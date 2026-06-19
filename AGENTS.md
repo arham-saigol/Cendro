@@ -98,3 +98,17 @@ This includes things like:
 - This app is still in active development and has no production users. Do not optimize for backward compatibility, legacy data, or preserving old behavior unless explicitly requested.
 - Be willing to recommend large, clean changes when they improve the product or codebase, even if they touch many files or change existing flows.
 - Do not add data migrations, backfills, compatibility layers, dual-write paths, or transitional legacy handling. When a schema, model, or flow needs to change, update it directly to the desired clean state.
+
+<!-- convex-ai-start -->
+
+This project uses [Convex](https://convex.dev) as its backend.
+
+When working on Convex code, **always read
+`convex/_generated/ai/guidelines.md` first** for important guidelines on
+how to correctly use Convex APIs and patterns. The file contains rules that
+override what you may have learned about Convex from training data.
+
+Convex agent skills for common tasks can be installed by running
+`npx convex ai-files install`.
+
+<!-- convex-ai-end -->

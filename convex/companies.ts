@@ -19,9 +19,9 @@ export const accessStatus = query({
   args: {},
   handler: async (ctx) => {
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return { status: "convexUnauthenticated" as const };
+    if (!identity) return { status: "signedOut" as const };
 
-    const user = await ctx.db.query("appUsers").withIndex("by_subject", (q) => q.eq("clerkSubject", identity.subject)).unique();
+    const user = await ctx.db.query("appUsers").withIndex("by_subject", (q) => q.eq("clerkSubject", identity.tokenIdentifier)).unique();
     if (!user) return { status: "profileMissing" as const, email: identity.email ?? null };
 
     const companies = await accessibleCompanies(ctx);

@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { action, mutation, query } from "./_generated/server";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import { assertPlatformAdminEmail } from "./permissions";
 
 async function platformEmail(ctx: { auth: { getUserIdentity: () => Promise<{ email?: string | null } | null> } }) {
@@ -28,10 +28,18 @@ export const createCompanyRecord = mutation({
   handler: async (ctx, args) => {
     const actorEmail = await platformEmail(ctx);
     const now = Date.now();
-    const companyId = await ctx.db.insert("companies", { name: args.name.trim(), createdAt: now });
+    const name = args.name.trim();
+    const adminEmail = args.adminEmail.toLowerCase();
+    const pendingInvitations = await ctx.db.query("invitations").withIndex("by_email", (q) => q.eq("email", adminEmail)).collect();
+    for (const invitation of pendingInvitations) {
+      if (invitation.role !== "Admin" || invitation.status !== "pending" || invitation.expiresAt <= now) continue;
+      const company = await ctx.db.get(invitation.companyId);
+      if (company && !company.deletedAt && company.name === name) return { companyId: company._id, token: invitation.token };
+    }
+    const companyId = await ctx.db.insert("companies", { name, createdAt: now });
     const token = crypto.randomUUID();
-    await ctx.db.insert("invitations", { companyId, email: args.adminEmail.toLowerCase(), role: "Admin", token, status: "pending", createdAt: now, expiresAt: now + 1_209_600_000 });
-    await ctx.db.insert("auditEvents", { companyId, actorEmail, action: "platform.company_create", targetType: "company", targetId: companyId, metadata: { firstAdminEmail: args.adminEmail }, createdAt: now });
+    await ctx.db.insert("invitations", { companyId, email: adminEmail, role: "Admin", token, status: "pending", createdAt: now, expiresAt: now + 1_209_600_000 });
+    await ctx.db.insert("auditEvents", { companyId, actorEmail, action: "platform.company_create", targetType: "company", targetId: companyId, createdAt: now });
     return { companyId, token };
   },
 });
@@ -41,7 +49,7 @@ export const createCompany = action({
   handler: async (ctx, args): Promise<{ companyId: string }> => {
     await platformEmail(ctx);
     const created = await ctx.runMutation(api.platform.createCompanyRecord, args);
-    await ctx.runAction(api.email.sendInvitation, { companyId: created.companyId, email: args.adminEmail, role: "Admin", token: created.token });
+    await ctx.runAction(internal.email.sendInvitation, { companyId: created.companyId, email: args.adminEmail, role: "Admin", token: created.token });
     return { companyId: created.companyId };
   },
 });

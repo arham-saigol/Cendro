@@ -9,7 +9,7 @@ export const preview = query({
     if (!invitation || invitation.status !== "pending" || invitation.expiresAt < Date.now()) return null;
     const company = await ctx.db.get(invitation.companyId);
     if (!company || company.deletedAt) return null;
-    return { email: invitation.email, role: invitation.role, companyName: company.name };
+    return { role: invitation.role, companyName: company.name };
   },
 });
 

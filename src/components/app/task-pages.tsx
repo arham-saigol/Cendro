@@ -21,16 +21,30 @@ export function TaskList({ kind }: { kind: "jd" | "one" }) {
   const createOne = useMutation(api.tasks.createOneTime);
   const [title, setTitle] = useState("");
   const [assigneeId, setAssigneeId] = useState<string>("");
+  const [optimisticTasks, setOptimisticTasks] = useState<any[]>([]);
   const defaultAssigneeId = assigneeId || assignable?.[0]?.membership._id;
+  const displayTasks = [...optimisticTasks, ...(tasks ?? [])];
 
   async function create() {
     if (!activeCompanyId || !defaultAssigneeId || !title.trim()) return;
-    if (kind === "jd") {
-      await createJd({ companyId: activeCompanyId, title, description: "", recurrence: "daily", startDate: Date.now(), assigneeMembershipIds: [defaultAssigneeId as Id<"companyMemberships">], priority: "medium" });
-    } else {
-      await createOne({ companyId: activeCompanyId, title, description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [defaultAssigneeId as Id<"companyMemberships">], priority: "medium" });
-    }
+    const currentTitle = title.trim();
+    const assignee = assignable?.find((a) => a.membership._id === defaultAssigneeId);
+    const tempId = crypto.randomUUID();
+    const optimistic = { _id: tempId, title: currentTitle, state: kind === "jd" ? { status: "Due" } : "Upcoming", recurrence: "daily", dueDate: Date.now() + 86_400_000, priority: "medium", assignees: assignee ? [assignee] : [] };
+    setOptimisticTasks((current) => [optimistic, ...current]);
     setTitle("");
+    try {
+      if (kind === "jd") {
+        await createJd({ companyId: activeCompanyId, title: currentTitle, description: "", recurrence: "daily", startDate: Date.now(), assigneeMembershipIds: [defaultAssigneeId as Id<"companyMemberships">], priority: "medium" });
+      } else {
+        await createOne({ companyId: activeCompanyId, title: currentTitle, description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [defaultAssigneeId as Id<"companyMemberships">], priority: "medium" });
+      }
+    } catch (err) {
+      setTitle(currentTitle);
+      throw err;
+    } finally {
+      setOptimisticTasks((current) => current.filter((t) => t._id !== tempId));
+    }
   }
 
   const base = kind === "jd" ? "/jd-tasks" : "/one-time-tasks";
@@ -56,7 +70,7 @@ export function TaskList({ kind }: { kind: "jd" | "one" }) {
         <table className="notion-table">
           <thead><tr><th className="px-3">Title</th><th>Status</th><th>Assignees</th><th>{kind === "jd" ? "Recurrence" : "Due"}</th><th>Priority</th></tr></thead>
           <tbody>
-            {tasks?.map((t) => <tr key={t._id}>
+            {displayTasks.map((t) => <tr key={t._id}>
               <td className="px-3 font-medium"><Link href={`${base}/${t._id}`}>{t.title}</Link></td>
               <td><Badge tone={t.state.status === "Overdue" || t.state === "Overdue" ? "red" : t.state.status === "Done" || t.state === "Done" ? "green" : "blue"}>{t.state.status || t.state}</Badge></td>
               <td>{t.assignees.map((a: any) => a.user.name || a.user.email).join(", ")}</td>
@@ -76,19 +90,22 @@ export function TaskDetail({ kind, id }: { kind: "jd" | "one"; id: string }) {
   const complete = useMutation(kind === "jd" ? api.tasks.completeJd : api.tasks.completeOneTime);
   const comment = useMutation(api.tasks.addComment);
   const [body, setBody] = useState("");
+  const [optimisticDone, setOptimisticDone] = useState(false);
+  const [optimisticComments, setOptimisticComments] = useState<any[]>([]);
   if (!data) return <div className="p-8">Loading task…</div>;
-  const t = data.task;
+  const t = optimisticDone ? { ...data.task, state: kind === "jd" ? { ...data.task.state, status: "Done" } : "Done" } : data.task;
+  const comments = [...optimisticComments, ...data.comments];
   return (
     <div className="mx-auto max-w-3xl p-8">
       <div className="text-4xl">{kind === "jd" ? "🔁" : "☑️"}</div>
       <h1 className="text-[32px] font-bold">{t.title}</h1>
       <div className="mt-3 flex gap-2"><Badge tone={(t.state.status || t.state) === "Overdue" ? "red" : "blue"}>{t.state.status || t.state}</Badge><Badge>{t.priority}</Badge></div>
       <p className="mt-6 whitespace-pre-wrap text-[var(--ink-secondary)]">{t.description || "No description."}</p>
-      <Button className="mt-5" variant="primary" onClick={() => complete({ companyId: activeCompanyId as Id<"companies">, taskId: id as any })}>Mark as done</Button>
+      <Button className="mt-5" variant="primary" onClick={async () => { setOptimisticDone(true); try { await complete({ companyId: activeCompanyId as Id<"companies">, taskId: id as any }); } catch (err) { setOptimisticDone(false); throw err; } }}>Mark as done</Button>
       <section className="mt-8 border-t pt-6">
         <h2 className="font-semibold">Comments</h2>
-        <div className="mt-3 space-y-2">{data.comments.map((c: any) => <div key={c._id} className="rounded-md bg-[var(--surface-muted)] p-3 text-sm">{c.body}</div>)}</div>
-        <div className="mt-3 flex gap-2"><Textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Add a comment…" /><Button onClick={async () => { if (body.trim()) { await comment({ companyId: activeCompanyId as Id<"companies">, taskType: kind === "jd" ? "jd" : "one_time", taskId: id, body }); setBody(""); } }}>Comment</Button></div>
+        <div className="mt-3 space-y-2">{comments.map((c: any) => <div key={c._id} className="rounded-md bg-[var(--surface-muted)] p-3 text-sm">{c.body}</div>)}</div>
+        <div className="mt-3 flex gap-2"><Textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Add a comment…" /><Button onClick={async () => { const text = body.trim(); if (text) { const tempId = crypto.randomUUID(); setOptimisticComments((current) => [{ _id: tempId, body: text }, ...current]); setBody(""); try { await comment({ companyId: activeCompanyId as Id<"companies">, taskType: kind === "jd" ? "jd" : "one_time", taskId: id, body: text }); } catch (err) { setBody(text); throw err; } finally { setOptimisticComments((current) => current.filter((c) => c._id !== tempId)); } } }}>Comment</Button></div>
         <h3 className="mt-6 text-sm font-semibold">Attachments foundation</h3>
         <p className="text-sm text-[var(--ink-muted)]">Attachment metadata is modeled in Convex; connect storage upload when a storage provider is selected.</p>
       </section>

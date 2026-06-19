@@ -3,6 +3,7 @@
 import { useAction, useMutation, useQuery } from "convex/react";
 import { useState } from "react";
 import { api } from "../../../../convex/_generated/api";
+import type { Id } from "../../../../convex/_generated/dataModel";
 import { useCompany } from "@/components/app/company-context";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -13,16 +14,35 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 export default function Company() {
   const { activeCompanyId } = useCompany();
   const data = useQuery(api.companyManagement.overview, activeCompanyId ? { companyId: activeCompanyId } : "skip");
-  const createBranch = useMutation(api.companyManagement.createBranch);
-  const createDepartment = useMutation(api.companyManagement.createDepartment);
+  const createBranch = useMutation(api.companyManagement.createBranch).withOptimisticUpdate((store, args) => {
+    const current = store.getQuery(api.companyManagement.overview, { companyId: args.companyId });
+    if (current) store.setQuery(api.companyManagement.overview, { companyId: args.companyId }, { ...current, branches: [...current.branches, { _id: crypto.randomUUID() as Id<"branches">, name: args.name }] });
+  });
+  const createDepartment = useMutation(api.companyManagement.createDepartment).withOptimisticUpdate((store, args) => {
+    const current = store.getQuery(api.companyManagement.overview, { companyId: args.companyId });
+    if (current) store.setQuery(api.companyManagement.overview, { companyId: args.companyId }, { ...current, departments: [...current.departments, { _id: crypto.randomUUID() as Id<"departments">, branchId: args.branchId, name: args.name }] });
+  });
   const invite = useAction(api.companyManagement.inviteUser);
-  const setRole = useMutation(api.companyManagement.setUserRole);
-  const setAssignments = useMutation(api.companyManagement.setAssignments);
-  const setScope = useMutation(api.companyManagement.setManagerScope);
-  const setOverride = useMutation(api.companyManagement.setPermissionOverride);
+  const setRole = useMutation(api.companyManagement.setUserRole).withOptimisticUpdate((store, args) => {
+    const current = store.getQuery(api.companyManagement.overview, { companyId: args.companyId });
+    if (current) store.setQuery(api.companyManagement.overview, { companyId: args.companyId }, { ...current, users: current.users.map((u: any) => u.membership._id === args.membershipId ? { ...u, membership: { ...u.membership, role: args.role } } : u) });
+  });
+  const setAssignments = useMutation(api.companyManagement.setAssignments).withOptimisticUpdate((store, args) => {
+    const current = store.getQuery(api.companyManagement.overview, { companyId: args.companyId });
+    if (current) store.setQuery(api.companyManagement.overview, { companyId: args.companyId }, { ...current, users: current.users.map((u: any) => u.membership._id === args.membershipId ? { ...u, branchIds: args.branchIds, departmentIds: args.departmentIds } : u) });
+  });
+  const setScope = useMutation(api.companyManagement.setManagerScope).withOptimisticUpdate((store, args) => {
+    const current = store.getQuery(api.companyManagement.overview, { companyId: args.companyId });
+    if (current) store.setQuery(api.companyManagement.overview, { companyId: args.companyId }, { ...current, users: current.users.map((u: any) => u.membership._id === args.managerMembershipId ? { ...u, scope: { branchIds: args.branchIds, departmentIds: args.departmentIds, userMembershipIds: args.userMembershipIds } } : u) });
+  });
+  const setOverride = useMutation(api.companyManagement.setPermissionOverride).withOptimisticUpdate((store, args) => {
+    const current = store.getQuery(api.companyManagement.overview, { companyId: args.companyId });
+    if (current) store.setQuery(api.companyManagement.overview, { companyId: args.companyId }, { ...current, users: current.users.map((u: any) => u.membership._id === args.membershipId ? { ...u, overrides: args.effect === "inherit" ? u.overrides.filter((o: any) => o.capability !== args.capability) : [...u.overrides.filter((o: any) => o.capability !== args.capability), { _id: crypto.randomUUID(), capability: args.capability, effect: args.effect }] } : u) });
+  });
   const [branch, setBranch] = useState("");
   const [dep, setDep] = useState("");
   const [email, setEmail] = useState("");
+  const [pendingInvites, setPendingInvites] = useState<any[]>([]);
 
   if (!data) return <div className="p-8">Loading management…</div>;
   const firstBranch = data.branches[0];
@@ -76,8 +96,8 @@ export default function Company() {
 
         <TabsContent value="invitations" className="mt-4">
           <Card className="p-3">
-            <div className="mb-3 flex gap-2"><Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="employee@example.com" /><Button onClick={async () => { if (activeCompanyId && email) { await invite({ companyId: activeCompanyId, email, role: "Employee" }); setEmail(""); } }}>Invite employee</Button></div>
-            {data.invitations.map((i: any) => <div key={i._id} className="border-t py-2">{i.email} <Badge>{i.status}</Badge> <Badge>{i.role}</Badge></div>)}
+            <div className="mb-3 flex gap-2"><Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="employee@example.com" /><Button onClick={async () => { if (activeCompanyId && email) { const optimistic = { _id: crypto.randomUUID(), email, role: "Employee", status: "pending" }; setPendingInvites((current) => [optimistic, ...current]); try { await invite({ companyId: activeCompanyId, email, role: "Employee" }); setEmail(""); } catch (err) { setPendingInvites((current) => current.filter((i) => i._id !== optimistic._id)); throw err; } finally { setPendingInvites((current) => current.filter((i) => i._id !== optimistic._id)); } } }}>Invite employee</Button></div>
+            {[...pendingInvites, ...data.invitations].map((i: any) => <div key={i._id} className="border-t py-2">{i.email} <Badge>{i.status}</Badge> <Badge>{i.role}</Badge></div>)}
           </Card>
         </TabsContent>
 

@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 export default function InvitePage({ params }: { params: { token: string } }) {
   const router = useRouter();
   const { isSignedIn } = useUser();
-  const preview = useQuery(api.invitations.preview, { token: params.token }) as { companyName: string; email: string; role: string } | null | undefined;
+  const preview = useQuery(api.invitations.preview, { token: params.token }) as { companyName: string; role: string } | null | undefined;
   const accept = useMutation(api.invitations.accept);
   const [error, setError] = useState<string | null>(null);
 
@@ -34,7 +34,7 @@ export default function InvitePage({ params }: { params: { token: string } }) {
         {preview === undefined ? <p className="mt-2 text-sm text-[var(--ink-muted)]">Loading invitation…</p> : preview ? (
           <div className="mt-3 space-y-2 text-sm">
             <p>You have been invited to join <strong>{preview.companyName}</strong>.</p>
-            <p><Badge>{preview.role}</Badge> <span className="text-[var(--ink-muted)]">{preview.email}</span></p>
+            <p><Badge>{preview.role}</Badge></p>
           </div>
         ) : <p className="mt-2 text-sm text-[var(--ink-muted)]">This invitation is invalid or expired.</p>}
         {error && <p className="mt-3 text-sm text-[#b42318]">{error}</p>}

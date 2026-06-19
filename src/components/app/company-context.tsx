@@ -15,6 +15,7 @@ type CompanyAccess = {
 type AccessStatus = "loading" | "signedOut" | "convexUnauthenticated" | "profileMissing" | "noCompanies" | "ready";
 
 type AccessResult =
+  | { status: "signedOut" }
   | { status: "convexUnauthenticated" }
   | { status: "profileMissing"; email: string | null }
   | { status: "noCompanies"; email: string }

@@ -28,11 +28,19 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
   useEffect(() => {
     if (accessStatus === "signedOut") router.replace(`/sign-in?redirect_url=${encodeURIComponent(path)}`);
   }, [accessStatus, path, router]);
-  const canManageCompany = active?.capabilities?.some((cap: string) => cap.startsWith("company:")) ?? false;
+  const canManageCompany = active?.capabilities?.includes("company:manage_permissions") ?? false;
   const visibleNav = nav.filter((item) => !item.requiresCompanyManagement || canManageCompany);
 
   if (accessStatus === "loading") {
-    return <div className="min-h-screen bg-[var(--canvas-soft)] p-8">Loading…</div>;
+    return (
+      <div className="min-h-screen bg-[var(--canvas-soft)] p-8">
+        <div className="mx-auto max-w-5xl space-y-3">
+          <div className="h-8 w-48 animate-pulse rounded bg-[var(--surface-pressed)]" />
+          <div className="h-24 w-full animate-pulse rounded bg-[var(--surface-pressed)]" />
+          <div className="h-24 w-full animate-pulse rounded bg-[var(--surface-pressed)]" />
+        </div>
+      </div>
+    );
   }
 
   if (accessStatus === "signedOut") return null;

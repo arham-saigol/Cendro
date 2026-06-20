@@ -160,3 +160,136 @@ export const assignableUsers = query({
 });
 
 export const accessibleTasksForAi = query({ args: { companyId: v.id("companies"), overdueOnly: v.optional(v.boolean()) }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const out: any[] = []; for (const t of await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(100)) { if (await visible(ctx, args.companyId, membership, t.assigneeMembershipIds)) { const s = await jdState(ctx, t); if (!args.overdueOnly || s.status === "Overdue") out.push({ type: "JD", id: t._id, title: t.title, state: s.status, dueAt: s.dueAt }); } } for (const t of await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(100)) { if (await visible(ctx, args.companyId, membership, t.assigneeMembershipIds)) { const s = oneState(t); if (!args.overdueOnly || s === "Overdue") out.push({ type: "One-time", id: t._id, title: t.title, state: s, dueAt: t.dueDate }); } } return out.slice(0, 100); } });
+
+async function aiAssignees(ctx: any, ids: Id<"companyMemberships">[]) {
+  const rows = await enrich(ctx, ids);
+  return rows.map((row: any) => ({ name: row.user.name ?? row.user.email, role: row.membership.role }));
+}
+
+async function aiJdRow(ctx: any, task: Doc<"jdTasks">) {
+  const state = await jdState(ctx, task);
+  return { kind: "jd" as const, id: task._id, title: task.title, description: task.description, status: state.status, dueAt: state.dueAt, priority: task.priority, recurrence: task.recurrence, assignees: await aiAssignees(ctx, task.assigneeMembershipIds) };
+}
+
+async function aiOneTimeRow(ctx: any, task: Doc<"oneTimeTasks">) {
+  return { kind: "one_time" as const, id: task._id, title: task.title, description: task.description, status: oneState(task), dueAt: task.dueDate, priority: task.priority, assignees: await aiAssignees(ctx, task.assigneeMembershipIds) };
+}
+
+export const aiListVisible = query({
+  args: { companyId: v.id("companies"), status: v.union(v.literal("all"), v.literal("due"), v.literal("overdue"), v.literal("done")), limit: v.number() },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const limit = Math.min(Math.max(Math.floor(args.limit), 1), 30);
+    const out: any[] = [];
+    const matches = (status: string) => args.status === "all" || (args.status === "overdue" ? status === "Overdue" : args.status === "done" ? status === "Done" : status !== "Done");
+    for (const task of await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100)) {
+      if (out.length >= limit) break;
+      if (!(await visible(ctx, args.companyId, membership, task.assigneeMembershipIds))) continue;
+      const row = await aiJdRow(ctx, task);
+      if (matches(row.status)) out.push(row);
+    }
+    for (const task of await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100)) {
+      if (out.length >= limit) break;
+      if (!(await visible(ctx, args.companyId, membership, task.assigneeMembershipIds))) continue;
+      const row = await aiOneTimeRow(ctx, task);
+      if (matches(row.status)) out.push(row);
+    }
+    return out.slice(0, limit);
+  },
+});
+
+export const aiGetDetail = query({
+  args: { companyId: v.id("companies"), kind: v.union(v.literal("jd"), v.literal("one_time")), taskId: v.string() },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const { task } = await getVisibleTask(ctx, args.companyId, membership, args.kind, args.taskId);
+    const comments = await ctx.db.query("taskComments").withIndex("by_task", (q) => q.eq("taskType", args.kind).eq("taskId", task._id)).order("desc").take(5);
+    const row = args.kind === "jd" ? await aiJdRow(ctx, task as Doc<"jdTasks">) : await aiOneTimeRow(ctx, task as Doc<"oneTimeTasks">);
+    return { ...row, comments: comments.map((comment) => ({ body: comment.body, createdAt: comment.createdAt })) };
+  },
+});
+
+export const aiAssignableUsers = query({
+  args: { companyId: v.id("companies"), kind: v.union(v.literal("jd"), v.literal("one_time")) },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const caps = await membershipCapabilities(ctx, membership);
+    const prefix = args.kind === "jd" ? "tasks:jd" : "tasks:one_time";
+    if (!caps.has(`${prefix}:create` as any)) return [];
+    let ids: Set<Id<"companyMemberships">>;
+    if (caps.has(`${prefix}:assign:any` as any)) {
+      const all = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
+      ids = new Set(all.filter((m) => m.active).map((m) => m._id));
+    } else if (caps.has(`${prefix}:assign:managed` as any)) {
+      ids = await scopedMembershipIds(ctx, args.companyId, membership);
+    } else {
+      ids = new Set([membership._id]);
+    }
+    const rows = await enrich(ctx, Array.from(ids));
+    return rows.map((row: any) => ({ membershipId: row.membership._id, name: row.user.name ?? row.user.email, email: row.user.email, role: row.membership.role }));
+  },
+});
+
+export const aiCreateOneTime = mutation({
+  args: { companyId: v.id("companies"), title: v.string(), description: v.optional(v.string()), dueDate: v.number(), assigneeMembershipIds: v.array(v.id("companyMemberships")), priority: v.union(v.literal("low"), v.literal("medium"), v.literal("high")) },
+  handler: async (ctx, args) => {
+    const { membership, user } = await requireCapability(ctx, args.companyId, "tasks:one_time:create");
+    const title = nonEmpty(args.title, "Title");
+    await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
+    await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
+    const now = Date.now();
+    const id = await ctx.db.insert("oneTimeTasks", { ...args, title, description: args.description?.trim(), createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "one_time_task.create", targetType: "oneTimeTask", targetId: id, createdAt: now });
+    const task = await ctx.db.get(id);
+    if (!task) throw new ConvexError("Task not found.");
+    return await aiOneTimeRow(ctx, task);
+  },
+});
+
+export const aiCreateJd = mutation({
+  args: { companyId: v.id("companies"), title: v.string(), description: v.optional(v.string()), recurrence: v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("every_two_weeks"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually")), startDate: v.number(), assigneeMembershipIds: v.array(v.id("companyMemberships")), priority: v.union(v.literal("low"), v.literal("medium"), v.literal("high")) },
+  handler: async (ctx, args) => {
+    const { membership, user } = await requireCapability(ctx, args.companyId, "tasks:jd:create");
+    const title = nonEmpty(args.title, "Title");
+    await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
+    await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
+    const now = Date.now();
+    const id = await ctx.db.insert("jdTasks", { ...args, title, description: args.description?.trim(), createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now });
+    const task = await ctx.db.get(id);
+    if (!task) throw new ConvexError("Task not found.");
+    return await aiJdRow(ctx, task);
+  },
+});
+
+export const aiComplete = mutation({
+  args: { companyId: v.id("companies"), kind: v.union(v.literal("jd"), v.literal("one_time")), taskId: v.string(), note: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const { normalized, task } = await getVisibleTask(ctx, args.companyId, membership, args.kind, args.taskId);
+    if (args.kind === "jd") {
+      await assertCanUpdateTask(ctx, args.companyId, membership, (task as Doc<"jdTasks">).assigneeMembershipIds, "jd");
+      const c = cycle((task as Doc<"jdTasks">).startDate, (task as Doc<"jdTasks">).recurrence);
+      const existing = await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", normalized as Id<"jdTasks">).eq("cycleStart", c.start)).unique();
+      if (!existing) await ctx.db.insert("jdTaskCompletions", { companyId: args.companyId, jdTaskId: normalized as Id<"jdTasks">, cycleStart: c.start, completedByMembershipId: membership._id, completedAt: Date.now(), note: args.note?.trim() || undefined });
+      const updated = await ctx.db.get(normalized as Id<"jdTasks">);
+      if (!updated) throw new ConvexError("Task not found.");
+      return await aiJdRow(ctx, updated);
+    }
+    await assertCanUpdateTask(ctx, args.companyId, membership, (task as Doc<"oneTimeTasks">).assigneeMembershipIds, "one_time");
+    const now = Date.now();
+    await ctx.db.patch(normalized as Id<"oneTimeTasks">, { completedAt: now, completedByMembershipId: membership._id, updatedAt: now });
+    const updated = await ctx.db.get(normalized as Id<"oneTimeTasks">);
+    if (!updated) throw new ConvexError("Task not found.");
+    return await aiOneTimeRow(ctx, updated);
+  },
+});
+
+export const aiAddComment = mutation({
+  args: { companyId: v.id("companies"), kind: v.union(v.literal("jd"), v.literal("one_time")), taskId: v.string(), body: v.string() },
+  handler: async (ctx, args) => {
+    const { membership } = await requireCapability(ctx, args.companyId, "tasks:comment");
+    const { normalized } = await getVisibleTask(ctx, args.companyId, membership, args.kind, args.taskId);
+    return await ctx.db.insert("taskComments", { companyId: args.companyId, taskType: args.kind, taskId: normalized, authorMembershipId: membership._id, body: nonEmpty(args.body, "Comment"), createdAt: Date.now() });
+  },
+});

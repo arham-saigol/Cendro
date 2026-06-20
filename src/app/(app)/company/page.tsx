@@ -42,6 +42,7 @@ export default function Company() {
   const [branch, setBranch] = useState("");
   const [dep, setDep] = useState("");
   const [email, setEmail] = useState("");
+  const [inviteError, setInviteError] = useState<string | null>(null);
   const [pendingInvites, setPendingInvites] = useState<any[]>([]);
 
   if (!data) return <div className="p-8">Loading management…</div>;
@@ -53,6 +54,7 @@ export default function Company() {
     <div className="p-8">
       <h1 className="text-[32px] font-bold">Company management</h1>
       <p className="mb-6 text-[var(--ink-muted)]">Branches, departments, users, invitations, manager scopes, and permission overrides.</p>
+      {inviteError && <p className="mb-4 rounded-md border border-[#f3b6b0] bg-[#fff4f2] p-3 text-sm text-[#b42318]">{inviteError}</p>}
       <Tabs defaultValue="branches">
         <TabsList>
           <TabsTrigger value="branches">Branches</TabsTrigger>
@@ -96,7 +98,7 @@ export default function Company() {
 
         <TabsContent value="invitations" className="mt-4">
           <Card className="p-3">
-            <div className="mb-3 flex gap-2"><Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="employee@example.com" /><Button onClick={async () => { if (activeCompanyId && email) { const optimistic = { _id: crypto.randomUUID(), email, role: "Employee", status: "pending" }; setPendingInvites((current) => [optimistic, ...current]); try { await invite({ companyId: activeCompanyId, email, role: "Employee" }); setEmail(""); } catch (err) { setPendingInvites((current) => current.filter((i) => i._id !== optimistic._id)); throw err; } finally { setPendingInvites((current) => current.filter((i) => i._id !== optimistic._id)); } } }}>Invite employee</Button></div>
+            <div className="mb-3 flex gap-2"><Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="employee@example.com" /><Button onClick={async () => { if (activeCompanyId && email) { const optimistic = { _id: crypto.randomUUID(), email, role: "Employee", status: "pending" }; setInviteError(null); setPendingInvites((current) => [optimistic, ...current]); try { await invite({ companyId: activeCompanyId, email, role: "Employee" }); setEmail(""); } catch (err) { setInviteError(err instanceof Error ? err.message : "Could not send invitation."); } finally { setPendingInvites((current) => current.filter((i) => i._id !== optimistic._id)); } } }}>Invite employee</Button></div>
             {[...pendingInvites, ...data.invitations].map((i: any) => <div key={i._id} className="border-t py-2">{i.email} <Badge>{i.status}</Badge> <Badge>{i.role}</Badge></div>)}
           </Card>
         </TabsContent>

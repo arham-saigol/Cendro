@@ -15,7 +15,7 @@ function UserSync() {
   const sync = useMutation(api.users.syncCurrentUser);
 
   useEffect(() => {
-    if (isSignedIn && isAuthenticated) void sync({}).catch(() => null);
+    if (isSignedIn && isAuthenticated) void sync({}).catch((err) => console.debug("User sync failed", err));
   }, [isAuthenticated, isSignedIn, sync]);
 
   return null;

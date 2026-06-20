@@ -1,5 +1,5 @@
 import { ConvexError, v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { currentOrCreateUser } from "./permissions";
 
 export const preview = query({
@@ -32,5 +32,12 @@ export const accept = mutation({
     await ctx.db.patch(invitation._id, { status: "accepted" });
     await ctx.db.insert("auditEvents", { companyId: invitation.companyId, actorUserId: user._id, action: "invitation.accept", targetType: "membership", targetId: membershipId, metadata: { role: invitation.role }, createdAt: now });
     return { companyId: invitation.companyId };
+  },
+});
+
+export const markSent = internalMutation({
+  args: { invitationId: v.id("invitations") },
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args.invitationId, { sentAt: Date.now() });
   },
 });

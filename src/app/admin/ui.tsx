@@ -18,10 +18,41 @@ function isCompanyId(id: string): id is Id<"companies"> {
   return !id.startsWith("temp-");
 }
 
+function AdminSkeleton() {
+  return (
+    <main className="min-h-screen bg-[var(--canvas-soft)] p-8">
+      <div className="mx-auto max-w-5xl animate-pulse">
+        <div className="h-10 w-64 rounded bg-[var(--surface-pressed)]" />
+        <div className="mt-2 h-4 w-full max-w-3xl rounded bg-[var(--surface-pressed)]" />
+        <Card className="my-6 p-4">
+          <div className="mb-3 h-5 w-36 rounded bg-[var(--surface-pressed)]" />
+          <div className="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
+            <div className="h-10 rounded bg-[var(--surface-pressed)]" />
+            <div className="h-10 rounded bg-[var(--surface-pressed)]" />
+            <div className="h-10 w-36 rounded bg-[var(--surface-pressed)]" />
+          </div>
+        </Card>
+        <Card className="p-4">
+          <div className="grid grid-cols-[2fr_1fr_1fr_1fr] gap-3">
+            {[0, 1, 2, 3, 4].map((row) => <div key={row} className="contents">
+              <div className="h-5 rounded bg-[var(--surface-pressed)]" />
+              <div className="h-5 rounded bg-[var(--surface-pressed)]" />
+              <div className="h-5 rounded bg-[var(--surface-pressed)]" />
+              <div className="h-5 rounded bg-[var(--surface-pressed)]" />
+            </div>)}
+          </div>
+        </Card>
+      </div>
+    </main>
+  );
+}
+
 export function AdminClient() {
   const { isLoading: authLoading, isAuthenticated } = useConvexAuth();
-  const access = useQuery(api.platform.access, isAuthenticated ? {} : "skip");
-  const companies = useQuery(api.platform.listCompanies, access?.isAdmin ? {} : "skip");
+  const [companyLimit, setCompanyLimit] = useState(25);
+  const dashboard = useQuery(api.platform.adminDashboard, isAuthenticated ? { companyLimit } : "skip");
+  const access = dashboard?.access;
+  const companies = dashboard?.companies;
   const create = useAction(api.platform.createCompany);
   const del = useMutation(api.platform.deleteCompany);
   const [name, setName] = useState("");
@@ -71,17 +102,18 @@ export function AdminClient() {
     try {
       await del({ companyId, confirmation });
     } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete company.");
+    } finally {
       setDeletingIds((current) => {
         const next = new Set(current);
-        next.delete(row.company._id);
+        next.delete(companyId);
         return next;
       });
-      setError(err instanceof Error ? err.message : "Could not delete company.");
     }
   }
 
   if (authLoading) {
-    return <main className="min-h-screen bg-[var(--canvas-soft)] p-8"><div className="mx-auto max-w-5xl">Loading platform admin…</div></main>;
+    return <AdminSkeleton />;
   }
 
   if (!isAuthenticated) {
@@ -98,11 +130,11 @@ export function AdminClient() {
     );
   }
 
-  if (access === undefined || (access.isAdmin && companies === undefined)) {
-    return <main className="min-h-screen bg-[var(--canvas-soft)] p-8"><div className="mx-auto max-w-5xl">Loading platform admin…</div></main>;
+  if (dashboard === undefined) {
+    return <AdminSkeleton />;
   }
 
-  if (!access.isAdmin) {
+  if (!access?.isAdmin) {
     return (
       <main className="min-h-screen bg-[var(--canvas-soft)] p-8">
         <div className="mx-auto max-w-5xl">
@@ -110,7 +142,7 @@ export function AdminClient() {
           <Card className="mt-6 p-4">
             <h2 className="font-semibold">No platform admin access</h2>
             <p className="mt-2 text-sm text-[var(--ink-muted)]">Your browser session is signed in, but Convex does not recognize this account as the configured platform admin.</p>
-            {access.email && <p className="mt-3 text-xs text-[var(--ink-faint)]">Signed in as {access.email}</p>}
+            {access?.email && <p className="mt-3 text-xs text-[var(--ink-faint)]">Signed in as {access.email}</p>}
           </Card>
         </div>
       </main>
@@ -142,6 +174,7 @@ export function AdminClient() {
             </tr>)}</tbody>
           </table>
         </Card>
+        {dashboard.hasMore && <Button className="mt-4" onClick={() => setCompanyLimit((limit) => limit + 25)}>Load more</Button>}
       </div>
     </main>
   );

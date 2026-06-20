@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as aiChat from "../aiChat.js";
 import type * as analytics from "../analytics.js";
 import type * as companies from "../companies.js";
 import type * as companyManagement from "../companyManagement.js";
@@ -18,6 +19,7 @@ import type * as platform from "../platform.js";
 import type * as sops from "../sops.js";
 import type * as tasks from "../tasks.js";
 import type * as users from "../users.js";
+import type * as validation from "../validation.js";
 
 import type {
   ApiFromModules,
@@ -26,6 +28,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  aiChat: typeof aiChat;
   analytics: typeof analytics;
   companies: typeof companies;
   companyManagement: typeof companyManagement;
@@ -36,6 +39,7 @@ declare const fullApi: ApiFromModules<{
   sops: typeof sops;
   tasks: typeof tasks;
   users: typeof users;
+  validation: typeof validation;
 }>;
 
 /**

@@ -42,7 +42,10 @@ export function InviteClient({ token }: { token: string }) {
       <Card className="w-full max-w-md p-6">
         <div className="text-4xl">✉️</div>
         <h1 className="mt-3 text-2xl font-semibold">Cendro invitation</h1>
-        {preview === undefined ? <p className="mt-2 text-sm text-[var(--ink-muted)]">Loading invitation…</p> : preview ? (
+        {preview === undefined ? <div className="mt-3 space-y-2 animate-pulse">
+          <div className="h-4 w-4/5 rounded bg-[var(--surface-pressed)]" />
+          <div className="h-6 w-20 rounded-full bg-[var(--surface-pressed)]" />
+        </div> : preview ? (
           <div className="mt-3 space-y-2 text-sm">
             <p>You have been invited to join <strong>{preview.companyName}</strong>.</p>
             <p><Badge>{preview.role}</Badge></p>

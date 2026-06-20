@@ -1,7 +1,9 @@
+import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
-import { action, mutation, query } from "./_generated/server";
-import { api, internal } from "./_generated/api";
+import { action, internalMutation, mutation, query } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { assertPlatformAdminEmail, isPlatformAdminEmail } from "./permissions";
+import { nonEmpty, normalizeEmail } from "./validation";
 
 async function platformEmail(ctx: { auth: { getUserIdentity: () => Promise<{ email?: string | null } | null> } }) {
   const identity = await ctx.auth.getUserIdentity();
@@ -17,38 +19,58 @@ export const access = query({
   },
 });
 
-export const listCompanies = query({
-  args: {},
-  handler: async (ctx) => {
-    await platformEmail(ctx);
-    const companies = await ctx.db.query("companies").collect();
-    const rows = [];
-    for (const company of companies) {
-      const memberCount = (await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", company._id)).collect()).length;
-      rows.push({ company, memberCount });
+const MAX_ADMIN_COMPANIES = 500;
+
+export const adminDashboard = query({
+  args: { companyLimit: v.number() },
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    const access = { isAdmin: isPlatformAdminEmail(identity?.email), email: identity?.email ?? null };
+    if (!access.isAdmin) return { access, companies: [], hasMore: false };
+
+    const limit = Math.min(Math.max(Math.floor(args.companyLimit), 1), MAX_ADMIN_COMPANIES);
+    const page = await ctx.db.query("companies").order("desc").take(limit + 1);
+    const companies = [];
+    for (const company of page.slice(0, limit)) {
+      const memberCount = (await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", company._id)).take(500)).length;
+      companies.push({ company, memberCount });
     }
-    return rows;
+    return { access, companies, hasMore: page.length > limit && limit < MAX_ADMIN_COMPANIES };
   },
 });
 
-export const createCompanyRecord = mutation({
+export const listCompanies = query({
+  args: { paginationOpts: paginationOptsValidator },
+  handler: async (ctx, args) => {
+    await platformEmail(ctx);
+    const page = await ctx.db.query("companies").order("desc").paginate(args.paginationOpts);
+    const rows = [];
+    for (const company of page.page) {
+      const memberCount = (await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", company._id)).take(500)).length;
+      rows.push({ company, memberCount });
+    }
+    return { ...page, page: rows };
+  },
+});
+
+export const createCompanyRecord = internalMutation({
   args: { name: v.string(), adminEmail: v.string() },
   handler: async (ctx, args) => {
     const actorEmail = await platformEmail(ctx);
     const now = Date.now();
-    const name = args.name.trim();
-    const adminEmail = args.adminEmail.toLowerCase();
-    const pendingInvitations = await ctx.db.query("invitations").withIndex("by_email", (q) => q.eq("email", adminEmail)).collect();
+    const name = nonEmpty(args.name, "Company name");
+    const adminEmail = normalizeEmail(args.adminEmail);
+    const pendingInvitations = await ctx.db.query("invitations").withIndex("by_email", (q) => q.eq("email", adminEmail)).take(100);
     for (const invitation of pendingInvitations) {
       if (invitation.role !== "Admin" || invitation.status !== "pending" || invitation.expiresAt <= now) continue;
       const company = await ctx.db.get(invitation.companyId);
-      if (company && !company.deletedAt && company.name === name) return { companyId: company._id, token: invitation.token };
+      if (company && !company.deletedAt && company.name === name) return { companyId: company._id, invitationId: invitation._id, token: invitation.token };
     }
     const companyId = await ctx.db.insert("companies", { name, createdAt: now });
     const token = crypto.randomUUID();
-    await ctx.db.insert("invitations", { companyId, email: adminEmail, role: "Admin", token, status: "pending", createdAt: now, expiresAt: now + 1_209_600_000 });
+    const invitationId = await ctx.db.insert("invitations", { companyId, email: adminEmail, role: "Admin", token, status: "pending", createdAt: now, expiresAt: now + 1_209_600_000 });
     await ctx.db.insert("auditEvents", { companyId, actorEmail, action: "platform.company_create", targetType: "company", targetId: companyId, createdAt: now });
-    return { companyId, token };
+    return { companyId, invitationId, token };
   },
 });
 
@@ -56,8 +78,8 @@ export const createCompany = action({
   args: { name: v.string(), adminEmail: v.string() },
   handler: async (ctx, args): Promise<{ companyId: string }> => {
     await platformEmail(ctx);
-    const created = await ctx.runMutation(api.platform.createCompanyRecord, args);
-    await ctx.runAction(internal.email.sendInvitation, { companyId: created.companyId, email: args.adminEmail, role: "Admin", token: created.token });
+    const created = await ctx.runMutation(internal.platform.createCompanyRecord, args);
+    await ctx.runAction(internal.email.sendInvitation, { companyId: created.companyId, invitationId: created.invitationId, email: args.adminEmail, role: "Admin", token: created.token });
     return { companyId: created.companyId };
   },
 });

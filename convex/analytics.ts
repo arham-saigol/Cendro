@@ -1,11 +1,11 @@
 import { ConvexError, v } from "convex/values";
-import { query } from "./_generated/server";
+import { query, type QueryCtx } from "./_generated/server";
 import { membershipCapabilities, requireMembership, scopedMembershipIds, visibleSop } from "./permissions";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 
-async function allActiveMembershipIds(ctx: any, companyId: Id<"companies">) {
-  const rows = await ctx.db.query("companyMemberships").withIndex("by_company", (q: any) => q.eq("companyId", companyId)).take(500);
-  return new Set(rows.filter((m: any) => m.active).map((m: any) => m._id));
+async function allActiveMembershipIds(ctx: QueryCtx, companyId: Id<"companies">) {
+  const rows: Doc<"companyMemberships">[] = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(500);
+  return new Set(rows.filter((m) => m.active).map((m) => m._id));
 }
 
 export const summary = query({

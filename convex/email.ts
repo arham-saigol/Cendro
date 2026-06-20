@@ -11,7 +11,7 @@ export const sendInvitation = internalAction({
     const apiKey = process.env.RESEND_API_KEY;
     const from = process.env.RESEND_FROM;
     const appUrl = process.env.APP_URL || "http://localhost:3000";
-    if (!apiKey || !from) throw new ConvexError("Invitation email is not configured. Set RESEND_API_KEY and RESEND_FROM.");
+    if (!apiKey || !from) throw new ConvexError("Invitation email is not configured.");
     const url = `${appUrl}/invite/${encodeURIComponent(args.token)}`;
     const result = await new Resend(apiKey).emails.send({
       from,
@@ -20,7 +20,7 @@ export const sendInvitation = internalAction({
       html: `<p>You have been invited to join Cendro as <strong>${args.role}</strong>.</p><p><a href="${url}">Accept invitation</a></p>`,
       text: `You have been invited to join Cendro as ${args.role}. Accept: ${url}`,
     });
-    if (result.error) throw new ConvexError(`Could not send invitation email: ${result.error.message}`);
+    if (result.error) throw new ConvexError("Could not send invitation email.");
     await ctx.runMutation(internal.invitations.markSent, { invitationId: args.invitationId });
     return { skipped: false };
   },

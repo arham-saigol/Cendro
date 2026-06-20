@@ -3,7 +3,6 @@
 import { convexTest } from "convex-test";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
-import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
@@ -92,7 +91,7 @@ describe("production permission and validation fixes", () => {
     const { t, companyId, secondAdminMembershipId } = await seedCompany();
     await t.withIdentity(identity("admin")).mutation(api.companyManagement.setUserRole, { companyId, membershipId: secondAdminMembershipId, role: "Employee" });
 
-    await expect(t.withIdentity(identity("admin")).mutation(api.companyManagement.setPermissionOverride, { companyId, membershipId: secondAdminMembershipId as Id<"companyMemberships">, capability: "company:manage_permissions", effect: "deny" })).resolves.toBeNull();
+    await expect(t.withIdentity(identity("admin")).mutation(api.companyManagement.setPermissionOverride, { companyId, membershipId: secondAdminMembershipId, capability: "company:manage_permissions", effect: "deny" })).resolves.toBeNull();
     const { adminMembershipId } = await t.run(async (ctx) => {
       const memberships = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(10);
       return { adminMembershipId: memberships.find((m) => m.role === "Admin")!._id };

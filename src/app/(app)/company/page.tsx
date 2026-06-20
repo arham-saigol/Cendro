@@ -11,6 +11,10 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
+function CompanySkeleton() {
+  return <div className="p-8 animate-pulse"><div className="h-9 w-72 rounded bg-[var(--surface-muted)]" /><div className="mb-6 mt-3 h-5 w-[520px] max-w-full rounded bg-[var(--surface-muted)]" /><div className="flex gap-2"><div className="h-9 w-24 rounded bg-[var(--surface-muted)]" /><div className="h-9 w-32 rounded bg-[var(--surface-muted)]" /><div className="h-9 w-20 rounded bg-[var(--surface-muted)]" /><div className="h-9 w-28 rounded bg-[var(--surface-muted)]" /></div><Card className="mt-4 p-3"><div className="mb-3 flex gap-2"><div className="h-8 flex-1 rounded bg-[var(--surface-muted)]" /><div className="h-8 w-20 rounded bg-[var(--surface-muted)]" /></div><div className="space-y-2 border-t pt-3"><div className="h-8 rounded bg-[var(--surface-muted)]" /><div className="h-8 rounded bg-[var(--surface-muted)]" /><div className="h-8 rounded bg-[var(--surface-muted)]" /></div></Card></div>;
+}
+
 export default function Company() {
   const { activeCompanyId } = useCompany();
   const data = useQuery(api.companyManagement.overview, activeCompanyId ? { companyId: activeCompanyId } : "skip");
@@ -45,7 +49,7 @@ export default function Company() {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [pendingInvites, setPendingInvites] = useState<any[]>([]);
 
-  if (!data) return <div className="p-8">Loading management…</div>;
+  if (!data) return <CompanySkeleton />;
   const firstBranch = data.branches[0];
   const firstDepartment = data.departments[0];
   const sampleCapability = "company:invite_users";

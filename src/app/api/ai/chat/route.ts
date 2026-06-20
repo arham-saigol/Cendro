@@ -6,18 +6,11 @@ import { z } from "zod";
 import { api } from "../../../../../convex/_generated/api";
 import type { Id, TableNames } from "../../../../../convex/_generated/dataModel";
 import { serverEnv } from "@/lib/env";
+import { textOf, toUiMessage } from "@/lib/message-utils";
 
 const idSchema = <Table extends TableNames>() => z.custom<Id<Table>>((value) => typeof value === "string");
 const requestSchema = z.object({ messages: z.array(z.any()), companyId: idSchema<"companies">(), sessionId: idSchema<"aiChatSessions">() });
 const assigneeIdsSchema = z.array(idSchema<"companyMemberships">());
-
-function textOf(message: any) {
-  if (typeof message.content === "string") return message.content;
-  return message.parts?.map((part: any) => part.type === "text" ? part.text : "").join("") ?? "";
-}
-function toUiMessage(row: { _id: string; role: "user" | "assistant" | "tool"; content: string }) {
-  return { id: row._id, role: row.role, parts: [{ type: "text", text: row.content }] };
-}
 
 export async function POST(req: Request) {
   const env = serverEnv();
@@ -31,7 +24,8 @@ export async function POST(req: Request) {
   const client = new ConvexHttpClient(env.NEXT_PUBLIC_CONVEX_URL);
   client.setAuth(token);
   const common = { companyId };
-  const persisted = await client.query(api.aiChat.listMessages, { companyId, sessionId });
+  let persisted = await client.query(api.aiChat.listMessages, { companyId, sessionId });
+  let appendedUser = false;
   const latestUser = [...messages].reverse().find((message) => message.role === "user");
   if (latestUser) {
     const content = textOf(latestUser);
@@ -42,14 +36,16 @@ export async function POST(req: Request) {
       : latestPersisted?.role === "user" && latestPersisted.content === content;
     if (content.trim() && !alreadyPersisted) {
       await client.mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "user", content, clientMessageId });
+      appendedUser = true;
     }
   }
-  const modelMessages = messages.length > persisted.length ? messages : persisted.map(toUiMessage);
+  if (appendedUser) persisted = await client.query(api.aiChat.listMessages, { companyId, sessionId });
+  const modelMessages = persisted.map(toUiMessage);
 
   const result = streamText({
     model: gateway(env.AI_MODEL as any),
     system: "You are Cendro's internal assistant. Use tools for tasks, SOPs, and analytics. Never infer or expose data outside the user's permission scope. If a task creation tool needs assigneeMembershipIds, call listAssignableUsers first. Be concise and Notion-like.",
-    messages: await convertToModelMessages(modelMessages),
+    messages: await convertToModelMessages(modelMessages as any),
     stopWhen: stepCountIs(5),
     tools: {
       listAssignableUsers: tool({ description: "List users the current user can assign tasks to, including membership IDs needed by creation tools.", inputSchema: z.object({ kind: z.enum(["jd", "one_time"]) }), execute: async ({ kind }) => client.query(api.tasks.assignableUsers, { ...common, kind }) }),

@@ -69,6 +69,7 @@ export const listJd = query({
   args: { companyId: v.id("companies"), paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
+    // Visibility is scoped asynchronously after database pagination, so a page may contain fewer visible rows than requested; continuation tokens still advance correctly.
     const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
     const rows = [];
     for (const t of page.page) if (await visible(ctx, args.companyId, membership, t.assigneeMembershipIds)) rows.push({ ...t, state: await jdState(ctx, t), assignees: await enrich(ctx, t.assigneeMembershipIds) });
@@ -83,12 +84,13 @@ export const createJd = mutation({
   handler: async (ctx, args) => { const { membership, user } = await requireCapability(ctx, args.companyId, "tasks:jd:create"); const title = nonEmpty(args.title, "Title"); await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds); await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd"); const now = Date.now(); const id = await ctx.db.insert("jdTasks", { ...args, title, description: args.description?.trim(), createdByMembershipId: membership._id, createdAt: now, updatedAt: now }); await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now }); return id; },
 });
 
-export const completeJd = mutation({ args: { companyId: v.id("companies"), taskId: v.id("jdTasks"), note: v.optional(v.string()) }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const t = await ctx.db.get(args.taskId); if (!t || t.companyId !== args.companyId) throw new ConvexError("Task not found."); await assertCanUpdateTask(ctx, args.companyId, membership, t.assigneeMembershipIds, "jd"); const c = cycle(t.startDate, t.recurrence); const existing = await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", args.taskId).eq("cycleStart", c.start)).unique(); if (existing) return null; const note = args.note === undefined ? undefined : nonEmpty(args.note, "Note"); return await ctx.db.insert("jdTaskCompletions", { companyId: args.companyId, jdTaskId: args.taskId, cycleStart: c.start, completedByMembershipId: membership._id, completedAt: Date.now(), note }); } });
+export const completeJd = mutation({ args: { companyId: v.id("companies"), taskId: v.id("jdTasks"), note: v.optional(v.string()) }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const t = await ctx.db.get(args.taskId); if (!t || t.companyId !== args.companyId) throw new ConvexError("Task not found."); await assertCanUpdateTask(ctx, args.companyId, membership, t.assigneeMembershipIds, "jd"); const c = cycle(t.startDate, t.recurrence); const existing = await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", args.taskId).eq("cycleStart", c.start)).unique(); if (existing) return null; const note = args.note === undefined || args.note.trim() === "" ? undefined : nonEmpty(args.note, "Note"); return await ctx.db.insert("jdTaskCompletions", { companyId: args.companyId, jdTaskId: args.taskId, cycleStart: c.start, completedByMembershipId: membership._id, completedAt: Date.now(), note }); } });
 
 export const listOneTime = query({
   args: { companyId: v.id("companies"), paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
+    // Visibility is scoped asynchronously after database pagination, so a page may contain fewer visible rows than requested; continuation tokens still advance correctly.
     const page = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
     const rows = [];
     for (const t of page.page) if (await visible(ctx, args.companyId, membership, t.assigneeMembershipIds)) rows.push({ ...t, state: oneState(t), assignees: await enrich(ctx, t.assigneeMembershipIds) });
@@ -126,12 +128,12 @@ export const addAttachment = mutation({
 });
 
 export const listAttachments = query({
-  args: { companyId: v.id("companies"), taskType: v.union(v.literal("jd"), v.literal("one_time")), taskId: v.string() },
+  args: { companyId: v.id("companies"), taskType: v.union(v.literal("jd"), v.literal("one_time")), taskId: v.string(), paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     await getVisibleTask(ctx, args.companyId, membership, args.taskType, args.taskId);
-    const rows = await ctx.db.query("taskAttachments").withIndex("by_task", (q) => q.eq("taskType", args.taskType).eq("taskId", args.taskId)).order("desc").take(100);
-    return await Promise.all(rows.map(async (row) => ({ ...row, url: await ctx.storage.getUrl(row.storageId) })));
+    const page = await ctx.db.query("taskAttachments").withIndex("by_task", (q) => q.eq("taskType", args.taskType).eq("taskId", args.taskId)).order("desc").paginate(args.paginationOpts);
+    return { ...page, page: await Promise.all(page.page.map(async (row) => ({ ...row, url: await ctx.storage.getUrl(row.storageId) }))) };
   },
 });
 

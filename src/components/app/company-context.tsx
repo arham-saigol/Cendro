@@ -6,7 +6,7 @@ import { useConvexAuth, useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 
-type CompanyAccess = {
+export type CompanyAccess = {
   company: { _id: Id<"companies">; name: string };
   membership: { _id: Id<"companyMemberships">; role: string };
   capabilities: string[];

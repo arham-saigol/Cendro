@@ -1,5 +1,5 @@
 import { mutation, query } from "./_generated/server";
-import { ConvexError } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { currentUser } from "./permissions";
 import { normalizeEmail } from "./validation";
 
@@ -19,6 +19,17 @@ export const syncCurrentUser = mutation({
       return existing._id;
     }
     return await ctx.db.insert("appUsers", { clerkSubject: identity.tokenIdentifier, email, name, imageUrl, createdAt: now, updatedAt: now });
+  },
+});
+
+export const updateCurrentName = mutation({
+  args: { name: v.string() },
+  handler: async (ctx, args) => {
+    const { user } = await currentUser(ctx);
+    const name = args.name.trim();
+    if (!name) throw new ConvexError("Name is required.");
+    await ctx.db.patch(user._id, { name, updatedAt: Date.now() });
+    return user._id;
   },
 });
 

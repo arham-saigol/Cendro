@@ -1,39 +1,289 @@
 "use client";
 
+import * as Dialog from "@radix-ui/react-dialog";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { useClerk, useUser } from "@clerk/nextjs";
+import { useMutation } from "convex/react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { BarChart3, Building2, ChevronDown, FileText, Repeat, SquareCheckBig, Sparkles } from "lucide-react";
-import { UserButton } from "@clerk/nextjs";
-import { useEffect, useState } from "react";
-import { CompanyProvider, useCompany } from "./company-context";
+import {
+  Building2,
+  Check,
+  ChevronDown,
+  FileText,
+  LayoutDashboard,
+  LogOut,
+  Moon,
+  Repeat,
+  Search,
+  Settings,
+  Sparkles,
+  Sun,
+  X,
+} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { api } from "../../../convex/_generated/api";
+import { CompanyProvider, useCompany, type CompanyAccess } from "./company-context";
 import { AiPanel } from "./ai-panel";
+import { useTheme } from "./theme";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
+import { Input } from "@/components/ui/input";
+import { cn, initials } from "@/lib/utils";
 
 const nav = [
-  { href: "/dashboard", label: "Dashboard", icon: BarChart3 },
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/jd-tasks", label: "JD tasks", icon: Repeat },
-  { href: "/one-time-tasks", label: "One-time tasks", icon: SquareCheckBig },
+  { href: "/one-time-tasks", label: "One-time tasks", icon: Check },
   { href: "/sops", label: "SOPs", icon: FileText },
   { href: "/company", label: "Company management", icon: Building2, requiresCompanyManagement: true },
 ];
 
+const dropdownItemClass =
+  "flex min-h-9 cursor-default select-none items-center gap-2 rounded-md px-2 py-1.5 text-sm text-[var(--ink-secondary)] outline-none data-[highlighted]:bg-[var(--surface-hover)] data-[highlighted]:text-[var(--ink)]";
+
+function ShellCard({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex min-h-dvh items-center justify-center bg-[var(--chrome)] p-6">
+      <div className="w-full max-w-md rounded-md border border-[var(--hairline)] bg-[var(--surface)] p-6 shadow-[var(--shadow-popover)]">{children}</div>
+    </div>
+  );
+}
+
+function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  const { user } = useUser();
+  const { theme, toggleTheme } = useTheme();
+  const updateName = useMutation(api.users.updateCurrentName);
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setName(user?.fullName || "");
+      setError(null);
+    }
+  }, [open, user?.fullName]);
+
+  async function saveName() {
+    const trimmed = name.trim();
+    if (!trimmed || !user || saving) return;
+    const [firstName, ...rest] = trimmed.split(/\s+/);
+    setSaving(true);
+    setError(null);
+    try {
+      await user.update({ firstName, lastName: rest.join(" ") || null });
+      await updateName({ name: trimmed });
+      await user.reload();
+      onOpenChange(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save your name.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/25" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(420px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-md border border-[var(--hairline)] bg-[var(--surface)] p-5 text-[var(--ink)] shadow-[var(--shadow-popover)]">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <Dialog.Title className="text-base font-semibold">Settings</Dialog.Title>
+              <Dialog.Description className="mt-1 text-sm text-[var(--ink-muted)]">Update the name shown in Cendro.</Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <Button variant="ghost" size="icon" aria-label="Close settings">
+                <X className="h-4 w-4" />
+              </Button>
+            </Dialog.Close>
+          </div>
+          <label className="mt-5 block text-sm font-medium text-[var(--ink-secondary)]" htmlFor="profile-name">
+            Name
+          </label>
+          <Input id="profile-name" className="mt-2" value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" />
+          {error && <p className="alert-error mt-3 rounded-md p-2 text-sm">{error}</p>}
+          <div className="mt-5 border-t border-[var(--hairline)] pt-4">
+            <div className="mb-2 text-sm font-medium text-[var(--ink-secondary)]">Appearance</div>
+            <Button variant="secondary" onClick={toggleTheme} type="button">
+              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              {theme === "dark" ? "Use light mode" : "Use dark mode"}
+            </Button>
+          </div>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={saving}>
+              Cancel
+            </Button>
+            <Button variant="primary" onClick={saveName} disabled={saving || !name.trim()}>
+              {saving ? "Saving..." : "Save name"}
+            </Button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function SearchCommandDialog({
+  open,
+  onOpenChange,
+  items,
+  companies,
+  activeCompanyId,
+  setActiveCompanyId,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  items: typeof nav;
+  companies: CompanyAccess[];
+  activeCompanyId: CompanyAccess["company"]["_id"] | null;
+  setActiveCompanyId: (id: CompanyAccess["company"]["_id"]) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const normalized = query.trim().toLowerCase();
+  const filteredItems = items.filter((item) => item.label.toLowerCase().includes(normalized));
+  const filteredCompanies = companies.filter((company) => company.company.name.toLowerCase().includes(normalized));
+
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/20" />
+        <Dialog.Content className="fixed left-1/2 top-[22vh] z-50 w-[min(560px,calc(100vw-32px))] -translate-x-1/2 overflow-hidden rounded-lg bg-[var(--surface)] text-[var(--ink)] shadow-[var(--shadow-popover)]">
+          <Dialog.Title className="sr-only">Search Cendro</Dialog.Title>
+          <div className="flex h-11 items-center gap-2 px-3">
+            <Search className="h-4 w-4 text-[var(--ink-faint)]" />
+            <Input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search pages and workspaces..." className="h-9 border-0 bg-transparent px-0 focus:border-0" />
+          </div>
+          <div className="max-h-[360px] overflow-auto px-2 pb-2">
+            {filteredItems.length > 0 && <div className="px-2 py-1 text-xs font-medium text-[var(--ink-faint)]">Pages</div>}
+            {filteredItems.map((item) => {
+              const Icon = item.icon;
+              return (
+                <Dialog.Close asChild key={item.href}>
+                  <Link href={item.href} className="flex h-9 items-center gap-2 rounded-md px-2 text-sm text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)]">
+                    <Icon className="h-4 w-4 text-[var(--ink-muted)]" />
+                    {item.label}
+                  </Link>
+                </Dialog.Close>
+              );
+            })}
+            {filteredCompanies.length > 0 && <div className="mt-2 px-2 py-1 text-xs font-medium text-[var(--ink-faint)]">Workspaces</div>}
+            {filteredCompanies.map((company) => {
+              const isActive = company.company._id === activeCompanyId;
+              return (
+                <button
+                  key={company.company._id}
+                  className="flex h-9 w-full items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)]"
+                  onClick={() => {
+                    setActiveCompanyId(company.company._id);
+                    onOpenChange(false);
+                  }}
+                >
+                  <span className="grid h-5 w-5 place-items-center rounded bg-[var(--surface-muted)] text-xs text-[var(--ink-muted)]">{company.company.name?.[0]?.toUpperCase() ?? "C"}</span>
+                  <span className="min-w-0 flex-1 truncate">{company.company.name}</span>
+                  {isActive && <Check className="h-4 w-4 text-[var(--ink)]" />}
+                </button>
+              );
+            })}
+            {filteredItems.length === 0 && filteredCompanies.length === 0 && <div className="px-2 py-8 text-center text-sm text-[var(--ink-muted)]">No results found.</div>}
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function AccountCompanyMenu({ searchItems = nav }: { searchItems?: typeof nav }) {
+  const { user } = useUser();
+  const { signOut } = useClerk();
+  const { companies, activeCompanyId, setActiveCompanyId } = useCompany();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const displayName = user?.fullName || user?.primaryEmailAddress?.emailAddress || "User";
+
+  return (
+    <>
+      <div className="flex h-8 items-center gap-1">
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger asChild>
+            <button className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[var(--ink)] hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]">
+              <span className="grid h-5 w-5 place-items-center overflow-hidden rounded-md bg-[var(--surface-pressed)] text-[11px] font-medium text-[var(--ink-secondary)]">
+                {user?.imageUrl ? <span aria-hidden="true" className="h-full w-full bg-cover bg-center" style={{ backgroundImage: `url(${user.imageUrl})` }} /> : initials(displayName)}
+              </span>
+              <span className="min-w-0 truncate text-sm font-medium tracking-[-0.01em]">{displayName}</span>
+              <ChevronDown className="h-3 w-3 shrink-0 text-[var(--ink-faint)]" />
+            </button>
+          </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content align="start" sideOffset={7} className="z-50 w-76 rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-2 shadow-[var(--shadow-popover)]">
+            <div className="flex items-center gap-3 px-2 py-2">
+              <div className="grid h-9 w-9 place-items-center overflow-hidden rounded-md bg-[var(--surface-pressed)] text-base font-medium text-[var(--ink-secondary)]">
+                {user?.imageUrl ? <span aria-hidden="true" className="h-full w-full bg-cover bg-center" style={{ backgroundImage: `url(${user.imageUrl})` }} /> : initials(displayName)}
+              </div>
+              <div className="min-w-0">
+                <div className="truncate text-sm font-semibold text-[var(--ink)]">{displayName}</div>
+                {user?.primaryEmailAddress?.emailAddress && <div className="truncate text-xs text-[var(--ink-faint)]">{user.primaryEmailAddress.emailAddress}</div>}
+              </div>
+            </div>
+            <DropdownMenu.Item className={dropdownItemClass} onSelect={() => setSettingsOpen(true)}>
+              <Settings className="h-4 w-4" />
+              Settings
+            </DropdownMenu.Item>
+            <DropdownMenu.Separator className="my-1 h-px bg-[var(--hairline)]" />
+            <div className="px-2 py-1 text-xs font-medium text-[var(--ink-faint)]">Workspaces</div>
+            {companies.map((company: CompanyAccess) => {
+              const isActive = company.company._id === activeCompanyId;
+              return (
+                <DropdownMenu.Item key={company.company._id} className={dropdownItemClass} onSelect={() => setActiveCompanyId(company.company._id)}>
+                  <div className="grid h-6 w-6 place-items-center rounded-md bg-[var(--surface-muted)] text-xs font-medium text-[var(--ink-muted)]">
+                    {company.company.name?.[0]?.toUpperCase() ?? "C"}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm text-[var(--ink)]">{company.company.name}</div>
+                    <div className="text-xs text-[var(--ink-faint)]">{company.membership.role}</div>
+                  </div>
+                  {isActive && <Check className="h-4 w-4 text-[var(--ink)]" />}
+                </DropdownMenu.Item>
+              );
+            })}
+            <DropdownMenu.Separator className="my-1 h-px bg-[var(--hairline)]" />
+            <DropdownMenu.Item className={dropdownItemClass} onSelect={() => void signOut({ redirectUrl: "/sign-in" })}>
+              <LogOut className="h-4 w-4" />
+              Log out
+            </DropdownMenu.Item>
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+        </DropdownMenu.Root>
+        <button className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]" aria-label="Open search" onClick={() => setSearchOpen(true)}>
+          <Search className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <SearchCommandDialog open={searchOpen} onOpenChange={setSearchOpen} items={searchItems} companies={companies} activeCompanyId={activeCompanyId} setActiveCompanyId={setActiveCompanyId} />
+    </>
+  );
+}
+
 function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; isPlatformAdmin: boolean }) {
   const path = usePathname();
   const router = useRouter();
-  const { accessStatus, email, companies, activeCompanyId, setActiveCompanyId, active } = useCompany();
-  const [open, setOpen] = useState(false);
+  const { accessStatus, email, activeCompanyId, active } = useCompany();
+  const [aiOpen, setAiOpen] = useState(false);
 
   useEffect(() => {
     if (accessStatus === "signedOut") router.replace(`/sign-in?redirect_url=${encodeURIComponent(path)}`);
   }, [accessStatus, path, router]);
+
   const canManageCompany = active?.capabilities?.includes("company:manage_permissions") ?? false;
-  const visibleNav = nav.filter((item) => !item.requiresCompanyManagement || canManageCompany);
+  const visibleNav = useMemo(() => nav.filter((item) => !item.requiresCompanyManagement || canManageCompany), [canManageCompany]);
 
   if (accessStatus === "loading") {
     return (
-      <div className="min-h-screen bg-[var(--canvas-soft)] p-8">
+      <div className="min-h-dvh bg-[var(--chrome)] p-8">
         <div className="mx-auto max-w-5xl space-y-3">
           <div className="h-8 w-48 animate-pulse rounded bg-[var(--surface-pressed)]" />
           <div className="h-24 w-full animate-pulse rounded bg-[var(--surface-pressed)]" />
@@ -47,79 +297,89 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
 
   if (accessStatus === "convexUnauthenticated" || accessStatus === "profileMissing") {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[var(--canvas-soft)]">
-        <div className="max-w-md rounded-lg border bg-[var(--surface)] p-6">
-          <div className="mb-4 flex justify-end"><UserButton /></div>
-          <h1 className="text-2xl font-semibold">Finishing sign-in…</h1>
-          <p className="mt-2 text-sm text-[var(--ink-muted)]">We’re setting up your authenticated session. Refresh the page in a moment.</p>
-          {email && <p className="mt-3 text-xs text-[var(--ink-faint)]">Signed in as {email}</p>}
+      <ShellCard>
+        <div className="mb-4">
+          <AccountCompanyMenu />
         </div>
-      </div>
+        <h1 className="text-xl font-semibold">Finishing sign-in</h1>
+        <p className="mt-2 text-sm text-[var(--ink-muted)]">We are setting up your authenticated session. Refresh the page in a moment.</p>
+        {email && <p className="mt-3 text-xs text-[var(--ink-faint)]">Signed in as {email}</p>}
+      </ShellCard>
     );
   }
 
   if (accessStatus === "noCompanies") {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[var(--canvas-soft)]">
-        <div className="max-w-md rounded-lg border bg-[var(--surface)] p-6">
-          <div className="mb-4 flex justify-end"><UserButton /></div>
-          <h1 className="text-2xl font-semibold">No company access yet</h1>
-          <p className="mt-2 text-sm text-[var(--ink-muted)]">Accept an invitation or ask an admin to add you to a company.</p>
-          {email && <p className="mt-3 text-xs text-[var(--ink-faint)]">Signed in as {email}</p>}
-          {isPlatformAdmin && <Button asChild className="mt-4" variant="primary"><Link href="/admin">Open platform admin</Link></Button>}
+      <ShellCard>
+        <div className="mb-4">
+          <AccountCompanyMenu />
         </div>
-      </div>
+        <h1 className="text-xl font-semibold">No company access yet</h1>
+        <p className="mt-2 text-sm text-[var(--ink-muted)]">Accept an invitation or ask an admin to add you to a company.</p>
+        {email && <p className="mt-3 text-xs text-[var(--ink-faint)]">Signed in as {email}</p>}
+        {isPlatformAdmin && (
+          <Button asChild className="mt-4" variant="primary">
+            <Link href="/admin">Open platform admin</Link>
+          </Button>
+        )}
+      </ShellCard>
     );
   }
 
   return (
-    <div className="flex min-h-screen bg-[var(--canvas-soft)]">
-      <aside className="w-[270px] shrink-0 border-r border-[var(--hairline)] bg-[var(--surface-muted)] p-3">
-        <div className="relative mb-4">
-          <button className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-[var(--surface-pressed)]">
-            <div className="grid h-7 w-7 place-items-center rounded bg-[var(--surface)] text-sm font-semibold">{active?.company.name?.[0] || "C"}</div>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium">{active?.company.name}</div>
-              <div className="text-xs text-[var(--ink-muted)]">{active?.membership.role}</div>
-            </div>
-            {companies.length > 1 && <ChevronDown className="h-4 w-4" />}
-          </button>
-          {companies.length > 1 && (
-            <div className="mt-1 rounded-md border border-[var(--hairline)] bg-[var(--surface)] p-1">
-              {companies.map((c: any) => (
-                <button key={c.company._id} onClick={() => setActiveCompanyId(c.company._id)} className="block w-full rounded px-2 py-1.5 text-left text-sm hover:bg-[var(--surface-muted)]">
-                  {c.company.name}<Badge className="ml-2">{c.membership.role}</Badge>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="mb-2 px-2 text-xs font-semibold uppercase tracking-wide text-[var(--ink-faint)]">Workspace</div>
-        <nav className="space-y-1">
+    <div className="flex h-dvh overflow-hidden bg-[var(--chrome)] p-1.5 text-[var(--ink)]">
+      <aside className="hidden w-[246px] shrink-0 flex-col bg-[var(--chrome-translucent)] px-2 pb-2 pt-1 backdrop-blur-sm md:flex">
+        <AccountCompanyMenu searchItems={visibleNav} />
+        <nav className="mt-4 space-y-0.5">
           {visibleNav.map((item) => {
             const Icon = item.icon;
-            const activeRow = path.startsWith(item.href);
+            const activeRow = path === item.href || path.startsWith(`${item.href}/`);
             return (
-              <Link key={item.href} href={item.href} className={cn("flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-[var(--ink-secondary)] hover:bg-[var(--surface-pressed)]", activeRow && "bg-[var(--surface-pressed)] text-[var(--ink)]")}>
-                <Icon className="h-4 w-4" />{item.label}
+              <Link
+                key={item.href}
+                href={item.href}
+                className={cn(
+                  "flex h-8 items-center gap-2 rounded-md px-2 text-sm text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)]",
+                  activeRow && "bg-[var(--surface-pressed)] text-[var(--ink)]",
+                )}
+              >
+                <Icon className="h-4 w-4 text-[var(--ink-muted)]" />
+                <span className="truncate">{item.label}</span>
               </Link>
             );
           })}
         </nav>
-        <div className="absolute bottom-3 left-3"><UserButton /></div>
+        {isPlatformAdmin && (
+          <Button asChild variant="ghost" className="mt-auto justify-start px-2">
+            <Link href="/admin">Platform admin</Link>
+          </Button>
+        )}
       </aside>
-      <main className="min-w-0 flex-1">
-        <header className="flex h-12 items-center justify-between border-b border-[var(--hairline)] bg-[var(--canvas)] px-5">
-          <div className="text-sm text-[var(--ink-muted)]">Synced through Convex realtime</div>
-          <Button onClick={() => setOpen(true)} variant="secondary"><Sparkles className="h-4 w-4" />AI panel</Button>
-        </header>
-        {children}
-      </main>
-      {open && activeCompanyId && <AiPanel companyId={activeCompanyId} onClose={() => setOpen(false)} />}
+
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="h-0 shrink-0 bg-[var(--chrome-translucent)] backdrop-blur-sm" />
+
+        <div className="flex min-h-0 flex-1 gap-1 overflow-hidden">
+          <section className="relative min-w-0 flex-1 overflow-hidden rounded-md border border-[var(--page-outline)] bg-[var(--canvas)]">
+            <Button onClick={() => setAiOpen((open) => !open)} variant={aiOpen ? "secondary" : "ghost"} size="sm" className="absolute left-3 top-2 z-20 h-7 px-2" aria-label="Toggle AI panel" aria-pressed={aiOpen}>
+              <Sparkles className="h-3.5 w-3.5" />
+              AI
+            </Button>
+            <div className="h-full overflow-auto">
+              {children}
+            </div>
+          </section>
+          {aiOpen && activeCompanyId && <AiPanel companyId={activeCompanyId} onClose={() => setAiOpen(false)} />}
+        </div>
+      </div>
     </div>
   );
 }
 
 export function AppShell({ children, isPlatformAdmin }: { children: React.ReactNode; isPlatformAdmin: boolean }) {
-  return <CompanyProvider><ShellInner isPlatformAdmin={isPlatformAdmin}>{children}</ShellInner></CompanyProvider>;
+  return (
+    <CompanyProvider>
+      <ShellInner isPlatformAdmin={isPlatformAdmin}>{children}</ShellInner>
+    </CompanyProvider>
+  );
 }

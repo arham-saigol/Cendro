@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useMutation, usePaginatedQuery } from "convex/react";
 import { useState } from "react";
 import { api } from "../../../../convex/_generated/api";
+import { PageHeader } from "@/components/app/page-header";
 import { useCompany } from "@/components/app/company-context";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
 export default function Sops() {
-  const { activeCompanyId } = useCompany();
+  const { activeCompanyId, active } = useCompany();
   const sopQuery = usePaginatedQuery(api.sops.list, activeCompanyId ? { companyId: activeCompanyId } : "skip", { initialNumItems: 25 });
   const create = useMutation(api.sops.create);
   const [title, setTitle] = useState("");
@@ -25,7 +26,7 @@ export default function Sops() {
   async function createSop() {
     const trimmedTitle = title.trim();
     if (!activeCompanyId || !trimmedTitle || isCreating) return;
-    const optimistic = { _id: crypto.randomUUID(), title: trimmedTitle, scopeType: "company", updatedAt: Date.now() };
+    const optimistic = { _id: crypto.randomUUID(), title: trimmedTitle, scopeType: "company", updatedAt: Date.now(), _optimistic: true };
     setCreateError(null);
     setOptimisticSops((current) => [optimistic, ...current]);
     setIsCreating(true);
@@ -43,10 +44,55 @@ export default function Sops() {
   }
 
   return (
-    <div className="p-8">
-      <div className="mb-6"><div className="text-4xl">📄</div><h1 className="text-[32px] font-bold">SOPs</h1><p className="text-[var(--ink-muted)]">Searchable operating procedures with company, branch, department, and user visibility.</p></div>
-      <Card className="mb-4 p-3"><div className="grid gap-2"><Input value={title} onChange={(e) => { setTitle(e.target.value); setCreateError(null); }} placeholder="SOP title" /><Textarea value={content} onChange={(e) => { setContent(e.target.value); setCreateError(null); }} placeholder="SOP body" />{createError && <p className="rounded-md border border-[#f3b6b0] bg-[#fff4f2] p-2 text-sm text-[#b42318]">{createError}</p>}<Button variant="primary" disabled={isCreating} onClick={createSop}>{isCreating ? "Creating…" : "Create SOP"}</Button></div></Card>
-      {sopQuery.status === "LoadingFirstPage" ? <Card className="space-y-3 p-4 animate-pulse"><div className="h-5 w-1/3 rounded bg-[var(--surface-muted)]" /><div className="h-10 rounded bg-[var(--surface-muted)]" /><div className="h-10 rounded bg-[var(--surface-muted)]" /><div className="h-10 rounded bg-[var(--surface-muted)]" /></Card> : <Card><table className="notion-table"><tbody>{rows.map((s: any) => <tr key={s._id}><td className="px-3 font-medium"><Link href={`/sops/${s._id}`}>{s.title}</Link></td><td><Badge>{s.scopeType}</Badge></td><td className="text-[var(--ink-muted)]">Updated {new Date(s.updatedAt).toLocaleDateString()}</td></tr>)}</tbody></table></Card>}
+    <div className="app-page">
+      <PageHeader
+        eyebrow={active?.company.name ?? "Knowledge base"}
+        title="SOPs"
+        description="Searchable operating procedures with company, branch, department, and user visibility."
+      />
+
+      <Card className="mb-4 p-3">
+        <div className="grid gap-3">
+          <label className="grid gap-1.5 text-xs font-medium text-[var(--ink-muted)]">
+            SOP title
+            <Input value={title} onChange={(event) => { setTitle(event.target.value); setCreateError(null); }} placeholder="New procedure title" />
+          </label>
+          <label className="grid gap-1.5 text-xs font-medium text-[var(--ink-muted)]">
+            Body
+            <Textarea value={content} onChange={(event) => { setContent(event.target.value); setCreateError(null); }} placeholder="Write the procedure..." />
+          </label>
+          {createError && <p className="alert-error rounded-md p-2 text-sm">{createError}</p>}
+          <div><Button variant="primary" disabled={isCreating || !title.trim()} onClick={createSop}>{isCreating ? "Creating..." : "Create SOP"}</Button></div>
+        </div>
+      </Card>
+
+      <Card className="overflow-hidden">
+        {sopQuery.status === "LoadingFirstPage" ? (
+          <div className="animate-pulse space-y-3 p-4">
+            <div className="h-5 w-1/3 rounded bg-[var(--surface-muted)]" />
+            <div className="h-10 rounded bg-[var(--surface-muted)]" />
+            <div className="h-10 rounded bg-[var(--surface-muted)]" />
+            <div className="h-10 rounded bg-[var(--surface-muted)]" />
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="p-5 text-sm text-[var(--ink-muted)]">No SOPs yet.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="notion-table">
+              <thead><tr><th>Title</th><th>Scope</th><th>Updated</th></tr></thead>
+              <tbody>
+                {rows.map((sop: any) => (
+                  <tr key={sop._id}>
+                    <td className="min-w-[260px] font-medium text-[var(--ink)]">{sop._optimistic ? <span>{sop.title}</span> : <Link className="hover:text-[var(--primary)]" href={`/sops/${sop._id}`}>{sop.title}</Link>}</td>
+                    <td><Badge>{sop.scopeType}</Badge></td>
+                    <td className="text-[var(--ink-muted)]">{new Date(sop.updatedAt).toLocaleDateString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
       {sopQuery.status === "CanLoadMore" && <Button className="mt-4" onClick={() => sopQuery.loadMore(25)}>Load more</Button>}
     </div>
   );

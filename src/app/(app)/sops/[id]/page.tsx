@@ -1,3 +1,6 @@
-"use client";
-import {useQuery} from "convex/react"; import {api} from "../../../../../convex/_generated/api"; import {useCompany} from "@/components/app/company-context"; import {Badge} from "@/components/ui/badge";
-export default function SopDetail({params}:{params:{id:string}}){const {activeCompanyId}=useCompany(); const sop=useQuery(api.sops.get,activeCompanyId?{companyId:activeCompanyId,sopId:params.id as any}:"skip") as any; if(!sop)return <div className="p-8">Loading SOP…</div>; return <article className="mx-auto max-w-3xl p-8"><div className="text-4xl">📄</div><h1 className="text-[32px] font-bold">{sop.title}</h1><div className="mt-2"><Badge>{sop.scopeType}</Badge></div><div className="prose mt-8 whitespace-pre-wrap leading-7 text-[var(--ink-secondary)]">{sop.content}</div></article>}
+import { SopDetail } from "@/components/app/sop-detail";
+
+export default async function Page({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  return <SopDetail id={id} />;
+}

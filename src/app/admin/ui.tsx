@@ -154,7 +154,7 @@ export function AdminClient() {
       <div className="mx-auto max-w-5xl">
         <h1 className="text-[32px] font-bold">Platform admin</h1>
         <p className="text-[var(--ink-muted)]">Hidden owner-only route. Company deletion is a soft delete: child records remain for audit and the company becomes inaccessible.</p>
-        {error && <p className="mt-4 rounded-md border border-[#f3b6b0] bg-[#fff4f2] p-3 text-sm text-[#b42318]">{error}</p>}
+        {error && <p className="alert-error mt-4 rounded-md p-3 text-sm">{error}</p>}
         <Card className="my-6 p-4">
           <h2 className="mb-3 font-semibold">Create company</h2>
           <div className="grid gap-2 md:grid-cols-[1fr_1fr_auto]">

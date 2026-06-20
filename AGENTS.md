@@ -79,8 +79,7 @@ This means things like:
 - Onboarding does the thinking: company details in → workspace, roles, and starter workflows out. User just reviews.
 - Tasks appear ready to triage or complete. Editing is optional, not required.
 - SOP workflows "just work" — sensible ordering, ownership, and reminders are automatic where possible.
-- The daily workflow should take under 5 minutes. If it takes longer, something is wrong.
-- Getting from login to the most important open tasks should be one click (max two).
+- Getting from login to tasks should be one click (max two).
 
 ## 7. Security
 
@@ -99,16 +98,14 @@ This includes things like:
 - Be willing to recommend large, clean changes when they improve the product or codebase, even if they touch many files or change existing flows.
 - Do not add data migrations, backfills, compatibility layers, dual-write paths, or transitional legacy handling. When a schema, model, or flow needs to change, update it directly to the desired clean state.
 
-<!-- convex-ai-start -->
+<!-- nextjs-ai-start -->
+# This is NOT the Next.js you know
 
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
+<!-- nextjs-ai-start -->
+
+<!-- convex-ai-start -->
 This project uses [Convex](https://convex.dev) as its backend.
 
-When working on Convex code, **always read
-`convex/_generated/ai/guidelines.md` first** for important guidelines on
-how to correctly use Convex APIs and patterns. The file contains rules that
-override what you may have learned about Convex from training data.
-
-Convex agent skills for common tasks can be installed by running
-`npx convex ai-files install`.
-
+When working on Convex code, **always read `convex/_generated/ai/guidelines.md` first** for important guidelines on how to correctly use Convex APIs and patterns. The file contains rules that override what you may have learned about Convex from training data.
 <!-- convex-ai-end -->

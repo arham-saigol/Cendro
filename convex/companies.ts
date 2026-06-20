@@ -3,7 +3,8 @@ import { currentUser, membershipCapabilities } from "./permissions";
 
 async function accessibleCompanies(ctx: Parameters<typeof currentUser>[0]) {
   const { user } = await currentUser(ctx);
-  const memberships = await ctx.db.query("companyMemberships").withIndex("by_user", (q) => q.eq("userId", user._id)).collect();
+  const memberships = await ctx.db.query("companyMemberships").withIndex("by_user", (q) => q.eq("userId", user._id)).take(100);
+  if (memberships.length === 100) console.warn("accessibleCompanies reached the 100 membership limit; company list may be truncated.");
   const rows = [];
   for (const membership of memberships.filter((m) => m.active)) {
     const company = await ctx.db.get(membership.companyId);

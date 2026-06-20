@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
-import { mutation, query } from "./_generated/server";
-import { currentUser } from "./permissions";
+import { internalMutation, mutation, query } from "./_generated/server";
+import { currentOrCreateUser } from "./permissions";
 
 export const preview = query({
   args: { token: v.string() },
@@ -16,7 +16,7 @@ export const preview = query({
 export const accept = mutation({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    const { user } = await currentUser(ctx);
+    const { user } = await currentOrCreateUser(ctx);
     const invitation = await ctx.db.query("invitations").withIndex("by_token", (q) => q.eq("token", args.token)).unique();
     if (!invitation || invitation.status !== "pending") throw new ConvexError("Invitation not found.");
     if (invitation.expiresAt < Date.now()) throw new ConvexError("This invitation has expired.");
@@ -32,5 +32,12 @@ export const accept = mutation({
     await ctx.db.patch(invitation._id, { status: "accepted" });
     await ctx.db.insert("auditEvents", { companyId: invitation.companyId, actorUserId: user._id, action: "invitation.accept", targetType: "membership", targetId: membershipId, metadata: { role: invitation.role }, createdAt: now });
     return { companyId: invitation.companyId };
+  },
+});
+
+export const markSent = internalMutation({
+  args: { invitationId: v.id("invitations") },
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args.invitationId, { sentAt: Date.now() });
   },
 });

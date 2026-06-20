@@ -2,7 +2,7 @@
 
 import { useAuth } from "@clerk/nextjs";
 import { createContext, useContext, useMemo, useState } from "react";
-import { useQuery } from "convex/react";
+import { useConvexAuth, useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 
@@ -34,8 +34,9 @@ const Context = createContext<Ctx | null>(null);
 
 export function CompanyProvider({ children }: { children: React.ReactNode }) {
   const { isLoaded, isSignedIn } = useAuth();
-  const queryResult = useQuery(api.companies.accessStatus, isLoaded && isSignedIn ? {} : "skip") as AccessResult | undefined;
-  const accessStatus: AccessStatus = !isLoaded ? "loading" : !isSignedIn ? "signedOut" : queryResult?.status ?? "loading";
+  const { isLoading: convexAuthLoading, isAuthenticated } = useConvexAuth();
+  const queryResult = useQuery(api.companies.accessStatus, isLoaded && isSignedIn && isAuthenticated ? {} : "skip") as AccessResult | undefined;
+  const accessStatus: AccessStatus = !isLoaded || (isSignedIn && convexAuthLoading) ? "loading" : !isSignedIn ? "signedOut" : !isAuthenticated ? "convexUnauthenticated" : queryResult?.status ?? "loading";
   const companies = useMemo(() => (queryResult?.status === "ready" ? queryResult.companies : []), [queryResult]);
   const email = queryResult && "email" in queryResult ? queryResult.email : null;
   const [selectedCompanyId, setSelectedCompanyId] = useState<Id<"companies"> | null>(() => {

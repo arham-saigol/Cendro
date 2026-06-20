@@ -1,13 +1,21 @@
 import { ConvexError, v } from "convex/values";
 import { action, mutation, query } from "./_generated/server";
 import { api, internal } from "./_generated/api";
-import { assertPlatformAdminEmail } from "./permissions";
+import { assertPlatformAdminEmail, isPlatformAdminEmail } from "./permissions";
 
 async function platformEmail(ctx: { auth: { getUserIdentity: () => Promise<{ email?: string | null } | null> } }) {
   const identity = await ctx.auth.getUserIdentity();
   assertPlatformAdminEmail(identity?.email);
   return identity?.email || "";
 }
+
+export const access = query({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity();
+    return { isAdmin: isPlatformAdminEmail(identity?.email), email: identity?.email ?? null };
+  },
+});
 
 export const listCompanies = query({
   args: {},

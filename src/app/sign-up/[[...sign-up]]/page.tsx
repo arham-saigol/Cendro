@@ -1,1 +1,17 @@
-import { SignUp } from "@clerk/nextjs"; export default function Page(){return <main className="flex min-h-screen items-center justify-center bg-[var(--canvas-soft)]"><SignUp /></main>}
+import { SignUp } from "@clerk/nextjs";
+
+function safeRedirectUrl(value: string | string[] | undefined) {
+  const redirectUrl = Array.isArray(value) ? value[0] : value;
+  if (!redirectUrl || !redirectUrl.startsWith("/") || redirectUrl.startsWith("//")) return "/dashboard";
+  return redirectUrl;
+}
+
+export default async function Page({ searchParams }: { searchParams: Promise<{ redirect_url?: string | string[] }> }) {
+  const redirectUrl = safeRedirectUrl((await searchParams).redirect_url);
+
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-[var(--canvas-soft)]">
+      <SignUp fallbackRedirectUrl={redirectUrl} forceRedirectUrl={redirectUrl} signInFallbackRedirectUrl={redirectUrl} signInForceRedirectUrl={redirectUrl} />
+    </main>
+  );
+}

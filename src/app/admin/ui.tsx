@@ -1,38 +1,50 @@
 "use client";
 
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useAction, useConvexAuth, useMutation, useQuery } from "convex/react";
 import { useMemo, useState } from "react";
 import { api } from "../../../convex/_generated/api";
+import type { Id } from "../../../convex/_generated/dataModel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
+type CompanyRow = {
+  company: { _id: Id<"companies"> | `temp-${string}`; name: string; deletedAt?: number };
+  memberCount: number;
+};
+
+function isCompanyId(id: string): id is Id<"companies"> {
+  return !id.startsWith("temp-");
+}
+
 export function AdminClient() {
-  const companies = useQuery(api.platform.listCompanies);
+  const { isLoading: authLoading, isAuthenticated } = useConvexAuth();
+  const access = useQuery(api.platform.access, isAuthenticated ? {} : "skip");
+  const companies = useQuery(api.platform.listCompanies, access?.isAdmin ? {} : "skip");
   const create = useAction(api.platform.createCompany);
   const del = useMutation(api.platform.deleteCompany);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [optimisticCreates, setOptimisticCreates] = useState<any[]>([]);
+  const [optimisticCreates, setOptimisticCreates] = useState<CompanyRow[]>([]);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
 
   const rows = useMemo(() => {
     const deleting = deletingIds;
     return [
       ...optimisticCreates,
-      ...(companies ?? []).map((row: any) => deleting.has(row.company._id) ? { ...row, company: { ...row.company, deletedAt: row.company.deletedAt ?? 1 } } : row),
+      ...(companies ?? []).map((row) => deleting.has(row.company._id) ? { ...row, company: { ...row.company, deletedAt: row.company.deletedAt ?? 1 } } : row),
     ];
   }, [companies, deletingIds, optimisticCreates]);
 
   async function createCompany() {
     const trimmedName = name.trim();
-    const trimmedEmail = email.trim();
-    if (!trimmedName || !trimmedEmail || creating) return;
-    const tempId = `temp-${crypto.randomUUID()}`;
-    const optimistic = { company: { _id: tempId, name: trimmedName }, memberCount: 0 };
+    const trimmedEmail = email.trim().toLowerCase();
+    if (!trimmedName || !trimmedEmail || creating || !access?.isAdmin) return;
+    const tempId = `temp-${crypto.randomUUID()}` as `temp-${string}`;
+    const optimistic: CompanyRow = { company: { _id: tempId, name: trimmedName }, memberCount: 0 };
     setError(null);
     setCreating(true);
     setOptimisticCreates((current) => [optimistic, ...current]);
@@ -49,13 +61,15 @@ export function AdminClient() {
     }
   }
 
-  async function deleteCompany(row: any) {
+  async function deleteCompany(row: CompanyRow) {
+    const companyId = row.company._id;
+    if (!isCompanyId(companyId)) return;
     const confirmation = prompt(`Type ${row.company.name} to delete`);
-    if (!confirmation || deletingIds.has(row.company._id)) return;
+    if (!confirmation || deletingIds.has(companyId) || !access?.isAdmin) return;
     setError(null);
-    setDeletingIds((current) => new Set(current).add(row.company._id));
+    setDeletingIds((current) => new Set(current).add(companyId));
     try {
-      await del({ companyId: row.company._id, confirmation });
+      await del({ companyId, confirmation });
     } catch (err) {
       setDeletingIds((current) => {
         const next = new Set(current);
@@ -64,6 +78,43 @@ export function AdminClient() {
       });
       setError(err instanceof Error ? err.message : "Could not delete company.");
     }
+  }
+
+  if (authLoading) {
+    return <main className="min-h-screen bg-[var(--canvas-soft)] p-8"><div className="mx-auto max-w-5xl">Loading platform admin…</div></main>;
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <main className="min-h-screen bg-[var(--canvas-soft)] p-8">
+        <div className="mx-auto max-w-5xl">
+          <h1 className="text-[32px] font-bold">Platform admin</h1>
+          <Card className="mt-6 p-4">
+            <h2 className="font-semibold">Could not authenticate with Convex</h2>
+            <p className="mt-2 text-sm text-[var(--ink-muted)]">You are signed in with Clerk, but Convex has not accepted the session yet. Check the Convex Clerk JWT configuration.</p>
+          </Card>
+        </div>
+      </main>
+    );
+  }
+
+  if (access === undefined || (access.isAdmin && companies === undefined)) {
+    return <main className="min-h-screen bg-[var(--canvas-soft)] p-8"><div className="mx-auto max-w-5xl">Loading platform admin…</div></main>;
+  }
+
+  if (!access.isAdmin) {
+    return (
+      <main className="min-h-screen bg-[var(--canvas-soft)] p-8">
+        <div className="mx-auto max-w-5xl">
+          <h1 className="text-[32px] font-bold">Platform admin</h1>
+          <Card className="mt-6 p-4">
+            <h2 className="font-semibold">No platform admin access</h2>
+            <p className="mt-2 text-sm text-[var(--ink-muted)]">Your browser session is signed in, but Convex does not recognize this account as the configured platform admin.</p>
+            {access.email && <p className="mt-3 text-xs text-[var(--ink-faint)]">Signed in as {access.email}</p>}
+          </Card>
+        </div>
+      </main>
+    );
   }
 
   return (
@@ -83,7 +134,7 @@ export function AdminClient() {
         <Card>
           <table className="notion-table">
             <thead><tr><th className="px-3">Company</th><th>Members</th><th>Status</th><th>Delete</th></tr></thead>
-            <tbody>{rows.map((r: any) => <tr key={r.company._id}>
+            <tbody>{rows.map((r) => <tr key={r.company._id}>
               <td className="px-3 font-medium">{r.company.name}</td>
               <td>{r.memberCount}</td>
               <td><Badge tone={r.company.deletedAt ? "red" : "green"}>{r.company.deletedAt ? "Deleted" : "Active"}</Badge></td>

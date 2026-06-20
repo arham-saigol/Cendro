@@ -26,7 +26,7 @@ export default function Sops() {
   async function createSop() {
     const trimmedTitle = title.trim();
     if (!activeCompanyId || !trimmedTitle || isCreating) return;
-    const optimistic = { _id: crypto.randomUUID(), title: trimmedTitle, scopeType: "company", updatedAt: Date.now() };
+    const optimistic = { _id: crypto.randomUUID(), title: trimmedTitle, scopeType: "company", updatedAt: Date.now(), _optimistic: true };
     setCreateError(null);
     setOptimisticSops((current) => [optimistic, ...current]);
     setIsCreating(true);
@@ -83,7 +83,7 @@ export default function Sops() {
               <tbody>
                 {rows.map((sop: any) => (
                   <tr key={sop._id}>
-                    <td className="min-w-[260px] font-medium text-[var(--ink)]"><Link className="hover:text-[var(--primary)]" href={`/sops/${sop._id}`}>{sop.title}</Link></td>
+                    <td className="min-w-[260px] font-medium text-[var(--ink)]">{sop._optimistic ? <span>{sop.title}</span> : <Link className="hover:text-[var(--primary)]" href={`/sops/${sop._id}`}>{sop.title}</Link>}</td>
                     <td><Badge>{sop.scopeType}</Badge></td>
                     <td className="text-[var(--ink-muted)]">{new Date(sop.updatedAt).toLocaleDateString()}</td>
                   </tr>

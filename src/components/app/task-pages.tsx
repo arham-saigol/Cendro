@@ -57,6 +57,7 @@ export function TaskList({ kind }: { kind: "jd" | "one" }) {
       dueDate: Date.now() + 86_400_000,
       priority: "medium",
       assignees: assignee ? [assignee] : [],
+      _optimistic: true,
     };
     setCreateError(null);
     setIsCreating(true);
@@ -120,7 +121,7 @@ export function TaskList({ kind }: { kind: "jd" | "one" }) {
                   const status = statusText(task);
                   return (
                     <tr key={task._id}>
-                      <td className="min-w-[260px] font-medium text-[var(--ink)]"><Link className="hover:text-[var(--primary)]" href={`${base}/${task._id}`}>{task.title}</Link></td>
+                      <td className="min-w-[260px] font-medium text-[var(--ink)]">{task._optimistic ? <span>{task.title}</span> : <Link className="hover:text-[var(--primary)]" href={`${base}/${task._id}`}>{task.title}</Link>}</td>
                       <td><Badge tone={statusTone(status)}>{status}</Badge></td>
                       <td className="min-w-[180px]">{task.assignees.map((assignee: any) => assignee.user.name || assignee.user.email).join(", ")}</td>
                       <td className="text-[var(--ink-muted)]">{kind === "jd" ? task.recurrence.replaceAll("_", " ") : formatDate(task.dueDate)}</td>
@@ -164,6 +165,7 @@ export function TaskDetail({ kind, id }: { kind: "jd" | "one"; id: string }) {
   const [body, setBody] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [optimisticDone, setOptimisticDone] = useState(false);
   const [optimisticComments, setOptimisticComments] = useState<any[]>([]);
 
@@ -201,8 +203,9 @@ export function TaskDetail({ kind, id }: { kind: "jd" | "one"; id: string }) {
         eyebrow={active?.company.name ?? (kind === "jd" ? "JD task" : "One-time task")}
         title={task.title}
         description={task.description || "No description."}
-        actions={<Button variant="primary" onClick={async () => { setOptimisticDone(true); try { await complete({ companyId: activeCompanyId as Id<"companies">, taskId: id as any }); } catch (err) { setOptimisticDone(false); throw err; } }}>Mark as done</Button>}
+        actions={<Button variant="primary" onClick={async () => { setActionError(null); setOptimisticDone(true); try { await complete({ companyId: activeCompanyId as Id<"companies">, taskId: id as any }); } catch (err) { setOptimisticDone(false); setActionError(err instanceof Error ? err.message : "Could not mark task as done."); } }}>Mark as done</Button>}
       />
+      {actionError && <p className="alert-error mb-4 rounded-md p-2 text-sm">{actionError}</p>}
       <div className="mb-6 flex gap-2"><Badge tone={statusTone(status)}>{status}</Badge><Badge>{task.priority}</Badge></div>
 
       <section className="border-t border-[var(--hairline)] pt-6">
@@ -214,7 +217,7 @@ export function TaskDetail({ kind, id }: { kind: "jd" | "one"; id: string }) {
         {commentsQuery.status === "CanLoadMore" && <Button className="mt-3" size="sm" onClick={() => commentsQuery.loadMore(25)}>Load more comments</Button>}
         <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
           <Textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder="Add a comment..." />
-          <Button onClick={async () => { const text = body.trim(); if (text) { const tempId = crypto.randomUUID(); setOptimisticComments((current) => [{ _id: tempId, body: text }, ...current]); setBody(""); try { await comment({ companyId: activeCompanyId as Id<"companies">, taskType, taskId: id, body: text }); } catch (err) { setBody(text); throw err; } finally { setOptimisticComments((current) => current.filter((commentRow) => commentRow._id !== tempId)); } } }}>Comment</Button>
+          <Button onClick={async () => { const text = body.trim(); if (text) { const tempId = crypto.randomUUID(); setActionError(null); setOptimisticComments((current) => [{ _id: tempId, body: text }, ...current]); setBody(""); try { await comment({ companyId: activeCompanyId as Id<"companies">, taskType, taskId: id, body: text }); } catch (err) { setBody(text); setActionError(err instanceof Error ? err.message : "Could not add comment."); } finally { setOptimisticComments((current) => current.filter((commentRow) => commentRow._id !== tempId)); } } }}>Comment</Button>
         </div>
         <h2 className="mt-8 text-sm font-semibold">Attachments</h2>
         <div className="mt-3 space-y-2">

@@ -327,7 +327,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
   }
 
   return (
-    <div className="flex h-dvh overflow-hidden bg-[var(--chrome)] p-1.5 text-[var(--ink)]">
+    <div className={cn("flex h-dvh overflow-hidden bg-[var(--chrome)] py-2 pl-1.5 text-[var(--ink)]", aiOpen ? "pr-1.5" : "pr-2.5")}>
       <aside className="hidden w-[246px] shrink-0 flex-col bg-[var(--chrome-translucent)] px-2 pb-2 pt-1 backdrop-blur-sm md:flex">
         <AccountCompanyMenu searchItems={visibleNav} />
         <nav className="mt-4 space-y-0.5">
@@ -357,10 +357,37 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="h-0 shrink-0 bg-[var(--chrome-translucent)] backdrop-blur-sm" />
+        <header className="shrink-0 bg-[var(--chrome-translucent)] px-2 pb-2 pt-1 backdrop-blur-sm md:hidden">
+          <AccountCompanyMenu searchItems={visibleNav} />
+          <nav className="mt-2 flex gap-1 overflow-x-auto pb-1">
+            {visibleNav.map((item) => {
+              const Icon = item.icon;
+              const activeRow = path === item.href || path.startsWith(`${item.href}/`);
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={cn(
+                    "flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)]",
+                    activeRow && "bg-[var(--surface-pressed)] text-[var(--ink)]",
+                  )}
+                >
+                  <Icon className="h-4 w-4 text-[var(--ink-muted)]" />
+                  <span>{item.label}</span>
+                </Link>
+              );
+            })}
+            {isPlatformAdmin && (
+              <Button asChild variant="ghost" size="sm" className="h-8 shrink-0 px-2">
+                <Link href="/admin">Platform admin</Link>
+              </Button>
+            )}
+          </nav>
+        </header>
+        <header className="hidden h-0 shrink-0 bg-[var(--chrome-translucent)] backdrop-blur-sm md:block" />
 
         <div className="flex min-h-0 flex-1 gap-1 overflow-hidden">
-          <section className="relative min-w-0 flex-1 overflow-hidden rounded-md border border-[var(--page-outline)] bg-[var(--canvas)]">
+          <section className="relative min-w-0 flex-1 overflow-hidden rounded-xl border border-[var(--page-outline)] bg-[var(--canvas)]">
             <Button onClick={() => setAiOpen((open) => !open)} variant={aiOpen ? "secondary" : "ghost"} size="sm" className="absolute left-3 top-2 z-20 h-7 px-2" aria-label="Toggle AI panel" aria-pressed={aiOpen}>
               <Sparkles className="h-3.5 w-3.5" />
               AI

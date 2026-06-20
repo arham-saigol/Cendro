@@ -19,17 +19,20 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
   useEffect(() => {
     let cancelled = false;
     const storageKey = `cendro:ai-session:${companyId}`;
-    const stored = localStorage.getItem(storageKey) as Id<"aiChatSessions"> | null;
-    if (stored) {
-      setSessionId(stored);
-      return () => {
-        cancelled = true;
-      };
+    let stored: Id<"aiChatSessions"> | null = null;
+    try {
+      stored = localStorage.getItem(storageKey) as Id<"aiChatSessions"> | null;
+    } catch {
+      stored = null;
     }
-    getOrCreate({ companyId }).then((id) => {
+    getOrCreate({ companyId, sessionId: stored ?? undefined }).then((id) => {
       if (!cancelled) {
         setSessionId(id);
-        localStorage.setItem(storageKey, id);
+        try {
+          localStorage.setItem(storageKey, id);
+        } catch {
+          // Ignore unavailable localStorage.
+        }
       }
     });
     return () => {

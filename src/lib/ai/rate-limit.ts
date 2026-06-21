@@ -1,20 +1,8 @@
-type RateLimitBucket = { count: number; resetAt: number };
+import type { ConvexHttpClient } from "convex/browser";
+import { api } from "../../../convex/_generated/api";
 
-declare global {
-  var __cendroAiRateLimits: Map<string, RateLimitBucket> | undefined;
-}
+export type AiRateLimitKind = "ai-chat" | "ai-title";
 
-const buckets = globalThis.__cendroAiRateLimits ?? new Map<string, RateLimitBucket>();
-globalThis.__cendroAiRateLimits = buckets;
-
-export function consumeAiRateLimit(key: string, options: { limit: number; windowMs: number }) {
-  const now = Date.now();
-  const bucket = buckets.get(key);
-  if (!bucket || bucket.resetAt <= now) {
-    buckets.set(key, { count: 1, resetAt: now + options.windowMs });
-    return { ok: true as const };
-  }
-  if (bucket.count >= options.limit) return { ok: false as const, retryAfter: Math.ceil((bucket.resetAt - now) / 1000) };
-  bucket.count += 1;
-  return { ok: true as const };
+export function consumeAiRateLimit(client: ConvexHttpClient, kind: AiRateLimitKind) {
+  return client.mutation(api.aiChat.consumeRateLimit, { kind });
 }

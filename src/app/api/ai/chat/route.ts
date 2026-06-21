@@ -8,7 +8,7 @@ import type { Id, TableNames } from "../../../../../convex/_generated/dataModel"
 import { buildCendroAiTools, createCendroAiContext } from "@/lib/ai/registry";
 import { consumeAiRateLimit } from "@/lib/ai/rate-limit";
 import { safeAiChatServerEnv } from "@/lib/env";
-import { textOf, toUiMessage } from "@/lib/message-utils";
+import { serializeAssistantMessage, textOf, toModelMessage } from "@/lib/message-utils";
 
 const idSchema = <Table extends TableNames>() => z.custom<Id<Table>>((value) => typeof value === "string");
 const requestSchema = z.object({ messages: z.array(z.any()).max(100), companyId: idSchema<"companies">(), sessionId: idSchema<"aiChatSessions">() });
@@ -43,14 +43,14 @@ export async function POST(req: Request) {
     if (!parsed.success) return Response.json({ error: "Invalid request body" }, { status: 400 });
 
     const { messages, companyId, sessionId } = parsed.data;
-    const { getToken, userId } = await auth();
+    const { getToken } = await auth();
     const token = await getToken({ template: "convex" });
     if (!token) return Response.json({ error: "Missing Convex auth token" }, { status: 401 });
-    const rateLimit = consumeAiRateLimit(`ai-chat:${userId ?? token}`, { limit: 20, windowMs: 60_000 });
-    if (!rateLimit.ok) return Response.json({ error: "Too many AI chat requests" }, { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } });
 
     const client = new ConvexHttpClient(env.data.NEXT_PUBLIC_CONVEX_URL);
     client.setAuth(token);
+    const rateLimit = await consumeAiRateLimit(client, "ai-chat");
+    if (!rateLimit.ok) return Response.json({ error: "Too many AI chat requests" }, { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } });
 
     let agentContext;
     try {
@@ -74,11 +74,12 @@ export async function POST(req: Request) {
       }
     }
 
-    const modelMessages = persisted.map(toUiMessage);
+    const modelMessages = persisted.map(toModelMessage);
     const result = streamText({
       model: createFireworks({ apiKey: env.data.FIREWORKS_API_KEY })(env.data.AI_MODEL as any),
       system: systemPrompt,
       messages: await convertToModelMessages(modelMessages as any),
+      providerOptions: { fireworks: { reasoningEffort: "medium" } },
       stopWhen: stepCountIs(8),
       tools: buildCendroAiTools(agentContext) as any,
       maxRetries: 1,
@@ -86,11 +87,11 @@ export async function POST(req: Request) {
 
     return result.toUIMessageStreamResponse({
       originalMessages: modelMessages as any,
-      sendReasoning: false,
+      sendReasoning: true,
       onError: () => "Cendro AI could not complete that request.",
       onFinish: async ({ responseMessage }) => {
-        const content = textOf(responseMessage);
-        if (content.trim()) await client.mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "assistant", content });
+        const content = serializeAssistantMessage(responseMessage);
+        if (textOf(responseMessage).trim()) await client.mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "assistant", content });
       },
     });
   } catch {

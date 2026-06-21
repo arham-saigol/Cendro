@@ -66,4 +66,31 @@ describe("AI agent Convex boundaries", () => {
     await expect(t.withIdentity(identity("employee")).mutation(api.tasks.aiCreateOneTime, { companyId, title: "Nope", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [employeeMembershipId], priority: "medium" })).rejects.toThrow("access");
     await expect(t.withIdentity(identity("employee")).mutation(api.sops.aiCreate, { companyId, title: "Nope", content: "Body" })).rejects.toThrow("access");
   });
+
+  test("AI session list excludes drafts until they have messages", async () => {
+    const { t, companyId } = await seed();
+    const sessionId = await t.withIdentity(identity("admin")).mutation(api.aiChat.createSession, { companyId });
+
+    await expect(t.withIdentity(identity("admin")).query(api.aiChat.listSessions, { companyId })).resolves.toEqual([]);
+
+    await t.withIdentity(identity("admin")).mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "user", content: "Hello" });
+
+    const sessions = await t.withIdentity(identity("admin")).query(api.aiChat.listSessions, { companyId });
+    expect(sessions.map((session) => session._id)).toEqual([sessionId]);
+  });
+
+  test("deleting an AI session removes its messages", async () => {
+    const { t, companyId } = await seed();
+    const sessionId = await t.withIdentity(identity("admin")).mutation(api.aiChat.createSession, { companyId });
+    await t.withIdentity(identity("admin")).mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "user", content: "Hello" });
+    await t.withIdentity(identity("admin")).mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "assistant", content: "Hi" });
+
+    await expect(t.withIdentity(identity("admin")).query(api.aiChat.listMessages, { companyId, sessionId })).resolves.toHaveLength(2);
+
+    await t.withIdentity(identity("admin")).mutation(api.aiChat.deleteSession, { companyId, sessionId });
+
+    const sessions = await t.withIdentity(identity("admin")).query(api.aiChat.listSessions, { companyId });
+    expect(sessions.some((session) => session._id === sessionId)).toBe(false);
+    await expect(t.withIdentity(identity("admin")).query(api.aiChat.listMessages, { companyId, sessionId })).rejects.toThrow("Chat session not found");
+  });
 });

@@ -7,6 +7,11 @@ function safeTitle(value: string) {
   return value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
 }
 
+const aiRateLimitConfigs = {
+  "ai-chat": { limit: 20, windowMs: 60_000 },
+  "ai-title": { limit: 10, windowMs: 60_000 },
+} as const;
+
 async function assertSession(ctx: any, companyId: any, sessionId: any) {
   const { membership, user } = await requireMembership(ctx, companyId);
   const session = await ctx.db.get(sessionId);
@@ -14,13 +19,40 @@ async function assertSession(ctx: any, companyId: any, sessionId: any) {
   return { session, membership, user };
 }
 
+export const consumeRateLimit = mutation({
+  args: { kind: v.union(v.literal("ai-chat"), v.literal("ai-title")) },
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new ConvexError("Authentication required.");
+
+    const now = Date.now();
+    const expired = await ctx.db.query("aiRateLimits").withIndex("by_resetAt", (q) => q.lt("resetAt", now)).take(20);
+    for (const bucket of expired) await ctx.db.delete(bucket._id);
+
+    const config = aiRateLimitConfigs[args.kind];
+    const key = `${args.kind}:${identity.tokenIdentifier}`;
+    const bucket = await ctx.db.query("aiRateLimits").withIndex("by_key", (q) => q.eq("key", key)).unique();
+    if (!bucket) {
+      await ctx.db.insert("aiRateLimits", { key, count: 1, resetAt: now + config.windowMs, updatedAt: now });
+      return { ok: true as const };
+    }
+    if (bucket.resetAt <= now) {
+      await ctx.db.patch(bucket._id, { count: 1, resetAt: now + config.windowMs, updatedAt: now });
+      return { ok: true as const };
+    }
+    if (bucket.count >= config.limit) return { ok: false as const, retryAfter: Math.ceil((bucket.resetAt - now) / 1000) };
+    await ctx.db.patch(bucket._id, { count: bucket.count + 1, updatedAt: now });
+    return { ok: true as const };
+  },
+});
+
 export const listSessions = query({
   args: { companyId: v.id("companies") },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     const rows = await ctx.db.query("aiChatSessions").withIndex("by_membership", (q) => q.eq("membershipId", membership._id)).take(50);
     return rows
-      .filter((row) => row.companyId === args.companyId)
+      .filter((row) => row.companyId === args.companyId && row.hasMessages)
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((row) => ({ _id: row._id, title: row.title, createdAt: row.createdAt, updatedAt: row.updatedAt }));
   },
@@ -31,7 +63,7 @@ export const createSession = mutation({
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     const now = Date.now();
-    return await ctx.db.insert("aiChatSessions", { companyId: args.companyId, membershipId: membership._id, createdAt: now, updatedAt: now });
+    return await ctx.db.insert("aiChatSessions", { companyId: args.companyId, membershipId: membership._id, hasMessages: false, createdAt: now, updatedAt: now });
   },
 });
 
@@ -52,7 +84,7 @@ export const getOrCreateSession = mutation({
       if (existing && existing.companyId === args.companyId && existing.membershipId === membership._id) return existing._id;
     }
     const now = Date.now();
-    return await ctx.db.insert("aiChatSessions", { companyId: args.companyId, membershipId: membership._id, createdAt: now, updatedAt: now });
+    return await ctx.db.insert("aiChatSessions", { companyId: args.companyId, membershipId: membership._id, hasMessages: false, createdAt: now, updatedAt: now });
   },
 });
 
@@ -84,7 +116,7 @@ export const appendMessage = mutation({
     }
     const now = Date.now();
     const id = await ctx.db.insert("aiChatMessages", { sessionId: args.sessionId, role: args.role, content, clientMessageId: args.clientMessageId, createdAt: now });
-    await ctx.db.patch(session._id, { updatedAt: now });
+    await ctx.db.patch(session._id, { hasMessages: true, updatedAt: now });
     return id;
   },
 });
@@ -97,6 +129,17 @@ export const setSessionTitle = mutation({
     if (!title) throw new ConvexError("Title is required.");
     await ctx.db.patch(args.sessionId, { title, updatedAt: Date.now() });
     return title;
+  },
+});
+
+export const deleteSession = mutation({
+  args: { companyId: v.id("companies"), sessionId: v.id("aiChatSessions") },
+  handler: async (ctx, args) => {
+    await assertSession(ctx, args.companyId, args.sessionId);
+    const messages = await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", args.sessionId)).take(100);
+    for (const message of messages) await ctx.db.delete(message._id);
+    await ctx.db.delete(args.sessionId);
+    return null;
   },
 });
 

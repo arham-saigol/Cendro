@@ -39,14 +39,14 @@ export async function POST(req: Request) {
   const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
   if (!convexUrl) return Response.json({ error: "Convex is not configured" }, { status: 500 });
 
-  const { getToken, userId } = await auth();
+  const { getToken } = await auth();
   const token = await getToken({ template: "convex" });
   if (!token) return new Response("Missing Convex auth token", { status: 401 });
-  const rateLimit = consumeAiRateLimit(`ai-title:${userId ?? token}`, { limit: 10, windowMs: 60_000 });
-  if (!rateLimit.ok) return Response.json({ error: "Too many title requests" }, { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } });
 
   const client = new ConvexHttpClient(convexUrl);
   client.setAuth(token);
+  const rateLimit = await consumeAiRateLimit(client, "ai-title");
+  if (!rateLimit.ok) return Response.json({ error: "Too many title requests" }, { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } });
   const { companyId, sessionId } = parsed.data;
   try {
     await client.query(api.aiChat.authorizeSessionForAgent, { companyId, sessionId });

@@ -79,8 +79,8 @@ export const appendMessage = mutation({
     const { session } = await assertSession(ctx, args.companyId, args.sessionId);
     const content = nonEmpty(args.content, "Message");
     if (args.clientMessageId) {
-      const existing = await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", args.sessionId)).take(100);
-      if (existing.some((message) => message.clientMessageId === args.clientMessageId)) return existing.find((message) => message.clientMessageId === args.clientMessageId)!._id;
+      const existing = await ctx.db.query("aiChatMessages").withIndex("by_session_and_clientMessageId", (q) => q.eq("sessionId", args.sessionId).eq("clientMessageId", args.clientMessageId)).unique();
+      if (existing) return existing._id;
     }
     const now = Date.now();
     const id = await ctx.db.insert("aiChatMessages", { sessionId: args.sessionId, role: args.role, content, clientMessageId: args.clientMessageId, createdAt: now });

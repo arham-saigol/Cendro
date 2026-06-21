@@ -79,7 +79,10 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
   }, [companyId, getOrCreate]);
 
   const transport = useMemo(() => new DefaultChatTransport({ api: "/api/ai/chat", body: { companyId, sessionId } }), [companyId, sessionId]);
-  const { messages, setMessages, sendMessage, status } = useChat({ transport });
+  const { messages, setMessages, sendMessage, status } = useChat({
+    id: sessionId ? `${companyId}:${sessionId}` : `pending:${companyId}`,
+    transport,
+  });
   const activities = useMemo(() => messageActivities(messages as any[]), [messages]);
   const isSending = status !== "ready" && !String(status).includes("error");
   const assistantStreamingText = isSending && messages.some((message: any) => message.role === "assistant" && textOf(message).trim());
@@ -125,10 +128,14 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
   async function submit(text: string) {
     if (!text.trim() || !sessionId || isSending) return;
     const shouldTitle = !currentSession?.title && (persisted?.filter((message) => message.role === "user").length ?? 0) === 0 && !titleRequested.current.has(sessionId);
-    setInput("");
     setActivityOpen(true);
     setManualActivityToggle(false);
-    void sendMessage({ text }).catch(() => null);
+    try {
+      await sendMessage({ text });
+      setInput((current) => current === text ? "" : current);
+    } catch {
+      return;
+    }
     if (shouldTitle) {
       titleRequested.current.add(sessionId);
       void fetch("/api/ai/title", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ companyId, sessionId, firstMessage: text }) }).catch(() => null);
@@ -139,7 +146,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     <aside className="fixed bottom-2 right-2 top-2 z-40 flex w-[min(420px,calc(100vw-16px))] flex-col overflow-hidden rounded-xl bg-[var(--chrome-translucent)] text-[var(--ink)] shadow-[var(--shadow-popover)] backdrop-blur-sm md:static md:z-auto md:w-[392px] md:shrink-0 md:rounded-lg md:shadow-none">
       <header className="relative flex h-11 shrink-0 items-center justify-between px-2.5">
         <div className="flex min-w-0 items-center gap-1.5">
-          <button onClick={() => setMenuOpen((open) => !open)} className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-1 text-sm font-medium hover:bg-[var(--surface-hover)]" aria-label="Switch AI session">
+          <button onClick={() => setMenuOpen((open) => !open)} className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-1 text-sm font-medium hover:bg-[var(--surface-hover)]" aria-label="Switch AI session" aria-expanded={menuOpen}>
             <span className="truncate">{sessionLabel(currentSession)}</span>
             <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]" />
           </button>

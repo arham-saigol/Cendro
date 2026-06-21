@@ -1,4 +1,4 @@
-import { gateway } from "@ai-sdk/gateway";
+import { createFireworks } from "@ai-sdk/fireworks";
 import { auth } from "@clerk/nextjs/server";
 import { convertToModelMessages, streamText, stepCountIs } from "ai";
 import { ConvexHttpClient } from "convex/browser";
@@ -6,7 +6,8 @@ import { z } from "zod";
 import { api } from "../../../../../convex/_generated/api";
 import type { Id, TableNames } from "../../../../../convex/_generated/dataModel";
 import { buildCendroAiTools, createCendroAiContext } from "@/lib/ai/registry";
-import { serverEnv } from "@/lib/env";
+import { consumeAiRateLimit } from "@/lib/ai/rate-limit";
+import { safeAiChatServerEnv } from "@/lib/env";
 import { textOf, toUiMessage } from "@/lib/message-utils";
 
 const idSchema = <Table extends TableNames>() => z.custom<Id<Table>>((value) => typeof value === "string");
@@ -33,58 +34,66 @@ Response style:
 - When possible, include next steps or a short recommendation.`;
 
 export async function POST(req: Request) {
-  const env = serverEnv();
-  const body = await req.json().catch(() => null);
-  const parsed = requestSchema.safeParse(body);
-  if (!parsed.success) return Response.json({ error: "Invalid request body" }, { status: 400 });
-
-  const { messages, companyId, sessionId } = parsed.data;
-  const { getToken } = await auth();
-  const token = await getToken({ template: "convex" });
-  if (!token) return new Response("Missing Convex auth token", { status: 401 });
-
-  const client = new ConvexHttpClient(env.NEXT_PUBLIC_CONVEX_URL);
-  client.setAuth(token);
-
-  let agentContext;
   try {
-    agentContext = await createCendroAiContext({ client, companyId, sessionId });
-  } catch {
-    return Response.json({ error: "Chat session not found" }, { status: 404 });
-  }
+    const env = safeAiChatServerEnv();
+    if (!env.success) return Response.json({ error: "AI chat is not configured" }, { status: 503 });
 
-  let persisted = await client.query(api.aiChat.listMessages, { companyId, sessionId });
-  const latestUser = [...messages].reverse().find((message) => message.role === "user");
-  if (latestUser) {
-    const content = textOf(latestUser);
-    const clientMessageId = typeof latestUser.id === "string" ? latestUser.id : undefined;
-    const latestPersisted = persisted.at(-1);
-    const alreadyPersisted = clientMessageId
-      ? persisted.some((message) => message.clientMessageId === clientMessageId)
-      : latestPersisted?.role === "user" && latestPersisted.content === content;
-    if (content.trim() && !alreadyPersisted) {
-      await client.mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "user", content, clientMessageId });
-      persisted = await client.query(api.aiChat.listMessages, { companyId, sessionId });
+    const body = await req.json().catch(() => null);
+    const parsed = requestSchema.safeParse(body);
+    if (!parsed.success) return Response.json({ error: "Invalid request body" }, { status: 400 });
+
+    const { messages, companyId, sessionId } = parsed.data;
+    const { getToken, userId } = await auth();
+    const token = await getToken({ template: "convex" });
+    if (!token) return Response.json({ error: "Missing Convex auth token" }, { status: 401 });
+    const rateLimit = consumeAiRateLimit(`ai-chat:${userId ?? token}`, { limit: 20, windowMs: 60_000 });
+    if (!rateLimit.ok) return Response.json({ error: "Too many AI chat requests" }, { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } });
+
+    const client = new ConvexHttpClient(env.data.NEXT_PUBLIC_CONVEX_URL);
+    client.setAuth(token);
+
+    let agentContext;
+    try {
+      agentContext = await createCendroAiContext({ client, companyId, sessionId });
+    } catch {
+      return Response.json({ error: "Chat session not found" }, { status: 404 });
     }
+
+    let persisted = await client.query(api.aiChat.listMessages, { companyId, sessionId });
+    const latestUser = [...messages].reverse().find((message) => message.role === "user");
+    if (latestUser) {
+      const content = textOf(latestUser);
+      const clientMessageId = typeof latestUser.id === "string" ? latestUser.id : undefined;
+      const latestPersisted = persisted.at(-1);
+      const alreadyPersisted = clientMessageId
+        ? persisted.some((message) => message.clientMessageId === clientMessageId)
+        : latestPersisted?.role === "user" && latestPersisted.content === content;
+      if (content.trim() && !alreadyPersisted) {
+        await client.mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "user", content, clientMessageId });
+        persisted = await client.query(api.aiChat.listMessages, { companyId, sessionId });
+      }
+    }
+
+    const modelMessages = persisted.map(toUiMessage);
+    const result = streamText({
+      model: createFireworks({ apiKey: env.data.FIREWORKS_API_KEY })(env.data.AI_MODEL as any),
+      system: systemPrompt,
+      messages: await convertToModelMessages(modelMessages as any),
+      stopWhen: stepCountIs(8),
+      tools: buildCendroAiTools(agentContext) as any,
+      maxRetries: 1,
+    });
+
+    return result.toUIMessageStreamResponse({
+      originalMessages: modelMessages as any,
+      sendReasoning: false,
+      onError: () => "Cendro AI could not complete that request.",
+      onFinish: async ({ responseMessage }) => {
+        const content = textOf(responseMessage);
+        if (content.trim()) await client.mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "assistant", content });
+      },
+    });
+  } catch {
+    return Response.json({ error: "Cendro AI could not complete that request." }, { status: 500 });
   }
-
-  const modelMessages = persisted.map(toUiMessage);
-  const result = streamText({
-    model: gateway(env.AI_MODEL as any),
-    system: systemPrompt,
-    messages: await convertToModelMessages(modelMessages as any),
-    stopWhen: stepCountIs(8),
-    tools: buildCendroAiTools(agentContext) as any,
-    maxRetries: 1,
-  });
-
-  return result.toUIMessageStreamResponse({
-    originalMessages: modelMessages as any,
-    sendReasoning: false,
-    onError: () => "Cendro AI could not complete that request.",
-    onFinish: async ({ responseMessage }) => {
-      const content = textOf(responseMessage);
-      if (content.trim()) await client.mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "assistant", content });
-    },
-  });
 }

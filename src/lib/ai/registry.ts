@@ -184,7 +184,6 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
     permission: "tasks:one_time:create",
     risk: "write",
     execute: async (input, ctx) => {
-      ensurePermission(ctx, "tasks:one_time:create");
       const assigneeMembershipIds = input.assigneeRefs.map((ref: string) => resolveRef(ctx, ref, "member").id as Id<"companyMemberships">);
       const row = await ctx.client.mutation(api.tasks.aiCreateOneTime, { companyId: ctx.companyId, title: input.title, description: input.description, dueDate: input.dueDateMs, assigneeMembershipIds, priority: input.priority });
       return { ok: true, task: taskOut(ctx, row) };
@@ -198,7 +197,6 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
     permission: "tasks:jd:create",
     risk: "write",
     execute: async (input, ctx) => {
-      ensurePermission(ctx, "tasks:jd:create");
       const assigneeMembershipIds = input.assigneeRefs.map((ref: string) => resolveRef(ctx, ref, "member").id as Id<"companyMemberships">);
       const row = await ctx.client.mutation(api.tasks.aiCreateJd, { companyId: ctx.companyId, title: input.title, description: input.description, recurrence: input.recurrence, startDate: input.startDateMs, assigneeMembershipIds, priority: input.priority });
       return { ok: true, task: taskOut(ctx, row) };
@@ -226,7 +224,6 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
     permission: "tasks:comment",
     risk: "write",
     execute: async (input, ctx) => {
-      ensurePermission(ctx, "tasks:comment");
       const ref = resolveRef(ctx, input.taskRef, "task");
       const [kind, id] = ref.id.split(":") as ["jd" | "one_time", string];
       await ctx.client.mutation(api.tasks.aiAddComment, { companyId: ctx.companyId, kind, taskId: id, body: input.body });
@@ -262,7 +259,6 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
     permission: "sops:create",
     risk: "write",
     execute: async (input, ctx) => {
-      ensurePermission(ctx, "sops:create");
       const row = await ctx.client.mutation(api.sops.aiCreate, { companyId: ctx.companyId, title: input.title, content: input.content });
       return { ok: true, sop: sopOut(ctx, row, true) };
     },

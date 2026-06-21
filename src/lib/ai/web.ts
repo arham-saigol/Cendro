@@ -69,15 +69,26 @@ function parsePublicHttpUrl(value: string) {
   return { url, hostname };
 }
 
+function ipUrlHost(address: string) {
+  return isIP(address) === 6 ? `[${address}]` : address;
+}
+
+function pinnedUrl(url: URL, address: string) {
+  const next = new URL(url.href);
+  next.hostname = ipUrlHost(address);
+  return next.href;
+}
+
 export async function isPublicHttpUrl(value: string) {
   const parsed = parsePublicHttpUrl(value);
-  if (!parsed) return false;
-  if (isIP(parsed.hostname)) return true;
+  if (!parsed) return { ok: false as const };
+  if (isIP(parsed.hostname)) return { ok: true as const, url: parsed.url, fetchUrl: parsed.url.href };
   try {
     const records = await lookup(parsed.hostname, { all: true, verbatim: true });
-    return records.length > 0 && records.every((record) => isPublicIp(record.address));
+    if (records.length === 0 || !records.every((record) => isPublicIp(record.address))) return { ok: false as const };
+    return { ok: true as const, url: parsed.url, fetchUrl: pinnedUrl(parsed.url, records[0].address), headers: { Host: parsed.url.host } };
   } catch {
-    return false;
+    return { ok: false as const };
   }
 }
 
@@ -101,7 +112,7 @@ export async function firecrawlSearch(input: { query: string; limit?: number }) 
     if (!response.ok) return { ok: false as const, message: "Web search is unavailable right now." };
     const json = await response.json() as { data?: Array<{ title?: string; url?: string; description?: string }> };
     const checked = await Promise.all((json.data ?? []).map(async (item) => {
-      if (!item.url || !(await isPublicHttpUrl(item.url))) return null;
+      if (!item.url || !(await isPublicHttpUrl(item.url)).ok) return null;
       return { title: (item.title ?? item.url).slice(0, 160), url: item.url, description: (item.description ?? "").slice(0, 300) };
     }));
     const results = checked.filter((item): item is NonNullable<typeof item> => item !== null).slice(0, limit);
@@ -114,12 +125,13 @@ export async function firecrawlSearch(input: { query: string; limit?: number }) 
 export async function firecrawlFetch(input: { url: string }) {
   const apiKey = process.env.FIRECRAWL_API_KEY;
   if (!apiKey) return missingKey();
-  if (!(await isPublicHttpUrl(input.url))) return { ok: false as const, message: "That URL cannot be fetched." };
+  const checked = await isPublicHttpUrl(input.url);
+  if (!checked.ok) return { ok: false as const, message: "That URL cannot be fetched." };
   try {
     const response = await fetch(SCRAPE_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ url: input.url, formats: ["markdown"], onlyMainContent: true, timeout: 12000 }),
+      body: JSON.stringify({ url: checked.fetchUrl, headers: checked.headers, formats: ["markdown"], onlyMainContent: true, timeout: 12000 }),
       signal: AbortSignal.timeout(15_000),
     });
     if (!response.ok) return { ok: false as const, message: "That page could not be fetched right now." };
@@ -131,7 +143,7 @@ export async function firecrawlFetch(input: { url: string }) {
       ok: true as const,
       page: {
         title: (data?.title ?? data?.metadata?.title ?? input.url).slice(0, 160),
-        url: data?.url ?? input.url,
+        url: input.url,
         markdown: markdown.slice(0, MAX_FETCH_CHARS),
         truncated: markdown.length > MAX_FETCH_CHARS,
       },

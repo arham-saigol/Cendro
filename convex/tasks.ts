@@ -182,19 +182,22 @@ export const aiListVisible = query({
     const limit = Math.min(Math.max(Math.floor(args.limit), 1), 30);
     const out: any[] = [];
     const matches = (status: string) => args.status === "all" || (args.status === "overdue" ? status === "Overdue" : args.status === "done" ? status === "Done" : status !== "Done");
-    for (const task of await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100)) {
+    const [jdTasks, oneTimeTasks] = await Promise.all([
+      ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100),
+      ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100),
+    ]);
+    const candidates = [];
+    for (let i = 0; i < Math.max(jdTasks.length, oneTimeTasks.length); i += 1) {
+      if (jdTasks[i]) candidates.push({ kind: "jd" as const, task: jdTasks[i] });
+      if (oneTimeTasks[i]) candidates.push({ kind: "one_time" as const, task: oneTimeTasks[i] });
+    }
+    for (const candidate of candidates) {
       if (out.length >= limit) break;
-      if (!(await visible(ctx, args.companyId, membership, task.assigneeMembershipIds))) continue;
-      const row = await aiJdRow(ctx, task);
+      if (!(await visible(ctx, args.companyId, membership, candidate.task.assigneeMembershipIds))) continue;
+      const row = candidate.kind === "jd" ? await aiJdRow(ctx, candidate.task) : await aiOneTimeRow(ctx, candidate.task);
       if (matches(row.status)) out.push(row);
     }
-    for (const task of await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100)) {
-      if (out.length >= limit) break;
-      if (!(await visible(ctx, args.companyId, membership, task.assigneeMembershipIds))) continue;
-      const row = await aiOneTimeRow(ctx, task);
-      if (matches(row.status)) out.push(row);
-    }
-    return out.slice(0, limit);
+    return out;
   },
 });
 

@@ -5,6 +5,7 @@ import { ConvexHttpClient } from "convex/browser";
 import { z } from "zod";
 import { api } from "../../../../../convex/_generated/api";
 import type { Id, TableNames } from "../../../../../convex/_generated/dataModel";
+import { consumeAiRateLimit } from "@/lib/ai/rate-limit";
 import { textOf } from "@/lib/message-utils";
 
 const idSchema = <Table extends TableNames>() => z.custom<Id<Table>>((value) => typeof value === "string");
@@ -23,23 +24,34 @@ function fallbackTitle(message: string) {
   return "New Session";
 }
 
+function authorizeErrorResponse(error: unknown) {
+  const anyError = error as { code?: string; data?: { code?: string; message?: string }; message?: string };
+  const code = `${anyError.code ?? ""} ${anyError.data?.code ?? ""}`;
+  const message = `${anyError.data?.message ?? ""} ${anyError.message ?? String(error)}`;
+  if (/auth|sign in|access|permission|forbidden/i.test(`${code} ${message}`)) return Response.json({ error: "Forbidden" }, { status: 403 });
+  if (/not found/i.test(message)) return Response.json({ error: "Chat session not found" }, { status: 404 });
+  return Response.json({ error: "Could not authorize chat session" }, { status: 500 });
+}
+
 export async function POST(req: Request) {
   const parsed = requestSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return Response.json({ error: "Invalid request body" }, { status: 400 });
   const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
   if (!convexUrl) return Response.json({ error: "Convex is not configured" }, { status: 500 });
 
-  const { getToken } = await auth();
+  const { getToken, userId } = await auth();
   const token = await getToken({ template: "convex" });
   if (!token) return new Response("Missing Convex auth token", { status: 401 });
+  const rateLimit = consumeAiRateLimit(`ai-title:${userId ?? token}`, { limit: 10, windowMs: 60_000 });
+  if (!rateLimit.ok) return Response.json({ error: "Too many title requests" }, { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } });
 
   const client = new ConvexHttpClient(convexUrl);
   client.setAuth(token);
   const { companyId, sessionId } = parsed.data;
   try {
     await client.query(api.aiChat.authorizeSessionForAgent, { companyId, sessionId });
-  } catch {
-    return Response.json({ error: "Chat session not found" }, { status: 404 });
+  } catch (error) {
+    return authorizeErrorResponse(error);
   }
 
   const messages = await client.query(api.aiChat.listMessages, { companyId, sessionId });
@@ -50,7 +62,7 @@ export async function POST(req: Request) {
   if (process.env.AI_GATEWAY_API_KEY && first.trim()) {
     try {
       const result = await generateText({
-        model: gateway("deepseek/deepseek-v4-flash" as any),
+        model: gateway("deepseek/deepseek-v4-flash"),
         system: "Generate a concise 2-5 word chat title. Return only the title. No punctuation unless necessary.",
         prompt: first.slice(0, 1200),
         maxOutputTokens: 20,
@@ -62,6 +74,6 @@ export async function POST(req: Request) {
     }
   }
 
-  const saved = await client.mutation(api.aiChat.setSessionTitle, { companyId, sessionId, title: title || fallback || "New Session" });
+  const saved = await client.mutation(api.aiChat.setSessionTitle, { companyId, sessionId, title: title || "New Session" });
   return Response.json({ title: saved });
 }

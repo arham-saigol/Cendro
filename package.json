@@ -15,6 +15,7 @@
   "dependencies": {
     "@ai-sdk/fireworks": "^2.0.57",
     "@ai-sdk/gateway": "^3.0.133",
+    "@ai-sdk/openai-compatible": "^2.0.51",
     "@ai-sdk/react": "^3.0.210",
     "@clerk/nextjs": "^7.0.1",
     "@radix-ui/react-dialog": "^1.1.17",

@@ -2,6 +2,7 @@ const STORED_ASSISTANT_MESSAGE_KIND = "cendro-ai-message";
 const STORED_ASSISTANT_MESSAGE_VERSION = 1;
 const MAX_STORED_THINKING_CHARS = 20_000;
 const MAX_STORED_PARTS = 80;
+export const EMPTY_ASSISTANT_FALLBACK_TEXT = "I checked the requested workspace data, but couldn't generate a final response. Please try again.";
 
 type StoredAssistantMessage = {
   kind: typeof STORED_ASSISTANT_MESSAGE_KIND;
@@ -93,14 +94,27 @@ export function textFromStoredContent(content: string) {
   return parseStoredAssistantMessage(content)?.text ?? content;
 }
 
+export function hasAssistantMessageContent(message: any) {
+  if (textOf(message).trim()) return true;
+  return (Array.isArray(message?.parts) ? message.parts : []).some((part: any) => {
+    if (part?.type === "step-start") return true;
+    if (part?.type === "reasoning") return !!compactText(part.text, MAX_STORED_THINKING_CHARS);
+    return !!toolNameOfPart(part);
+  });
+}
+
 export function serializeAssistantMessage(message: any) {
-  const text = textOf(message).trim();
+  let text = textOf(message).trim();
   const parts: any[] = (Array.isArray(message?.parts) ? message.parts : [])
     .map(safeStoredPart)
     .filter((part: any | null): part is any => part !== null)
     .slice(0, MAX_STORED_PARTS);
 
   if (!parts.some((part) => part.type === "text") && text) parts.push({ type: "text", text, state: "done" });
+  if (!text && parts.length) {
+    text = EMPTY_ASSISTANT_FALLBACK_TEXT;
+    parts.push({ type: "text", text, state: "done" });
+  }
 
   return JSON.stringify({
     kind: STORED_ASSISTANT_MESSAGE_KIND,

@@ -8,12 +8,16 @@ const serverSchema = z.object({
   NEXT_PUBLIC_CONVEX_URL: z.string().url(),
   AI_GATEWAY_API_KEY: z.string().min(1),
   FIREWORKS_API_KEY: z.string().min(1),
+  STEPFUN_API_KEY: z.string().min(1),
+  DEEPSEEK_API_KEY: z.string().min(1),
   AI_MODEL: aiModelSchema,
   FIRECRAWL_API_KEY: z.string().optional(),
 });
 const aiChatServerSchema = z.object({
   NEXT_PUBLIC_CONVEX_URL: z.string().url(),
   FIREWORKS_API_KEY: z.string().min(1),
+  STEPFUN_API_KEY: z.string().min(1),
+  DEEPSEEK_API_KEY: z.string().min(1),
   AI_MODEL: aiModelSchema,
 });
 const clientSchema = z.object({ NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: z.string().min(1), NEXT_PUBLIC_CONVEX_URL: z.string().url() });

@@ -12,6 +12,9 @@ const aiRateLimitConfigs = {
   "ai-title": { limit: 10, windowMs: 60_000 },
 } as const;
 
+const modelTier = v.union(v.literal("flash"), v.literal("pro"));
+const proProvider = v.union(v.literal("deepseek"), v.literal("kimi"));
+
 async function assertSession(ctx: any, companyId: any, sessionId: any) {
   const { membership, user } = await requireMembership(ctx, companyId);
   const session = await ctx.db.get(sessionId);
@@ -54,7 +57,7 @@ export const listSessions = query({
     return rows
       .filter((row) => row.companyId === args.companyId && row.hasMessages)
       .sort((a, b) => b.updatedAt - a.updatedAt)
-      .map((row) => ({ _id: row._id, title: row.title, createdAt: row.createdAt, updatedAt: row.updatedAt }));
+      .map((row) => ({ _id: row._id, title: row.title, modelTier: row.modelTier, proProvider: row.proProvider, createdAt: row.createdAt, updatedAt: row.updatedAt }));
   },
 });
 
@@ -71,7 +74,7 @@ export const getSession = query({
   args: { companyId: v.id("companies"), sessionId: v.id("aiChatSessions") },
   handler: async (ctx, args) => {
     const { session } = await assertSession(ctx, args.companyId, args.sessionId);
-    return { _id: session._id, title: session.title, createdAt: session.createdAt, updatedAt: session.updatedAt };
+    return { _id: session._id, title: session.title, modelTier: session.modelTier, proProvider: session.proProvider, createdAt: session.createdAt, updatedAt: session.updatedAt };
   },
 });
 
@@ -85,6 +88,19 @@ export const getOrCreateSession = mutation({
     }
     const now = Date.now();
     return await ctx.db.insert("aiChatSessions", { companyId: args.companyId, membershipId: membership._id, hasMessages: false, createdAt: now, updatedAt: now });
+  },
+});
+
+export const setSessionModel = mutation({
+  args: { companyId: v.id("companies"), sessionId: v.id("aiChatSessions"), modelTier, proProvider: v.optional(proProvider) },
+  handler: async (ctx, args) => {
+    const { session } = await assertSession(ctx, args.companyId, args.sessionId);
+    if (session.modelTier) return { modelTier: session.modelTier, proProvider: session.proProvider };
+    if (args.modelTier === "flash" && args.proProvider) throw new ConvexError("Flash sessions cannot set a Pro provider.");
+    if (args.modelTier === "pro" && !args.proProvider) throw new ConvexError("Pro sessions require a provider.");
+    const update = args.modelTier === "pro" ? { modelTier: args.modelTier, proProvider: args.proProvider, updatedAt: Date.now() } : { modelTier: args.modelTier, updatedAt: Date.now() };
+    await ctx.db.patch(args.sessionId, update);
+    return { modelTier: args.modelTier, proProvider: args.modelTier === "pro" ? args.proProvider : undefined };
   },
 });
 

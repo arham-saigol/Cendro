@@ -3,16 +3,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
+import type { FileUIPart } from "ai";
 import { useMutation, useQuery } from "convex/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowUp, Check, ChevronDown, ChevronRight, ChevronsRight, CircleAlert, Copy, Loader2, MessageCirclePlus, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ChevronRight, ChevronsRight, CircleAlert, Copy, Loader2, MessageCirclePlus, MoreHorizontal, Pencil, Plus, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { safeActivityLabel, safeCompletedActivityLabel } from "@/lib/ai/activity";
-import { textOf, toUiMessage } from "@/lib/message-utils";
+import { EMPTY_ASSISTANT_FALLBACK_TEXT, textOf, toUiMessage } from "@/lib/message-utils";
 
 type ActivityState = "running" | "done" | "error";
 
@@ -50,9 +51,13 @@ type AssistantBlock =
 
 type ActivityPanelPreference = { open: boolean; manual: boolean };
 
-type ChatSession = { _id: Id<"aiChatSessions">; title?: string; createdAt: number; updatedAt: number };
+type ModelTier = "flash" | "pro";
+type ProProvider = "deepseek" | "kimi";
+type ChatSession = { _id: Id<"aiChatSessions">; title?: string; modelTier?: ModelTier; proProvider?: ProProvider; createdAt: number; updatedAt: number };
+type PendingAttachment = { id: string; file: File; previewUrl?: string; part?: FileUIPart; status: "loading" | "ready" | "error" };
 
 const AI_SESSION_RESTORE_TTL_MS = 5 * 60 * 60 * 1000;
+const DOCUMENT_ACCEPT = "image/*,application/pdf,text/plain,text/markdown,text/csv,.pdf,.txt,.md,.csv";
 
 function aiSessionStorageKey(companyId: Id<"companies">) {
   return `cendro:ai-session:${companyId}`;
@@ -79,6 +84,42 @@ function rememberStoredAiSession(companyId: Id<"companies">, sessionId: Id<"aiCh
   } catch {
     // Ignore unavailable sessionStorage.
   }
+}
+
+function mediaTypeOf(file: File) {
+  if (file.type) return file.type;
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".pdf")) return "application/pdf";
+  if (name.endsWith(".md")) return "text/markdown";
+  if (name.endsWith(".csv")) return "text/csv";
+  return "text/plain";
+}
+
+function fileToUIPart(file: File): Promise<FileUIPart> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({ type: "file", mediaType: mediaTypeOf(file), filename: file.name || "attachment", url: String(reader.result ?? "") });
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function attachmentId() {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+}
+
+function revokeAttachmentPreview(attachment: Pick<PendingAttachment, "previewUrl">) {
+  if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+}
+
+function filePartsOfMessage(message: any): FileUIPart[] {
+  return (Array.isArray(message?.parts) ? message.parts : []).filter((part: any): part is FileUIPart => part?.type === "file");
+}
+
+function compactFileSize(size: number) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function sessionLabel(session?: { title?: string } | null) {
@@ -477,8 +518,11 @@ function AssistantOrbMark() {
 
 export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; onClose: () => void }) {
   const [input, setInput] = useState("");
+  const [selectedModel, setSelectedModel] = useState<ModelTier>("pro");
+  const [selectedAttachments, setSelectedAttachments] = useState<PendingAttachment[]>([]);
   const [sessionId, setSessionId] = useState<Id<"aiChatSessions"> | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [sessionActionsOpen, setSessionActionsOpen] = useState<Id<"aiChatSessions"> | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState<Id<"aiChatSessions"> | null>(null);
   const [renameTitle, setRenameTitle] = useState("");
@@ -489,7 +533,10 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
   const titleRequested = useRef(new Set<string>());
   const localMessageSession = useRef<Id<"aiChatSessions"> | null>(null);
   const sessionMenuRef = useRef<HTMLDivElement | null>(null);
+  const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedAttachmentsRef = useRef<PendingAttachment[]>([]);
   const renameCancelled = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
@@ -501,7 +548,8 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
   const deleteChatSession = useMutation(api.aiChat.deleteSession);
   const sessions = useQuery(api.aiChat.listSessions, { companyId });
   const persisted = useQuery(api.aiChat.listMessages, sessionId ? { companyId, sessionId } : "skip");
-  const currentSession = sessions?.find((session) => session._id === sessionId) ?? null;
+  const currentSessionDetails = useQuery(api.aiChat.getSession, sessionId ? { companyId, sessionId } : "skip");
+  const currentSession = currentSessionDetails ?? sessions?.find((session) => session._id === sessionId) ?? null;
   const sessionGroups = useMemo(() => {
     const groups: Array<{ key: string; label?: string; sessions: ChatSession[] }> = [
       { key: "today", label: "Today", sessions: [] },
@@ -555,6 +603,27 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
   }, [menuOpen]);
 
   useEffect(() => {
+    if (!modelMenuOpen) return;
+
+    function closeOnOutsidePointer(event: PointerEvent) {
+      const target = event.target;
+      if (target instanceof Node && modelMenuRef.current?.contains(target)) return;
+      setModelMenuOpen(false);
+    }
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setModelMenuOpen(false);
+    }
+
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [modelMenuOpen]);
+
+  useEffect(() => {
     let cancelled = false;
     const stored = readStoredAiSession(companyId);
     getOrCreate({ companyId, sessionId: stored ?? undefined }).then((id) => {
@@ -573,6 +642,11 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     transport,
   });
   const isSending = status !== "ready" && !String(status).includes("error");
+  const hasStartedSession = messages.length > 0 || (persisted?.length ?? 0) > 0;
+  const attachmentsMuted = currentSession?.modelTier === "pro" && currentSession.proProvider === "deepseek";
+  const attachmentPending = selectedAttachments.some((attachment) => attachment.status === "loading");
+  const attachmentErrored = selectedAttachments.some((attachment) => attachment.status === "error");
+  const canSubmit = !!sessionId && !isSending && !attachmentPending && !attachmentErrored && (!!input.trim() || selectedAttachments.length > 0);
   const lastMessage = messages[messages.length - 1] as any | undefined;
 
   useEffect(() => {
@@ -581,6 +655,26 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     setMessages(persisted.map(toUiMessage) as any);
     hydratedSession.current = sessionId;
   }, [persisted, sessionId, setMessages, isSending, messages.length]);
+
+  useEffect(() => {
+    if (currentSession?.modelTier) setSelectedModel(currentSession.modelTier);
+  }, [currentSession?.modelTier]);
+
+  useEffect(() => {
+    selectedAttachmentsRef.current = selectedAttachments;
+  }, [selectedAttachments]);
+
+  useEffect(() => () => {
+    for (const attachment of selectedAttachmentsRef.current) revokeAttachmentPreview(attachment);
+  }, []);
+
+  useEffect(() => {
+    if (!attachmentsMuted) return;
+    setSelectedAttachments((current) => {
+      for (const attachment of current) revokeAttachmentPreview(attachment);
+      return [];
+    });
+  }, [attachmentsMuted]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -641,6 +735,10 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     setMenuOpen(false);
     setSessionActionsOpen(null);
     setRenamingSessionId(null);
+    setSelectedAttachments((current) => {
+      for (const attachment of current) revokeAttachmentPreview(attachment);
+      return [];
+    });
     setActivityPanelPreferences({});
     rememberStoredAiSession(companyId, id);
   }
@@ -699,24 +797,56 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     rememberSession(id);
   }
 
+  function addSelectedFiles(files: FileList | File[] | null) {
+    if (!files || attachmentsMuted) return;
+    const nextFiles = Array.from(files);
+    const attachments = nextFiles.map((file) => ({ id: attachmentId(), file, previewUrl: mediaTypeOf(file).startsWith("image/") ? URL.createObjectURL(file) : undefined, status: "loading" as const }));
+    setSelectedAttachments((current) => [...current, ...attachments]);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+
+    for (const attachment of attachments) {
+      void fileToUIPart(attachment.file).then((part) => {
+        setSelectedAttachments((current) => current.map((item) => item.id === attachment.id ? { ...item, part, status: "ready" } : item));
+      }).catch(() => {
+        setSelectedAttachments((current) => current.map((item) => item.id === attachment.id ? { ...item, status: "error" } : item));
+      });
+    }
+  }
+
+  function removeSelectedAttachment(id: string) {
+    setSelectedAttachments((current) => {
+      const target = current.find((attachment) => attachment.id === id);
+      if (target) revokeAttachmentPreview(target);
+      return current.filter((attachment) => attachment.id !== id);
+    });
+  }
+
   async function submit(text: string) {
-    if (!text.trim() || !sessionId || isSending) return;
+    if (!canSubmit || !sessionId) return;
     const submittedText = text;
+    const submittedAttachments = selectedAttachments;
     const shouldTitle = !currentSession?.title && (persisted?.filter((message) => message.role === "user").length ?? 0) === 0 && !titleRequested.current.has(sessionId);
     rememberStoredAiSession(companyId, sessionId);
     setActivityPanelPreferences({});
     localMessageSession.current = sessionId;
     shouldStickToBottom.current = true;
     setInput("");
+    setSelectedAttachments([]);
     try {
-      await sendMessage({ text: submittedText });
+      const fileParts = submittedAttachments.flatMap((attachment) => attachment.part ? [attachment.part] : []);
+      const message = submittedText.trim() ? { text: submittedText, ...(fileParts.length ? { files: fileParts } : {}) } : { files: fileParts };
+      const sendPromise = sendMessage(message as any, { body: { modelTier: selectedModel } });
+      if (shouldTitle) {
+        titleRequested.current.add(sessionId);
+        const fileTitle = submittedAttachments.map((attachment) => attachment.file.name || "attachment").join(", ");
+        void fetch("/api/ai/title", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ companyId, sessionId, firstMessage: submittedText.trim() || fileTitle }) }).catch(() => null);
+      }
+      await sendPromise;
+      for (const attachment of submittedAttachments) revokeAttachmentPreview(attachment);
     } catch {
       setInput((current) => current || submittedText);
+      setSelectedAttachments((current) => current.length ? current : submittedAttachments);
       return;
-    }
-    if (shouldTitle) {
-      titleRequested.current.add(sessionId);
-      void fetch("/api/ai/title", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ companyId, sessionId, firstMessage: submittedText }) }).catch(() => null);
     }
   }
 
@@ -801,7 +931,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
         </div>
       </header>
 
-      <div ref={chatScrollRef} onScroll={updateShouldStickToBottom} className="ai-panel-scrollbar min-h-0 flex-1 space-y-3 overflow-auto p-3 pb-10">
+      <div ref={chatScrollRef} onScroll={updateShouldStickToBottom} className="scrollbar-hidden min-h-0 flex-1 space-y-3 overflow-auto p-3 pb-10">
         {persisted === undefined && sessionId !== null && messages.length === 0 && (
           <div className="animate-pulse space-y-3 pt-4">
             <div className="h-14 rounded-lg bg-[var(--surface-muted)]" />
@@ -822,28 +952,53 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
             const isLiveAssistant = isSending && lastMessage?.id === message.id;
             const blocks = buildAssistantBlocks(message, isLiveAssistant);
             const assistantText = blocks.flatMap((block) => block.kind === "text" ? [block.text.trim()] : []).filter(Boolean).join("\n\n");
+            const visibleBlocks: AssistantBlock[] = !isLiveAssistant && blocks.length > 0 && !assistantText
+              ? [...blocks, { kind: "text", id: `${message.id}:text:fallback`, text: EMPTY_ASSISTANT_FALLBACK_TEXT }]
+              : blocks;
+            const visibleAssistantText = assistantText || (!isLiveAssistant && blocks.length > 0 ? EMPTY_ASSISTANT_FALLBACK_TEXT : "");
             if (isLiveAssistant && blocks.length === 0) return <PendingThinkingIndicator key={message.id} />;
             return (
               <div key={message.id} className="group relative -mb-8 mr-7 px-1 pb-8 pt-1">
-                {blocks.map((block) => block.kind === "activity" ? (
+                {visibleBlocks.map((block) => block.kind === "activity" ? (
                   <ActivityPanel key={block.segment.id} segment={block.segment} open={activityPanelOpen(block.segment)} onToggle={() => toggleActivityPanel(block.segment)} />
                 ) : (
                   <AssistantMarkdown key={block.id} text={block.text.trim()} />
                 ))}
-                {assistantText && <CopyMessageButton text={assistantText} align="left" />}
+                {visibleAssistantText && <CopyMessageButton text={visibleAssistantText} align="left" />}
               </div>
             );
           }
 
           const text = textOf(message).trim();
+          const files = filePartsOfMessage(message);
+          const imageFiles = files.filter((file) => file.mediaType.startsWith("image/"));
+          const documentFiles = files.filter((file) => !file.mediaType.startsWith("image/"));
           const sentAt = userMessageSentAt(message);
-          if (!text) return null;
+          if (!text && files.length === 0) return null;
           return (
             <div key={message.id} className="group relative -mb-8 w-full pb-8">
-              <div className="ml-auto w-fit max-w-[82%] rounded-2xl bg-[var(--chat-user-bg)] px-3 py-2 text-[var(--chat-user-fg)]">
-                <div className="whitespace-pre-wrap text-sm leading-6 text-[var(--chat-user-fg)]">{text}</div>
+              <div className="ml-auto w-fit max-w-[82%] space-y-2">
+                {imageFiles.length > 0 && (
+                  <div className="flex justify-end gap-1.5">
+                    {imageFiles.map((file, index) => (
+                      <div key={`${message.id}:image:${index}`} role="img" aria-label={file.filename || "Attached image"} className="h-24 w-24 rounded-xl border border-[var(--hairline)] bg-cover bg-center" style={{ backgroundImage: `url(${file.url})` }} />
+                    ))}
+                  </div>
+                )}
+                <div className="rounded-2xl bg-[var(--chat-user-bg)] px-3 py-2 text-[var(--chat-user-fg)]">
+                  {documentFiles.length > 0 && (
+                    <div className="mb-2 flex flex-wrap gap-1.5">
+                      {documentFiles.map((file, index) => (
+                        <span key={`${message.id}:file:${index}`} className="max-w-full truncate rounded-full bg-[var(--surface-muted)] px-2 py-1 text-xs text-[var(--ink-secondary)] ring-1 ring-[var(--hairline)]">
+                          {file.filename || "Attachment"}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {text && <div className="whitespace-pre-wrap text-sm leading-6 text-[var(--chat-user-fg)]">{text}</div>}
+                </div>
               </div>
-              <CopyMessageButton text={text} align="right" sentAt={sentAt} />
+              {text && <CopyMessageButton text={text} align="right" sentAt={sentAt} />}
             </div>
           );
         })}
@@ -853,6 +1008,36 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
 
       <form className="shrink-0 bg-[var(--chrome-translucent)] px-3 pb-1 pt-3" onSubmit={(event) => { event.preventDefault(); void submit(input); }}>
         <div className="cursor-text rounded-2xl bg-[var(--surface)] p-2 ring-1 ring-[var(--hairline)] focus-within:ring-[var(--focus-ring)]" onClick={() => textareaRef.current?.focus()}>
+          {selectedAttachments.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-2 px-1 pt-1">
+              {selectedAttachments.map((attachment) => {
+                const isImage = mediaTypeOf(attachment.file).startsWith("image/");
+                if (isImage) {
+                  return (
+                    <div key={attachment.id} className="relative h-16 w-16 overflow-visible rounded-xl border border-[var(--hairline)] bg-[var(--surface-muted)]">
+                      {attachment.previewUrl && <div role="img" aria-label={attachment.file.name || "Selected image"} className="h-full w-full rounded-xl bg-cover bg-center" style={{ backgroundImage: `url(${attachment.previewUrl})` }} />}
+                      {attachment.status === "loading" && <div className="absolute inset-0 grid place-items-center rounded-xl bg-black/35"><Loader2 className="h-4 w-4 animate-spin text-white" /></div>}
+                      {attachment.status === "error" && <div className="absolute inset-0 grid place-items-center rounded-xl bg-black/45 text-[10px] font-medium text-white">Failed</div>}
+                      <button type="button" onClick={(event) => { event.stopPropagation(); removeSelectedAttachment(attachment.id); }} className="absolute -right-1.5 -top-1.5 grid h-5 w-5 place-items-center rounded-full bg-[var(--surface)] text-[var(--ink-muted)] shadow ring-1 ring-[var(--hairline)] hover:text-[var(--ink)]" aria-label={`Remove ${attachment.file.name || "image"}`}>
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  );
+                }
+                return (
+                  <span key={attachment.id} className="relative flex max-w-full items-center gap-1 rounded-full bg-[var(--surface-muted)] px-2 py-1 text-xs text-[var(--ink-secondary)] ring-1 ring-[var(--hairline)]">
+                    {attachment.status === "loading" && <Loader2 className="h-3 w-3 animate-spin" />}
+                    <span className="truncate">{attachment.file.name || "Attachment"}</span>
+                    <span className="shrink-0 text-[var(--ink-muted)]">{compactFileSize(attachment.file.size)}</span>
+                    {attachment.status === "error" && <span className="shrink-0 text-[var(--danger)]">Failed</span>}
+                    <button type="button" onClick={(event) => { event.stopPropagation(); removeSelectedAttachment(attachment.id); }} className="shrink-0 rounded-full p-0.5 hover:bg-[var(--surface-hover)]" aria-label={`Remove ${attachment.file.name || "attachment"}`}>
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          )}
           <Textarea
             ref={textareaRef}
             id="ai-input"
@@ -864,11 +1049,60 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
                 void submit(input);
               }
             }}
+            onPaste={(event) => {
+              const images = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
+              if (!images.length) return;
+              event.preventDefault();
+              addSelectedFiles(images);
+            }}
             placeholder="Do anything with AI..."
-            className="max-h-40 min-h-10 resize-none border-0 bg-transparent p-1.5 focus:border-0"
+            className="scrollbar-hidden max-h-40 min-h-10 resize-none border-0 bg-transparent p-1.5 focus:border-0"
           />
-          <div className="mt-1 flex justify-end">
-            <Button type="submit" variant="primary" size="icon" disabled={!sessionId || !input.trim() || isSending} aria-label="Send message" className="rounded-full disabled:bg-[var(--surface-muted)] disabled:text-[var(--ink-muted)]"><ArrowUp className="h-4 w-4" /></Button>
+          <div className="mt-1 flex items-center justify-between gap-2">
+            <input ref={fileInputRef} type="file" multiple accept={DOCUMENT_ACCEPT} className="hidden" onChange={(event) => addSelectedFiles(event.target.files)} />
+            <button
+              type="button"
+              onClick={(event) => { event.stopPropagation(); if (!attachmentsMuted) fileInputRef.current?.click(); }}
+              aria-disabled={attachmentsMuted}
+              title={attachmentsMuted ? "Create a new session to add images." : "Add photos or documents"}
+              className={`grid h-7 w-7 shrink-0 place-items-center rounded-md text-[var(--ink-muted)] outline-none transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] ${attachmentsMuted ? "cursor-not-allowed opacity-45" : ""}`}
+            >
+              <Plus className="h-4 w-4" />
+            </button>
+            <div className="ml-auto flex items-center gap-1.5">
+              <div ref={modelMenuRef} className="relative" onClick={(event) => event.stopPropagation()}>
+                <button
+                  type="button"
+                  onClick={() => { if (!hasStartedSession && !isSending) setModelMenuOpen((open) => !open); }}
+                  disabled={hasStartedSession || isSending}
+                  title={hasStartedSession ? "Create a new session to change models." : "Choose AI model"}
+                  aria-haspopup="listbox"
+                  aria-expanded={modelMenuOpen}
+                  className="h-7 rounded-full px-2.5 text-sm font-medium text-[var(--ink-secondary)] outline-none transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:opacity-60"
+                  aria-label="Select AI model"
+                >
+                  {selectedModel === "flash" ? "Flash" : "Pro"}
+                </button>
+                {modelMenuOpen && (
+                  <div className="absolute bottom-9 right-0 z-20 w-48 rounded-xl border border-[var(--hairline)] bg-[var(--surface)] p-1 shadow-[var(--shadow-popover)]" role="listbox" aria-label="AI model">
+                    {(["flash", "pro"] as const).map((model) => (
+                      <button
+                        key={model}
+                        type="button"
+                        role="option"
+                        aria-selected={selectedModel === model}
+                        onClick={() => { setSelectedModel(model); setModelMenuOpen(false); }}
+                        className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--ink-secondary)] outline-none hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] focus-visible:bg-[var(--surface-hover)]"
+                      >
+                        <span className="flex-1">{model === "flash" ? "Flash" : "Pro"}</span>
+                        {selectedModel === model && <Check className="h-4 w-4 text-[var(--ink)]" />}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <Button type="submit" variant="primary" size="icon" disabled={!canSubmit} aria-label="Send message" className="rounded-full disabled:bg-[var(--surface-muted)] disabled:text-[var(--ink-muted)]"><ArrowUp className="h-4 w-4" /></Button>
+            </div>
           </div>
         </div>
       </form>

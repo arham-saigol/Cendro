@@ -55,7 +55,7 @@ export const listSessions = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const rows = await ctx.db.query("aiChatSessions").withIndex("by_membership", (q) => q.eq("membershipId", membership._id)).take(50);
     return rows
-      .filter((row) => row.companyId === args.companyId && row.hasMessages)
+      .filter((row) => row.companyId === args.companyId && row.hasMessages !== false)
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((row) => ({ _id: row._id, title: row.title, modelTier: row.modelTier, proProvider: row.proProvider, createdAt: row.createdAt, updatedAt: row.updatedAt }));
   },
@@ -152,8 +152,11 @@ export const deleteSession = mutation({
   args: { companyId: v.id("companies"), sessionId: v.id("aiChatSessions") },
   handler: async (ctx, args) => {
     await assertSession(ctx, args.companyId, args.sessionId);
-    const messages = await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", args.sessionId)).take(100);
-    for (const message of messages) await ctx.db.delete(message._id);
+    while (true) {
+      const messages = await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", args.sessionId)).take(100);
+      if (messages.length === 0) break;
+      for (const message of messages) await ctx.db.delete(message._id);
+    }
     await ctx.db.delete(args.sessionId);
     return null;
   },

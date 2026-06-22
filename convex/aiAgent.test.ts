@@ -79,16 +79,32 @@ describe("AI agent Convex boundaries", () => {
     expect(sessions.map((session) => session._id)).toEqual([sessionId]);
   });
 
-  test("deleting an AI session removes its messages", async () => {
+  test("AI session list includes legacy sessions without hasMessages", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const sessionId = await t.run(async (ctx) => {
+      const now = Date.now();
+      const sessionId = await ctx.db.insert("aiChatSessions", { companyId, membershipId: adminMembershipId, createdAt: now, updatedAt: now });
+      await ctx.db.insert("aiChatMessages", { sessionId, role: "user", content: "Legacy message", createdAt: now });
+      return sessionId;
+    });
+
+    const sessions = await t.withIdentity(identity("admin")).query(api.aiChat.listSessions, { companyId });
+    expect(sessions.map((session) => session._id)).toContain(sessionId);
+  });
+
+  test("deleting an AI session removes all of its messages", async () => {
     const { t, companyId } = await seed();
     const sessionId = await t.withIdentity(identity("admin")).mutation(api.aiChat.createSession, { companyId });
-    await t.withIdentity(identity("admin")).mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "user", content: "Hello" });
-    await t.withIdentity(identity("admin")).mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "assistant", content: "Hi" });
-
-    await expect(t.withIdentity(identity("admin")).query(api.aiChat.listMessages, { companyId, sessionId })).resolves.toHaveLength(2);
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let i = 0; i < 101; i += 1) await ctx.db.insert("aiChatMessages", { sessionId, role: "user", content: `Message ${i}`, createdAt: now + i });
+      await ctx.db.patch(sessionId, { hasMessages: true, updatedAt: now });
+    });
 
     await t.withIdentity(identity("admin")).mutation(api.aiChat.deleteSession, { companyId, sessionId });
 
+    const remaining = await t.run(async (ctx) => await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).take(200));
+    expect(remaining).toHaveLength(0);
     const sessions = await t.withIdentity(identity("admin")).query(api.aiChat.listSessions, { companyId });
     expect(sessions.some((session) => session._id === sessionId)).toBe(false);
     await expect(t.withIdentity(identity("admin")).query(api.aiChat.listMessages, { companyId, sessionId })).rejects.toThrow("Chat session not found");

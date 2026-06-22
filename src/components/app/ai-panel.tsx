@@ -13,7 +13,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { safeActivityLabel, safeCompletedActivityLabel } from "@/lib/ai/activity";
-import { EMPTY_ASSISTANT_FALLBACK_TEXT, textOf, toUiMessage } from "@/lib/message-utils";
+import { textOf, toUiMessage } from "@/lib/message-utils";
 
 type ActivityState = "running" | "done" | "error";
 
@@ -299,6 +299,10 @@ function PendingThinkingIndicator() {
       </div>
     </div>
   );
+}
+
+function IncompleteAssistantNotice() {
+  return <div className="py-1 text-xs text-[var(--ink-muted)]">Cendro AI stopped before producing a final answer. Please try again.</div>;
 }
 
 function formatMessageTime(value: unknown) {
@@ -652,9 +656,11 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
   useEffect(() => {
     if (!persisted || !sessionId || isSending || hydratedSession.current === sessionId) return;
     if (localMessageSession.current === sessionId && messages.length > 0) return;
-    setMessages(persisted.map(toUiMessage) as any);
+    const hydratedMessages = persisted.map(toUiMessage) as any[];
+    const alreadyHydrated = messages.length === hydratedMessages.length && messages.every((message: any, index) => message.id === hydratedMessages[index]?.id);
     hydratedSession.current = sessionId;
-  }, [persisted, sessionId, setMessages, isSending, messages.length]);
+    if (!alreadyHydrated) setMessages(hydratedMessages as any);
+  }, [persisted, sessionId, setMessages, isSending, messages]);
 
   useEffect(() => {
     if (currentSession?.modelTier) setSelectedModel(currentSession.modelTier);
@@ -886,13 +892,13 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
                                     cancelRenamingSession();
                                   }
                                 }}
-                                className="h-7 w-full rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2 text-sm font-medium outline-none focus:border-[var(--focus-ring)]"
+                                className="h-7 w-full rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2 text-sm outline-none focus:border-[var(--focus-ring)]"
                                 aria-label="Rename session"
                               />
                             </div>
                           ) : (
                             <button type="button" onClick={() => rememberSession(session._id)} className="min-w-0 flex-1 px-2 py-2 pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]">
-                              <div className="truncate pr-1 font-medium">{sessionLabel(session)}</div>
+                              <div className="truncate pr-1">{sessionLabel(session)}</div>
                             </button>
                           )}
                           <button
@@ -952,18 +958,16 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
             const isLiveAssistant = isSending && lastMessage?.id === message.id;
             const blocks = buildAssistantBlocks(message, isLiveAssistant);
             const assistantText = blocks.flatMap((block) => block.kind === "text" ? [block.text.trim()] : []).filter(Boolean).join("\n\n");
-            const visibleBlocks: AssistantBlock[] = !isLiveAssistant && blocks.length > 0 && !assistantText
-              ? [...blocks, { kind: "text", id: `${message.id}:text:fallback`, text: EMPTY_ASSISTANT_FALLBACK_TEXT }]
-              : blocks;
-            const visibleAssistantText = assistantText || (!isLiveAssistant && blocks.length > 0 ? EMPTY_ASSISTANT_FALLBACK_TEXT : "");
+            const visibleAssistantText = assistantText;
             if (isLiveAssistant && blocks.length === 0) return <PendingThinkingIndicator key={message.id} />;
             return (
               <div key={message.id} className="group relative -mb-8 mr-7 px-1 pb-8 pt-1">
-                {visibleBlocks.map((block) => block.kind === "activity" ? (
+                {blocks.map((block) => block.kind === "activity" ? (
                   <ActivityPanel key={block.segment.id} segment={block.segment} open={activityPanelOpen(block.segment)} onToggle={() => toggleActivityPanel(block.segment)} />
                 ) : (
                   <AssistantMarkdown key={block.id} text={block.text.trim()} />
                 ))}
+                {!isLiveAssistant && blocks.length > 0 && !assistantText && <IncompleteAssistantNotice />}
                 {visibleAssistantText && <CopyMessageButton text={visibleAssistantText} align="left" />}
               </div>
             );

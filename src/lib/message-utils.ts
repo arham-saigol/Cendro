@@ -94,27 +94,38 @@ export function textFromStoredContent(content: string) {
   return parseStoredAssistantMessage(content)?.text ?? content;
 }
 
+function partText(part: any) {
+  if (part?.type === "text" || part?.type === "text-delta") return String(part.text ?? "");
+  return "";
+}
+
+export function finalTextOfAssistantMessage(message: any) {
+  if (!message) return "";
+  if (typeof message.content === "string") return textFromStoredContent(message.content);
+  const parts = Array.isArray(message.parts) ? message.parts : [];
+  const lastToolIndex = parts.reduce((last: number, part: any, index: number) => toolNameOfPart(part) ? index : last, -1);
+  if (lastToolIndex < 0) return textOf(message);
+  return parts.slice(lastToolIndex + 1).map(partText).join("");
+}
+
 export function hasAssistantMessageContent(message: any) {
-  if (textOf(message).trim()) return true;
-  return (Array.isArray(message?.parts) ? message.parts : []).some((part: any) => {
-    if (part?.type === "step-start") return true;
-    if (part?.type === "reasoning") return !!compactText(part.text, MAX_STORED_THINKING_CHARS);
-    return !!toolNameOfPart(part);
-  });
+  return !!finalTextOfAssistantMessage(message).trim();
 }
 
 export function serializeAssistantMessage(message: any) {
-  let text = textOf(message).trim();
-  const parts: any[] = (Array.isArray(message?.parts) ? message.parts : [])
-    .map(safeStoredPart)
+  const text = finalTextOfAssistantMessage(message).trim();
+  const sourceParts = Array.isArray(message?.parts) ? message.parts : [];
+  const lastToolIndex = sourceParts.reduce((last: number, part: any, index: number) => toolNameOfPart(part) ? index : last, -1);
+  const parts: any[] = sourceParts
+    .map((part: any, index: number) => {
+      const stored = safeStoredPart(part);
+      if (stored?.type === "text" && lastToolIndex >= 0 && index <= lastToolIndex) return null;
+      return stored;
+    })
     .filter((part: any | null): part is any => part !== null)
     .slice(0, MAX_STORED_PARTS);
 
   if (!parts.some((part) => part.type === "text") && text) parts.push({ type: "text", text, state: "done" });
-  if (!text && parts.length) {
-    text = EMPTY_ASSISTANT_FALLBACK_TEXT;
-    parts.push({ type: "text", text, state: "done" });
-  }
 
   return JSON.stringify({
     kind: STORED_ASSISTANT_MESSAGE_KIND,

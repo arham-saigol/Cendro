@@ -116,4 +116,45 @@ async function embed(apiKey: string, input: string) {
   return embedding?.length === 1024 ? embedding : null;
 }
 
+export const aiSearch = query({
+  args: { companyId: v.id("companies"), query: v.string() },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const needle = args.query.trim().toLowerCase();
+    if (!needle) return [];
+    const rows = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100);
+    const out = [];
+    for (const sop of rows) {
+      if (!(await visibleSop(ctx, args.companyId, membership, sop))) continue;
+      if (sop.title.toLowerCase().includes(needle) || sop.content.toLowerCase().includes(needle)) out.push({ id: sop._id, title: sop.title, excerpt: sop.content.slice(0, 700), scopeType: sop.scopeType });
+      if (out.length >= 8) break;
+    }
+    return out;
+  },
+});
+
+export const aiGet = query({
+  args: { companyId: v.id("companies"), sopId: v.id("sops") },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const sop = await ctx.db.get(args.sopId);
+    if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found.");
+    return { id: sop._id, title: sop.title, content: sop.content.slice(0, 8000), scopeType: sop.scopeType };
+  },
+});
+
+export const aiCreate = mutation({
+  args: { companyId: v.id("companies"), title: v.string(), content: v.string() },
+  handler: async (ctx, args) => {
+    const { membership } = await requireCapability(ctx, args.companyId, "sops:create");
+    await requireCapability(ctx, args.companyId, "sops:manage:company");
+    const title = nonEmpty(args.title, "Title");
+    const content = nonEmpty(args.content, "SOP body");
+    const now = Date.now();
+    const id = await ctx.db.insert("sops", { companyId: args.companyId, title, content, scopeType: "company", creatorMembershipId: membership._id, updatedByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: id });
+    return { id, title, content: content.slice(0, 8000), scopeType: "company" as const };
+  },
+});
+
 export const indexSop = internalAction({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { const sop: Doc<"sops"> | null = await ctx.runQuery(internal.sops.getForIndexing, args); if (!sop) return { skipped: true }; const apiKey = process.env.VOYAGE_API_KEY; if (!apiKey) return { skipped: true }; const input = sop.title + "\n\n" + sop.content; const embedding = await embed(apiKey, input); if (embedding) await ctx.runMutation(internal.sops.storeEmbedding, { companyId: args.companyId, sopId: args.sopId, chunk: input, embedding }); return { skipped: !embedding }; } });

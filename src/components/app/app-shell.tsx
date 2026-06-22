@@ -17,7 +17,6 @@ import {
   Repeat,
   Search,
   Settings,
-  Sparkles,
   Sun,
   X,
 } from "lucide-react";
@@ -268,6 +267,22 @@ function AccountCompanyMenu({ searchItems = nav }: { searchItems?: typeof nav })
   );
 }
 
+function AssistantOrb({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="fixed bottom-5 right-5 z-30 grid h-11 w-11 place-items-center rounded-full border border-[var(--assistant-orb-border)] bg-[var(--assistant-orb-bg)] text-zinc-950 shadow-[var(--assistant-orb-shadow)] transition hover:-translate-y-0.5 hover:bg-[var(--assistant-orb-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] active:translate-y-0 md:bottom-6 md:right-6"
+      aria-label="Open AI assistant"
+    >
+      <svg aria-hidden="true" role="graphics-symbol" viewBox="0 0 20 20" className="h-[31px] w-[31px]" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12.758 9.976a1.178 1.178 0 1 0 .377-2.326 1.178 1.178 0 0 0-.377 2.326M6.547 8.97a1.178 1.178 0 1 0 .377-2.327 1.178 1.178 0 0 0-.377 2.326" fill="#4F4E49" />
+        <path d="M10.573 5.554a3.917 3.917 0 0 1 6.743.035.625.625 0 1 1-1.08.63 2.667 2.667 0 0 0-4.591-.023l-5.398 9.015 4.192.68a.625.625 0 0 1-.2 1.233l-5.102-.827a.625.625 0 0 1-.436-.938zM4.36 3.517a3.92 3.92 0 0 1 5.572.356.625.625 0 1 1-.945.818 2.67 2.67 0 0 0-3.795-.243.625.625 0 1 1-.833-.931" fill="#4F4E49" />
+      </svg>
+    </button>
+  );
+}
+
 function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; isPlatformAdmin: boolean }) {
   const path = usePathname();
   const router = useRouter();
@@ -388,14 +403,11 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
 
         <div className="flex min-h-0 flex-1 gap-1 overflow-hidden">
           <section className="relative min-w-0 flex-1 overflow-hidden rounded-xl border border-[var(--page-outline)] bg-[var(--canvas)]">
-            <Button onClick={() => setAiOpen((open) => !open)} variant={aiOpen ? "secondary" : "ghost"} size="sm" className="absolute left-3 top-2 z-20 h-7 px-2" aria-label="Toggle AI panel" aria-pressed={aiOpen}>
-              <Sparkles className="h-3.5 w-3.5" />
-              AI
-            </Button>
             <div className="h-full overflow-auto">
               {children}
             </div>
           </section>
+          {!aiOpen && activeCompanyId && <AssistantOrb onClick={() => setAiOpen(true)} />}
           {aiOpen && activeCompanyId && <AiPanel companyId={activeCompanyId} onClose={() => setAiOpen(false)} />}
         </div>
       </div>

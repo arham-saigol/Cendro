@@ -9,6 +9,7 @@
  */
 
 import type * as aiChat from "../aiChat.js";
+import type * as aiWorkspace from "../aiWorkspace.js";
 import type * as analytics from "../analytics.js";
 import type * as companies from "../companies.js";
 import type * as companyManagement from "../companyManagement.js";
@@ -29,6 +30,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   aiChat: typeof aiChat;
+  aiWorkspace: typeof aiWorkspace;
   analytics: typeof analytics;
   companies: typeof companies;
   companyManagement: typeof companyManagement;

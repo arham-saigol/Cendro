@@ -8,9 +8,7 @@ async function allActiveMembershipIds(ctx: QueryCtx, companyId: Id<"companies">)
   return new Set(rows.filter((m) => m.active).map((m) => m._id));
 }
 
-export const summary = query({
-  args: { companyId: v.id("companies") },
-  handler: async (ctx, args) => {
+async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"> }) {
     const { membership } = await requireMembership(ctx, args.companyId);
     const caps = await membershipCapabilities(ctx, membership);
     if (!caps.has("analytics:view:company") && !caps.has("analytics:view:managed_scope") && !caps.has("analytics:view:self")) throw new ConvexError("You do not have access to analytics.");
@@ -28,5 +26,14 @@ export const summary = query({
       ? (await ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(8)).map((event) => ({ _id: event._id, action: event.action, targetType: event.targetType, createdAt: event.createdAt }))
       : [];
     return { role: membership.role, scopeSize: scoped.size, jdTaskCount: visibleJd.length, oneTimeTaskCount: visibleOne.length, overdueTasks: overdueOne, completionRate: visibleOne.length ? Math.round(completedOne / visibleOne.length * 100) : 100, sopCount, recent };
-  },
+}
+
+export const summary = query({
+  args: { companyId: v.id("companies") },
+  handler: analyticsSummary,
+});
+
+export const aiSummary = query({
+  args: { companyId: v.id("companies") },
+  handler: analyticsSummary,
 });

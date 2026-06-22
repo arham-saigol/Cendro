@@ -26,6 +26,7 @@ async function assertSession(ctx: QueryCtx | MutationCtx, companyId: Id<"compani
 }
 
 const DELETE_MESSAGE_BATCH_SIZE = 100;
+const MESSAGE_HISTORY_LIMIT = 100;
 
 async function deleteMessageBatch(ctx: MutationCtx, sessionId: Id<"aiChatSessions">) {
   const messages = await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).take(DELETE_MESSAGE_BATCH_SIZE);
@@ -67,7 +68,6 @@ export const listSessions = query({
     const rows = await ctx.db.query("aiChatSessions").withIndex("by_membership_and_updatedAt", (q) => q.eq("membershipId", membership._id)).order("desc").take(50);
     return rows
       .filter((row) => row.companyId === args.companyId && row.hasMessages !== false)
-      .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((row) => ({ _id: row._id, title: row.title, modelTier: row.modelTier, proProvider: row.proProvider, createdAt: row.createdAt, updatedAt: row.updatedAt }));
   },
 });
@@ -128,7 +128,9 @@ export const listMessages = query({
   args: { companyId: v.id("companies"), sessionId: v.id("aiChatSessions") },
   handler: async (ctx, args) => {
     await assertSession(ctx, args.companyId, args.sessionId);
-    return (await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", args.sessionId)).order("desc").take(100)).sort((a, b) => a.createdAt - b.createdAt);
+    const newestMessages = await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", args.sessionId)).order("desc").take(MESSAGE_HISTORY_LIMIT);
+    // Fetch the newest bounded window, then return it chronologically for display.
+    return newestMessages.sort((a, b) => a.createdAt - b.createdAt);
   },
 });
 
@@ -164,8 +166,11 @@ export const deleteSession = mutation({
   handler: async (ctx, args) => {
     await assertSession(ctx, args.companyId, args.sessionId);
     const shouldContinue = await deleteMessageBatch(ctx, args.sessionId);
+    if (shouldContinue) {
+      await ctx.scheduler.runAfter(0, internal.aiChat.deleteSessionMessages, { sessionId: args.sessionId });
+      return null;
+    }
     await ctx.db.delete(args.sessionId);
-    if (shouldContinue) await ctx.scheduler.runAfter(0, internal.aiChat.deleteSessionMessages, { sessionId: args.sessionId });
     return null;
   },
 });
@@ -174,7 +179,12 @@ export const deleteSessionMessages = internalMutation({
   args: { sessionId: v.id("aiChatSessions") },
   handler: async (ctx, args) => {
     const shouldContinue = await deleteMessageBatch(ctx, args.sessionId);
-    if (shouldContinue) await ctx.scheduler.runAfter(0, internal.aiChat.deleteSessionMessages, { sessionId: args.sessionId });
+    if (shouldContinue) {
+      await ctx.scheduler.runAfter(0, internal.aiChat.deleteSessionMessages, { sessionId: args.sessionId });
+      return null;
+    }
+    const session = await ctx.db.get(args.sessionId);
+    if (session) await ctx.db.delete(args.sessionId);
     return null;
   },
 });

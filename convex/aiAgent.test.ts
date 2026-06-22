@@ -6,6 +6,7 @@ import { api } from "./_generated/api";
 import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
+const MESSAGE_HISTORY_LIMIT = 100;
 
 function identity(key: string, email = `${key}@example.com`) {
   return { tokenIdentifier: `clerk|${key}`, subject: key, issuer: "https://clerk.test", email, name: key };
@@ -97,14 +98,14 @@ describe("AI agent Convex boundaries", () => {
     const sessionId = await t.withIdentity(identity("admin")).mutation(api.aiChat.createSession, { companyId });
     await t.run(async (ctx) => {
       const now = Date.now() - 10_000;
-      for (let i = 0; i < 100; i += 1) await ctx.db.insert("aiChatMessages", { sessionId, role: "user", content: `Old ${i}`, createdAt: now + i });
+      for (let i = 0; i < MESSAGE_HISTORY_LIMIT; i += 1) await ctx.db.insert("aiChatMessages", { sessionId, role: "user", content: `Old ${i}`, createdAt: now + i });
       await ctx.db.patch(sessionId, { hasMessages: true, updatedAt: now });
     });
 
     await t.withIdentity(identity("admin")).mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "user", content: "Latest prompt" });
 
     const messages = await t.withIdentity(identity("admin")).query(api.aiChat.listMessages, { companyId, sessionId });
-    expect(messages).toHaveLength(100);
+    expect(messages).toHaveLength(MESSAGE_HISTORY_LIMIT);
     expect(messages.map((message) => message.content)).toContain("Latest prompt");
     expect(messages.at(-1)?.content).toBe("Latest prompt");
   });

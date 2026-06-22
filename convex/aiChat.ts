@@ -1,5 +1,8 @@
 import { ConvexError, v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { internal } from "./_generated/api";
+import { internalMutation, mutation, query } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { membershipCapabilities, requireMembership } from "./permissions";
 import { nonEmpty } from "./validation";
 
@@ -15,11 +18,19 @@ const aiRateLimitConfigs = {
 const modelTier = v.union(v.literal("flash"), v.literal("pro"));
 const proProvider = v.union(v.literal("deepseek"), v.literal("kimi"));
 
-async function assertSession(ctx: any, companyId: any, sessionId: any) {
+async function assertSession(ctx: QueryCtx | MutationCtx, companyId: Id<"companies">, sessionId: Id<"aiChatSessions">) {
   const { membership, user } = await requireMembership(ctx, companyId);
   const session = await ctx.db.get(sessionId);
   if (!session || session.companyId !== companyId || session.membershipId !== membership._id) throw new ConvexError("Chat session not found.");
   return { session, membership, user };
+}
+
+const DELETE_MESSAGE_BATCH_SIZE = 100;
+
+async function deleteMessageBatch(ctx: MutationCtx, sessionId: Id<"aiChatSessions">) {
+  const messages = await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).take(DELETE_MESSAGE_BATCH_SIZE);
+  for (const message of messages) await ctx.db.delete(message._id);
+  return messages.length === DELETE_MESSAGE_BATCH_SIZE;
 }
 
 export const consumeRateLimit = mutation({
@@ -53,7 +64,7 @@ export const listSessions = query({
   args: { companyId: v.id("companies") },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
-    const rows = await ctx.db.query("aiChatSessions").withIndex("by_membership", (q) => q.eq("membershipId", membership._id)).take(50);
+    const rows = await ctx.db.query("aiChatSessions").withIndex("by_membership_and_updatedAt", (q) => q.eq("membershipId", membership._id)).order("desc").take(50);
     return rows
       .filter((row) => row.companyId === args.companyId && row.hasMessages !== false)
       .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -117,7 +128,7 @@ export const listMessages = query({
   args: { companyId: v.id("companies"), sessionId: v.id("aiChatSessions") },
   handler: async (ctx, args) => {
     await assertSession(ctx, args.companyId, args.sessionId);
-    return (await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", args.sessionId)).take(100)).sort((a, b) => a.createdAt - b.createdAt);
+    return (await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", args.sessionId)).order("desc").take(100)).sort((a, b) => a.createdAt - b.createdAt);
   },
 });
 
@@ -152,22 +163,19 @@ export const deleteSession = mutation({
   args: { companyId: v.id("companies"), sessionId: v.id("aiChatSessions") },
   handler: async (ctx, args) => {
     await assertSession(ctx, args.companyId, args.sessionId);
-    while (true) {
-      const messages = await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", args.sessionId)).take(100);
-      if (messages.length === 0) break;
-      for (const message of messages) await ctx.db.delete(message._id);
-    }
+    const shouldContinue = await deleteMessageBatch(ctx, args.sessionId);
     await ctx.db.delete(args.sessionId);
+    if (shouldContinue) await ctx.scheduler.runAfter(0, internal.aiChat.deleteSessionMessages, { sessionId: args.sessionId });
     return null;
   },
 });
 
-export const recordToolAudit = mutation({
-  args: { companyId: v.id("companies"), sessionId: v.id("aiChatSessions"), toolName: v.string(), ok: v.boolean(), risk: v.union(v.literal("read"), v.literal("write"), v.literal("external")) },
+export const deleteSessionMessages = internalMutation({
+  args: { sessionId: v.id("aiChatSessions") },
   handler: async (ctx, args) => {
-    const { user } = await assertSession(ctx, args.companyId, args.sessionId);
-    if (args.risk !== "write") return null;
-    await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "ai.tool", targetType: "aiChatSession", targetId: args.sessionId, metadata: { toolName: args.toolName, ok: args.ok, risk: args.risk }, createdAt: Date.now() });
+    const shouldContinue = await deleteMessageBatch(ctx, args.sessionId);
+    if (shouldContinue) await ctx.scheduler.runAfter(0, internal.aiChat.deleteSessionMessages, { sessionId: args.sessionId });
     return null;
   },
 });
+

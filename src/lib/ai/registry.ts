@@ -81,15 +81,6 @@ function safeError(error: unknown) {
   return "The requested action could not be completed.";
 }
 
-async function recordToolAudit(ctx: CendroAiToolContext, def: CendroAiToolDefinition, ok: boolean) {
-  if (def.risk !== "write") return;
-  try {
-    await ctx.client.mutation(api.aiChat.recordToolAudit, { companyId: ctx.companyId, sessionId: ctx.sessionId, toolName: def.name, ok, risk: def.risk });
-  } catch {
-    // Tool execution should not expose audit failures to the model or user.
-  }
-}
-
 function taskOut(ctx: CendroAiToolContext, row: any) {
   const kind = row.kind === "jd" ? "jd" : "one_time";
   return {
@@ -315,16 +306,11 @@ export function buildCendroAiTools(ctx: CendroAiToolContext) {
     description: `${def.description} Activity label: ${def.activityLabel}.`,
     inputSchema: def.inputSchema,
     execute: async (input) => {
-      let ok = false;
       try {
         ensurePermission(ctx, def.permission);
-        const result = await def.execute(input as never, ctx);
-        ok = result.ok;
-        return result;
+        return await def.execute(input as never, ctx);
       } catch (error) {
         return { ok: false, message: safeError(error) } satisfies CendroAiToolResult;
-      } finally {
-        await recordToolAudit(ctx, def, ok);
       }
     },
   })]));

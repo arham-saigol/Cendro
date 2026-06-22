@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 
@@ -92,6 +92,39 @@ describe("AI agent Convex boundaries", () => {
     expect(sessions.map((session) => session._id)).toContain(sessionId);
   });
 
+  test("AI message history returns the newest bounded window", async () => {
+    const { t, companyId } = await seed();
+    const sessionId = await t.withIdentity(identity("admin")).mutation(api.aiChat.createSession, { companyId });
+    await t.run(async (ctx) => {
+      const now = Date.now() - 10_000;
+      for (let i = 0; i < 100; i += 1) await ctx.db.insert("aiChatMessages", { sessionId, role: "user", content: `Old ${i}`, createdAt: now + i });
+      await ctx.db.patch(sessionId, { hasMessages: true, updatedAt: now });
+    });
+
+    await t.withIdentity(identity("admin")).mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "user", content: "Latest prompt" });
+
+    const messages = await t.withIdentity(identity("admin")).query(api.aiChat.listMessages, { companyId, sessionId });
+    expect(messages).toHaveLength(100);
+    expect(messages.map((message) => message.content)).toContain("Latest prompt");
+    expect(messages.at(-1)?.content).toBe("Latest prompt");
+  });
+
+  test("AI session list returns recently updated sessions beyond the first 50 created", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const ids = await t.run(async (ctx) => {
+      const now = Date.now();
+      const ids = [];
+      for (let i = 0; i < 60; i += 1) ids.push(await ctx.db.insert("aiChatSessions", { companyId, membershipId: adminMembershipId, hasMessages: true, createdAt: now + i, updatedAt: now + i }));
+      await ctx.db.patch(ids[0], { updatedAt: now + 10_000 });
+      return ids;
+    });
+
+    const sessions = await t.withIdentity(identity("admin")).query(api.aiChat.listSessions, { companyId });
+    expect(sessions).toHaveLength(50);
+    expect(sessions[0]?._id).toBe(ids[0]);
+    expect(sessions.map((session) => session._id)).toContain(ids[59]);
+  });
+
   test("deleting an AI session removes all of its messages", async () => {
     const { t, companyId } = await seed();
     const sessionId = await t.withIdentity(identity("admin")).mutation(api.aiChat.createSession, { companyId });
@@ -101,7 +134,13 @@ describe("AI agent Convex boundaries", () => {
       await ctx.db.patch(sessionId, { hasMessages: true, updatedAt: now });
     });
 
-    await t.withIdentity(identity("admin")).mutation(api.aiChat.deleteSession, { companyId, sessionId });
+    vi.useFakeTimers();
+    try {
+      await t.withIdentity(identity("admin")).mutation(api.aiChat.deleteSession, { companyId, sessionId });
+      await t.finishAllScheduledFunctions(vi.runAllTimers);
+    } finally {
+      vi.useRealTimers();
+    }
 
     const remaining = await t.run(async (ctx) => await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).take(200));
     expect(remaining).toHaveLength(0);

@@ -7,12 +7,13 @@ import type { FileUIPart } from "ai";
 import { useMutation, useQuery } from "convex/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowUp, Check, ChevronDown, ChevronRight, ChevronsRight, CircleAlert, Copy, Loader2, MessageCirclePlus, MoreHorizontal, Pencil, Plus, Trash2, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ChevronRight, ChevronsRight, CircleAlert, CircleCheck, Copy, Loader2, MessageCirclePlus, MoreHorizontal, Pencil, Plus, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { safeActivityLabel, safeCompletedActivityLabel } from "@/lib/ai/activity";
+import { mediaTypeOfAttachmentFile, validateAiAttachmentFile } from "@/lib/ai/attachments";
 import { textOf, toUiMessage } from "@/lib/message-utils";
 
 type ActivityState = "running" | "done" | "error";
@@ -87,12 +88,7 @@ function rememberStoredAiSession(companyId: Id<"companies">, sessionId: Id<"aiCh
 }
 
 function mediaTypeOf(file: File) {
-  if (file.type) return file.type;
-  const name = file.name.toLowerCase();
-  if (name.endsWith(".pdf")) return "application/pdf";
-  if (name.endsWith(".md")) return "text/markdown";
-  if (name.endsWith(".csv")) return "text/csv";
-  return "text/plain";
+  return mediaTypeOfAttachmentFile(file);
 }
 
 function fileToUIPart(file: File): Promise<FileUIPart> {
@@ -276,12 +272,43 @@ function buildAssistantBlocks(message: any, isLiveMessage: boolean): AssistantBl
   });
 }
 
-function ThinkingDot() {
+const STREAM_THINKING_DOTS = [
+  [6, 6, 0], [17, 6, 86], [28, 6, 171], [39, 6, 257], [50, 6, 343],
+  [6, 17, 429], [17, 17, 514], [28, 17, 600], [39, 17, 686], [50, 17, 771],
+  [6, 28, 857], [17, 28, 943], [28, 28, 1029], [39, 28, 1114], [50, 28, 1200],
+  [6, 39, 1286], [17, 39, 1371], [28, 39, 1457], [39, 39, 1543], [50, 39, 1629],
+  [6, 50, 1714], [17, 50, 1800], [28, 50, 1886], [39, 50, 1971], [50, 50, 2057],
+] as const;
+
+function ActivitySpinner() {
   return (
-    <span className="relative grid h-3.5 w-3.5 shrink-0 place-items-center" aria-hidden="true">
-      <span className="absolute h-2 w-2 animate-ping rounded-full bg-[var(--ink-faint)] opacity-30" />
-      <span className="h-1.5 w-1.5 rounded-full bg-[var(--ink-faint)]" />
-    </span>
+    <svg className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--ink-secondary)]" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 56" aria-hidden="true">
+      <style>{`.ai-activity-stream-light{fill:currentColor;opacity:0;animation:ai-activity-stream-k 2400ms cubic-bezier(0.25,1,0.5,1) infinite both;}@keyframes ai-activity-stream-k{0%{opacity:0;}4%{opacity:1;}26%{opacity:0.08;}100%{opacity:0;}}@media (prefers-reduced-motion:reduce){.ai-activity-stream-light{animation:none;opacity:0.45;}}`}</style>
+      {STREAM_THINKING_DOTS.map(([x, y]) => <circle key={`b-${x}-${y}`} cx={x} cy={y} r="2.4" fill="currentColor" opacity="0.16" />)}
+      {STREAM_THINKING_DOTS.map(([x, y, delay]) => (
+        <circle key={`l-${x}-${y}`} className="ai-activity-stream-light" cx={x} cy={y} r="3.1" style={{ animationDelay: `${delay}ms` }} />
+      ))}
+    </svg>
+  );
+}
+
+const SPIRAL_THINKING_DOTS = [
+  [6, 6, 2221], [17, 6, 2317], [28, 6, 869], [39, 6, 966], [50, 6, 1062],
+  [6, 17, 2124], [17, 17, 772], [28, 17, 97], [39, 17, 193], [50, 17, 1159],
+  [6, 28, 2028], [17, 28, 676], [28, 28, 0], [39, 28, 290], [50, 28, 1255],
+  [6, 39, 1931], [17, 39, 579], [28, 39, 483], [39, 39, 386], [50, 39, 1352],
+  [6, 50, 1834], [17, 50, 1738], [28, 50, 1641], [39, 50, 1545], [50, 50, 1448],
+] as const;
+
+function SpiralThinkingIcon() {
+  return (
+    <svg className="h-4 w-4 shrink-0 text-[var(--ink-secondary)]" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 56" aria-hidden="true">
+      <style>{`.ai-panel-spiral-light{fill:currentColor;opacity:0;animation:ai-panel-spiral-k 2800ms cubic-bezier(0.25,1,0.5,1) infinite both;}@keyframes ai-panel-spiral-k{0%{opacity:0;}4%{opacity:1;}26%{opacity:0.08;}100%{opacity:0;}}@media (prefers-reduced-motion:reduce){.ai-panel-spiral-light{animation:none;opacity:0.45;}}`}</style>
+      {SPIRAL_THINKING_DOTS.map(([x, y]) => <circle key={`b-${x}-${y}`} cx={x} cy={y} r="2.4" fill="currentColor" opacity="0.16" />)}
+      {SPIRAL_THINKING_DOTS.map(([x, y, delay]) => (
+        <circle key={`l-${x}-${y}`} className="ai-panel-spiral-light" cx={x} cy={y} r="3.1" style={{ animationDelay: `${delay}ms` }} />
+      ))}
+    </svg>
   );
 }
 
@@ -289,7 +316,7 @@ function PendingThinkingIndicator() {
   return (
     <div className="mr-7 px-1 py-1 text-xs text-[var(--ink-muted)]">
       <div className="flex items-center gap-2 rounded-md px-1 py-1.5">
-        <ThinkingDot />
+        <SpiralThinkingIcon />
         <span className="font-medium">Thinking</span>
         <span className="flex gap-0.5 text-[var(--ink-faint)]" aria-hidden="true">
           <span className="animate-pulse">.</span>
@@ -398,7 +425,7 @@ function ActivityPanel({ segment, open, onToggle }: { segment: ActivitySegment; 
               )}
               {actions.length > 0 && !segment.isLive && actions.every((item) => item.state !== "running") && (
                 <div className="flex items-center gap-2 text-[var(--ink-muted)]">
-                  <Check className="h-3.5 w-3.5" />
+                  <CircleCheck className="h-3.5 w-3.5" />
                   <span>Done</span>
                 </div>
               )}
@@ -430,7 +457,7 @@ function ActivityThoughtBlock({ thought, isLive, panelOpen }: { thought: Activit
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-2 text-[var(--ink-muted)]">
-        {isRunning ? <ThinkingDot /> : <Check className="h-3.5 w-3.5" />}
+        {isRunning ? <ActivitySpinner /> : <CircleCheck className="h-3.5 w-3.5" />}
         <span>{isRunning ? "Thinking" : "Thought"}</span>
       </div>
       <div className="ml-5 border-l border-[var(--hairline)] pl-3">
@@ -462,11 +489,11 @@ function ActivityRow({ item }: { item: ActivityItem }) {
   return (
     <div className={`flex items-start gap-2 ${isError ? "text-[var(--danger)]" : "text-[var(--ink-muted)]"}`}>
       {isRunning ? (
-        <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />
+        <ActivitySpinner />
       ) : isError ? (
         <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
       ) : (
-        <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <CircleCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
       )}
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
@@ -524,6 +551,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
   const [input, setInput] = useState("");
   const [selectedModel, setSelectedModel] = useState<ModelTier>("pro");
   const [selectedAttachments, setSelectedAttachments] = useState<PendingAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<Id<"aiChatSessions"> | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -676,6 +704,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
 
   useEffect(() => {
     if (!attachmentsMuted) return;
+    setAttachmentError(null);
     setSelectedAttachments((current) => {
       for (const attachment of current) revokeAttachmentPreview(attachment);
       return [];
@@ -805,15 +834,30 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
 
   function addSelectedFiles(files: FileList | File[] | null) {
     if (!files || attachmentsMuted) return;
-    const nextFiles = Array.from(files);
-    const attachments = nextFiles.map((file) => ({ id: attachmentId(), file, previewUrl: mediaTypeOf(file).startsWith("image/") ? URL.createObjectURL(file) : undefined, status: "loading" as const }));
-    setSelectedAttachments((current) => [...current, ...attachments]);
+    let totalBytes = selectedAttachmentsRef.current.reduce((sum, attachment) => sum + attachment.file.size, 0);
+    const accepted: File[] = [];
+    let rejectedError: string | null = null;
+    for (const file of Array.from(files)) {
+      const validation = validateAiAttachmentFile(file, selectedAttachmentsRef.current.length + accepted.length, totalBytes);
+      if (!validation.ok) {
+        rejectedError ??= validation.error;
+        continue;
+      }
+      totalBytes += file.size;
+      accepted.push(file);
+    }
+    setAttachmentError(rejectedError);
     if (fileInputRef.current) fileInputRef.current.value = "";
+    if (!accepted.length) return;
+
+    const attachments = accepted.map((file) => ({ id: attachmentId(), file, previewUrl: mediaTypeOf(file).startsWith("image/") ? URL.createObjectURL(file) : undefined, status: "loading" as const }));
+    setSelectedAttachments((current) => [...current, ...attachments]);
 
     for (const attachment of attachments) {
       void fileToUIPart(attachment.file).then((part) => {
         setSelectedAttachments((current) => current.map((item) => item.id === attachment.id ? { ...item, part, status: "ready" } : item));
       }).catch(() => {
+        setAttachmentError("Could not read one of the selected attachments.");
         setSelectedAttachments((current) => current.map((item) => item.id === attachment.id ? { ...item, status: "error" } : item));
       });
     }
@@ -823,6 +867,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     setSelectedAttachments((current) => {
       const target = current.find((attachment) => attachment.id === id);
       if (target) revokeAttachmentPreview(target);
+      setAttachmentError(null);
       return current.filter((attachment) => attachment.id !== id);
     });
   }
@@ -838,6 +883,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     shouldStickToBottom.current = true;
     setInput("");
     setSelectedAttachments([]);
+    setAttachmentError(null);
     try {
       const fileParts = submittedAttachments.flatMap((attachment) => attachment.part ? [attachment.part] : []);
       const message = submittedText.trim() ? { text: submittedText, ...(fileParts.length ? { files: fileParts } : {}) } : { files: fileParts };
@@ -1012,6 +1058,12 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
 
       <form className="shrink-0 bg-[var(--chrome-translucent)] px-3 pb-1 pt-3" onSubmit={(event) => { event.preventDefault(); void submit(input); }}>
         <div className="cursor-text rounded-2xl bg-[var(--surface)] p-2 ring-1 ring-[var(--hairline)] focus-within:ring-[var(--focus-ring)]" onClick={() => textareaRef.current?.focus()}>
+          {attachmentError && (
+            <div className="mb-2 flex items-start gap-1.5 rounded-lg bg-[var(--danger-surface)] px-2 py-1.5 text-xs text-[var(--danger)]">
+              <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{attachmentError}</span>
+            </div>
+          )}
           {selectedAttachments.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-2 px-1 pt-1">
               {selectedAttachments.map((attachment) => {

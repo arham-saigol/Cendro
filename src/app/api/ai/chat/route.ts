@@ -6,6 +6,7 @@ import { ConvexHttpClient } from "convex/browser";
 import { z } from "zod";
 import { api } from "../../../../../convex/_generated/api";
 import type { Id, TableNames } from "../../../../../convex/_generated/dataModel";
+import { AI_CHAT_MAX_REQUEST_BYTES, validateAiChatAttachments } from "@/lib/ai/attachments";
 import { buildCendroAiTools, createCendroAiContext } from "@/lib/ai/registry";
 import { consumeAiRateLimit } from "@/lib/ai/rate-limit";
 import { CENDRO_AI_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
@@ -65,9 +66,14 @@ export async function POST(req: Request) {
     const env = safeAiChatServerEnv();
     if (!env.success) return Response.json({ error: "AI chat is not configured" }, { status: 503 });
 
+    const contentLength = Number(req.headers.get("content-length") ?? 0);
+    if (Number.isFinite(contentLength) && contentLength > AI_CHAT_MAX_REQUEST_BYTES) return Response.json({ error: "Chat request is too large" }, { status: 413 });
+
     const body = await req.json().catch(() => null);
     const parsed = requestSchema.safeParse(body);
     if (!parsed.success) return Response.json({ error: "Invalid request body" }, { status: 400 });
+    const attachments = validateAiChatAttachments(parsed.data.messages);
+    if (!attachments.ok) return Response.json({ error: attachments.error }, { status: 413 });
 
     const { messages, companyId, sessionId } = parsed.data;
     const { getToken } = await auth();

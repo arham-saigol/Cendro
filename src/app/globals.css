@@ -453,6 +453,91 @@ button:disabled { cursor: not-allowed; }
 }
 .filter-chip:disabled { opacity: 0.55; cursor: not-allowed; }
 
+.task-view-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.task-view-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding-inline: 12px;
+  border-radius: 999px;
+  color: var(--ink-muted);
+  font-size: 14px;
+  font-weight: 600;
+  transition: background-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+}
+.task-view-button:hover:not(:disabled) { color: var(--ink); background: var(--surface-hover); }
+.task-view-button[data-active="true"] {
+  background: var(--surface-hover) !important;
+  color: var(--ink) !important;
+  box-shadow: none !important;
+}
+.task-view-button:disabled { cursor: default; opacity: 1; }
+
+.task-toolbar-icon {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  height: 30px;
+  width: 30px;
+  border-radius: 7px;
+  color: var(--ink-muted);
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.task-toolbar-icon:hover,
+.task-toolbar-icon[data-active="true"] { background: var(--surface-muted); color: var(--ink); }
+.task-toolbar-badge {
+  position: absolute;
+  right: -4px;
+  top: -5px;
+  display: grid;
+  min-width: 16px;
+  height: 16px;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--on-primary);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+.task-search-control {
+  position: relative;
+  height: 30px;
+  width: 30px;
+  overflow: hidden;
+  border-radius: 7px;
+  transition: width 0.18s ease;
+}
+.task-search-control[data-open="true"] { width: min(240px, 46vw); }
+.task-search-input {
+  height: 30px;
+  padding-left: 34px;
+  padding-right: 10px;
+  font-size: 13px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.task-search-control[data-open="true"] .task-search-input { opacity: 1; }
+.task-search-button {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: grid;
+  height: 30px;
+  width: 30px;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--ink-muted);
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.task-search-button:hover { background: var(--surface-muted); color: var(--ink); }
+.task-search-control[data-open="true"] .task-search-button { border-radius: 7px 0 0 7px; }
+
 .avatar-stack { display: inline-flex; align-items: center; }
 .avatar-stack > * + * { margin-left: -7px; }
 

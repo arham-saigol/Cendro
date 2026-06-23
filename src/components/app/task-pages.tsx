@@ -19,6 +19,7 @@ import {
   Pencil,
   Plus,
   Search,
+  SlidersHorizontal,
   Tag,
   Trash2,
   User,
@@ -27,7 +28,7 @@ import {
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
@@ -44,6 +45,8 @@ type Priority = "low" | "medium" | "high";
 type Frequency = "daily" | "every_other_day" | "monthly" | "semiannually" | "annually";
 type ManualStatus = "due" | "in_progress" | "completed";
 type StatusFilter = "all" | ManualStatus | "overdue";
+type TaskView = "all" | "my";
+type PriorityFilter = "all" | Priority;
 
 type TaskFormValues = {
   title: string;
@@ -137,6 +140,8 @@ function statusMatches(task: any, filter: StatusFilter) {
   if (filter === "overdue") return raw === "overdue" || statusText(task) === "Overdue";
   return raw === filter;
 }
+function taskHasAssignee(task: any, membershipId?: string) { return Boolean(membershipId && Array.isArray(task.assigneeMembershipIds) && task.assigneeMembershipIds.includes(membershipId)); }
+function assigneeDisplayName(assignee: any) { return assignee?.user?.name || assignee?.user?.email || "Unknown user"; }
 function relativeTime(ms?: number) {
   if (!ms) return "";
   const diff = Date.now() - ms;
@@ -189,6 +194,14 @@ function UsersIcon({ className }: { className?: string }) {
   return (
     <svg className={className} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true">
       <path d="M117.25,157.92a60,60,0,1,0-66.5,0A95.83,95.83,0,0,0,3.53,195.63a8,8,0,1,0,13.4,8.74,80,80,0,0,1,134.14,0,8,8,0,0,0,13.4-8.74A95.83,95.83,0,0,0,117.25,157.92ZM40,108a44,44,0,1,1,44,44A44.05,44.05,0,0,1,40,108Zm210.14,98.7a8,8,0,0,1-11.07-2.33A79.83,79.83,0,0,0,172,168a8,8,0,0,1,0-16,44,44,0,1,0-16.34-84.87,8,8,0,1,1-5.94-14.85,60,60,0,0,1,55.53,105.64,95.83,95.83,0,0,1,47.22,37.71A8,8,0,0,1,250.14,206.7Z" />
+    </svg>
+  );
+}
+
+function StarIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true">
+      <path d="M234.29,114.85l-45,38.83L203,211.75a16.4,16.4,0,0,1-24.5,17.82L128,198.49,77.47,229.57A16.4,16.4,0,0,1,53,211.75l13.76-58.07-45-38.83A16.46,16.46,0,0,1,31.08,86l59-4.76,22.76-55.08a16.36,16.36,0,0,1,30.27,0l22.75,55.08,59,4.76a16.46,16.46,0,0,1,9.37,28.86Z" />
     </svg>
   );
 }
@@ -300,26 +313,89 @@ function StatusBadge({ kind, task, size = "sm" }: { kind: Kind; task: any; size?
   );
 }
 
-function FilterChip<T extends string>({ icon, ariaLabel, value, options, onChange }: { icon?: React.ReactNode; ariaLabel: string; value: T; options: { value: T; label: string }[]; onChange: (value: T) => void }) {
-  const selected = options.find((option) => option.value === value);
-  const isDefault = options.length > 0 && options[0].value === value;
+function TaskFilterSubmenu<T extends string>({ label, value, options, onChange }: { label: string; value: T; options: { value: T; label: string; avatar?: React.ReactNode }[]; onChange: (value: T) => void }) {
   return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>
-        <button type="button" className="filter-chip" data-active={!isDefault}>
-          {icon}
-          <span className="truncate">{selected?.label ?? "Select"}</span>
-          <ChevronDown className="h-3.5 w-3.5 text-[var(--ink-faint)]" />
-        </button>
-      </DropdownMenu.Trigger>
+    <DropdownMenu.Sub>
+      <DropdownMenu.SubTrigger className="task-menu-item">
+        <span className="flex-1">{label}</span>
+        <ChevronRight className="h-3.5 w-3.5" />
+      </DropdownMenu.SubTrigger>
       <DropdownMenu.Portal>
-        <DropdownMenu.Content align="start" sideOffset={4} className="task-menu min-w-44" aria-label={ariaLabel}>
+        <DropdownMenu.SubContent sideOffset={7} alignOffset={-5} className="task-menu min-w-52">
           {options.map((option) => (
             <DropdownMenu.Item key={option.value} onSelect={() => onChange(option.value)} className="task-menu-item">
-              <span className="flex-1">{option.label}</span>
+              {option.avatar}
+              <span className="min-w-0 flex-1 truncate">{option.label}</span>
               {value === option.value && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
             </DropdownMenu.Item>
           ))}
+        </DropdownMenu.SubContent>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Sub>
+  );
+}
+
+function TaskFilterMenu({
+  kind,
+  statusFilter,
+  frequency,
+  priorityFilter,
+  assigneeFilter,
+  assignees,
+  showAssigneeFilter,
+  activeCount,
+  onStatusChange,
+  onFrequencyChange,
+  onPriorityChange,
+  onAssigneeChange,
+}: {
+  kind: Kind;
+  statusFilter: StatusFilter;
+  frequency: Frequency | "all";
+  priorityFilter: PriorityFilter;
+  assigneeFilter: string;
+  assignees: any[];
+  showAssigneeFilter: boolean;
+  activeCount: number;
+  onStatusChange: (value: StatusFilter) => void;
+  onFrequencyChange: (value: Frequency | "all") => void;
+  onPriorityChange: (value: PriorityFilter) => void;
+  onAssigneeChange: (value: string) => void;
+}) {
+  const statusOptions: { value: StatusFilter; label: string }[] = [
+    { value: "all", label: "All statuses" },
+    { value: "due", label: "Due" },
+    { value: "in_progress", label: "In progress" },
+    { value: "completed", label: "Completed" },
+    { value: "overdue", label: "Overdue" },
+  ];
+  const priorityOptions: { value: PriorityFilter; label: string }[] = [{ value: "all", label: "All priorities" }, ...priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))];
+  const frequencyOptions: { value: Frequency | "all"; label: string }[] = [{ value: "all", label: "All frequencies" }, ...frequencies];
+
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button type="button" className="task-toolbar-icon" data-active={activeCount > 0} aria-label="Filter tasks">
+          <SlidersHorizontal className="h-4 w-4" />
+          {activeCount > 0 && <span className="task-toolbar-badge">{activeCount}</span>}
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content align="end" sideOffset={6} className="task-menu min-w-48" aria-label="Task filters">
+          <TaskFilterSubmenu label="Status" value={statusFilter} options={statusOptions} onChange={onStatusChange} />
+          {kind === "jd" ? (
+            <TaskFilterSubmenu label="Frequency" value={frequency} options={frequencyOptions} onChange={onFrequencyChange} />
+          ) : (
+            <TaskFilterSubmenu label="Priority" value={priorityFilter} options={priorityOptions} onChange={onPriorityChange} />
+          )}
+          {showAssigneeFilter && (
+            <TaskFilterSubmenu
+              label="Assignee"
+              value={assigneeFilter}
+              options={[{ value: "all", label: "All assignees" }, ...assignees.map((assignee) => ({ value: assignee.membership._id as string, label: assigneeDisplayName(assignee), avatar: <Avatar name={assignee.user.name} email={assignee.user.email} /> }))]}
+              onChange={onAssigneeChange}
+            />
+          )}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
@@ -597,11 +673,11 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
                 )}
                 <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
                   <span className="text-[13px] text-[var(--ink-muted)]">Quantity</span>
-                  <div className="min-w-0"><input aria-label="Quantity" className="h-9 w-full rounded-md border border-transparent bg-transparent px-2 text-[13px] text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-faint)] hover:bg-[var(--surface-muted)] focus:border-[var(--focus-ring)]" inputMode="decimal" value={values.quantity} onChange={(event) => patch({ quantity: event.target.value })} placeholder="None" /></div>
+                  <div className="min-w-0"><input aria-label="Quantity" className="h-9 w-full rounded-md border border-transparent bg-transparent px-2 text-[13px] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" inputMode="decimal" value={values.quantity} onChange={(event) => patch({ quantity: event.target.value })} placeholder="None" /></div>
                 </div>
                 <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
                   <span className="text-[13px] text-[var(--ink-muted)]">Time</span>
-                  <div className="min-w-0"><input aria-label="Time estimate" className="h-9 w-full rounded-md border border-transparent bg-transparent px-2 text-[13px] text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-faint)] hover:bg-[var(--surface-muted)] focus:border-[var(--focus-ring)]" value={values.time} onChange={(event) => patch({ time: event.target.value })} placeholder="None" /></div>
+                  <div className="min-w-0"><input aria-label="Time estimate" className="h-9 w-full rounded-md border border-transparent bg-transparent px-2 text-[13px] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" value={values.time} onChange={(event) => patch({ time: event.target.value })} placeholder="None" /></div>
                 </div>
                 <div className="grid grid-cols-[120px_1fr] items-start gap-3 py-2">
                   <span className="pt-2 text-[13px] text-[var(--ink-muted)]">Description</span>
@@ -633,13 +709,20 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const router = useRouter();
   const { activeCompanyId, active } = useCompany();
   const [search, setSearch] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [taskView, setTaskView] = useState<TaskView>("all");
   const [frequency, setFrequency] = useState<Frequency | "all">("all");
+  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [assigneeFilter, setAssigneeFilter] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const canUseAllTasks = active?.membership.role === "Admin" || active?.membership.role === "Manager";
   const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip") as any[] | undefined;
+  const filterableAssignees = useQuery(api.tasks.filterableAssignees, activeCompanyId && canUseAllTasks ? { companyId: activeCompanyId } : "skip") as any[] | undefined;
   const tasks = useQuery(kind === "jd" ? api.tasks.listJdRows : api.tasks.listOneTimeRows, activeCompanyId ? (kind === "jd" ? { companyId: activeCompanyId, search: search || undefined, frequency, sort: "newest" as const } : { companyId: activeCompanyId, search: search || undefined, sort: "newest" as const }) : "skip") as any[] | undefined;
   const deleteJd = useMutation(api.tasks.deleteJd);
   const deleteJdBulk = useMutation(api.tasks.deleteJdBulk);
@@ -649,13 +732,35 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const pageTitle = kind === "jd" ? "JD Tasks" : "One-Time Tasks";
   const description = kind === "jd" ? "Recurring role responsibilities with cycle-aware status and clear ownership." : "One-off work with priority, due dates, and clear completion status.";
   const canCreate = canCreateTasks(active, kind);
-  const visibleTasks = (tasks ?? []).filter((task) => statusMatches(task, statusFilter));
+  const effectiveTaskView: TaskView = canUseAllTasks ? taskView : "my";
+  const currentMembershipId = active?.membership._id as string | undefined;
+  const visibleTasks = (tasks ?? []).filter((task) => {
+    if (effectiveTaskView === "my" && !taskHasAssignee(task, currentMembershipId)) return false;
+    if (!statusMatches(task, statusFilter)) return false;
+    if (kind === "one" && priorityFilter !== "all" && task.priority !== priorityFilter) return false;
+    if (assigneeFilter !== "all" && !taskHasAssignee(task, assigneeFilter)) return false;
+    return true;
+  });
   const visibleIds = visibleTasks.map((task) => task._id);
   const selectedVisibleCount = visibleIds.reduce((count, id) => count + (selectedIds.has(id) ? 1 : 0), 0);
   const allVisibleSelected = visibleTasks.length > 0 && selectedVisibleCount === visibleTasks.length;
   const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
   const selectionCount = selectedIds.size;
   const canDeleteSelection = selectionCount > 0 && !deleting;
+
+  useEffect(() => {
+    if (!activeCompanyId) return;
+    setTaskView(canUseAllTasks ? "all" : "my");
+    setAssigneeFilter("all");
+  }, [activeCompanyId, canUseAllTasks]);
+
+  useEffect(() => {
+    if (effectiveTaskView === "my" && assigneeFilter !== "all") setAssigneeFilter("all");
+  }, [effectiveTaskView, assigneeFilter]);
+
+  useEffect(() => {
+    if (searchOpen) searchInputRef.current?.focus();
+  }, [searchOpen]);
 
   useEffect(() => {
     if (tasks && selectedIds.size > 0) {
@@ -723,17 +828,10 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     }
   }
 
-  const statusOptions: { value: StatusFilter; label: string }[] = [
-    { value: "all", label: "All statuses" },
-    { value: "due", label: "Due" },
-    { value: "in_progress", label: "In progress" },
-    { value: "completed", label: "Completed" },
-    { value: "overdue", label: "Overdue" },
-  ];
-
   const jdColumns = 6; // task + frequency + assignee + status + time + quantity
   const oneColumns = 7; // task + priority + assignee + status + due + time + quantity
-  const hasActiveFilters = statusFilter !== "all" || (kind === "jd" && frequency !== "all") || search.trim() !== "";
+  const filterCount = [statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
+  const hasActiveFilters = filterCount > 0 || search.trim() !== "";
 
   return (
     <div>
@@ -745,14 +843,37 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       <TaskDialog kind={kind} mode="create" open={createOpen} onOpenChange={setCreateOpen} assignable={assignable ?? []} />
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <label className="relative block min-w-[200px] flex-1 max-w-[340px]">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--ink-faint)]" />
-          <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-8 pl-8 text-[13px]" placeholder="Search title" />
-        </label>
-        <div className="flex flex-1 items-center justify-end gap-2">
-          <span className="hidden text-[12.5px] text-[var(--ink-faint)] sm:inline">{tasks ? `${visibleTasks.length} ${visibleTasks.length === 1 ? "task" : "tasks"}` : ""}</span>
-          <FilterChip icon={<span className="h-1.5 w-1.5 rounded-full bg-current opacity-60" />} ariaLabel="Filter by status" value={statusFilter} options={statusOptions} onChange={setStatusFilter} />
-          {kind === "jd" && <FilterChip ariaLabel="Filter by frequency" value={frequency} options={[{ value: "all" as const, label: "All frequencies" }, ...frequencies]} onChange={setFrequency} />}
+        <div className="task-view-toggle" aria-label="Task view">
+          {canUseAllTasks && (
+            <button type="button" className="task-view-button" data-active={effectiveTaskView === "all"} onClick={() => setTaskView("all")}>
+              <StarIcon className="h-4 w-4" />All Tasks
+            </button>
+          )}
+          <button type="button" className="task-view-button" data-active={effectiveTaskView === "my"} disabled={!canUseAllTasks} onClick={() => setTaskView("my")}>
+            <User className="h-4 w-4" />My Tasks
+          </button>
+        </div>
+        <div className="ml-auto flex flex-1 items-center justify-end gap-2">
+          <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
+            <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search title" aria-label="Search tasks by title" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
+            <button type="button" className="task-search-button" aria-label={search ? "Clear search" : "Search tasks"} onClick={() => { if (search) setSearch(""); else setSearchOpen((open) => !open); }}>
+              {search ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
+            </button>
+          </div>
+          <TaskFilterMenu
+            kind={kind}
+            statusFilter={statusFilter}
+            frequency={frequency}
+            priorityFilter={priorityFilter}
+            assigneeFilter={assigneeFilter}
+            assignees={filterableAssignees ?? []}
+            showAssigneeFilter={canUseAllTasks && effectiveTaskView === "all"}
+            activeCount={filterCount}
+            onStatusChange={setStatusFilter}
+            onFrequencyChange={setFrequency}
+            onPriorityChange={setPriorityFilter}
+            onAssigneeChange={setAssigneeFilter}
+          />
           {canCreate && <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />New task</Button>}
         </div>
       </div>
@@ -805,7 +926,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
           <thead>
             {kind === "jd" ? (
               <tr className="group/head">
-                <th className="min-w-[280px] max-w-[360px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />Task</span></th>
+                <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />Task</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><FrequencyIcon className="h-3.5 w-3.5" />Frequency</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />Assignee</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />Status</span></th>
@@ -814,7 +935,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               </tr>
             ) : (
               <tr className="group/head">
-                <th className="min-w-[280px] max-w-[360px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />Task</span></th>
+                <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />Task</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><Tag className="h-3.5 w-3.5" />Priority</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />Assignee</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />Status</span></th>
@@ -849,7 +970,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                       </Button>
                     )}
                     {hasActiveFilters && tasks.length > 0 && (
-                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setStatusFilter("all"); setFrequency("all"); }}>Clear filters</Button>
+                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); setStatusFilter("all"); setFrequency("all"); setPriorityFilter("all"); setAssigneeFilter("all"); }}>Clear filters</Button>
                     )}
                   </div>
                 </td>
@@ -866,7 +987,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                     onClick={() => router.push(`${base}/${task._id}`)}
                     className="group/row"
                   >
-                    <td className="col-task max-w-[360px]">
+                    <td className="col-task max-w-[250px]">
                       <div className="flex min-w-0 items-center gap-2.5">
                         <span className="min-w-0 flex-1 truncate">{task.title}</span>
                       </div>

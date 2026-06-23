@@ -398,6 +398,17 @@ export const assignableUsers = query({
   },
 });
 
+export const filterableAssignees = query({
+  args: { companyId: v.id("companies") },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const ids = membership.role === "Admin"
+      ? new Set((await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500)).filter((m) => m.active).map((m) => m._id))
+      : await scopedMembershipIds(ctx, args.companyId, membership);
+    return await enrich(ctx, Array.from(ids));
+  },
+});
+
 export const accessibleTasksForAi = query({
   args: { companyId: v.id("companies"), overdueOnly: v.optional(v.boolean()) },
   handler: async (ctx, args) => {

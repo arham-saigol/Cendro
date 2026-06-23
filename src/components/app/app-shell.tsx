@@ -3,7 +3,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useClerk, useUser } from "@clerk/nextjs";
-import { useMutation } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -51,27 +51,30 @@ function ShellCard({ children }: { children: React.ReactNode }) {
 function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const { user } = useUser();
   const { theme, toggleTheme } = useTheme();
+  const profile = useQuery(api.users.me);
   const updateName = useMutation(api.users.updateCurrentName);
-  const [name, setName] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [secondName, setSecondName] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) {
-      setName(user?.fullName || "");
+      setFirstName(profile?.firstName || user?.fullName || "");
+      setSecondName(profile?.secondName || "");
       setError(null);
     }
-  }, [open, user?.fullName]);
+  }, [open, profile?.firstName, profile?.secondName, user?.fullName]);
 
   async function saveName() {
-    const trimmed = name.trim();
-    if (!trimmed || !user || saving) return;
-    const [firstName, ...rest] = trimmed.split(/\s+/);
+    const trimmedFirstName = firstName.trim();
+    const trimmedSecondName = secondName.trim();
+    if (!trimmedFirstName || !user || saving) return;
     setSaving(true);
     setError(null);
     try {
-      await user.update({ firstName, lastName: rest.join(" ") || null });
-      await updateName({ name: trimmed });
+      await user.update({ firstName: trimmedFirstName, lastName: trimmedSecondName || null });
+      await updateName({ firstName: trimmedFirstName, secondName: trimmedSecondName });
       await user.reload();
       onOpenChange(false);
     } catch (err) {
@@ -89,7 +92,7 @@ function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
           <div className="flex items-start justify-between gap-4">
             <div>
               <Dialog.Title className="text-base font-semibold">Settings</Dialog.Title>
-              <Dialog.Description className="mt-1 text-sm text-[var(--ink-muted)]">Update the name shown in Cendro.</Dialog.Description>
+              <Dialog.Description className="mt-1 text-sm text-[var(--ink-muted)]">Update the names shown in Cendro.</Dialog.Description>
             </div>
             <Dialog.Close asChild>
               <Button variant="ghost" size="icon" aria-label="Close settings">
@@ -97,10 +100,20 @@ function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
               </Button>
             </Dialog.Close>
           </div>
-          <label className="mt-5 block text-sm font-medium text-[var(--ink-secondary)]" htmlFor="profile-name">
-            Name
-          </label>
-          <Input id="profile-name" className="mt-2" value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" />
+          <div className="mt-5 grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="block text-sm font-medium text-[var(--ink-secondary)]" htmlFor="profile-first-name">
+                First name
+              </label>
+              <Input id="profile-first-name" className="mt-2" value={firstName} onChange={(event) => setFirstName(event.target.value)} placeholder="First name" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-[var(--ink-secondary)]" htmlFor="profile-second-name">
+                Second name
+              </label>
+              <Input id="profile-second-name" className="mt-2" value={secondName} onChange={(event) => setSecondName(event.target.value)} placeholder="Second name" />
+            </div>
+          </div>
           {error && <p className="alert-error mt-3 rounded-md p-2 text-sm">{error}</p>}
           <div className="mt-5 border-t border-[var(--hairline)] pt-4">
             <div className="mb-2 text-sm font-medium text-[var(--ink-secondary)]">Appearance</div>
@@ -113,8 +126,8 @@ function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
             <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={saving}>
               Cancel
             </Button>
-            <Button variant="primary" onClick={saveName} disabled={saving || !name.trim()}>
-              {saving ? "Saving..." : "Save name"}
+            <Button variant="primary" onClick={saveName} disabled={saving || !firstName.trim()}>
+              {saving ? "Saving..." : "Save names"}
             </Button>
           </div>
         </Dialog.Content>

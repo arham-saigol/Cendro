@@ -291,12 +291,18 @@ button:disabled { cursor: not-allowed; }
 
 .task-add-row td {
   height: 41px;
+  padding-left: 4px;
   color: var(--ink-faint);
   font-size: 13px;
   cursor: pointer;
+  background: transparent !important;
+}
+.task-add-label {
+  padding: 4px 8px;
+  border-radius: 6px;
   transition: background-color 0.12s ease, color 0.12s ease;
 }
-.task-add-row:hover td { background: var(--surface-muted); color: var(--ink-muted); }
+.task-add-row:hover .task-add-label { background: var(--surface-muted); color: var(--ink-muted); }
 
 /* Notion-style status / priority select pills */
 .task-pill {

@@ -233,23 +233,24 @@ function QuantityIcon({ className }: { className?: string }) {
   );
 }
 
-function Avatar({ name, email, size = "sm" }: { name?: string | null; email?: string | null; size?: "sm" | "md" | "lg" }) {
+function Avatar({ name, email, imageUrl, size = "sm" }: { name?: string | null; email?: string | null; imageUrl?: string | null; size?: "sm" | "md" | "lg" }) {
   const dim = size === "md" ? "h-7 w-7 text-[11px]" : size === "lg" ? "h-9 w-9 text-xs" : "h-6 w-6 text-[10px]";
   return (
-    <span className={cn("inline-flex shrink-0 items-center justify-center rounded-full bg-[linear-gradient(135deg,var(--surface-hover),var(--surface-pressed))] font-semibold text-[var(--ink-secondary)] ring-2 ring-[var(--canvas)]", dim)} title={name || email || undefined}>
+    <span className={cn("relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-[linear-gradient(135deg,var(--surface-hover),var(--surface-pressed))] font-semibold text-[var(--ink-secondary)] ring-2 ring-[var(--canvas)]", dim)} title={name || email || undefined}>
       {initials(name, email)}
+      {imageUrl && <span aria-hidden="true" className="absolute inset-0 bg-cover bg-center" style={{ backgroundImage: `url(${imageUrl})` }} />}
     </span>
   );
 }
 
-function AvatarStack({ assignees, max = 3, showName = false }: { assignees: { user: { name: string | null; email: string } }[]; max?: number; showName?: boolean }) {
+function AvatarStack({ assignees, max = 3, showName = false }: { assignees: { user: { name: string | null; email: string; imageUrl?: string | null } }[]; max?: number; showName?: boolean }) {
   if (!assignees.length) return <span className="text-[12.5px] text-[var(--ink-faint)]">Unassigned</span>;
   const shown = assignees.slice(0, max);
   const extra = assignees.length - shown.length;
   return (
     <span className="inline-flex min-w-0 items-center gap-2">
       <span className="avatar-stack shrink-0">
-        {shown.map((assignee, index) => <Avatar key={index} name={assignee.user.name} email={assignee.user.email} />)}
+        {shown.map((assignee, index) => <Avatar key={index} name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} />)}
         {extra > 0 && <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--surface-hover)] text-[10px] font-semibold text-[var(--ink-secondary)] ring-2 ring-[var(--canvas)]">+{extra}</span>}
       </span>
       {showName && <span className="min-w-0 truncate">{assigneeDisplayName(assignees[0])}</span>}
@@ -390,7 +391,7 @@ function TaskFilterMenu({
             <TaskFilterSubmenu
               label="Assignee"
               value={assigneeFilter}
-              options={[{ value: "all", label: "All assignees" }, ...assignees.map((assignee) => ({ value: assignee.membership._id as string, label: assigneeDisplayName(assignee), avatar: <Avatar name={assignee.user.name} email={assignee.user.email} /> }))]}
+              options={[{ value: "all", label: "All assignees" }, ...assignees.map((assignee) => ({ value: assignee.membership._id as string, label: assigneeDisplayName(assignee), avatar: <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} /> }))]}
               onChange={onAssigneeChange}
             />
           )}
@@ -436,7 +437,7 @@ function AssigneePicker({ assignable, selected, onChange, required = false }: { 
   return (
     <div className="relative">
       <button type="button" onClick={() => setOpen((current) => !current)} className="task-inline-control">
-        {selectedAssignee ? <Avatar name={selectedAssignee.user.name} email={selectedAssignee.user.email} /> : <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>}
+        {selectedAssignee ? <Avatar name={selectedAssignee.user.name} email={selectedAssignee.user.email} imageUrl={selectedAssignee.user.imageUrl} /> : <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>}
         <span className={cn("min-w-0 flex-1 truncate", !selectedAssignee && "text-[var(--ink-faint)]")}>{selectedAssignee ? (selectedAssignee.user.name || selectedAssignee.user.email) : required ? "Select assignee" : "Unassigned"}</span>
         <ChevronDown className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
       </button>
@@ -461,7 +462,7 @@ function AssigneePicker({ assignable, selected, onChange, required = false }: { 
                 const name = assignee.user.name || assignee.user.email;
                 return (
                   <button key={id} type="button" onClick={() => { onChange([id]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
-                    <Avatar name={assignee.user.name} email={assignee.user.email} />
+                    <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} />
                     <span className="min-w-0 flex-1"><span className="block truncate font-medium text-[var(--ink)]">{name}</span><span className="block truncate text-[11.5px] text-[var(--ink-muted)]">{assignee.membership.role}</span></span>
                     {selected[0] === id && <Check className="h-4 w-4 shrink-0 text-[var(--primary)]" />}
                   </button>
@@ -1015,8 +1016,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                 })}
                 {canCreate && (
                   <tr className="task-add-row" onClick={() => setCreateOpen(true)}>
-                    <td colSpan={kind === "jd" ? jdColumns : oneColumns} className="pl-4">
-                      <span className="inline-flex items-center gap-1.5">
+                    <td colSpan={kind === "jd" ? jdColumns : oneColumns}>
+                      <span className="task-add-label inline-flex items-center gap-1.5">
                         <Plus className="h-3.5 w-3.5" />New task
                       </span>
                     </td>
@@ -1199,7 +1200,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
           <PropertyRow icon={<UsersIcon className="h-3.5 w-3.5" />} label="Assignee" muted={!task.assignees?.length}>
             {task.assignees?.length ? (
               <span className="inline-flex items-center gap-2">
-                {primaryAssignee && <Avatar name={primaryAssignee.user.name} email={primaryAssignee.user.email} />}
+                {primaryAssignee && <Avatar name={primaryAssignee.user.name} email={primaryAssignee.user.email} imageUrl={primaryAssignee.user.imageUrl} />}
                 <span className="truncate">{primaryAssignee?.user.name || primaryAssignee?.user.email}</span>
                 {task.assignees.length > 1 && <span className="text-[var(--ink-faint)]">+{task.assignees.length - 1}</span>}
               </span>
@@ -1258,7 +1259,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
             const name = commentRow.author?.user.name || commentRow.author?.user.email || "You";
             return (
               <div key={commentRow._id} className="flex gap-3">
-                <Avatar name={commentRow.author?.user.name ?? null} email={commentRow.author?.user.email ?? null} size="md" />
+                <Avatar name={commentRow.author?.user.name ?? null} email={commentRow.author?.user.email ?? null} imageUrl={commentRow.author?.user.imageUrl ?? null} size="md" />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-baseline gap-2">
                     <span className="text-[13px] font-semibold text-[var(--ink)]">{name}</span>

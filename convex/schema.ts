@@ -9,7 +9,7 @@ const scope = v.union(v.literal("company"), v.literal("branch"), v.literal("depa
 const taskType = v.union(v.literal("jd"), v.literal("one_time"));
 
 export default defineSchema({
-  appUsers: defineTable({ clerkSubject: v.string(), email: v.string(), name: v.optional(v.string()), imageUrl: v.optional(v.string()), createdAt: v.number(), updatedAt: v.number() }).index("by_subject", ["clerkSubject"]).index("by_email", ["email"]),
+  appUsers: defineTable({ clerkSubject: v.string(), email: v.string(), firstName: v.string(), secondName: v.optional(v.string()), imageUrl: v.optional(v.string()), createdAt: v.number(), updatedAt: v.number() }).index("by_subject", ["clerkSubject"]).index("by_email", ["email"]),
   companies: defineTable({ name: v.string(), createdAt: v.number(), createdBy: v.optional(v.id("appUsers")), deletedAt: v.optional(v.number()) }).index("by_deleted", ["deletedAt"]),
   companyMemberships: defineTable({ companyId: v.id("companies"), userId: v.id("appUsers"), role, active: v.boolean(), createdAt: v.number(), updatedAt: v.number() }).index("by_company", ["companyId"]).index("by_user", ["userId"]).index("by_company_user", ["companyId", "userId"]),
   branches: defineTable({ companyId: v.id("companies"), name: v.string(), createdAt: v.number(), updatedAt: v.number() }).index("by_company", ["companyId"]),

@@ -14,6 +14,9 @@ async function scopedIdsForAnalytics(ctx: QueryCtx, companyId: Id<"companies">, 
   return new Set<Id<"companyMemberships">>([membership._id]);
 }
 
+function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.email; }
+function fullName(user: Doc<"appUsers">) { return [firstName(user), user.secondName?.trim()].filter(Boolean).join(" ") || user.email; }
+
 async function peopleRows(ctx: QueryCtx, companyId: Id<"companies">, ids: Set<Id<"companyMemberships">>, limit: number) {
   const out = [];
   for (const membershipId of Array.from(ids).slice(0, limit)) {
@@ -21,7 +24,7 @@ async function peopleRows(ctx: QueryCtx, companyId: Id<"companies">, ids: Set<Id
     if (!membership || membership.companyId !== companyId || !membership.active) continue;
     const user = await ctx.db.get(membership.userId);
     if (!user) continue;
-    out.push({ membershipId: membership._id, name: user.name ?? user.email, email: user.email, role: membership.role });
+    out.push({ membershipId: membership._id, name: fullName(user), email: user.email, role: membership.role });
   }
   return out;
 }

@@ -32,6 +32,8 @@ function prevCycle(cycleStartedAt: number, r: Rec) { const c = cycle(cycleStarte
 function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Not Started" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
 function cleanOptionalText(value?: string) { const text = value?.trim(); return text ? text : undefined; }
 function cleanOptionalQuantity(value?: number) { return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined; }
+function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.email; }
+function fullName(user: Doc<"appUsers">) { return [firstName(user), user.secondName?.trim()].filter(Boolean).join(" ") || user.email; }
 async function enrich(ctx: Ctx, ids: Id<"companyMemberships">[]) {
   const uniqueIds = Array.from(new Set(ids));
   const memberships = (await Promise.all(uniqueIds.map((id) => ctx.db.get(id)))).filter(Boolean) as Doc<"companyMemberships">[];
@@ -39,7 +41,7 @@ async function enrich(ctx: Ctx, ids: Id<"companyMemberships">[]) {
   const userById = new Map(users.map((user) => [user._id, user]));
   return memberships.flatMap((membership) => {
     const user = userById.get(membership.userId);
-    return user ? [{ membership: { _id: membership._id, role: membership.role }, user: { name: user.name, email: user.email } }] : [];
+    return user ? [{ membership: { _id: membership._id, role: membership.role }, user: { name: firstName(user), firstName: firstName(user), secondName: user.secondName ?? "", fullName: fullName(user), email: user.email, imageUrl: user.imageUrl } }] : [];
   });
 }
 
@@ -436,7 +438,7 @@ export const accessibleTasksForAi = query({
 
 async function aiAssignees(ctx: Ctx, ids: Id<"companyMemberships">[]) {
   const rows = await enrich(ctx, ids);
-  return rows.map((row: any) => ({ name: row.user.name ?? row.user.email, role: row.membership.role }));
+  return rows.map((row: any) => ({ name: row.user.fullName ?? row.user.email, role: row.membership.role }));
 }
 
 async function aiJdRow(ctx: Ctx, task: Doc<"jdTasks">) {
@@ -506,7 +508,7 @@ export const aiAssignableUsers = query({
       ids = new Set([membership._id]);
     }
     const rows = await enrich(ctx, Array.from(ids));
-    return rows.map((row: any) => ({ membershipId: row.membership._id, name: row.user.name ?? row.user.email, email: row.user.email, role: row.membership.role }));
+    return rows.map((row: any) => ({ membershipId: row.membership._id, name: row.user.fullName ?? row.user.email, email: row.user.email, role: row.membership.role }));
   },
 });
 

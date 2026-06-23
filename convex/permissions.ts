@@ -1,3 +1,4 @@
+import type { UserIdentity } from "convex/server";
 import { ConvexError } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
@@ -19,20 +20,43 @@ export async function currentUser(ctx: Ctx) {
   return { identity, user };
 }
 
+function cleanNamePart(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function nameFields(firstName: string, secondName: string) {
+  const cleanSecondName = secondName.trim();
+  return cleanSecondName ? { firstName, secondName: cleanSecondName } : { firstName };
+}
+
+function namesFromIdentity(identity: UserIdentity, email: string) {
+  return nameFields(cleanNamePart(identity.givenName) || cleanNamePart(identity.name) || email, cleanNamePart(identity.familyName));
+}
+
+function namesForExistingUser(existing: { firstName?: unknown; secondName?: unknown }, identity: UserIdentity, email: string) {
+  const names = namesFromIdentity(identity, email);
+  const firstName = typeof existing.firstName === "string" ? cleanNamePart(existing.firstName) || email : names.firstName;
+  const secondName = typeof existing.secondName === "string" ? cleanNamePart(existing.secondName) : names.secondName ?? "";
+  return nameFields(firstName, secondName);
+}
+
 export async function currentOrCreateUser(ctx: MutationCtx) {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) throw new ConvexError("Please sign in.");
   const email = identity.email ? normalizeEmail(identity.email) : null;
   if (!email) throw new ConvexError("Authenticated email is required.");
-  const name = identity.name;
   const imageUrl = identity.pictureUrl;
   const now = Date.now();
   const existing = await ctx.db.query("appUsers").withIndex("by_subject", (q) => q.eq("clerkSubject", identity.tokenIdentifier)).unique();
   if (existing) {
-    await ctx.db.patch(existing._id, { email, name, imageUrl, updatedAt: now });
-    return { identity, user: { ...existing, email, name, imageUrl, updatedAt: now } };
+    const names = namesForExistingUser(existing, identity, email);
+    await ctx.db.replace(existing._id, { clerkSubject: existing.clerkSubject, email, ...names, imageUrl, createdAt: existing.createdAt, updatedAt: now });
+    const user = await ctx.db.get(existing._id);
+    if (!user) throw new ConvexError("Could not update your profile.");
+    return { identity, user };
   }
-  const userId = await ctx.db.insert("appUsers", { clerkSubject: identity.tokenIdentifier, email, name, imageUrl, createdAt: now, updatedAt: now });
+  const names = namesFromIdentity(identity, email);
+  const userId = await ctx.db.insert("appUsers", { clerkSubject: identity.tokenIdentifier, email, ...names, imageUrl, createdAt: now, updatedAt: now });
   const user = await ctx.db.get(userId);
   if (!user) throw new ConvexError("Could not create your profile.");
   return { identity, user };

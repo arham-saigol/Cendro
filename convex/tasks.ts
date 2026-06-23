@@ -32,8 +32,6 @@ function prevCycle(cycleStartedAt: number, r: Rec) { const c = cycle(cycleStarte
 function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Due" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
 function cleanOptionalText(value?: string) { const text = value?.trim(); return text ? text : undefined; }
 function cleanOptionalQuantity(value?: number) { return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined; }
-function serialPrefix(kind: TaskKind) { return kind === "jd" ? "JD" : "OT"; }
-
 async function enrich(ctx: Ctx, ids: Id<"companyMemberships">[]) {
   const uniqueIds = Array.from(new Set(ids));
   const memberships = (await Promise.all(uniqueIds.map((id) => ctx.db.get(id)))).filter(Boolean) as Doc<"companyMemberships">[];
@@ -59,13 +57,12 @@ async function assertAssigneesInCompany(ctx: Ctx, companyId: Id<"companies">, as
   }
 }
 
-async function generateSerialNumber(ctx: MutationCtx, companyId: Id<"companies">, taskType: TaskKind) {
-  const now = Date.now();
-  const counter = await ctx.db.query("taskSerialCounters").withIndex("by_companyId_and_taskType", (q) => q.eq("companyId", companyId).eq("taskType", taskType)).unique();
-  const nextNumber = counter?.nextNumber ?? 1;
-  if (counter) await ctx.db.patch(counter._id, { nextNumber: nextNumber + 1, updatedAt: now });
-  else await ctx.db.insert("taskSerialCounters", { companyId, taskType, nextNumber: nextNumber + 1, updatedAt: now });
-  return `${serialPrefix(taskType)}-${String(nextNumber).padStart(4, "0")}`;
+function requireTaskAssignee(assignees: Id<"companyMemberships">[]) {
+  if (assignees.length === 0) throw new ConvexError("Task assignee is required.");
+}
+
+function updateAuthTargets(task: Pick<Doc<"jdTasks"> | Doc<"oneTimeTasks">, "assigneeMembershipIds" | "createdByMembershipId">) {
+  return task.assigneeMembershipIds.length === 0 ? [task.createdByMembershipId] : task.assigneeMembershipIds;
 }
 
 async function currentJdCompletion(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: number) {
@@ -99,40 +96,38 @@ async function getVisibleTask(ctx: Ctx, companyId: Id<"companies">, membership: 
 
 async function enrichedJd(ctx: Ctx, task: Doc<"jdTasks">) { return { ...task, state: await jdState(ctx, task), assignees: await enrich(ctx, task.assigneeMembershipIds) }; }
 async function enrichedOneTime(ctx: Ctx, task: Doc<"oneTimeTasks">) { return { ...task, state: oneState(task), assignees: await enrich(ctx, task.assigneeMembershipIds) }; }
-function matchesSearch(task: { title: string; serialNumber: string }, search?: string) {
+function matchesSearch(task: { title: string }, search?: string) {
   const needle = search?.trim().toLowerCase();
   if (!needle) return true;
-  return task.title.toLowerCase().includes(needle) || task.serialNumber.toLowerCase().includes(needle);
+  return task.title.toLowerCase().includes(needle);
 }
 
 export const listJdRows = query({
-  args: { companyId: v.id("companies"), search: v.optional(v.string()), frequency: v.optional(jdFrequencyFilterValidator), sort: v.optional(v.union(v.literal("newest"), v.literal("serial"), v.literal("frequency"))) },
+  args: { companyId: v.id("companies"), search: v.optional(v.string()), frequency: v.optional(jdFrequencyFilterValidator), sort: v.optional(v.union(v.literal("newest"), v.literal("frequency"))) },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
-    const rows = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(200);
     const filtered = [];
-    for (const task of rows) {
+    for await (const task of ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc")) {
       if (args.frequency && args.frequency !== "all" && task.recurrence !== args.frequency) continue;
       if (!matchesSearch(task, args.search)) continue;
       if (await visible(ctx, args.companyId, membership, task)) filtered.push(await enrichedJd(ctx, task));
+      if (filtered.length >= 200) break;
     }
-    if (args.sort === "serial") filtered.sort((a, b) => a.serialNumber.localeCompare(b.serialNumber));
-    if (args.sort === "frequency") filtered.sort((a, b) => a.recurrence.localeCompare(b.recurrence) || a.serialNumber.localeCompare(b.serialNumber));
+    if (args.sort === "frequency") filtered.sort((a, b) => a.recurrence.localeCompare(b.recurrence));
     return filtered;
   },
 });
 
 export const listOneTimeRows = query({
-  args: { companyId: v.id("companies"), search: v.optional(v.string()), sort: v.optional(v.union(v.literal("newest"), v.literal("serial"), v.literal("dueDate"))) },
+  args: { companyId: v.id("companies"), search: v.optional(v.string()), sort: v.optional(v.union(v.literal("newest"), v.literal("dueDate"))) },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
-    const rows = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(200);
     const filtered = [];
-    for (const task of rows) {
+    for await (const task of ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc")) {
       if (!matchesSearch(task, args.search)) continue;
       if (await visible(ctx, args.companyId, membership, task)) filtered.push(await enrichedOneTime(ctx, task));
+      if (filtered.length >= 200) break;
     }
-    if (args.sort === "serial") filtered.sort((a, b) => a.serialNumber.localeCompare(b.serialNumber));
     if (args.sort === "dueDate") filtered.sort((a, b) => (a.dueDate ?? Number.MAX_SAFE_INTEGER) - (b.dueDate ?? Number.MAX_SAFE_INTEGER));
     return filtered;
   },
@@ -164,10 +159,11 @@ export const createJd = mutation({
   handler: async (ctx, args) => {
     const { membership, user } = await requireCapability(ctx, args.companyId, "tasks:jd:create");
     const title = nonEmpty(args.title, "Task title");
+    requireTaskAssignee(args.assigneeMembershipIds);
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
-    if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
+    await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
-    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, serialNumber: await generateSerialNumber(ctx, args.companyId, "jd"), title, description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: sod(now), assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: sod(now), assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now });
     return id;
   },
@@ -179,7 +175,7 @@ export const updateJd = mutation({
     const { membership } = await requireMembership(ctx, args.companyId);
     const task = await ctx.db.get(args.taskId);
     if (!task || task.companyId !== args.companyId) throw new ConvexError("Task not found.");
-    await assertCanUpdateTask(ctx, args.companyId, membership, task.assigneeMembershipIds, "jd");
+    await assertCanUpdateTask(ctx, args.companyId, membership, updateAuthTargets(task), "jd");
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
     if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const state = await jdState(ctx, task);
@@ -192,7 +188,7 @@ async function setJdStatus(ctx: MutationCtx, companyId: Id<"companies">, taskId:
   const { membership } = await requireMembership(ctx, companyId);
   const task = await ctx.db.get(taskId);
   if (!task || task.companyId !== companyId) throw new ConvexError("Task not found.");
-  await assertCanUpdateTask(ctx, companyId, membership, task.assigneeMembershipIds, "jd");
+  await assertCanUpdateTask(ctx, companyId, membership, updateAuthTargets(task), "jd");
   const state = await jdState(ctx, task);
   if (state.isOverdue) {
     if (!task.overdueAt) await ctx.db.patch(taskId, { overdueAt: Date.now(), updatedAt: Date.now() });
@@ -244,10 +240,11 @@ export const createOneTime = mutation({
   handler: async (ctx, args) => {
     const { membership, user } = await requireCapability(ctx, args.companyId, "tasks:one_time:create");
     const title = nonEmpty(args.title, "Task title");
+    requireTaskAssignee(args.assigneeMembershipIds);
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
-    if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
+    await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     const now = Date.now();
-    const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, serialNumber: await generateSerialNumber(ctx, args.companyId, "one_time"), title, description: cleanOptionalText(args.description), dueDate: args.dueDate, time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
+    const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), dueDate: args.dueDate, time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "one_time_task.create", targetType: "oneTimeTask", targetId: id, createdAt: now });
     return id;
   },
@@ -259,7 +256,7 @@ export const updateOneTime = mutation({
     const { membership } = await requireMembership(ctx, args.companyId);
     const task = await ctx.db.get(args.taskId);
     if (!task || task.companyId !== args.companyId) throw new ConvexError("Task not found.");
-    await assertCanUpdateTask(ctx, args.companyId, membership, task.assigneeMembershipIds, "one_time");
+    await assertCanUpdateTask(ctx, args.companyId, membership, updateAuthTargets(task), "one_time");
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
     if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     const state = oneState(task);
@@ -272,7 +269,7 @@ async function setOneTimeStatus(ctx: MutationCtx, companyId: Id<"companies">, ta
   const { membership } = await requireMembership(ctx, companyId);
   const task = await ctx.db.get(taskId);
   if (!task || task.companyId !== companyId) throw new ConvexError("Task not found.");
-  await assertCanUpdateTask(ctx, companyId, membership, task.assigneeMembershipIds, "one_time");
+  await assertCanUpdateTask(ctx, companyId, membership, updateAuthTargets(task), "one_time");
   const state = oneState(task);
   if (state.isOverdue) {
     if (!task.overdueAt) await ctx.db.patch(taskId, { overdueAt: Date.now(), updatedAt: Date.now() });
@@ -296,7 +293,7 @@ async function purgeJdTask(ctx: MutationCtx, companyId: Id<"companies">, taskId:
   const { membership, user } = await requireMembership(ctx, companyId);
   const task = await ctx.db.get(taskId);
   if (!task || task.companyId !== companyId) throw new ConvexError("Task not found.");
-  await assertCanUpdateTask(ctx, companyId, membership, task.assigneeMembershipIds, "jd");
+  await assertCanUpdateTask(ctx, companyId, membership, updateAuthTargets(task), "jd");
   const completions = await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect();
   for (const completion of completions) await ctx.db.delete(completion._id);
   const comments = await ctx.db.query("taskComments").withIndex("by_task", (q) => q.eq("taskType", "jd").eq("taskId", taskId)).collect();
@@ -312,7 +309,7 @@ async function purgeOneTimeTask(ctx: MutationCtx, companyId: Id<"companies">, ta
   const { membership, user } = await requireMembership(ctx, companyId);
   const task = await ctx.db.get(taskId);
   if (!task || task.companyId !== companyId) throw new ConvexError("Task not found.");
-  await assertCanUpdateTask(ctx, companyId, membership, task.assigneeMembershipIds, "one_time");
+  await assertCanUpdateTask(ctx, companyId, membership, updateAuthTargets(task), "one_time");
   const comments = await ctx.db.query("taskComments").withIndex("by_task", (q) => q.eq("taskType", "one_time").eq("taskId", taskId)).collect();
   for (const comment of comments) await ctx.db.delete(comment._id);
   const attachments = await ctx.db.query("taskAttachments").withIndex("by_task", (q) => q.eq("taskType", "one_time").eq("taskId", taskId)).collect();
@@ -401,7 +398,28 @@ export const assignableUsers = query({
   },
 });
 
-export const accessibleTasksForAi = query({ args: { companyId: v.id("companies"), overdueOnly: v.optional(v.boolean()) }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const out: any[] = []; for (const task of await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(100)) { if (await visible(ctx, args.companyId, membership, task)) { const state = await jdState(ctx, task); if (!args.overdueOnly || state.status === "Overdue") out.push({ type: "JD", id: task._id, serialNumber: task.serialNumber, title: task.title, state: state.status, dueAt: state.dueAt }); } } for (const task of await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(100)) { if (await visible(ctx, args.companyId, membership, task)) { const state = oneState(task); if (!args.overdueOnly || state.status === "Overdue") out.push({ type: "One-time", id: task._id, serialNumber: task.serialNumber, title: task.title, state: state.status, dueAt: task.dueDate }); } } return out.slice(0, 100); } });
+export const accessibleTasksForAi = query({
+  args: { companyId: v.id("companies"), overdueOnly: v.optional(v.boolean()) },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const out: any[] = [];
+    for await (const task of ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc")) {
+      if (out.length >= 100) break;
+      if (await visible(ctx, args.companyId, membership, task)) {
+        const state = await jdState(ctx, task);
+        if (!args.overdueOnly || state.status === "Overdue") out.push({ type: "JD", id: task._id, title: task.title, state: state.status, dueAt: state.dueAt });
+      }
+    }
+    for await (const task of ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc")) {
+      if (out.length >= 100) break;
+      if (await visible(ctx, args.companyId, membership, task)) {
+        const state = oneState(task);
+        if (!args.overdueOnly || state.status === "Overdue") out.push({ type: "One-time", id: task._id, title: task.title, state: state.status, dueAt: task.dueDate });
+      }
+    }
+    return out;
+  },
+});
 
 async function aiAssignees(ctx: Ctx, ids: Id<"companyMemberships">[]) {
   const rows = await enrich(ctx, ids);
@@ -410,12 +428,12 @@ async function aiAssignees(ctx: Ctx, ids: Id<"companyMemberships">[]) {
 
 async function aiJdRow(ctx: Ctx, task: Doc<"jdTasks">) {
   const state = await jdState(ctx, task);
-  return { kind: "jd" as const, id: task._id, serialNumber: task.serialNumber, title: task.title, description: task.description, status: state.status, dueAt: state.dueAt, recurrence: task.recurrence, quantity: task.quantity, time: task.time, assignees: await aiAssignees(ctx, task.assigneeMembershipIds) };
+  return { kind: "jd" as const, id: task._id, title: task.title, description: task.description, status: state.status, dueAt: state.dueAt, recurrence: task.recurrence, quantity: task.quantity, time: task.time, assignees: await aiAssignees(ctx, task.assigneeMembershipIds) };
 }
 
 async function aiOneTimeRow(ctx: Ctx, task: Doc<"oneTimeTasks">) {
   const state = oneState(task);
-  return { kind: "one_time" as const, id: task._id, serialNumber: task.serialNumber, title: task.title, description: task.description, status: state.status, dueAt: task.dueDate, priority: task.priority, quantity: task.quantity, time: task.time, assignees: await aiAssignees(ctx, task.assigneeMembershipIds) };
+  return { kind: "one_time" as const, id: task._id, title: task.title, description: task.description, status: state.status, dueAt: task.dueDate, priority: task.priority, quantity: task.quantity, time: task.time, assignees: await aiAssignees(ctx, task.assigneeMembershipIds) };
 }
 
 export const aiListVisible = query({
@@ -424,21 +442,24 @@ export const aiListVisible = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const limit = Math.min(Math.max(Math.floor(args.limit), 1), 30);
     const out: any[] = [];
-    const matches = (status: string) => args.status === "all" || (args.status === "overdue" ? status === "Overdue" : args.status === "done" ? status === "Completed" : status !== "Completed");
-    const [jdTasks, oneTimeTasks] = await Promise.all([
-      ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100),
-      ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100),
-    ]);
-    const candidates = [];
-    for (let i = 0; i < Math.max(jdTasks.length, oneTimeTasks.length); i += 1) {
-      if (jdTasks[i]) candidates.push({ kind: "jd" as const, task: jdTasks[i] });
-      if (oneTimeTasks[i]) candidates.push({ kind: "one_time" as const, task: oneTimeTasks[i] });
+    const matches = (status: string) => args.status === "all" || (args.status === "overdue" ? status === "Overdue" : args.status === "done" ? status === "Completed" : status !== "Completed" && status !== "Overdue");
+    const jdRows: any[] = [];
+    for await (const task of ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc")) {
+      if (!(await visible(ctx, args.companyId, membership, task))) continue;
+      const row = await aiJdRow(ctx, task);
+      if (matches(row.status)) jdRows.push(row);
+      if (jdRows.length >= limit) break;
     }
-    for (const candidate of candidates) {
-      if (out.length >= limit) break;
-      if (!(await visible(ctx, args.companyId, membership, candidate.task))) continue;
-      const row = candidate.kind === "jd" ? await aiJdRow(ctx, candidate.task) : await aiOneTimeRow(ctx, candidate.task);
-      if (matches(row.status)) out.push(row);
+    const oneRows: any[] = [];
+    for await (const task of ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc")) {
+      if (!(await visible(ctx, args.companyId, membership, task))) continue;
+      const row = await aiOneTimeRow(ctx, task);
+      if (matches(row.status)) oneRows.push(row);
+      if (oneRows.length >= limit) break;
+    }
+    for (let i = 0; i < Math.max(jdRows.length, oneRows.length) && out.length < limit; i += 1) {
+      if (jdRows[i]) out.push(jdRows[i]);
+      if (oneRows[i] && out.length < limit) out.push(oneRows[i]);
     }
     return out;
   },
@@ -481,10 +502,11 @@ export const aiCreateOneTime = mutation({
   handler: async (ctx, args) => {
     const { membership, user } = await requireCapability(ctx, args.companyId, "tasks:one_time:create");
     const title = nonEmpty(args.title, "Task title");
+    requireTaskAssignee(args.assigneeMembershipIds);
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
-    if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
+    await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     const now = Date.now();
-    const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, serialNumber: await generateSerialNumber(ctx, args.companyId, "one_time"), title, description: cleanOptionalText(args.description), dueDate: args.dueDate, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
+    const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), dueDate: args.dueDate, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "one_time_task.create", targetType: "oneTimeTask", targetId: id, createdAt: now });
     const task = await ctx.db.get(id);
     if (!task) throw new ConvexError("Task not found.");
@@ -497,10 +519,11 @@ export const aiCreateJd = mutation({
   handler: async (ctx, args) => {
     const { membership, user } = await requireCapability(ctx, args.companyId, "tasks:jd:create");
     const title = nonEmpty(args.title, "Task title");
+    requireTaskAssignee(args.assigneeMembershipIds);
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
-    if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
+    await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
-    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, serialNumber: await generateSerialNumber(ctx, args.companyId, "jd"), title, description: cleanOptionalText(args.description), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: sod(now), assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: sod(now), assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now });
     const task = await ctx.db.get(id);
     if (!task) throw new ConvexError("Task not found.");

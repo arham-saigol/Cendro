@@ -24,7 +24,7 @@ function CompanySkeleton() {
 }
 
 export default function Company() {
-  const { activeCompanyId, active } = useCompany();
+  const { activeCompanyId } = useCompany();
   const data = useQuery(api.companyManagement.overview, activeCompanyId ? { companyId: activeCompanyId } : "skip");
   const createBranch = useMutation(api.companyManagement.createBranch).withOptimisticUpdate((store, args) => {
     const current = store.getQuery(api.companyManagement.overview, { companyId: args.companyId });
@@ -65,7 +65,6 @@ export default function Company() {
   return (
     <div className="app-page">
       <PageHeader
-        eyebrow={active?.company.name ?? "Administration"}
         title="Company management"
         description="Branches, departments, users, invitations, manager scopes, and permission overrides."
       />

@@ -265,6 +265,7 @@ function StatusBadge({ kind, task, size = "sm" }: { kind: Kind; task: any; size?
     try {
       if (kind === "jd") await updateJdStatus({ companyId: activeCompanyId, taskId: task._id, status: nextStatus });
       else await updateOneStatus({ companyId: activeCompanyId, taskId: task._id, status: nextStatus });
+      setOptimistic(null);
     } catch {
       setOptimistic(null);
     } finally {
@@ -352,7 +353,7 @@ function SelectPicker<T extends string>({ ariaLabel, value, options, onChange, p
   );
 }
 
-function AssigneePicker({ assignable, selected, onChange }: { assignable: any[]; selected: string[]; onChange: (ids: string[]) => void }) {
+function AssigneePicker({ assignable, selected, onChange, required = false }: { assignable: any[]; selected: string[]; onChange: (ids: string[]) => void; required?: boolean }) {
   const [open, setOpen] = useState(false);
   const [searchValue, setSearchValue] = useState("");
   const selectedAssignee = assignable.find((assignee) => assignee.membership._id === selected[0]);
@@ -362,7 +363,7 @@ function AssigneePicker({ assignable, selected, onChange }: { assignable: any[];
     <div className="relative">
       <button type="button" onClick={() => setOpen((current) => !current)} className="task-inline-control">
         {selectedAssignee ? <Avatar name={selectedAssignee.user.name} email={selectedAssignee.user.email} /> : <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>}
-        <span className={cn("min-w-0 flex-1 truncate", !selectedAssignee && "text-[var(--ink-faint)]")}>{selectedAssignee ? (selectedAssignee.user.name || selectedAssignee.user.email) : "Unassigned"}</span>
+        <span className={cn("min-w-0 flex-1 truncate", !selectedAssignee && "text-[var(--ink-faint)]")}>{selectedAssignee ? (selectedAssignee.user.name || selectedAssignee.user.email) : required ? "Select assignee" : "Unassigned"}</span>
         <ChevronDown className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
       </button>
       {open && (
@@ -374,11 +375,13 @@ function AssigneePicker({ assignable, selected, onChange }: { assignable: any[];
               <Input aria-label="Search assignees" className="h-8 rounded-md pl-8 text-[13px]" value={searchValue} onChange={(event) => setSearchValue(event.target.value)} placeholder="Search people" autoFocus />
             </div>
             <div className="max-h-56 overflow-auto p-0.5">
-              <button type="button" onClick={() => { onChange([]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
-                <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>
-                <span className="flex-1 text-[var(--ink-secondary)]">Unassigned</span>
-                {!selected[0] && <Check className="h-4 w-4 text-[var(--primary)]" />}
-              </button>
+              {!required && (
+                <button type="button" onClick={() => { onChange([]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
+                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>
+                  <span className="flex-1 text-[var(--ink-secondary)]">Unassigned</span>
+                  {!selected[0] && <Check className="h-4 w-4 text-[var(--primary)]" />}
+                </button>
+              )}
               {filtered.map((assignee) => {
                 const id = assignee.membership._id as string;
                 const name = assignee.user.name || assignee.user.email;
@@ -498,12 +501,14 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
   const [values, setValues] = useState<TaskFormValues>(() => task ? formFromTask(kind, task) : emptyForm(kind));
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [persistedTaskId, setPersistedTaskId] = useState<string | null>(null);
 
   function reset(nextOpen: boolean) {
     onOpenChange(nextOpen);
     if (!nextOpen) {
       setError(null);
       setSaving(false);
+      setPersistedTaskId(null);
       setValues(task ? formFromTask(kind, task) : emptyForm(kind));
     }
   }
@@ -511,32 +516,37 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
 
   async function uploadFiles(taskId: string, files: File[]) {
     if (!activeCompanyId || files.length === 0 || !active?.capabilities.includes("tasks:attachment:add")) return;
-    for (const file of files) {
+    for (const file of [...files]) {
       const postUrl = await generateUploadUrl({ companyId: activeCompanyId });
       const response = await fetch(postUrl, { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
       if (!response.ok) throw new Error(`Could not upload ${file.name}.`);
       const json = await response.json() as { storageId?: Id<"_storage"> };
       if (!json.storageId) throw new Error(`Could not upload ${file.name}.`);
       await addAttachment({ companyId: activeCompanyId, taskType: taskTypeFor(kind), taskId, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size });
+      setValues((current) => ({ ...current, files: current.files.filter((candidate) => candidate !== file) }));
     }
   }
 
   async function submit() {
     if (!activeCompanyId || saving) return;
     if (!values.title.trim()) { setError("Task title is required."); return; }
+    if (mode === "create" && values.assigneeMembershipIds.length === 0) { setError("Assignee is required."); return; }
     if (kind === "jd" && !values.recurrence) { setError("Frequency is required."); return; }
     setSaving(true);
     setError(null);
     try {
-      let taskId = task?._id as string | undefined;
+      let taskId = persistedTaskId ?? (task?._id as string | undefined);
       const common = { companyId: activeCompanyId, title: values.title.trim(), description: values.description, time: values.time, quantity: quantityFromInput(values.quantity), assigneeMembershipIds: values.assigneeMembershipIds as Id<"companyMemberships">[] };
-      if (kind === "jd") {
-        if (mode === "create") taskId = await createJd({ ...common, recurrence: values.recurrence });
-        else await updateJd({ ...common, taskId: task._id, recurrence: values.recurrence });
-      } else {
-        const payload = { ...common, dueDate: fromDateInput(values.dueDate), priority: values.priority };
-        if (mode === "create") taskId = await createOne(payload);
-        else await updateOne({ ...payload, taskId: task._id });
+      if (!persistedTaskId) {
+        if (kind === "jd") {
+          if (mode === "create") taskId = await createJd({ ...common, recurrence: values.recurrence });
+          else await updateJd({ ...common, taskId: task._id, recurrence: values.recurrence });
+        } else {
+          const payload = { ...common, dueDate: fromDateInput(values.dueDate), priority: values.priority };
+          if (mode === "create") taskId = await createOne(payload);
+          else await updateOne({ ...payload, taskId: task._id });
+        }
+        if (mode === "create" && taskId) setPersistedTaskId(taskId);
       }
       if (taskId) await uploadFiles(taskId, values.files);
       reset(false);
@@ -566,7 +576,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
               <div className="mt-4 divide-y divide-[var(--hairline)] border-y border-[var(--hairline)]">
                 <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
                   <span className="text-[13px] text-[var(--ink-muted)]">Assignee</span>
-                  <div className="min-w-0"><AssigneePicker assignable={assignable} selected={values.assigneeMembershipIds} onChange={(ids) => patch({ assigneeMembershipIds: ids })} /></div>
+                  <div className="min-w-0"><AssigneePicker assignable={assignable} selected={values.assigneeMembershipIds} onChange={(ids) => patch({ assigneeMembershipIds: ids })} required={mode === "create"} /></div>
                 </div>
                 {kind === "jd" ? (
                   <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
@@ -610,7 +620,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
 
             <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--hairline)] px-6 py-4">
               <Button type="button" variant="secondary" onClick={() => reset(false)}>Cancel</Button>
-              <Button type="submit" size="lg" variant="primary" disabled={saving || !values.title.trim()}>{saving ? "Saving..." : mode === "create" ? "Create task" : "Save changes"}</Button>
+              <Button type="submit" size="lg" variant="primary" disabled={saving || !values.title.trim() || (mode === "create" && values.assigneeMembershipIds.length === 0)}>{saving ? "Saving..." : persistedTaskId ? "Retry upload" : mode === "create" ? "Create task" : "Save changes"}</Button>
             </div>
           </form>
         </Dialog.Content>
@@ -728,7 +738,6 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   return (
     <div>
       <PageHeader
-        eyebrow={active?.company.name}
         title={pageTitle}
         description={description}
       />
@@ -738,7 +747,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <label className="relative block min-w-[200px] flex-1 max-w-[340px]">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--ink-faint)]" />
-          <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-8 pl-8 text-[13px]" placeholder="Search title or serial number" />
+          <Input value={search} onChange={(event) => setSearch(event.target.value)} className="h-8 pl-8 text-[13px]" placeholder="Search title" />
         </label>
         <div className="flex flex-1 items-center justify-end gap-2">
           <span className="hidden text-[12.5px] text-[var(--ink-faint)] sm:inline">{tasks ? `${visibleTasks.length} ${visibleTasks.length === 1 ? "task" : "tasks"}` : ""}</span>
@@ -823,7 +832,6 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                     <div className="flex items-center gap-3">
                       <div className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-[var(--surface-muted)]" />
                       <div className="h-3 w-2/5 animate-pulse rounded bg-[var(--surface-muted)]" />
-                      <div className="ml-1 h-3 w-12 animate-pulse rounded bg-[var(--surface-muted)]" />
                     </div>
                   </td>
                 </tr>
@@ -861,7 +869,6 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                     <td className="col-task max-w-[360px]">
                       <div className="flex min-w-0 items-center gap-2.5">
                         <span className="min-w-0 flex-1 truncate">{task.title}</span>
-                        <span className="ml-1 hidden shrink-0 font-mono text-[11px] text-[var(--ink-faint)] sm:inline">{task.serialNumber}</span>
                       </div>
                     </td>
                     {kind === "jd" ? (
@@ -1062,8 +1069,6 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
       <div className="pt-1">
         <h1 className="text-[26px] font-semibold leading-tight tracking-[-0.025em] text-[var(--ink)]">{task.title}</h1>
         <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] text-[var(--ink-faint)]">
-          <span className="font-mono">{task.serialNumber}</span>
-          <span aria-hidden>·</span>
           <span>{typeLabel}</span>
           <span aria-hidden>·</span>
           <span>Updated {relativeTime(task.updatedAt)}</span>

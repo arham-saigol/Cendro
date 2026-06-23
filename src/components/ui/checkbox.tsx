@@ -4,7 +4,7 @@ import * as React from "react";
 import { Check, Minus } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type CheckboxProps = Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "onChange"> & {
+export type CheckboxProps = Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "onChange" | "onClick"> & {
   checked: boolean;
   indeterminate?: boolean;
   onCheckedChange: (next: boolean) => void;

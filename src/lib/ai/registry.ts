@@ -40,7 +40,7 @@ class AiToolDenied extends Error {}
 class AiToolNotFound extends Error {}
 
 const priority = z.enum(["low", "medium", "high"]);
-const recurrence = z.enum(["daily", "every_other_day", "weekly", "every_two_weeks", "monthly", "semiannually", "annually"]);
+const recurrence = z.enum(["daily", "every_other_day", "monthly", "semiannually", "annually"]);
 const taskRef = z.string().regex(/^task_\d+$/);
 const memberRef = z.string().regex(/^member_\d+$/);
 const sopRef = z.string().regex(/^sop_\d+$/);
@@ -170,7 +170,7 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
   {
     name: "create_one_time_task",
     description: "Create a one-time task after the user explicitly asks for it. Use member refs from list_assignable_users; if absent, ask one clarification.",
-    inputSchema: z.object({ title: z.string().min(1).max(160), description: z.string().max(2000).optional(), dueDateMs: z.number().int().positive(), assigneeRefs: z.array(memberRef).min(1).max(10), priority: priority.default("medium") }),
+    inputSchema: z.object({ title: z.string().min(1).max(160), description: z.string().max(2000).optional(), dueDateMs: z.number().int().positive().optional(), assigneeRefs: z.array(memberRef).max(10).default([]), priority: priority.default("medium") }),
     activityLabel: cendroAiActivityLabels.create_one_time_task,
     permission: "tasks:one_time:create",
     risk: "write",
@@ -183,13 +183,13 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
   {
     name: "create_jd_task",
     description: "Create a recurring JD task after explicit user intent. Use member refs from list_assignable_users; if absent, ask one clarification.",
-    inputSchema: z.object({ title: z.string().min(1).max(160), description: z.string().max(2000).optional(), recurrence, startDateMs: z.number().int().positive(), assigneeRefs: z.array(memberRef).min(1).max(10), priority: priority.default("medium") }),
+    inputSchema: z.object({ title: z.string().min(1).max(160), description: z.string().max(2000).optional(), recurrence, assigneeRefs: z.array(memberRef).max(10).default([]) }),
     activityLabel: cendroAiActivityLabels.create_jd_task,
     permission: "tasks:jd:create",
     risk: "write",
     execute: async (input, ctx) => {
       const assigneeMembershipIds = input.assigneeRefs.map((ref: string) => resolveRef(ctx, ref, "member").id as Id<"companyMemberships">);
-      const row = await ctx.client.mutation(api.tasks.aiCreateJd, { companyId: ctx.companyId, title: input.title, description: input.description, recurrence: input.recurrence, startDate: input.startDateMs, assigneeMembershipIds, priority: input.priority });
+      const row = await ctx.client.mutation(api.tasks.aiCreateJd, { companyId: ctx.companyId, title: input.title, description: input.description, recurrence: input.recurrence, assigneeMembershipIds });
       return { ok: true, task: taskOut(ctx, row) };
     },
   },

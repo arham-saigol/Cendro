@@ -12,7 +12,6 @@ import {
   Clock,
   Flag,
   Inbox,
-  Lock,
   Maximize2,
   Minimize2,
   Paperclip,
@@ -33,7 +32,6 @@ import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
 import { PageHeader } from "./page-header";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -69,7 +67,7 @@ const frequencies: { value: Frequency; label: string }[] = [
 ];
 const priorities: Priority[] = ["low", "medium", "high"];
 const manualStatuses: { value: ManualStatus; label: string }[] = [
-  { value: "due", label: "Due" },
+  { value: "due", label: "Not Started" },
   { value: "in_progress", label: "In Progress" },
   { value: "completed", label: "Completed" },
 ];
@@ -79,7 +77,7 @@ const toneClasses: Record<string, string> = {
   green: "bg-[var(--badge-green-bg)] text-[var(--badge-green-fg)]",
   red: "bg-[var(--badge-red-bg)] text-[var(--badge-red-fg)]",
   yellow: "bg-[var(--badge-yellow-bg)] text-[var(--badge-yellow-fg)]",
-  neutral: "bg-[var(--surface-pressed)] text-[var(--ink-muted)]",
+  neutral: "bg-[var(--badge-neutral-bg)] text-[var(--badge-neutral-fg)]",
 };
 
 function emptyForm(kind: Kind): TaskFormValues {
@@ -123,10 +121,10 @@ function fromDateInput(value: string) {
 function quantityFromInput(value: string) { const parsed = Number(value); return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined; }
 function frequencyLabel(value?: Frequency) { return frequencies.find((frequency) => frequency.value === value)?.label ?? "—"; }
 function priorityLabel(value?: Priority) { return value ? value[0].toUpperCase() + value.slice(1) : "—"; }
-function statusText(task: any) { return typeof task.state === "string" ? task.state : task.state?.status ?? "Due"; }
-function rawStatus(task: any): ManualStatus | "overdue" { return task.state?.rawStatus ?? (statusText(task) === "Completed" ? "completed" : statusText(task) === "In Progress" ? "in_progress" : statusText(task) === "Overdue" ? "overdue" : "due"); }
-function statusTone(status: string) { if (status === "Overdue") return "red"; if (status === "Completed") return "green"; if (status === "In Progress") return "yellow"; return "blue"; }
-function statusDotClass(status: ManualStatus | "overdue") { return status === "completed" ? "bg-[var(--badge-green-fg)]" : status === "in_progress" ? "bg-[var(--badge-yellow-fg)]" : status === "overdue" ? "bg-[var(--badge-red-fg)]" : "bg-[var(--badge-blue-fg)]"; }
+function statusText(task: any) { return typeof task.state === "string" ? task.state : task.state?.status ?? "Not Started"; }
+function rawStatus(task: any): ManualStatus | "overdue" { return task.state?.rawStatus ?? (statusText(task) === "Completed" ? "completed" : statusText(task) === "In Progress" ? "in_progress" : statusText(task) === "Overdue" ? "overdue" : statusText(task) === "Not Started" ? "due" : "due"); }
+function statusTone(status: string) { if (status === "Overdue") return "red"; if (status === "Completed") return "green"; if (status === "In Progress") return "blue"; return "neutral"; }
+function statusDotClass(status: ManualStatus | "overdue") { return status === "completed" ? "bg-[var(--badge-green-fg)]" : status === "in_progress" ? "bg-[var(--badge-blue-fg)]" : status === "overdue" ? "bg-[var(--badge-red-fg)]" : "bg-[var(--badge-neutral-fg)]"; }
 function taskTypeFor(kind: Kind) { return kind === "jd" ? "jd" : "one_time"; }
 function hasAnyCapability(active: { capabilities: string[] } | null | undefined, capabilities: string[]) { return capabilities.some((capability) => active?.capabilities.includes(capability)); }
 function canCreateTasks(active: { capabilities: string[] } | null | undefined, kind: Kind) { return active?.capabilities.includes(kind === "jd" ? "tasks:jd:create" : "tasks:one_time:create") ?? false; }
@@ -161,10 +159,7 @@ function humanSize(bytes?: number) {
   return `${i <= 1 ? Math.round(value) : value.toFixed(1)} ${units[i]}`;
 }
 function priorityChipClasses(priority: Priority) {
-  return priority === "high" ? "bg-[var(--badge-red-bg)] text-[var(--badge-red-fg)]" : priority === "medium" ? "bg-[var(--badge-yellow-bg)] text-[var(--badge-yellow-fg)]" : "bg-[var(--surface-pressed)] text-[var(--ink-muted)]";
-}
-function priorityDot(priority: Priority) {
-  return priority === "high" ? "bg-[var(--badge-red-fg)]" : priority === "medium" ? "bg-[var(--badge-yellow-fg)]" : "bg-[var(--ink-faint)]";
+  return priority === "high" ? "bg-[var(--priority-high-bg)] text-[var(--priority-high-fg)]" : priority === "medium" ? "bg-[var(--priority-medium-bg)] text-[var(--priority-medium-fg)]" : "bg-[var(--priority-low-bg)] text-[var(--priority-low-fg)]";
 }
 function dueLabel(task: any) {
   const ms = task.dueDate;
@@ -247,14 +242,17 @@ function Avatar({ name, email, size = "sm" }: { name?: string | null; email?: st
   );
 }
 
-function AvatarStack({ assignees, max = 3 }: { assignees: { user: { name: string | null; email: string } }[]; max?: number }) {
+function AvatarStack({ assignees, max = 3, showName = false }: { assignees: { user: { name: string | null; email: string } }[]; max?: number; showName?: boolean }) {
   if (!assignees.length) return <span className="text-[12.5px] text-[var(--ink-faint)]">Unassigned</span>;
   const shown = assignees.slice(0, max);
   const extra = assignees.length - shown.length;
   return (
-    <span className="avatar-stack">
-      {shown.map((assignee, index) => <Avatar key={index} name={assignee.user.name} email={assignee.user.email} />)}
-      {extra > 0 && <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--surface-hover)] text-[10px] font-semibold text-[var(--ink-secondary)] ring-2 ring-[var(--canvas)]">+{extra}</span>}
+    <span className="inline-flex min-w-0 items-center gap-2">
+      <span className="avatar-stack shrink-0">
+        {shown.map((assignee, index) => <Avatar key={index} name={assignee.user.name} email={assignee.user.email} />)}
+        {extra > 0 && <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--surface-hover)] text-[10px] font-semibold text-[var(--ink-secondary)] ring-2 ring-[var(--canvas)]">+{extra}</span>}
+      </span>
+      {showName && <span className="min-w-0 truncate">{assigneeDisplayName(assignees[0])}</span>}
     </span>
   );
 }
@@ -286,7 +284,7 @@ function StatusBadge({ kind, task, size = "sm" }: { kind: Kind; task: any; size?
     }
   }
 
-  if (locked) return <Badge tone="red" className={cn("inline-flex items-center gap-1.5 rounded px-2", pad)}><Lock className="h-3 w-3" />Overdue</Badge>;
+  if (locked) return <span className={cn("task-pill", toneClasses[statusTone("Overdue")], pad)} aria-label="Overdue (locked)"><span className="task-pill-dot bg-[var(--badge-red-fg)]" />Overdue</span>;
   if (!canUpdate) return <span className={cn("task-pill", toneClasses[statusTone(status)], pad)}><span className={cn("task-pill-dot", statusDotClass(raw))} />{status}</span>;
 
   return (
@@ -364,7 +362,7 @@ function TaskFilterMenu({
 }) {
   const statusOptions: { value: StatusFilter; label: string }[] = [
     { value: "all", label: "All statuses" },
-    { value: "due", label: "Due" },
+    { value: "due", label: "Not Started" },
     { value: "in_progress", label: "In progress" },
     { value: "completed", label: "Completed" },
     { value: "overdue", label: "Overdue" },
@@ -994,28 +992,24 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                     </td>
                     {kind === "jd" ? (
                       <td className="whitespace-nowrap text-[var(--ink-secondary)]">
-                        <span className="inline-flex items-center gap-1.5">
-                          <FrequencyIcon className="h-3.5 w-3.5 text-[var(--ink-faint)]" />
-                          {frequencyLabel(task.recurrence)}
-                        </span>
+                        {frequencyLabel(task.recurrence)}
                       </td>
                     ) : (
                       <td>
-                        <span className={cn("task-pill", priorityChipClasses(task.priority))}>
-                          <span className={cn("task-pill-dot", priorityDot(task.priority))} />
+                        <span className={cn("priority-chip", priorityChipClasses(task.priority))}>
                           {priorityLabel(task.priority)}
                         </span>
                       </td>
                     )}
-                    <td><AvatarStack assignees={task.assignees} /></td>
+                    <td><AvatarStack assignees={task.assignees} showName /></td>
                     <td><StatusBadge kind={kind} task={task} /></td>
                     {kind === "one" && (
                       <td className="col-meta">
                         <span className={cn(dueTone(task) === "danger" && "font-medium text-[var(--danger)]", dueTone(task) === "warn" && "font-medium text-[var(--badge-yellow-fg)]", dueTone(task) === "muted" && "text-[var(--ink-faint)]")}>{dueLabel(task)}</span>
                       </td>
                     )}
-                    <td className="col-meta">{task.time || "—"}</td>
-                    <td className="col-meta">{task.quantity != null ? task.quantity : "—"}</td>
+                    <td>{task.time || "—"}</td>
+                    <td>{task.quantity != null ? task.quantity : "—"}</td>
                   </tr>
                   );
                 })}
@@ -1217,8 +1211,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
             </PropertyRow>
           ) : (
             <PropertyRow icon={<Flag className="h-3.5 w-3.5" />} label="Priority">
-              <span className={cn("task-pill", priorityChipClasses(task.priority))}>
-                <span className={cn("task-pill-dot", priorityDot(task.priority))} />
+              <span className={cn("priority-chip", priorityChipClasses(task.priority))}>
                 {priorityLabel(task.priority)}
               </span>
             </PropertyRow>

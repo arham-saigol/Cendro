@@ -71,6 +71,15 @@ describe("production permission and validation fixes", () => {
     })).resolves.toEqual(expect.any(String));
   });
 
+  test("task updates require at least one assignee", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const jdTaskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "JD task", description: "", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    const oneTimeTaskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, { companyId, title: "One-time task", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [adminMembershipId], priority: "medium" });
+
+    await expect(t.withIdentity(identity("admin")).mutation(api.tasks.updateJd, { companyId, taskId: jdTaskId, title: "JD task", description: "", recurrence: "daily", assigneeMembershipIds: [] })).rejects.toThrow("Task assignee is required");
+    await expect(t.withIdentity(identity("admin")).mutation(api.tasks.updateOneTime, { companyId, taskId: oneTimeTaskId, title: "One-time task", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [], priority: "medium" })).rejects.toThrow("Task assignee is required");
+  });
+
   test("analytics requires an effective analytics:view capability", async () => {
     const { t, companyId, employeeMembershipId } = await seedCompany();
     await t.run(async (ctx) => {

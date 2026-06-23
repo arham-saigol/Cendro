@@ -29,7 +29,7 @@ function next(s: number, r: Rec) {
 }
 function cycle(cycleStartedAt: number, r: Rec, now = Date.now()) { let start = sod(cycleStartedAt); let end = next(start, r); while (end <= now) { start = end; end = next(start, r); } return { start, end }; }
 function prevCycle(cycleStartedAt: number, r: Rec) { const c = cycle(cycleStartedAt, r); let prev = sod(cycleStartedAt); let end = next(prev, r); while (end < c.start) { prev = end; end = next(prev, r); } return c.start === sod(cycleStartedAt) ? null : { start: prev, end: c.start }; }
-function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Due" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
+function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Not Started" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
 function cleanOptionalText(value?: string) { const text = value?.trim(); return text ? text : undefined; }
 function cleanOptionalQuantity(value?: number) { return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined; }
 async function enrich(ctx: Ctx, ids: Id<"companyMemberships">[]) {
@@ -176,6 +176,7 @@ export const updateJd = mutation({
     const task = await ctx.db.get(args.taskId);
     if (!task || task.companyId !== args.companyId) throw new ConvexError("Task not found.");
     await assertCanUpdateTask(ctx, args.companyId, membership, updateAuthTargets(task), "jd");
+    requireTaskAssignee(args.assigneeMembershipIds);
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
     if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const state = await jdState(ctx, task);
@@ -257,6 +258,7 @@ export const updateOneTime = mutation({
     const task = await ctx.db.get(args.taskId);
     if (!task || task.companyId !== args.companyId) throw new ConvexError("Task not found.");
     await assertCanUpdateTask(ctx, args.companyId, membership, updateAuthTargets(task), "one_time");
+    requireTaskAssignee(args.assigneeMembershipIds);
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
     if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     const state = oneState(task);

@@ -38,6 +38,14 @@
   --badge-red-fg: #a33a32;
   --badge-yellow-bg: #fff3d2;
   --badge-yellow-fg: #79550d;
+  --badge-neutral-bg: #dde0e2;
+  --badge-neutral-fg: #4a4d50;
+  --priority-high-bg: #fbe1de;
+  --priority-high-fg: #a33a32;
+  --priority-medium-bg: #fdf1cd;
+  --priority-medium-fg: #79550d;
+  --priority-low-bg: #d8f0e1;
+  --priority-low-fg: #2c7046;
   --shadow-popover: 0 10px 28px rgba(30, 28, 24, 0.12), 0 1px 2px rgba(30, 28, 24, 0.08);
   --shadow-elevated: var(--shadow-popover);
   --assistant-orb-bg: #ffffff;
@@ -83,6 +91,14 @@
   --badge-red-fg: #f4aaa4;
   --badge-yellow-bg: #39311e;
   --badge-yellow-fg: #efd08a;
+  --badge-neutral-bg: #2a2c2f;
+  --badge-neutral-fg: #a8a59f;
+  --priority-high-bg: #3b2321;
+  --priority-high-fg: #f4aaa4;
+  --priority-medium-bg: #39311e;
+  --priority-medium-fg: #efd08a;
+  --priority-low-bg: #1f3027;
+  --priority-low-fg: #9bd6b3;
   --shadow-popover: 0 14px 34px rgba(0, 0, 0, 0.42), 0 1px 2px rgba(0, 0, 0, 0.28);
   --shadow-elevated: var(--shadow-popover);
   --assistant-orb-bg: #d8d8d8;
@@ -286,10 +302,10 @@ button:disabled { cursor: not-allowed; }
 .task-pill {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   height: 22px;
-  padding-inline: 7px;
-  border-radius: 4px;
+  padding-inline: 8px;
+  border-radius: 999px;
   font-size: 12px;
   font-weight: 500;
   line-height: 1;
@@ -301,6 +317,19 @@ button:disabled { cursor: not-allowed; }
 .task-pill[data-interactive="true"]:active { filter: brightness(0.9); }
 .task-pill-dot { width: 7px; height: 7px; border-radius: 999px; flex-shrink: 0; }
 .task-pill-chevron { opacity: 0.55; flex-shrink: 0; }
+
+/* Priority chip — text-only, regular weight, slightly rounded */
+.priority-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding-inline: 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1;
+  white-space: nowrap;
+}
 
 /* Floating square icon button (peek bar, row hover, etc.) */
 .task-icon-btn {

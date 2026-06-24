@@ -128,8 +128,12 @@ describe("production permission and validation fixes", () => {
     await expect(t.withIdentity(identity("employee")).query(api.sops.get, { companyId, sopId: userSopId })).resolves.toMatchObject({ title: "User" });
     const list = await t.withIdentity(identity("employee")).query(api.sops.list, { companyId, paginationOpts: { numItems: 10, cursor: null } });
     expect(Object.fromEntries(list.page.map((sop) => [sop.title, sop.scopeTargetName]))).toMatchObject({ Company: "Acme", Branch: "Downtown", User: "Employee" });
-    await expect(t.withIdentity(identity("admin2", "admin2@example.com")).query(api.sops.get, { companyId, sopId: branchSopId })).rejects.toThrow("SOP not found");
-    await expect(t.withIdentity(identity("admin")).query(api.sops.get, { companyId, sopId: userSopId })).rejects.toThrow("SOP not found");
+    await expect(t.withIdentity(identity("admin2", "admin2@example.com")).query(api.sops.get, { companyId, sopId: branchSopId })).resolves.toMatchObject({ title: "Branch" });
+    await expect(t.withIdentity(identity("admin")).query(api.sops.get, { companyId, sopId: userSopId })).resolves.toMatchObject({ title: "User" });
+    const adminAll = await t.withIdentity(identity("admin")).query(api.sops.listRows, { companyId, view: "all" });
+    expect(adminAll.map((sop) => sop.title).sort()).toEqual(["Branch", "Company", "User"]);
+    const adminMy = await t.withIdentity(identity("admin")).query(api.sops.listRows, { companyId, view: "my" });
+    expect(adminMy.map((sop) => sop.title)).toEqual(["Company"]);
   });
 
   test("SOP scoped creation requires exactly one selected target", async () => {

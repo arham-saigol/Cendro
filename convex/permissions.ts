@@ -139,7 +139,25 @@ export async function assertCanUpdateTask(ctx: Ctx, companyId: Id<"companies">, 
   throw new ConvexError("You cannot update this task.");
 }
 
-export async function visibleSop(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, sop: Doc<"sops">) {
+async function membershipBranchIds(ctx: Ctx, membershipIds: Set<Id<"companyMemberships">>) {
+  const branchIds = new Set<Id<"branches">>();
+  for (const membershipId of membershipIds) {
+    const rows = await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(500);
+    for (const row of rows) branchIds.add(row.branchId);
+  }
+  return branchIds;
+}
+
+async function membershipDepartmentIds(ctx: Ctx, membershipIds: Set<Id<"companyMemberships">>) {
+  const departmentIds = new Set<Id<"departments">>();
+  for (const membershipId of membershipIds) {
+    const rows = await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(500);
+    for (const row of rows) departmentIds.add(row.departmentId);
+  }
+  return departmentIds;
+}
+
+export async function visibleSopForSelf(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, sop: Doc<"sops">) {
   if (sop.companyId !== companyId) return false;
   if (sop.scopeType === "company") return true;
   if (sop.scopeType === "user") {
@@ -147,14 +165,37 @@ export async function visibleSop(ctx: Ctx, companyId: Id<"companies">, m: Doc<"c
     return rows.some((row) => row.userMembershipId === m._id);
   }
   if (sop.scopeType === "branch") {
-    const userBranches = await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500);
+    const branchIds = await membershipBranchIds(ctx, new Set([m._id]));
     const sopBranches = await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
-    const branchIds = new Set(userBranches.map((row) => row.branchId));
     return sopBranches.some((row) => branchIds.has(row.branchId));
   }
-  const userDepartments = await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500);
+  const departmentIds = await membershipDepartmentIds(ctx, new Set([m._id]));
   const sopDepartments = await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
-  const departmentIds = new Set(userDepartments.map((row) => row.departmentId));
+  return sopDepartments.some((row) => departmentIds.has(row.departmentId));
+}
+
+export async function visibleSop(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, sop: Doc<"sops">) {
+  if (sop.companyId !== companyId) return false;
+  if (m.role === "Admin") return true;
+  if (m.role !== "Manager") return await visibleSopForSelf(ctx, companyId, m, sop);
+  if (sop.scopeType === "company") return true;
+
+  const scopedMemberships = await scopedMembershipIds(ctx, companyId, m);
+  if (sop.scopeType === "user") {
+    const rows = await ctx.db.query("sopUserScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
+    return rows.some((row) => scopedMemberships.has(row.userMembershipId));
+  }
+  if (sop.scopeType === "branch") {
+    const branchIds = await membershipBranchIds(ctx, scopedMemberships);
+    const managedBranches = await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", m._id)).take(500);
+    for (const row of managedBranches) branchIds.add(row.branchId);
+    const sopBranches = await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
+    return sopBranches.some((row) => branchIds.has(row.branchId));
+  }
+  const departmentIds = await membershipDepartmentIds(ctx, scopedMemberships);
+  const managedDepartments = await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", m._id)).take(500);
+  for (const row of managedDepartments) departmentIds.add(row.departmentId);
+  const sopDepartments = await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
   return sopDepartments.some((row) => departmentIds.has(row.departmentId));
 }
 

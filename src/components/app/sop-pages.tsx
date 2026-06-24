@@ -5,6 +5,7 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   Check,
   ChevronDown,
+  ChevronRight,
   ChevronsRight,
   FileText,
   History,
@@ -14,12 +15,14 @@ import {
   Pencil,
   Plus,
   Search,
+  SlidersHorizontal,
   Trash2,
+  User,
   Users,
   X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
@@ -33,6 +36,8 @@ import { cn, formatDate, initials } from "@/lib/utils";
 type ScopeType = "company" | "branch" | "department" | "user";
 type EditableScopeType = "company" | "branch" | "user";
 type CreateScopeType = EditableScopeType;
+type SopView = "all" | "my";
+type SopScopeFilter = "all" | ScopeType;
 type SopScopeOptions = { branches: { _id: Id<"branches">; name: string }[]; users: { membership: { _id: Id<"companyMemberships">; role: string }; user: { name: string; firstName?: string; imageUrl?: string | null } }[] };
 type SopTargetUser = { firstName?: string; name?: string; imageUrl?: string | null } | null | undefined;
 
@@ -153,6 +158,82 @@ function SopUserAvatar({ name, imageUrl }: { name: string; imageUrl?: string | n
       {initials(name)}
       {imageUrl && <span aria-hidden="true" className="absolute inset-0 bg-cover bg-center" style={{ backgroundImage: `url(${imageUrl})` }} />}
     </span>
+  );
+}
+
+function StarIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true">
+      <path d="M234.29,114.85l-45,38.83L203,211.75a16.4,16.4,0,0,1-24.5,17.82L128,198.49,77.47,229.57A16.4,16.4,0,0,1,53,211.75l13.76-58.07-45-38.83A16.46,16.46,0,0,1,31.08,86l59-4.76,22.76-55.08a16.36,16.36,0,0,1,30.27,0l22.75,55.08,59,4.76a16.46,16.46,0,0,1,9.37,28.86Z" />
+    </svg>
+  );
+}
+
+function SopFilterSubmenu<T extends string>({ label, value, options, onChange }: { label: string; value: T; options: { value: T; label: string; avatar?: React.ReactNode }[]; onChange: (value: T) => void }) {
+  return (
+    <DropdownMenu.Sub>
+      <DropdownMenu.SubTrigger className="task-menu-item">
+        <span className="flex-1">{label}</span>
+        <ChevronRight className="h-3.5 w-3.5" />
+      </DropdownMenu.SubTrigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.SubContent sideOffset={7} alignOffset={-5} className="task-menu min-w-52">
+          {options.map((option) => (
+            <DropdownMenu.Item key={option.value} onSelect={() => onChange(option.value)} className="task-menu-item">
+              {option.avatar}
+              <span className="min-w-0 flex-1 truncate">{option.label}</span>
+              {value === option.value && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
+            </DropdownMenu.Item>
+          ))}
+        </DropdownMenu.SubContent>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Sub>
+  );
+}
+
+function SopFilterMenu({
+  scopeFilter,
+  branchFilter,
+  personFilter,
+  branches,
+  users,
+  activeCount,
+  showPersonFilter,
+  onScopeChange,
+  onBranchChange,
+  onPersonChange,
+}: {
+  scopeFilter: SopScopeFilter;
+  branchFilter: string;
+  personFilter: string;
+  branches: SopScopeOptions["branches"];
+  users: SopScopeOptions["users"];
+  activeCount: number;
+  showPersonFilter: boolean;
+  onScopeChange: (value: SopScopeFilter) => void;
+  onBranchChange: (value: string) => void;
+  onPersonChange: (value: string) => void;
+}) {
+  const scopeOptions: { value: SopScopeFilter; label: string }[] = [{ value: "all", label: "All scopes" }, ...(["company", "branch", "department", "user"] as ScopeType[]).map((scope) => ({ value: scope, label: scopeLabels[scope] }))];
+  const branchOptions = [{ value: "all", label: "All branches" }, ...branches.map((branch) => ({ value: branch._id as string, label: branch.name }))];
+  const personOptions = [{ value: "all", label: "All people" }, ...users.map((user) => ({ value: user.membership._id as string, label: user.user.name, avatar: <SopUserAvatar name={user.user.name} imageUrl={user.user.imageUrl} /> }))];
+
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button type="button" className="task-toolbar-icon" data-active={activeCount > 0} aria-label="Filter SOPs">
+          <SlidersHorizontal className="h-4 w-4" />
+          {activeCount > 0 && <span className="task-toolbar-badge">{activeCount}</span>}
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content align="end" sideOffset={6} className="task-menu min-w-48" aria-label="SOP filters">
+          <SopFilterSubmenu label="Scope" value={scopeFilter} options={scopeOptions} onChange={onScopeChange} />
+          <SopFilterSubmenu label="Branch" value={branchFilter} options={branchOptions} onChange={onBranchChange} />
+          {showPersonFilter && <SopFilterSubmenu label="Person" value={personFilter} options={personOptions} onChange={onPersonChange} />}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }
 
@@ -555,22 +636,49 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const [sopView, setSopView] = useState<SopView>("all");
+  const [scopeFilter, setScopeFilter] = useState<SopScopeFilter>("all");
+  const [branchFilter, setBranchFilter] = useState("all");
+  const [personFilter, setPersonFilter] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [pendingCell, setPendingCell] = useState<string | null>(null);
   const debouncedSearch = useDebouncedValue(search);
+  const canUseAllSops = active?.membership.role === "Admin" || active?.membership.role === "Manager";
+  const effectiveSopView: SopView = canUseAllSops ? sopView : "my";
   const canLoadScopeOptions = canLoadSopScopeOptions(active);
-  const sopQuery = usePaginatedQuery(api.sops.list, activeCompanyId && { companyId: activeCompanyId, search: debouncedSearch || undefined } || "skip", { initialNumItems: 25 });
+  const sops = useQuery(api.sops.listRows, activeCompanyId ? {
+    companyId: activeCompanyId,
+    search: debouncedSearch || undefined,
+    view: effectiveSopView,
+    scope: scopeFilter,
+    branchId: branchFilter === "all" ? undefined : branchFilter as Id<"branches">,
+    userMembershipId: personFilter === "all" || effectiveSopView === "my" ? undefined : personFilter as Id<"companyMemberships">,
+  } : "skip") as any[] | undefined;
   const scopeOptions = useQuery(api.sops.scopeOptions, activeCompanyId && canLoadScopeOptions ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
+  const filterOptions = useQuery(api.sops.filterOptions, activeCompanyId && canUseAllSops ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const update = useMutation(api.sops.update);
   const updateScope = useMutation(api.sops.updateScope);
-  const sops = sopQuery?.results as any[] | undefined;
-  const isLoading = !sopQuery || sopQuery.status === "LoadingFirstPage";
+  const isLoading = sops === undefined;
   const rows = sops ?? [];
   const canCreate = canCreateSops(active);
   const editableScopes = useMemo(() => editableScopeTypes.filter((scope) => canManageSop(active, scope)), [active]);
+  const filterCount = [scopeFilter !== "all", branchFilter !== "all", effectiveSopView === "all" && personFilter !== "all"].filter(Boolean).length;
+  const hasActiveFilters = filterCount > 0 || search.trim() !== "";
 
   useEffect(() => { if (searchOpen) searchInputRef.current?.focus(); }, [searchOpen]);
+
+  useEffect(() => {
+    if (!activeCompanyId) return;
+    setSopView(canUseAllSops ? "all" : "my");
+    setScopeFilter("all");
+    setBranchFilter("all");
+    setPersonFilter("all");
+  }, [activeCompanyId, canUseAllSops]);
+
+  useEffect(() => {
+    if (effectiveSopView === "my" && personFilter !== "all") setPersonFilter("all");
+  }, [effectiveSopView, personFilter]);
 
   async function saveTitle(sop: any, title: string) {
     if (!activeCompanyId) return false;
@@ -624,6 +732,16 @@ export function SopList({ selectedId }: { selectedId?: string }) {
       <SopDialog mode="create" open={createOpen} onOpenChange={setCreateOpen} onCreated={(id) => router.push(`/sops/${id}`)} />
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
+        <div className="task-view-toggle" aria-label="SOP view">
+          {canUseAllSops && (
+            <button type="button" className="task-view-button" data-active={effectiveSopView === "all"} onClick={() => setSopView("all")}>
+              <StarIcon className="h-4 w-4" />All SOPs
+            </button>
+          )}
+          <button type="button" className="task-view-button" data-active={effectiveSopView === "my"} disabled={!canUseAllSops} onClick={() => setSopView("my")}>
+            <User className="h-4 w-4" />My SOPs
+          </button>
+        </div>
         <div className="ml-auto flex flex-1 items-center justify-end gap-2">
           <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
             <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search SOPs" aria-label="Search SOPs by title or body" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
@@ -631,6 +749,20 @@ export function SopList({ selectedId }: { selectedId?: string }) {
               {search ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
             </button>
           </div>
+          {canUseAllSops && (
+            <SopFilterMenu
+              scopeFilter={scopeFilter}
+              branchFilter={branchFilter}
+              personFilter={personFilter}
+              branches={filterOptions?.branches ?? []}
+              users={filterOptions?.users ?? []}
+              activeCount={filterCount}
+              showPersonFilter={effectiveSopView === "all"}
+              onScopeChange={setScopeFilter}
+              onBranchChange={setBranchFilter}
+              onPersonChange={setPersonFilter}
+            />
+          )}
           {canCreate && <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />New SOP</Button>}
         </div>
       </div>
@@ -669,13 +801,13 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                 <td colSpan={4} className="!h-auto py-2">
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
-                    <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{search.trim() ? "No matching SOPs" : "No SOPs yet"}</div>
-                    <p className="mt-1 max-w-[300px] text-[13px] text-[var(--ink-muted)]">{search.trim() ? "Try adjusting your search." : "Create your first procedure to get started."}</p>
-                    {canCreate && !search.trim() && (
+                    <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{hasActiveFilters ? "No matching SOPs" : "No SOPs yet"}</div>
+                    <p className="mt-1 max-w-[300px] text-[13px] text-[var(--ink-muted)]">{hasActiveFilters ? "Try adjusting your search or filters." : "Create your first procedure to get started."}</p>
+                    {canCreate && !hasActiveFilters && (
                       <Button className="mt-4" size="sm" variant="primary" onClick={() => setCreateOpen(true)}><Plus className="h-3.5 w-3.5" />New SOP</Button>
                     )}
-                    {search.trim() && (
-                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); }}>Clear search</Button>
+                    {hasActiveFilters && (
+                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); setScopeFilter("all"); setBranchFilter("all"); setPersonFilter("all"); }}>Clear filters</Button>
                     )}
                   </div>
                 </td>
@@ -762,7 +894,6 @@ export function SopList({ selectedId }: { selectedId?: string }) {
         </table>
       </div>
 
-      {sopQuery?.status === "CanLoadMore" && <Button className="mt-4" variant="ghost" size="sm" onClick={() => sopQuery.loadMore(25)}>Load more</Button>}
     </div>
   );
 }

@@ -14,6 +14,9 @@ async function scopedIdsForAnalytics(ctx: QueryCtx, companyId: Id<"companies">, 
   return new Set<Id<"companyMemberships">>([membership._id]);
 }
 
+function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.email; }
+function fullName(user: Doc<"appUsers">) { return [firstName(user), user.secondName?.trim()].filter(Boolean).join(" ") || user.email; }
+
 async function peopleRows(ctx: QueryCtx, companyId: Id<"companies">, ids: Set<Id<"companyMemberships">>, limit: number) {
   const out = [];
   for (const membershipId of Array.from(ids).slice(0, limit)) {
@@ -21,7 +24,7 @@ async function peopleRows(ctx: QueryCtx, companyId: Id<"companies">, ids: Set<Id
     if (!membership || membership.companyId !== companyId || !membership.active) continue;
     const user = await ctx.db.get(membership.userId);
     if (!user) continue;
-    out.push({ membershipId: membership._id, name: user.name ?? user.email, email: user.email, role: membership.role });
+    out.push({ membershipId: membership._id, name: fullName(user), email: user.email, role: membership.role });
   }
   return out;
 }
@@ -59,14 +62,14 @@ export const performanceSummary = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const scoped = await scopedIdsForAnalytics(ctx, args.companyId, membership);
     const oneTime = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
-    const visibleOneTime = oneTime.filter((task) => task.assigneeMembershipIds.some((id) => scoped.has(id)));
-    const completed = visibleOneTime.filter((task) => task.completedAt).length;
-    const overdue = visibleOneTime.filter((task) => !task.completedAt && task.dueDate < Date.now()).length;
+    const visibleOneTime = oneTime.filter((task) => scoped.has(task.createdByMembershipId) || task.assigneeMembershipIds.some((id) => scoped.has(id)));
+    const completed = visibleOneTime.filter((task) => task.status === "completed").length;
+    const overdue = visibleOneTime.filter((task) => task.status !== "completed" && (task.overdueAt || (task.dueDate && task.dueDate < Date.now()))).length;
     const people = await peopleRows(ctx, args.companyId, scoped, 50);
     const byPerson = people.map((person) => {
-      const assigned = visibleOneTime.filter((task) => task.assigneeMembershipIds.includes(person.membershipId));
-      const personCompleted = assigned.filter((task) => task.completedAt).length;
-      const personOverdue = assigned.filter((task) => !task.completedAt && task.dueDate < Date.now()).length;
+      const assigned = visibleOneTime.filter((task) => task.assigneeMembershipIds.includes(person.membershipId) || (task.assigneeMembershipIds.length === 0 && task.createdByMembershipId === person.membershipId));
+      const personCompleted = assigned.filter((task) => task.status === "completed").length;
+      const personOverdue = assigned.filter((task) => task.status !== "completed" && (task.overdueAt || (task.dueDate && task.dueDate < Date.now()))).length;
       return { name: person.name, role: person.role, assignedOneTimeTasks: assigned.length, completedOneTimeTasks: personCompleted, overdueOneTimeTasks: personOverdue };
     });
     return {

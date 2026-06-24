@@ -15,10 +15,10 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
     const scoped = caps.has("analytics:view:company") ? await allActiveMembershipIds(ctx, args.companyId) : caps.has("analytics:view:managed_scope") ? await scopedMembershipIds(ctx, args.companyId, membership) : new Set([membership._id]);
     const jd = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
     const one = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
-    const visibleJd = jd.filter((t) => t.assigneeMembershipIds.some((id) => scoped.has(id)));
-    const visibleOne = one.filter((t) => t.assigneeMembershipIds.some((id) => scoped.has(id)));
-    const overdueOne = visibleOne.filter((t) => !t.completedAt && t.dueDate < Date.now()).length;
-    const completedOne = visibleOne.filter((t) => t.completedAt).length;
+    const visibleJd = jd.filter((t) => scoped.has(t.createdByMembershipId) || t.assigneeMembershipIds.some((id) => scoped.has(id)));
+    const visibleOne = one.filter((t) => scoped.has(t.createdByMembershipId) || t.assigneeMembershipIds.some((id) => scoped.has(id)));
+    const overdueOne = visibleOne.filter((t) => t.status !== "completed" && (t.overdueAt || (t.dueDate && t.dueDate < Date.now()))).length;
+    const completedOne = visibleOne.filter((t) => t.status === "completed").length;
     const sops = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
     let sopCount = 0;
     for (const sop of sops) if (await visibleSop(ctx, args.companyId, membership, sop)) sopCount++;

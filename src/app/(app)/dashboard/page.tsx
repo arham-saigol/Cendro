@@ -18,7 +18,7 @@ function StatCard({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 export default function Dashboard() {
-  const { activeCompanyId, active } = useCompany();
+  const { activeCompanyId } = useCompany();
   const data = useQuery(api.analytics.summary, activeCompanyId ? { companyId: activeCompanyId } : "skip");
 
   if (!data) {
@@ -45,7 +45,6 @@ export default function Dashboard() {
   return (
     <div className="app-page">
       <PageHeader
-        eyebrow={active?.company.name ?? "Overview"}
         title="Dashboard"
         description="Role-aware analytics for your current company."
       />

@@ -7,7 +7,7 @@ import { useCompany } from "@/components/app/company-context";
 import { Badge } from "@/components/ui/badge";
 
 export function SopDetail({ id }: { id: string }) {
-  const { activeCompanyId, active } = useCompany();
+  const { activeCompanyId } = useCompany();
   const sop = useQuery(api.sops.get, activeCompanyId ? { companyId: activeCompanyId, sopId: id as any } : "skip") as any;
 
   if (!sop) {
@@ -23,7 +23,6 @@ export function SopDetail({ id }: { id: string }) {
   return (
     <article className="app-page app-page-narrow">
       <PageHeader
-        eyebrow={active?.company.name ?? "SOP"}
         title={sop.title}
         actions={<Badge>{sop.scopeType}</Badge>}
       />

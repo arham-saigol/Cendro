@@ -18,10 +18,10 @@ async function seed() {
     const now = Date.now();
     const companyId = await ctx.db.insert("companies", { name: "Acme", createdAt: now });
     const otherCompanyId = await ctx.db.insert("companies", { name: "Other", createdAt: now });
-    const adminUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin", email: "admin@example.com", name: "Admin", createdAt: now, updatedAt: now });
-    const managerUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|manager", email: "manager@example.com", name: "Manager", createdAt: now, updatedAt: now });
-    const employeeUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|employee", email: "employee@example.com", name: "Employee", createdAt: now, updatedAt: now });
-    const employee2UserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|employee2", email: "employee2@example.com", name: "Employee 2", createdAt: now, updatedAt: now });
+    const adminUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin", email: "admin@example.com", firstName: "Admin", secondName: "", createdAt: now, updatedAt: now });
+    const managerUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|manager", email: "manager@example.com", firstName: "Manager", secondName: "", createdAt: now, updatedAt: now });
+    const employeeUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|employee", email: "employee@example.com", firstName: "Employee", secondName: "", createdAt: now, updatedAt: now });
+    const employee2UserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|employee2", email: "employee2@example.com", firstName: "Employee 2", secondName: "", createdAt: now, updatedAt: now });
     const adminMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: adminUserId, role: "Admin", active: true, createdAt: now, updatedAt: now });
     const otherAdminMembershipId = await ctx.db.insert("companyMemberships", { companyId: otherCompanyId, userId: adminUserId, role: "Admin", active: true, createdAt: now, updatedAt: now });
     const managerMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: managerUserId, role: "Manager", active: true, createdAt: now, updatedAt: now });

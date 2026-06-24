@@ -1,1 +1,3 @@
-import {TaskList} from "@/components/app/task-pages"; export default function Page(){return <TaskList kind="one"/>}
+export default function Page() {
+  return null;
+}

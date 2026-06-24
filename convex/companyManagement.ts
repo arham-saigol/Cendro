@@ -21,6 +21,9 @@ async function assertMembership(ctx: any, companyId: Id<"companies">, membership
   if (!membership || membership.companyId !== companyId) throw new ConvexError("User not found in this company.");
   return membership;
 }
+function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.email; }
+function fullName(user: Doc<"appUsers">) { return [firstName(user), user.secondName?.trim()].filter(Boolean).join(" ") || user.email; }
+
 async function managerScope(ctx: any, managerMembershipId: Id<"companyMemberships">) {
   const branchIds = (await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", managerMembershipId)).take(500)).map((row: any) => row.branchId);
   const departmentIds = (await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", managerMembershipId)).take(500)).map((row: any) => row.departmentId);
@@ -64,7 +67,7 @@ export const overview = query({
       const departmentIds = (await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500)).map((a) => a.departmentId);
       const scope = await managerScope(ctx, m._id);
       const overrides = await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500);
-      if (user) users.push({ membership: { _id: m._id, role: m.role, active: m.active }, user: { _id: user._id, name: user.name, email: user.email }, branchIds, departmentIds, scope, overrides: overrides.map((o) => ({ _id: o._id, capability: o.capability, effect: o.effect })) });
+      if (user) users.push({ membership: { _id: m._id, role: m.role, active: m.active }, user: { _id: user._id, name: fullName(user), firstName: firstName(user), secondName: user.secondName ?? "", email: user.email }, branchIds, departmentIds, scope, overrides: overrides.map((o) => ({ _id: o._id, capability: o.capability, effect: o.effect })) });
     }
     const invitations = await ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100);
     return { currentMembership: { _id: membership._id, role: membership.role, active: membership.active }, branches: branches.map((b) => ({ _id: b._id, name: b.name })), departments: departments.map((d) => ({ _id: d._id, branchId: d.branchId, name: d.name })), users, invitations: invitations.map((i) => ({ _id: i._id, email: i.email, role: i.role, status: i.status, createdAt: i.createdAt, expiresAt: i.expiresAt })), capabilities };

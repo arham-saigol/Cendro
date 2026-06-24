@@ -18,9 +18,9 @@ async function seedCompany() {
   const ids = await t.run(async (ctx) => {
     const now = Date.now();
     const companyId = await ctx.db.insert("companies", { name: "Acme", createdAt: now });
-    const adminUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin", email: "admin@example.com", name: "Admin", createdAt: now, updatedAt: now });
-    const secondAdminUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin2", email: "admin2@example.com", name: "Admin 2", createdAt: now, updatedAt: now });
-    const employeeUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|employee", email: "employee@example.com", name: "Employee", createdAt: now, updatedAt: now });
+    const adminUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin", email: "admin@example.com", firstName: "Admin", secondName: "", createdAt: now, updatedAt: now });
+    const secondAdminUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin2", email: "admin2@example.com", firstName: "Admin 2", secondName: "", createdAt: now, updatedAt: now });
+    const employeeUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|employee", email: "employee@example.com", firstName: "Employee", secondName: "", createdAt: now, updatedAt: now });
     const adminMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: adminUserId, role: "Admin", active: true, createdAt: now, updatedAt: now });
     const secondAdminMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: secondAdminUserId, role: "Admin", active: true, createdAt: now, updatedAt: now });
     const employeeMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: employeeUserId, role: "Employee", active: true, createdAt: now, updatedAt: now });
@@ -69,6 +69,29 @@ describe("production permission and validation fixes", () => {
       assigneeMembershipIds: [employeeMembershipId],
       priority: "medium",
     })).resolves.toEqual(expect.any(String));
+  });
+
+  test("task updates require at least one assignee", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const jdTaskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "JD task", description: "", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    const oneTimeTaskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, { companyId, title: "One-time task", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [adminMembershipId], priority: "medium" });
+
+    await expect(t.withIdentity(identity("admin")).mutation(api.tasks.updateJd, { companyId, taskId: jdTaskId, title: "JD task", description: "", recurrence: "daily", assigneeMembershipIds: [] })).rejects.toThrow("Task assignee is required");
+    await expect(t.withIdentity(identity("admin")).mutation(api.tasks.updateOneTime, { companyId, taskId: oneTimeTaskId, title: "One-time task", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [], priority: "medium" })).rejects.toThrow("Task assignee is required");
+  });
+
+  test("task text updates use per-task update permissions", async () => {
+    const { t, companyId, adminMembershipId, employeeMembershipId } = await seedCompany();
+    const selfTaskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, { companyId, title: "Old title", description: "Old body", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [employeeMembershipId], priority: "medium" });
+    const adminTaskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, { companyId, title: "Admin task", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [adminMembershipId], priority: "medium" });
+
+    await expect(t.withIdentity(identity("employee")).mutation(api.tasks.updateOneTimeText, { companyId, taskId: selfTaskId, title: "New title", description: "New body" })).resolves.toBeNull();
+    await expect(t.withIdentity(identity("employee")).mutation(api.tasks.updateOneTimeText, { companyId, taskId: adminTaskId, title: "Nope" })).rejects.toThrow("update this task");
+
+    const detail = await t.withIdentity(identity("employee")).query(api.tasks.getOneTime, { companyId, taskId: selfTaskId });
+    expect(detail.canUpdate).toBe(true);
+    expect(detail.task.title).toBe("New title");
+    expect(detail.task.description).toBe("New body");
   });
 
   test("analytics requires an effective analytics:view capability", async () => {

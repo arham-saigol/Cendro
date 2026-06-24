@@ -13,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
 export default function Sops() {
-  const { activeCompanyId, active } = useCompany();
+  const { activeCompanyId } = useCompany();
   const sopQuery = usePaginatedQuery(api.sops.list, activeCompanyId ? { companyId: activeCompanyId } : "skip", { initialNumItems: 25 });
   const create = useMutation(api.sops.create);
   const [title, setTitle] = useState("");
@@ -46,7 +46,6 @@ export default function Sops() {
   return (
     <div className="app-page">
       <PageHeader
-        eyebrow={active?.company.name ?? "Knowledge base"}
         title="SOPs"
         description="Searchable operating procedures with company, branch, department, and user visibility."
       />

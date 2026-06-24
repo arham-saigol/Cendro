@@ -3,12 +3,14 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
+  ArrowUp,
   CalendarClock,
   CalendarDays,
   Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronsRight,
   Clock,
   Flag,
   Inbox,
@@ -36,7 +38,6 @@ import { PageHeader } from "./page-header";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { cn, formatDate, initials } from "@/lib/utils";
 
 type Kind = "jd" | "one";
@@ -1529,15 +1530,14 @@ function PropertyRow({ icon, label, children, muted = false }: { icon: React.Rea
 function AttachmentList({ attachments, canDelete, onDelete }: { attachments: any[]; canDelete: boolean; onDelete: (id: Id<"taskAttachments">) => void }) {
   if (attachments.length === 0) return <div className="text-[13px] text-[var(--ink-faint)]">No attachments.</div>;
   return (
-    <div className="grid gap-2">
+    <div className="grid gap-1.5">
       {attachments.map((attachment) => (
-        <div key={attachment._id} className="group flex items-center gap-3 rounded-lg border border-[var(--hairline)] bg-[var(--surface)] px-3 py-2 transition-colors hover:border-[var(--hairline-strong)]">
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[var(--surface-muted)] text-[var(--ink-muted)]"><Paperclip className="h-4 w-4" /></span>
-          <a className="min-w-0 flex-1" href={attachment.url ?? "#"} target="_blank" rel="noreferrer">
-            <span className="block truncate text-[13px] font-medium text-[var(--primary)] hover:underline">{attachment.fileName}</span>
-            <span className="block truncate text-[11.5px] text-[var(--ink-faint)]">{humanSize(attachment.size)}{attachment.createdAt ? ` · ${formatDate(attachment.createdAt)}` : ""}</span>
+        <div key={attachment._id} className="task-attachment-item group">
+          <Paperclip className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
+          <a className="min-w-0 flex-1 truncate hover:text-[var(--ink)]" href={attachment.url ?? "#"} target="_blank" rel="noreferrer" title={`${attachment.fileName} · ${humanSize(attachment.size)}${attachment.createdAt ? ` · ${formatDate(attachment.createdAt)}` : ""}`}>
+            {attachment.fileName}
           </a>
-          {canDelete && <button type="button" className="task-icon-btn h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100" onClick={() => onDelete(attachment._id)} aria-label={`Delete ${attachment.fileName}`}><Trash2 className="h-3.5 w-3.5" /></button>}
+          {canDelete && <button type="button" className="task-icon-btn h-7 w-7 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100" onClick={() => onDelete(attachment._id)} aria-label={`Delete ${attachment.fileName}`}><Trash2 className="h-3.5 w-3.5" /></button>}
         </div>
       ))}
     </div>
@@ -1549,39 +1549,34 @@ function PeekBar({ kind, id, isFullView, canEdit, onEdit }: { kind: Kind; id: st
   const base = kind === "jd" ? "/jd-tasks" : "/one-time-tasks";
 
   return (
-    <div className="peek-bar">
+    <div className="peek-bar -mt-7 -mx-6 px-2 md:-mt-8 md:-mx-9 md:px-3">
       <div className="flex items-center gap-1">
-        {isFullView && (
-          <button type="button" className="task-icon-btn" aria-label="Back to peek" onClick={() => router.push(`${base}/${id}`)}>
-            <ChevronLeft className="h-4 w-4" />
-          </button>
-        )}
-        {canEdit && (
-          <Button size="sm" variant="ghost" onClick={onEdit}>
-            <Pencil className="h-3.5 w-3.5" />Edit
-          </Button>
-        )}
-      </div>
-      <div className="flex items-center gap-1">
+        <button type="button" className="task-icon-btn" aria-label={isFullView ? "Back to list" : "Close details"} onClick={() => router.push(base)}>
+          <ChevronsRight className="h-5 w-5" />
+        </button>
         {isFullView ? (
           <button type="button" className="task-icon-btn" aria-label="Collapse to peek" onClick={() => router.push(`${base}/${id}`)}>
-            <Minimize2 className="h-3.5 w-3.5" />
+            <Minimize2 className="h-[18px] w-[18px]" />
           </button>
         ) : (
           <button type="button" className="task-icon-btn" aria-label="Open in full page" onClick={() => router.push(`${base}/${id}/full`)}>
-            <Maximize2 className="h-3.5 w-3.5" />
+            <Maximize2 className="h-[18px] w-[18px]" />
           </button>
         )}
-        <button type="button" className="task-icon-btn" aria-label={isFullView ? "Back to list" : "Close"} onClick={() => router.push(base)}>
-          <X className="h-4 w-4" />
-        </button>
       </div>
+      {canEdit && (
+        <div className="flex items-center gap-1">
+          <button type="button" className="task-icon-btn" aria-label="Edit task" onClick={onEdit}>
+            <Pencil className="h-4 w-4" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
 export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
-  const { activeCompanyId, active } = useCompany();
+  const { activeCompanyId, active, email } = useCompany();
   const pathname = usePathname();
   const taskType = taskTypeFor(kind);
   const isFullView = pathname.endsWith("/full");
@@ -1591,6 +1586,8 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const attachmentsQuery = usePaginatedQuery(api.tasks.listAttachments, activeCompanyId ? { companyId: activeCompanyId, taskType, taskId: id } : "skip", { initialNumItems: 25 });
   const attachments = attachmentsQuery.results as any[] | undefined;
   const comment = useMutation(api.tasks.addComment);
+  const updateComment = useMutation(api.tasks.updateComment);
+  const deleteComment = useMutation(api.tasks.deleteComment);
   const generateUploadUrl = useMutation(api.tasks.generateAttachmentUploadUrl);
   const addAttachment = useMutation(api.tasks.addAttachment);
   const deleteAttachment = useMutation(api.tasks.deleteAttachment);
@@ -1600,11 +1597,41 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [optimisticComments, setOptimisticComments] = useState<any[]>([]);
+  const [optimisticCommentBodies, setOptimisticCommentBodies] = useState<Record<string, string>>({});
+  const [optimisticDeletedCommentIds, setOptimisticDeletedCommentIds] = useState<string[]>([]);
+  const [editingCommentId, setEditingCommentId] = useState<Id<"taskComments"> | null>(null);
+  const [editingCommentBody, setEditingCommentBody] = useState("");
+  const commentTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const editCommentTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const previousEditingCommentIdRef = useRef<Id<"taskComments"> | null>(null);
 
-  const comments = useMemo(() => [...optimisticComments, ...((commentsQuery.results as any[]) ?? [])], [commentsQuery.results, optimisticComments]);
+  const comments = useMemo(() => [...(((commentsQuery.results as any[]) ?? []).slice().reverse()).filter((commentRow) => !optimisticDeletedCommentIds.includes(commentRow._id)).map((commentRow) => ({ ...commentRow, body: optimisticCommentBodies[commentRow._id] ?? commentRow.body })), ...optimisticComments], [commentsQuery.results, optimisticCommentBodies, optimisticComments, optimisticDeletedCommentIds]);
   const canManageAttachments = active?.capabilities.includes("tasks:attachment:add") ?? false;
   const canComment = active?.capabilities.includes("tasks:comment") ?? false;
   const canEdit = canEditTasks(active, kind);
+
+  useLayoutEffect(() => {
+    const textarea = commentTextareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, [body]);
+
+  useLayoutEffect(() => {
+    if (!editingCommentId) {
+      previousEditingCommentIdRef.current = null;
+      return;
+    }
+    const textarea = editCommentTextareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${textarea.scrollHeight}px`;
+    if (previousEditingCommentIdRef.current !== editingCommentId) {
+      textarea.focus();
+      textarea.setSelectionRange(editingCommentBody.length, editingCommentBody.length);
+    }
+    previousEditingCommentIdRef.current = editingCommentId;
+  }, [editingCommentBody, editingCommentId]);
 
   if (!data) return <TaskDetailSkeleton />;
   const task = data.task;
@@ -1627,9 +1654,65 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
     }
   }
 
+  async function submitComment() {
+    const text = body.trim();
+    if (!text || !activeCompanyId) return;
+    const tempId = crypto.randomUUID();
+    setActionError(null);
+    setOptimisticComments((current) => [{ _id: tempId, body: text, createdAt: Date.now(), optimistic: true }, ...current]);
+    setBody("");
+    try {
+      await comment({ companyId: activeCompanyId, taskType, taskId: id, body: text });
+    } catch (err) {
+      setBody(text);
+      setActionError(err instanceof Error ? err.message : "Could not add comment.");
+    } finally {
+      setOptimisticComments((current) => current.filter((commentRow) => commentRow._id !== tempId));
+    }
+  }
+
+  function startEditingComment(commentRow: any) {
+    setActionError(null);
+    setEditingCommentId(commentRow._id);
+    setEditingCommentBody(commentRow.body);
+  }
+
+  function cancelEditingComment() {
+    setEditingCommentId(null);
+    setEditingCommentBody("");
+  }
+
+  async function saveEditedComment(commentId: Id<"taskComments">) {
+    const text = editingCommentBody.trim();
+    if (!text || !activeCompanyId) return;
+    const previousBody = comments.find((commentRow) => commentRow._id === commentId)?.body ?? "";
+    setActionError(null);
+    setOptimisticCommentBodies((current) => ({ ...current, [commentId]: text }));
+    cancelEditingComment();
+    try {
+      await updateComment({ companyId: activeCompanyId, commentId, body: text });
+      setOptimisticCommentBodies((current) => { const next = { ...current }; delete next[commentId]; return next; });
+    } catch (err) {
+      setOptimisticCommentBodies((current) => ({ ...current, [commentId]: previousBody }));
+      setActionError(err instanceof Error ? err.message : "Could not update comment.");
+    }
+  }
+
+  async function removeComment(commentId: Id<"taskComments">) {
+    if (!activeCompanyId) return;
+    setActionError(null);
+    setOptimisticDeletedCommentIds((current) => current.includes(commentId) ? current : [...current, commentId]);
+    if (editingCommentId === commentId) cancelEditingComment();
+    try {
+      await deleteComment({ companyId: activeCompanyId, commentId });
+    } catch (err) {
+      setOptimisticDeletedCommentIds((current) => current.filter((id) => id !== commentId));
+      setActionError(err instanceof Error ? err.message : "Could not delete comment.");
+    }
+  }
+
   const base = kind === "jd" ? "/jd-tasks" : "/one-time-tasks";
   const sectionLabel = kind === "jd" ? "JD Tasks" : "One-Time Tasks";
-  const typeLabel = kind === "jd" ? "JD Task" : "One-Time Task";
   const primaryAssignee = task.assignees?.[0];
 
   return (
@@ -1645,17 +1728,8 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
         </nav>
       )}
 
-      <div className="pt-1">
+      <div className="pt-6">
         <h1 className="text-[26px] font-semibold leading-tight tracking-[-0.025em] text-[var(--ink)]">{task.title}</h1>
-        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] text-[var(--ink-faint)]">
-          <span>{typeLabel}</span>
-          <span aria-hidden>·</span>
-          <span>Updated {relativeTime(task.updatedAt)}</span>
-        </div>
-      </div>
-
-      <div className="mt-5">
-        <StatusBadge kind={kind} task={task} size="md" />
       </div>
 
       <div className="task-section !mt-6">
@@ -1668,6 +1742,9 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
                 {task.assignees.length > 1 && <span className="text-[var(--ink-faint)]">+{task.assignees.length - 1}</span>}
               </span>
             ) : "Unassigned"}
+          </PropertyRow>
+          <PropertyRow icon={<StatusIcon className="h-3.5 w-3.5" />} label="Status">
+            <StatusBadge kind={kind} task={task} size="md" />
           </PropertyRow>
           {kind === "jd" ? (
             <PropertyRow icon={<FrequencyIcon className="h-3.5 w-3.5" />} label="Frequency">
@@ -1704,46 +1781,95 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
         <AttachmentList attachments={attachments ?? []} canDelete={canManageAttachments} onDelete={(attachmentId) => deleteAttachment({ companyId: activeCompanyId as Id<"companies">, attachmentId })} />
         {uploadError && <p className="alert-error mt-3 rounded-md p-2 text-[13px]">{uploadError}</p>}
         {canManageAttachments && (
-          <label className="mt-3 inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2.5 text-[13px] text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-muted)]">
-            <input className="sr-only" type="file" disabled={uploading} onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); event.currentTarget.value = ""; }} />
-            <Plus className="h-3.5 w-3.5" />{uploading ? "Uploading..." : "Attach file"}
-          </label>
+          <div className="task-attachment-add-row">
+            <label className="task-attachment-add inline-flex cursor-pointer items-center gap-1.5">
+              <input className="sr-only" type="file" disabled={uploading} onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); event.currentTarget.value = ""; }} />
+              <Plus className="h-3.5 w-3.5" />{uploading ? "Uploading..." : "Attach file"}
+            </label>
+          </div>
         )}
       </section>
 
       <section className="task-section">
-        <div className="mb-2.5 flex items-center justify-between">
-          <h2 className="task-section-title !mb-0">Comments</h2>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-[13px] font-semibold text-[var(--ink-muted)]">Comments</h2>
           {commentsQuery.status === "CanLoadMore" && <Button size="sm" variant="ghost" onClick={() => commentsQuery.loadMore(25)}>Load more</Button>}
         </div>
-        <div className="space-y-4">
-          {comments.length === 0 && <div className="text-[13px] text-[var(--ink-faint)]">No comments yet.</div>}
-          {comments.map((commentRow: any) => {
-            const name = commentRow.author?.user.name || commentRow.author?.user.email || "You";
-            return (
-              <div key={commentRow._id} className="flex gap-3">
-                <Avatar name={commentRow.author?.user.name ?? null} email={commentRow.author?.user.email ?? null} imageUrl={commentRow.author?.user.imageUrl ?? null} size="md" />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-[13px] font-semibold text-[var(--ink)]">{name}</span>
-                    {commentRow.author?.membership?.role && <span className="text-[11.5px] text-[var(--ink-faint)]">{commentRow.author.membership.role}</span>}
-                    {commentRow.createdAt && <span className="text-[11.5px] text-[var(--ink-faint)]">{relativeTime(commentRow.createdAt)}</span>}
+        {comments.length > 0 && (
+          <div className="mb-5">
+            {comments.map((commentRow: any, index) => {
+              const name = commentRow.author?.user.name || commentRow.author?.user.email || "You";
+              const isLastComment = index === comments.length - 1;
+              const isEditing = editingCommentId === commentRow._id;
+              const canManageComment = canComment && !commentRow.optimistic && active?.membership._id === commentRow.authorMembershipId;
+              return (
+                <div key={commentRow._id} className={cn("comment-row relative flex gap-2.5", !isLastComment && "pb-4")} data-editing={isEditing ? "true" : undefined}>
+                  {canManageComment && (
+                    <div className="comment-action-menu">
+                      {isEditing ? (
+                        <>
+                          <button type="button" className="comment-action-btn" aria-label="Cancel editing comment" onClick={cancelEditingComment}><X className="h-3.5 w-3.5" /></button>
+                          <button type="button" className="comment-action-btn" aria-label="Save comment" disabled={!editingCommentBody.trim()} onClick={() => void saveEditedComment(commentRow._id)}><Check className="h-3.5 w-3.5" /></button>
+                        </>
+                      ) : (
+                        <>
+                          <button type="button" className="comment-action-btn" aria-label="Edit comment" onClick={() => startEditingComment(commentRow)}><Pencil className="h-3.5 w-3.5" /></button>
+                          <button type="button" className="comment-action-btn" aria-label="Delete comment" onClick={() => void removeComment(commentRow._id)}><Trash2 className="h-3.5 w-3.5" /></button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {!isLastComment && <span className="absolute bottom-[6px] left-3 top-[30px] w-px -translate-x-1/2 bg-[color-mix(in_srgb,var(--hairline-strong)_72%,var(--ink-faint))]" aria-hidden />}
+                  <div className="relative z-[1] flex w-6 shrink-0 justify-center">
+                    <Avatar name={commentRow.author?.user.name ?? null} email={commentRow.author?.user.email ?? null} imageUrl={commentRow.author?.user.imageUrl ?? null} />
                   </div>
-                  <p className="mt-0.5 whitespace-pre-wrap text-[13px] leading-6 text-[var(--ink-secondary)]">{commentRow.body}</p>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-[13px] font-medium text-[var(--ink)]">{name}</span>
+                      {commentRow.createdAt && <span className="text-[12px] text-[var(--ink-faint)]">{relativeTime(commentRow.createdAt)}</span>}
+                    </div>
+                    {isEditing ? (
+                      <textarea
+                        ref={editCommentTextareaRef}
+                        rows={1}
+                        value={editingCommentBody}
+                        onChange={(event) => setEditingCommentBody(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") cancelEditingComment();
+                          if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void saveEditedComment(commentRow._id); }
+                        }}
+                        className="mt-0.5 block min-h-6 w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-[13px] leading-6 text-[var(--ink-secondary)] outline-none"
+                        autoFocus
+                      />
+                    ) : (
+                      <p className="mt-0.5 whitespace-pre-wrap text-[13px] leading-6 text-[var(--ink-secondary)]">{commentRow.body}</p>
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
-        {canComment && (
-          <div className="mt-4">
-            <Textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder="Add a comment..." />
-            <div className="mt-2 flex justify-end">
-              <Button variant="primary" disabled={!body.trim()} onClick={async () => { const text = body.trim(); if (text) { const tempId = crypto.randomUUID(); setActionError(null); setOptimisticComments((current) => [{ _id: tempId, body: text }, ...current]); setBody(""); try { await comment({ companyId: activeCompanyId as Id<"companies">, taskType, taskId: id, body: text }); } catch (err) { setBody(text); setActionError(err instanceof Error ? err.message : "Could not add comment."); } finally { setOptimisticComments((current) => current.filter((commentRow) => commentRow._id !== tempId)); } } }}>Comment</Button>
-            </div>
+              );
+            })}
           </div>
         )}
-        {actionError && <p className="alert-error mt-2 rounded-md p-2 text-[13px]">{actionError}</p>}
+        {canComment && (
+          <form className="group flex items-start gap-2 border-b border-[var(--hairline)] pb-3" onSubmit={(event) => { event.preventDefault(); void submitComment(); }}>
+            <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full border border-[var(--hairline)] bg-[var(--canvas-soft)] text-[11px] text-[var(--ink-muted)]">
+              {initials(null, email).slice(0, 1)}
+            </span>
+            <textarea
+              ref={commentTextareaRef}
+              rows={1}
+              value={body}
+              onChange={(event) => setBody(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitComment(); } }}
+              placeholder="Add a comment..."
+              className="min-h-6 max-h-24 flex-1 resize-none overflow-y-auto border-0 bg-transparent p-0 text-[13px] leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]"
+            />
+            <button type="submit" disabled={!body.trim()} className={cn("hidden h-5 w-5 shrink-0 place-items-center rounded-full text-[var(--on-primary)] transition-colors group-focus-within:grid", body.trim() ? "bg-[var(--primary)] hover:bg-[var(--primary-hover)]" : "bg-[var(--ink-faint)] disabled:opacity-30")} aria-label="Add comment">
+              <ArrowUp className="h-3.5 w-3.5" />
+            </button>
+          </form>
+        )}
+        {actionError && <p className="alert-error mt-3 rounded-md p-2 text-[13px]">{actionError}</p>}
       </section>
     </div>
   );

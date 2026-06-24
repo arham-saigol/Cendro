@@ -501,6 +501,72 @@ button:disabled { cursor: not-allowed; }
 }
 .task-add-label:hover,
 .task-add-label:focus-visible { background: var(--surface-muted); color: var(--ink-muted); outline: none; }
+.task-attachment-item {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  background: var(--surface-hover);
+  padding: 8px 12px;
+  color: var(--ink-secondary);
+  font-size: 13px;
+  transition: background-color 0.12s ease;
+}
+.task-attachment-item:hover { background: var(--surface-pressed); }
+.task-attachment-add-row {
+  margin-top: 8px;
+  min-height: 41px;
+  color: var(--ink-faint);
+  font-size: 13px;
+}
+.task-attachment-add {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.task-attachment-add:hover,
+.task-attachment-add:focus-visible { background: var(--surface-hover); color: var(--ink); outline: none; }
+
+.comment-action-menu {
+  position: absolute;
+  right: 0;
+  top: -2px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  border-radius: 999px;
+  background: var(--surface);
+  padding: 2px;
+  color: var(--ink-muted);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--ink) 12%, transparent), 0 0 0 1px var(--hairline);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.comment-row:hover .comment-action-menu,
+.comment-row:focus-within .comment-action-menu,
+.comment-row[data-editing="true"] .comment-action-menu { opacity: 1; pointer-events: auto; }
+.comment-action-btn {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.comment-action-btn:hover,
+.comment-action-btn:focus-visible { background: var(--surface-hover); color: var(--ink); outline: none; }
+.comment-action-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* Notion-style status / priority select pills */
 .task-pill {
@@ -539,8 +605,8 @@ button:disabled { cursor: not-allowed; }
 .task-icon-btn {
   display: inline-grid;
   place-items: center;
-  height: 28px;
-  width: 28px;
+  height: 32px;
+  width: 32px;
   border-radius: 6px;
   color: var(--ink-muted);
   transition: background-color 0.12s ease, color 0.12s ease;
@@ -555,12 +621,12 @@ button:disabled { cursor: not-allowed; }
   z-index: 6;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 2px;
-  padding: 10px 0 12px;
+  padding-top: 8px;
+  padding-bottom: 10px;
   margin-bottom: 4px;
-  background: linear-gradient(var(--canvas-soft) 64%, color-mix(in srgb, var(--canvas-soft) 0%, transparent));
-  backdrop-filter: blur(6px);
+  background: var(--canvas-soft);
 }
 
 /* Property rows */

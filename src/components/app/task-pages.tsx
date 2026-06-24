@@ -91,7 +91,7 @@ function formFromTask(kind: Kind, task: any): TaskFormValues {
     recurrence: task.recurrence ?? "daily",
     priority: task.priority ?? "medium",
     dueDate: kind === "one" && task.dueDate ? toDateField(task.dueDate, dateHasExplicitTime(task.dueDate)) : "",
-    quantity: task.quantity ? String(task.quantity) : "",
+    quantity: task.quantity != null ? String(task.quantity) : "",
     time: task.time ?? "",
     files: [],
   };
@@ -1625,6 +1625,50 @@ function PropertyRow({ icon, label, children, muted = false }: { icon: React.Rea
   );
 }
 
+function InlinePropertyText({ value, placeholder = "—", ariaLabel, onSave, inputMode = "text", pending = false }: { value: string; placeholder?: string; ariaLabel: string; onSave: (value: string) => Promise<boolean>; inputMode?: React.HTMLAttributes<HTMLInputElement>["inputMode"]; pending?: boolean }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const savingRef = useRef(false);
+
+  useEffect(() => { if (!editing) setDraft(value); }, [editing, value]);
+
+  async function commit() {
+    if (savingRef.current) return;
+    const next = draft.trim();
+    if (next === value.trim()) { setEditing(false); return; }
+    savingRef.current = true;
+    const saved = await onSave(next);
+    savingRef.current = false;
+    if (saved) setEditing(false);
+    else setDraft(value);
+  }
+
+  if (editing) {
+    return (
+      <input
+        aria-label={ariaLabel}
+        autoFocus
+        disabled={pending}
+        inputMode={inputMode}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={() => void commit()}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
+          if (event.key === "Escape") { setDraft(value); setEditing(false); }
+        }}
+        className="prop-inline-input"
+      />
+    );
+  }
+
+  return (
+    <button type="button" disabled={pending} className={cn("prop-inline-text", pending && "opacity-60")} onClick={() => setEditing(true)}>
+      <span className={cn("truncate", !value && "text-[var(--ink-faint)]")}>{value || placeholder}</span>
+    </button>
+  );
+}
+
 function AttachmentList({ attachments, canDelete, onDelete }: { attachments: any[]; canDelete: boolean; onDelete: (id: Id<"taskAttachments">) => void }) {
   if (attachments.length === 0) return <div className="text-[13px] text-[var(--ink-faint)]">No attachments.</div>;
   return (
@@ -1680,11 +1724,14 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const deleteAttachment = useMutation(api.tasks.deleteAttachment);
   const updateJdText = useMutation(api.tasks.updateJdText);
   const updateOneTimeText = useMutation(api.tasks.updateOneTimeText);
+  const updateJdFields = useMutation(api.tasks.updateJdFields);
+  const updateOneTimeFields = useMutation(api.tasks.updateOneTimeFields);
   const [editOpen, setEditOpen] = useState(false);
   const [body, setBody] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [textError, setTextError] = useState<string | null>(null);
+  const [pendingTaskField, setPendingTaskField] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [optimisticComments, setOptimisticComments] = useState<any[]>([]);
   const [optimisticCommentBodies, setOptimisticCommentBodies] = useState<Record<string, string>>({});
@@ -1736,6 +1783,44 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
     } catch (err) {
       setTextError(err instanceof Error ? err.message : "Could not update the task.");
       return false;
+    }
+  }
+
+  async function saveTaskField(patch: Partial<TaskFormValues>, label: string) {
+    if (!activeCompanyId || pendingTaskField) return false;
+    setPendingTaskField(label);
+    setTextError(null);
+    try {
+      if (kind === "jd") {
+        await updateJdFields({
+          companyId: activeCompanyId,
+          taskId: task._id as Id<"jdTasks">,
+          title: patch.title,
+          description: patch.description,
+          time: patch.time,
+          quantity: patch.quantity !== undefined ? quantityFromInput(patch.quantity) ?? null : undefined,
+          recurrence: patch.recurrence,
+          assigneeMembershipIds: patch.assigneeMembershipIds as Id<"companyMemberships">[] | undefined,
+        });
+      } else {
+        await updateOneTimeFields({
+          companyId: activeCompanyId,
+          taskId: task._id as Id<"oneTimeTasks">,
+          title: patch.title,
+          description: patch.description,
+          dueDate: patch.dueDate !== undefined ? fromDateInput(patch.dueDate) ?? null : undefined,
+          time: patch.time,
+          quantity: patch.quantity !== undefined ? quantityFromInput(patch.quantity) ?? null : undefined,
+          assigneeMembershipIds: patch.assigneeMembershipIds as Id<"companyMemberships">[] | undefined,
+          priority: patch.priority,
+        });
+      }
+      return true;
+    } catch (err) {
+      setTextError(err instanceof Error ? err.message : "Could not update the task.");
+      return false;
+    } finally {
+      setPendingTaskField((current) => current === label ? null : current);
     }
   }
 
@@ -1815,6 +1900,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   }
 
   const primaryAssignee = task.assignees?.[0];
+  const fieldPending = (field: string) => pendingTaskField === field;
 
   return (
     <div>
@@ -1829,8 +1915,10 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
 
       <div className="task-section !mt-6">
         <div className="prop-list">
-          <PropertyRow icon={<UsersIcon className="h-3.5 w-3.5" />} label="Assignee" muted={!task.assignees?.length}>
-            {task.assignees?.length ? (
+          <PropertyRow icon={<UsersIcon className="h-3.5 w-3.5" />} label="Assignee" muted={!canEdit && !task.assignees?.length}>
+            {canEdit && assignable ? (
+              <InlineAssigneeCell assignable={assignable} assignees={task.assignees ?? []} selected={task.assigneeMembershipIds ?? []} pending={fieldPending("assignee")} onSave={(assigneeMembershipIds) => saveTaskField({ assigneeMembershipIds }, "assignee")} />
+            ) : task.assignees?.length ? (
               <span className="inline-flex items-center gap-2">
                 {primaryAssignee && <Avatar name={primaryAssignee.user.name} email={primaryAssignee.user.email} imageUrl={primaryAssignee.user.imageUrl} />}
                 <span className="truncate">{primaryAssignee?.user.name || primaryAssignee?.user.email}</span>
@@ -1839,22 +1927,47 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
             ) : "Unassigned"}
           </PropertyRow>
           <PropertyRow icon={<StatusIcon className="h-3.5 w-3.5" />} label="Status">
-            <StatusBadge kind={kind} task={task} size="md" canUpdateOverride={canEdit} />
+            <StatusBadge kind={kind} task={task} size="md" canUpdateOverride={canEdit} cellTrigger={canEdit} />
           </PropertyRow>
           {kind === "jd" ? (
             <PropertyRow icon={<FrequencyIcon className="h-3.5 w-3.5" />} label="Frequency">
-              <span className="inline-flex items-center gap-1.5">{frequencyLabel(task.recurrence)}</span>
+              {canEdit ? (
+                <InlineSelectCell value={task.recurrence as Frequency} options={frequencies} ariaLabel="Change frequency" pending={fieldPending("frequency")} onSave={(recurrence) => saveTaskField({ recurrence }, "frequency")} />
+              ) : (
+                <span className="inline-flex items-center gap-1.5">{frequencyLabel(task.recurrence)}</span>
+              )}
             </PropertyRow>
           ) : (
             <PropertyRow icon={<Flag className="h-3.5 w-3.5" />} label="Priority">
-              <span className={cn("priority-chip", priorityChipClasses(task.priority))}>
-                {priorityLabel(task.priority)}
-              </span>
+              {canEdit && canEditPriority(active) ? (
+                <InlineSelectCell
+                  value={task.priority as Priority}
+                  options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))}
+                  ariaLabel="Change priority"
+                  pending={fieldPending("priority")}
+                  onSave={(priority) => saveTaskField({ priority }, "priority")}
+                  renderValue={(option) => <span className={cn("priority-chip", priorityChipClasses((option?.value ?? task.priority) as Priority))}>{option?.label ?? priorityLabel(task.priority)}</span>}
+                />
+              ) : (
+                <span className={cn("priority-chip", priorityChipClasses(task.priority))}>
+                  {priorityLabel(task.priority)}
+                </span>
+              )}
             </PropertyRow>
           )}
-          {kind === "one" && <PropertyRow icon={<CalendarClock className="h-3.5 w-3.5" />} label="Due date" muted={!task.dueDate}>{dueLabel(task)}</PropertyRow>}
-          <PropertyRow icon={<QuantityIcon className="h-3.5 w-3.5" />} label="Quantity" muted={task.quantity == null}>{task.quantity ?? "—"}</PropertyRow>
-          <PropertyRow icon={<Clock className="h-3.5 w-3.5" />} label="Time" muted={!task.time}>{task.time || "—"}</PropertyRow>
+          {kind === "one" && (
+            <PropertyRow icon={<CalendarClock className="h-3.5 w-3.5" />} label="Due date" muted={!canEdit && !task.dueDate}>
+              {canEdit ? (
+                <DatePicker value={task.dueDate ? toDateField(task.dueDate, dateHasExplicitTime(task.dueDate)) : ""} displayValue={dueLabel(task)} compact onChange={(dueDate) => { void saveTaskField({ dueDate }, "due"); }} />
+              ) : dueLabel(task)}
+            </PropertyRow>
+          )}
+          <PropertyRow icon={<QuantityIcon className="h-3.5 w-3.5" />} label="Quantity" muted={!canEdit && task.quantity == null}>
+            {canEdit ? <InlinePropertyText value={task.quantity != null ? String(task.quantity) : ""} ariaLabel="Edit quantity" inputMode="decimal" pending={fieldPending("quantity")} onSave={(quantity) => saveTaskField({ quantity }, "quantity")} /> : task.quantity ?? "—"}
+          </PropertyRow>
+          <PropertyRow icon={<Clock className="h-3.5 w-3.5" />} label="Time" muted={!canEdit && !task.time}>
+            {canEdit ? <InlinePropertyText value={task.time ?? ""} ariaLabel="Edit time" pending={fieldPending("time")} onSave={(time) => saveTaskField({ time }, "time")} /> : task.time || "—"}
+          </PropertyRow>
           <PropertyRow icon={<CalendarDays className="h-3.5 w-3.5" />} label="Created">{formatDate(task.createdAt)}</PropertyRow>
         </div>
       </div>

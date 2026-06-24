@@ -216,6 +216,44 @@ export const updateJdText = mutation({
   },
 });
 
+export const updateJdFields = mutation({
+  args: {
+    companyId: v.id("companies"),
+    taskId: v.id("jdTasks"),
+    title: v.optional(v.string()),
+    description: v.optional(v.string()),
+    time: v.optional(v.string()),
+    quantity: v.optional(v.union(v.number(), v.null())),
+    recurrence: v.optional(recurrenceValidator),
+    assigneeMembershipIds: v.optional(v.array(v.id("companyMemberships"))),
+  },
+  handler: async (ctx, args) => {
+    const hasUpdate = args.title !== undefined || args.description !== undefined || args.time !== undefined || args.quantity !== undefined || args.recurrence !== undefined || args.assigneeMembershipIds !== undefined;
+    if (!hasUpdate) return null;
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const task = await ctx.db.get(args.taskId);
+    if (!task || task.companyId !== args.companyId) throw new ConvexError("Task not found.");
+    await assertCanUpdateTask(ctx, args.companyId, membership, updateAuthTargets(task), "jd");
+    if (args.assigneeMembershipIds !== undefined) {
+      requireTaskAssignee(args.assigneeMembershipIds);
+      await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
+      await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
+    }
+    const state = await jdState(ctx, task);
+    await ctx.db.patch(args.taskId, {
+      ...(args.title !== undefined ? { title: nonEmpty(args.title, "Task title") } : {}),
+      ...(args.description !== undefined ? { description: cleanOptionalText(args.description) } : {}),
+      ...(args.time !== undefined ? { time: cleanOptionalText(args.time) } : {}),
+      ...(args.quantity !== undefined ? { quantity: args.quantity === null ? undefined : cleanOptionalQuantity(args.quantity) } : {}),
+      ...(args.recurrence !== undefined ? { recurrence: args.recurrence } : {}),
+      ...(args.assigneeMembershipIds !== undefined ? { assigneeMembershipIds: args.assigneeMembershipIds } : {}),
+      overdueAt: state.isOverdue ? task.overdueAt ?? Date.now() : task.overdueAt,
+      updatedAt: Date.now(),
+    });
+    return null;
+  },
+});
+
 async function setJdStatus(ctx: MutationCtx, companyId: Id<"companies">, taskId: Id<"jdTasks">, status: ManualStatus, note?: string) {
   const { membership } = await requireMembership(ctx, companyId);
   const task = await ctx.db.get(taskId);
@@ -309,6 +347,46 @@ export const updateOneTimeText = mutation({
     await ctx.db.patch(args.taskId, {
       ...(args.title !== undefined ? { title: nonEmpty(args.title, "Task title") } : {}),
       ...(args.description !== undefined ? { description: cleanOptionalText(args.description) } : {}),
+      updatedAt: Date.now(),
+    });
+    return null;
+  },
+});
+
+export const updateOneTimeFields = mutation({
+  args: {
+    companyId: v.id("companies"),
+    taskId: v.id("oneTimeTasks"),
+    title: v.optional(v.string()),
+    description: v.optional(v.string()),
+    dueDate: v.optional(v.union(v.number(), v.null())),
+    time: v.optional(v.string()),
+    quantity: v.optional(v.union(v.number(), v.null())),
+    assigneeMembershipIds: v.optional(v.array(v.id("companyMemberships"))),
+    priority: v.optional(priorityValidator),
+  },
+  handler: async (ctx, args) => {
+    const hasUpdate = args.title !== undefined || args.description !== undefined || args.dueDate !== undefined || args.time !== undefined || args.quantity !== undefined || args.assigneeMembershipIds !== undefined || args.priority !== undefined;
+    if (!hasUpdate) return null;
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const task = await ctx.db.get(args.taskId);
+    if (!task || task.companyId !== args.companyId) throw new ConvexError("Task not found.");
+    await assertCanUpdateTask(ctx, args.companyId, membership, updateAuthTargets(task), "one_time");
+    if (args.assigneeMembershipIds !== undefined) {
+      requireTaskAssignee(args.assigneeMembershipIds);
+      await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
+      await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
+    }
+    const state = oneState(task);
+    await ctx.db.patch(args.taskId, {
+      ...(args.title !== undefined ? { title: nonEmpty(args.title, "Task title") } : {}),
+      ...(args.description !== undefined ? { description: cleanOptionalText(args.description) } : {}),
+      ...(args.dueDate !== undefined ? { dueDate: args.dueDate === null ? undefined : args.dueDate } : {}),
+      ...(args.time !== undefined ? { time: cleanOptionalText(args.time) } : {}),
+      ...(args.quantity !== undefined ? { quantity: args.quantity === null ? undefined : cleanOptionalQuantity(args.quantity) } : {}),
+      ...(args.assigneeMembershipIds !== undefined ? { assigneeMembershipIds: args.assigneeMembershipIds } : {}),
+      ...(args.priority !== undefined ? { priority: args.priority } : {}),
+      overdueAt: state.isOverdue ? task.overdueAt ?? Date.now() : task.overdueAt,
       updatedAt: Date.now(),
     });
     return null;

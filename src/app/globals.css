@@ -204,12 +204,15 @@ button:disabled { cursor: not-allowed; }
 .task-fullpage { height: 100%; overflow-y: auto; }
 
 /* Detail drawer that slides in from the right edge */
-.task-drawer-backdrop {
+.task-drawer-click-target {
   position: absolute;
   inset: 0;
   z-index: 40;
-  background: color-mix(in srgb, var(--ink) 14%, transparent);
-  backdrop-filter: blur(2px);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: default;
 }
 .task-drawer {
   position: absolute;
@@ -232,7 +235,7 @@ button:disabled { cursor: not-allowed; }
 }
 @media (max-width: 1023px) {
   .task-drawer { max-width: 100%; border-left: 0; }
-  .task-drawer-backdrop { display: none; }
+  .task-drawer-click-target { display: none; }
 }
 
 /* Database table */

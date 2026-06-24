@@ -14,6 +14,7 @@ import {
   Inbox,
   Maximize2,
   Minimize2,
+  PanelRight,
   Paperclip,
   Pencil,
   Plus,
@@ -132,6 +133,13 @@ function canEditTasks(active: { capabilities: string[] } | null | undefined, kin
   const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   return hasAnyCapability(active, [`${prefix}:update:any`, `${prefix}:update:managed`, `${prefix}:update:self`]);
 }
+function canEditTaskRow(active: { capabilities: string[]; membership: { _id: string; role: string } } | null | undefined, kind: Kind, task: any) {
+  const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
+  if (active?.capabilities.includes(`${prefix}:update:any`)) return true;
+  if (active?.capabilities.includes(`${prefix}:update:managed`)) return true;
+  return Boolean(active?.capabilities.includes(`${prefix}:update:self`) && taskHasAssignee(task, active.membership._id));
+}
+function canEditPriority(active: { membership: { role: string } } | null | undefined) { return active?.membership.role === "Admin" || active?.membership.role === "Manager"; }
 function statusMatches(task: any, filter: StatusFilter) {
   if (filter === "all") return true;
   const raw = rawStatus(task);
@@ -258,16 +266,89 @@ function AvatarStack({ assignees, max = 3, showName = false }: { assignees: { us
   );
 }
 
-function StatusBadge({ kind, task, size = "sm" }: { kind: Kind; task: any; size?: "sm" | "md" }) {
+function TaskCellPopover({
+  open,
+  onOpenChange,
+  disabled = false,
+  pending = false,
+  ariaLabel,
+  header,
+  children,
+  panelClassName,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  disabled?: boolean;
+  pending?: boolean;
+  ariaLabel: string;
+  header: React.ReactNode;
+  children: React.ReactNode;
+  panelClassName?: string;
+}) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [rect, setRect] = useState<{ top: number; left: number; width: number } | null>(null);
+
+  function measure() {
+    const bounds = triggerRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    setRect({ top: bounds.top, left: bounds.left - 14, width: Math.max(bounds.width + 28, 220) });
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    measure();
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onOpenChange(false);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [onOpenChange, open]);
+
+  return (
+    <span className="task-cell-popover-root">
+      <button
+        ref={triggerRef}
+        type="button"
+        disabled={disabled || pending}
+        data-interactive="true"
+        data-cell-popover-open={open ? "true" : undefined}
+        onClick={(event) => { event.stopPropagation(); if (!open) measure(); onOpenChange(!open); }}
+        className={cn("task-cell-control", pending && "opacity-60")}
+        aria-label={ariaLabel}
+        aria-expanded={open}
+      >
+        {header}
+      </button>
+      {open && rect && (
+        <>
+          <button type="button" aria-label="Close menu" className="task-cell-popover-backdrop" onClick={(event) => { event.stopPropagation(); onOpenChange(false); }} />
+          <div className={cn("task-cell-popover", panelClassName)} style={{ top: rect.top, left: rect.left, width: rect.width }} data-interactive="true" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+            <div className="task-cell-popover-header">{header}</div>
+            <div className="task-cell-popover-body">{children}</div>
+          </div>
+        </>
+      )}
+    </span>
+  );
+}
+
+function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger = false }: { kind: Kind; task: any; size?: "sm" | "md"; canUpdateOverride?: boolean; cellTrigger?: boolean }) {
   const { activeCompanyId, active } = useCompany();
   const updateJdStatus = useMutation(api.tasks.updateJdStatus);
   const updateOneStatus = useMutation(api.tasks.updateOneTimeStatus);
   const [pending, setPending] = useState(false);
+  const [open, setOpen] = useState(false);
   const [optimistic, setOptimistic] = useState<ManualStatus | null>(null);
   const status = statusText(task);
   const raw = optimistic ?? rawStatus(task);
   const locked = status === "Overdue" || raw === "overdue";
-  const canUpdate = canEditTasks(active, kind);
+  const canUpdate = canUpdateOverride ?? canEditTasks(active, kind);
   const pad = size === "md" ? "h-7 px-2.5" : "h-[22px] px-2";
 
   async function change(nextStatus: ManualStatus) {
@@ -288,17 +369,40 @@ function StatusBadge({ kind, task, size = "sm" }: { kind: Kind; task: any; size?
   if (locked) return <span className={cn("task-pill", toneClasses[statusTone("Overdue")], pad)} aria-label="Overdue (locked)"><span className="task-pill-dot bg-[var(--badge-red-fg)]" />Overdue</span>;
   if (!canUpdate) return <span className={cn("task-pill", toneClasses[statusTone(status)], pad)}><span className={cn("task-pill-dot", statusDotClass(raw))} />{status}</span>;
 
+  const pill = (
+    <span className={cn("task-pill", toneClasses[statusTone(status)], pad)}>
+      <span className={cn("task-pill-dot", statusDotClass(raw))} />
+      {manualStatuses.find((option) => option.value === raw)?.label ?? status}
+    </span>
+  );
+
+  if (cellTrigger) {
+    return (
+      <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending} pending={pending} ariaLabel="Change status" header={pill}>
+        {manualStatuses.map((option) => (
+          <button key={option.value} type="button" onClick={() => { setOpen(false); void change(option.value); }} className="task-cell-popover-item">
+            <span className={cn("task-pill h-[22px] px-2", toneClasses[statusTone(option.label)])}>
+              <span className={cn("task-pill-dot", statusDotClass(option.value))} />
+              {option.label}
+            </span>
+            <span className="flex-1" />
+            {raw === option.value && <Check className="h-3.5 w-3.5 text-[var(--ink-faint)]" />}
+          </button>
+        ))}
+      </TaskCellPopover>
+    );
+  }
+
   return (
-    <DropdownMenu.Root>
+    <DropdownMenu.Root open={open} onOpenChange={setOpen}>
       <DropdownMenu.Trigger asChild>
         <button type="button" disabled={pending} onClick={(event) => event.stopPropagation()} data-interactive="true" className={cn("task-pill", toneClasses[statusTone(status)], pad)} aria-label="Change status">
           <span className={cn("task-pill-dot", statusDotClass(raw))} />
           {manualStatuses.find((option) => option.value === raw)?.label ?? status}
-          <ChevronDown className="task-pill-chevron h-3 w-3" />
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
-        <DropdownMenu.Content align="start" sideOffset={4} className="task-menu" onClick={(event) => event.stopPropagation()}>
+        <DropdownMenu.Content align="start" sideOffset={4} className="task-menu" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
           {manualStatuses.map((option) => (
             <DropdownMenu.Item key={option.value} onSelect={() => change(option.value)} className="task-menu-item">
               <span className={cn("task-pill-dot", statusDotClass(option.value))} />
@@ -406,7 +510,7 @@ function SelectPicker<T extends string>({ ariaLabel, value, options, onChange, p
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
-        <button type="button" className="task-inline-control">
+        <button type="button" className="task-inline-control" data-interactive="true" onClick={(event) => event.stopPropagation()}>
           <span className={cn("truncate", !selectedOption && "text-[var(--ink-faint)]")}>{selectedOption?.label ?? placeholder}</span>
           <ChevronDown className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
         </button>
@@ -436,7 +540,7 @@ function AssigneePicker({ assignable, selected, onChange, required = false }: { 
   if (!assignable.length) return <div className="py-2 text-[13px] text-[var(--ink-faint)]">No assignable people.</div>;
   return (
     <div className="relative">
-      <button type="button" onClick={() => setOpen((current) => !current)} className="task-inline-control">
+      <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((current) => !current); }} className="task-inline-control" data-interactive="true">
         {selectedAssignee ? <Avatar name={selectedAssignee.user.name} email={selectedAssignee.user.email} imageUrl={selectedAssignee.user.imageUrl} /> : <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>}
         <span className={cn("min-w-0 flex-1 truncate", !selectedAssignee && "text-[var(--ink-faint)]")}>{selectedAssignee ? (selectedAssignee.user.name || selectedAssignee.user.email) : required ? "Select assignee" : "Unassigned"}</span>
         <ChevronDown className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
@@ -477,7 +581,7 @@ function AssigneePicker({ assignable, selected, onChange, required = false }: { 
   );
 }
 
-function DatePicker({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function DatePicker({ value, onChange, displayValue, compact = false }: { value: string; onChange: (value: string) => void; displayValue?: string; compact?: boolean }) {
   const selectedDate = dateFromField(value);
   const [open, setOpen] = useState(false);
   const [today] = useState(() => toDateField(Date.now()));
@@ -492,45 +596,150 @@ function DatePicker({ value, onChange }: { value: string; onChange: (value: stri
     setOpen(false);
   }
 
+  const header = (
+    <>
+      {!compact && <CalendarDays className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />}
+      <span className={cn("min-w-0 flex-1 truncate", !value && "text-[var(--ink-faint)]")}>{displayValue ?? (value || (compact ? "—" : "Add date"))}</span>
+      {!compact && <ChevronDown className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />}
+    </>
+  );
+  const calendar = (
+    <div className={compact ? "p-3" : ""}>
+      <div className="mb-3 flex items-center justify-between">
+        <button type="button" className="task-icon-btn" onClick={() => setMonthDate(new Date(monthDate.getFullYear(), monthDate.getMonth() - 1, 1))} aria-label="Previous month"><ChevronLeft className="h-4 w-4" /></button>
+        <div className="text-[13px] font-semibold text-[var(--ink)]">{monthLabel}</div>
+        <button type="button" className="task-icon-btn" onClick={() => setMonthDate(new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 1))} aria-label="Next month"><ChevronRight className="h-4 w-4" /></button>
+      </div>
+      <div className="grid grid-cols-7 gap-1 text-center text-[11px] font-medium text-[var(--ink-faint)]">
+        {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, index) => <div key={`${day}-${index}`} className="py-1">{day}</div>)}
+      </div>
+      <div className="mt-1 grid grid-cols-7 gap-1">
+        {Array.from({ length: blanks }).map((_, index) => <div key={`blank-${index}`} />)}
+        {Array.from({ length: daysInMonth }).map((_, index) => {
+          const day = index + 1;
+          const dateValue = toDateField(new Date(monthDate.getFullYear(), monthDate.getMonth(), day).getTime());
+          const selected = value === dateValue;
+          return (
+            <button key={day} type="button" onClick={() => pick(day)} className={cn("h-8 rounded-md text-[13px] text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-muted)]", dateValue === today && "font-semibold text-[var(--primary)]", selected && "bg-[var(--primary)] !text-[var(--on-primary)] hover:!bg-[var(--primary-hover)]")}>
+              {day}
+            </button>
+          );
+        })}
+      </div>
+      <div className="mt-3 flex items-center justify-between border-t border-[var(--hairline)] pt-3">
+        <Button type="button" size="sm" variant="ghost" onClick={() => { onChange(""); setOpen(false); }}>Clear</Button>
+        <Button type="button" size="sm" variant="secondary" onClick={() => { onChange(today); setMonthDate(new Date()); setOpen(false); }}>Today</Button>
+      </div>
+    </div>
+  );
+
+  if (compact) return <TaskCellPopover open={open} onOpenChange={setOpen} ariaLabel="Change due date" header={header} panelClassName="task-cell-popover-date">{calendar}</TaskCellPopover>;
+
   return (
     <DropdownMenu.Root open={open} onOpenChange={setOpen}>
       <DropdownMenu.Trigger asChild>
-        <button type="button" className="task-inline-control">
-          <CalendarDays className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
-          <span className={cn("min-w-0 flex-1 truncate", !value && "text-[var(--ink-faint)]")}>{value || "Add date"}</span>
-          <ChevronDown className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
-        </button>
+        <button type="button" className="task-inline-control" data-interactive="true" onClick={(event) => event.stopPropagation()}>{header}</button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
-        <DropdownMenu.Content align="start" sideOffset={6} className="task-menu w-72 p-3">
-          <div className="mb-3 flex items-center justify-between">
-            <button type="button" className="task-icon-btn" onClick={() => setMonthDate(new Date(monthDate.getFullYear(), monthDate.getMonth() - 1, 1))} aria-label="Previous month"><ChevronLeft className="h-4 w-4" /></button>
-            <div className="text-[13px] font-semibold text-[var(--ink)]">{monthLabel}</div>
-            <button type="button" className="task-icon-btn" onClick={() => setMonthDate(new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 1))} aria-label="Next month"><ChevronRight className="h-4 w-4" /></button>
-          </div>
-          <div className="grid grid-cols-7 gap-1 text-center text-[11px] font-medium text-[var(--ink-faint)]">
-            {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, index) => <div key={`${day}-${index}`} className="py-1">{day}</div>)}
-          </div>
-          <div className="mt-1 grid grid-cols-7 gap-1">
-            {Array.from({ length: blanks }).map((_, index) => <div key={`blank-${index}`} />)}
-            {Array.from({ length: daysInMonth }).map((_, index) => {
-              const day = index + 1;
-              const dateValue = toDateField(new Date(monthDate.getFullYear(), monthDate.getMonth(), day).getTime());
-              const selected = value === dateValue;
-              return (
-                <button key={day} type="button" onClick={() => pick(day)} className={cn("h-8 rounded-md text-[13px] text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-muted)]", dateValue === today && "font-semibold text-[var(--primary)]", selected && "bg-[var(--primary)] !text-[var(--on-primary)] hover:!bg-[var(--primary-hover)]")}>
-                  {day}
-                </button>
-              );
-            })}
-          </div>
-          <div className="mt-3 flex items-center justify-between border-t border-[var(--hairline)] pt-3">
-            <Button type="button" size="sm" variant="ghost" onClick={() => onChange("")}>Clear</Button>
-            <Button type="button" size="sm" variant="secondary" onClick={() => { onChange(today); setMonthDate(new Date()); setOpen(false); }}>Today</Button>
-          </div>
+        <DropdownMenu.Content align="start" sideOffset={6} className="task-menu w-72 p-3" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+          {calendar}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
+  );
+}
+
+function InlineTextCell({ value, placeholder = "—", ariaLabel, onSave, required = false, inputMode = "text", align = "left", pending = false }: { value: string; placeholder?: string; ariaLabel: string; onSave: (value: string) => Promise<boolean>; required?: boolean; inputMode?: React.HTMLAttributes<HTMLInputElement>["inputMode"]; align?: "left" | "right"; pending?: boolean }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const savingRef = useRef(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => { if (!editing) setDraft(value); }, [editing, value]);
+  useEffect(() => {
+    if (!editing || !textareaRef.current) return;
+    textareaRef.current.style.height = "0px";
+    textareaRef.current.style.height = `${Math.max(30, textareaRef.current.scrollHeight)}px`;
+  }, [draft, editing]);
+
+  async function commit() {
+    if (savingRef.current) return;
+    const next = draft.trim();
+    if (required && !next) { setDraft(value); setEditing(false); return; }
+    if (next === value.trim()) { setEditing(false); return; }
+    savingRef.current = true;
+    const saved = await onSave(next);
+    savingRef.current = false;
+    if (saved) setEditing(false);
+    else setDraft(value);
+  }
+
+  if (editing) {
+    return (
+      <span className="task-cell-editor">
+        <textarea
+          ref={textareaRef}
+          aria-label={ariaLabel}
+          autoFocus
+          data-interactive="true"
+          inputMode={inputMode}
+          disabled={pending}
+          value={draft}
+          rows={1}
+          onClick={(event) => event.stopPropagation()}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={() => void commit()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
+            if (event.key === "Escape") { setDraft(value); setEditing(false); }
+          }}
+          className={cn("task-cell-input", align === "right" && "text-right")}
+        />
+      </span>
+    );
+  }
+
+  return (
+    <button type="button" data-interactive="true" disabled={pending} className={cn("task-cell-control", align === "right" && "justify-end text-right", pending && "opacity-60")} onClick={(event) => { event.stopPropagation(); setEditing(true); }}>
+      <span className={cn("min-w-0 truncate", !value && "text-[var(--ink-faint)]")}>{value || placeholder}</span>
+    </button>
+  );
+}
+
+function InlineSelectCell<T extends string>({ value, options, ariaLabel, onSave, pending = false, renderValue }: { value: T; options: { value: T; label: string }[]; ariaLabel: string; onSave: (value: T) => Promise<boolean>; pending?: boolean; renderValue?: (option: { value: T; label: string } | undefined) => React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const selected = options.find((option) => option.value === value);
+  const header = <span className="min-w-0 flex-1 truncate">{renderValue ? renderValue(selected) : selected?.label ?? "—"}</span>;
+  return (
+    <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending} pending={pending} ariaLabel={ariaLabel} header={header}>
+      {options.map((option) => (
+        <button key={option.value} type="button" onClick={() => { setOpen(false); if (option.value !== value) void onSave(option.value); }} className="task-cell-popover-item">
+          <span className="min-w-0 flex-1 truncate">{option.label}</span>
+          {option.value === value && <Check className="h-3.5 w-3.5 text-[var(--ink-faint)]" />}
+        </button>
+      ))}
+    </TaskCellPopover>
+  );
+}
+
+function InlineAssigneeCell({ assignable, assignees, selected, onSave, pending = false }: { assignable: any[]; assignees: any[]; selected: string[]; onSave: (ids: string[]) => Promise<boolean>; pending?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const selectedId = selected[0];
+  const header = <span className="min-w-0 flex-1 truncate"><AvatarStack assignees={assignees} showName /></span>;
+  return (
+    <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending || assignable.length === 0} pending={pending} ariaLabel="Change assignee" header={header} panelClassName="task-cell-popover-scroll">
+      {assignable.map((assignee) => {
+        const id = assignee.membership._id as string;
+        const name = assignee.user.name || assignee.user.email;
+        return (
+          <button key={id} type="button" onClick={() => { setOpen(false); if (id !== selectedId) void onSave([id]); }} className="task-cell-popover-item">
+            <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} />
+            <span className="min-w-0 flex-1"><span className="block truncate font-medium text-[var(--ink)]">{name}</span><span className="block truncate text-[11.5px] text-[var(--ink-muted)]">{assignee.membership.role}</span></span>
+            {selectedId === id && <Check className="h-3.5 w-3.5 text-[var(--ink-faint)]" />}
+          </button>
+        );
+      })}
+    </TaskCellPopover>
   );
 }
 
@@ -719,10 +928,14 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [inlineError, setInlineError] = useState<string | null>(null);
+  const [pendingCell, setPendingCell] = useState<string | null>(null);
   const canUseAllTasks = active?.membership.role === "Admin" || active?.membership.role === "Manager";
   const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip") as any[] | undefined;
   const filterableAssignees = useQuery(api.tasks.filterableAssignees, activeCompanyId && canUseAllTasks ? { companyId: activeCompanyId } : "skip") as any[] | undefined;
   const tasks = useQuery(kind === "jd" ? api.tasks.listJdRows : api.tasks.listOneTimeRows, activeCompanyId ? (kind === "jd" ? { companyId: activeCompanyId, search: search || undefined, frequency, sort: "newest" as const } : { companyId: activeCompanyId, search: search || undefined, sort: "newest" as const }) : "skip") as any[] | undefined;
+  const updateJd = useMutation(api.tasks.updateJd);
+  const updateOneTime = useMutation(api.tasks.updateOneTime);
   const deleteJd = useMutation(api.tasks.deleteJd);
   const deleteJdBulk = useMutation(api.tasks.deleteJdBulk);
   const deleteOneTime = useMutation(api.tasks.deleteOneTime);
@@ -827,6 +1040,31 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     }
   }
 
+  async function saveInline(task: any, patch: Partial<TaskFormValues>, label: string) {
+    if (!activeCompanyId) return false;
+    const key = `${task._id}:${label}`;
+    setPendingCell(key);
+    setInlineError(null);
+    try {
+      const common = {
+        companyId: activeCompanyId,
+        title: (patch.title ?? task.title ?? "").trim(),
+        description: patch.description ?? task.description,
+        time: patch.time ?? task.time,
+        quantity: patch.quantity !== undefined ? quantityFromInput(patch.quantity) : task.quantity,
+        assigneeMembershipIds: (patch.assigneeMembershipIds ?? task.assigneeMembershipIds) as Id<"companyMemberships">[],
+      };
+      if (kind === "jd") await updateJd({ ...common, taskId: task._id as Id<"jdTasks">, recurrence: (patch.recurrence ?? task.recurrence) as Frequency });
+      else await updateOneTime({ ...common, taskId: task._id as Id<"oneTimeTasks">, dueDate: patch.dueDate !== undefined ? fromDateInput(patch.dueDate) : task.dueDate, priority: (patch.priority ?? task.priority) as Priority });
+      return true;
+    } catch (err) {
+      setInlineError(err instanceof Error ? err.message : "Could not update the task.");
+      return false;
+    } finally {
+      setPendingCell((current) => current === key ? null : current);
+    }
+  }
+
   const jdColumns = 6; // task + frequency + assignee + status + time + quantity
   const oneColumns = 7; // task + priority + assignee + status + due + time + quantity
   const filterCount = [statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
@@ -890,6 +1128,13 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             </Button>
           </div>
           {deleteError && <p className="alert-error basis-full rounded-md px-2 py-1.5 text-[12.5px]" role="alert">{deleteError}</p>}
+        </div>
+      )}
+
+      {inlineError && (
+        <div className="alert-error mb-3 flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-[13px]" role="alert">
+          <span>{inlineError}</span>
+          <button type="button" className="task-icon-btn h-6 w-6" onClick={() => setInlineError(null)} aria-label="Dismiss inline edit error"><X className="h-3.5 w-3.5" /></button>
         </div>
       )}
 
@@ -978,40 +1223,92 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               <>
                 {visibleTasks.map((task) => {
                   const isChecked = selectedIds.has(task._id);
+                  const rowCanEdit = canEditTaskRow(active, kind, task);
+                  const pending = (field: string) => pendingCell === `${task._id}:${field}`;
+                  const openDetails = () => router.push(`${base}/${task._id}`);
                   return (
-                  <tr
-                    key={task._id}
-                    data-selected={task._id === selectedId}
-                    data-checked={isChecked ? "true" : undefined}
-                    onClick={() => router.push(`${base}/${task._id}`)}
-                    className="group/row"
-                  >
-                    <td className="col-task max-w-[250px]">
-                      <div className="flex min-w-0 items-center gap-2.5">
-                        <span className="min-w-0 flex-1 truncate">{task.title}</span>
-                      </div>
-                    </td>
-                    {kind === "jd" ? (
-                      <td className="whitespace-nowrap text-[var(--ink-secondary)]">
-                        {frequencyLabel(task.recurrence)}
+                    <tr
+                      key={task._id}
+                      data-row="task"
+                      data-clickable={!rowCanEdit ? "true" : undefined}
+                      data-selected={task._id === selectedId}
+                      data-checked={isChecked ? "true" : undefined}
+                      tabIndex={!rowCanEdit ? 0 : undefined}
+                      onClick={(event) => {
+                        if (rowCanEdit) return;
+                        if ((event.target as HTMLElement).closest("[data-interactive='true']")) return;
+                        openDetails();
+                      }}
+                      onKeyDown={(event) => {
+                        if (!rowCanEdit && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openDetails(); }
+                      }}
+                      className="group/row"
+                    >
+                      <td className="col-task max-w-[250px]">
+                        <div className="task-title-cell">
+                          {rowCanEdit ? (
+                            <InlineTextCell value={task.title ?? ""} ariaLabel="Edit task title" required pending={pending("title")} onSave={(title) => saveInline(task, { title }, "title")} />
+                          ) : (
+                            <div className="flex min-w-0 items-center gap-2.5"><span className="min-w-0 flex-1 truncate">{task.title}</span></div>
+                          )}
+                          <button
+                            type="button"
+                            data-interactive="true"
+                            data-tooltip="Open in side peek"
+                            className="task-title-open"
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => { event.stopPropagation(); openDetails(); }}
+                            aria-label={`Open details for ${task.title}`}
+                          >
+                            <PanelRight className="h-3.5 w-3.5" />
+                            <span>OPEN</span>
+                          </button>
+                        </div>
                       </td>
-                    ) : (
+                      {kind === "jd" ? (
+                        <td className="whitespace-nowrap text-[var(--ink-secondary)]">
+                          {rowCanEdit ? (
+                            <InlineSelectCell value={task.recurrence as Frequency} options={frequencies} ariaLabel="Change frequency" pending={pending("frequency")} onSave={(recurrence) => saveInline(task, { recurrence }, "frequency")} />
+                          ) : frequencyLabel(task.recurrence)}
+                        </td>
+                      ) : (
+                        <td>
+                          {rowCanEdit && canEditPriority(active) ? (
+                            <InlineSelectCell
+                              value={task.priority as Priority}
+                              options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))}
+                              ariaLabel="Change priority"
+                              pending={pending("priority")}
+                              onSave={(priority) => saveInline(task, { priority }, "priority")}
+                              renderValue={(option) => <span className={cn("priority-chip", priorityChipClasses((option?.value ?? task.priority) as Priority))}>{option?.label ?? priorityLabel(task.priority)}</span>}
+                            />
+                          ) : (
+                            <span className={cn("priority-chip", priorityChipClasses(task.priority))}>{priorityLabel(task.priority)}</span>
+                          )}
+                        </td>
+                      )}
                       <td>
-                        <span className={cn("priority-chip", priorityChipClasses(task.priority))}>
-                          {priorityLabel(task.priority)}
-                        </span>
+                        {rowCanEdit && assignable ? (
+                          <InlineAssigneeCell assignable={assignable} assignees={task.assignees} selected={task.assigneeMembershipIds ?? []} pending={pending("assignee")} onSave={(assigneeMembershipIds) => saveInline(task, { assigneeMembershipIds }, "assignee")} />
+                        ) : <AvatarStack assignees={task.assignees} showName />}
                       </td>
-                    )}
-                    <td><AvatarStack assignees={task.assignees} showName /></td>
-                    <td><StatusBadge kind={kind} task={task} /></td>
-                    {kind === "one" && (
-                      <td className="col-meta">
-                        <span className={cn(dueTone(task) === "danger" && "font-medium text-[var(--danger)]", dueTone(task) === "warn" && "font-medium text-[var(--badge-yellow-fg)]", dueTone(task) === "muted" && "text-[var(--ink-faint)]")}>{dueLabel(task)}</span>
+                      <td><StatusBadge kind={kind} task={task} canUpdateOverride={rowCanEdit} cellTrigger={rowCanEdit} /></td>
+                      {kind === "one" && (
+                        <td className="col-meta">
+                          {rowCanEdit ? (
+                            <DatePicker value={task.dueDate ? toDateField(task.dueDate) : ""} displayValue={dueLabel(task)} compact onChange={(dueDate) => { void saveInline(task, { dueDate }, "due"); }} />
+                          ) : (
+                            <span className={cn(dueTone(task) === "danger" && "font-medium text-[var(--danger)]", dueTone(task) === "warn" && "font-medium text-[var(--badge-yellow-fg)]", dueTone(task) === "muted" && "text-[var(--ink-faint)]")}>{dueLabel(task)}</span>
+                          )}
+                        </td>
+                      )}
+                      <td>
+                        {rowCanEdit ? <InlineTextCell value={task.time ?? ""} ariaLabel="Edit time" pending={pending("time")} onSave={(time) => saveInline(task, { time }, "time")} /> : (task.time || "—")}
                       </td>
-                    )}
-                    <td>{task.time || "—"}</td>
-                    <td>{task.quantity != null ? task.quantity : "—"}</td>
-                  </tr>
+                      <td>
+                        {rowCanEdit ? <InlineTextCell value={task.quantity != null ? String(task.quantity) : ""} ariaLabel="Edit quantity" inputMode="decimal" pending={pending("quantity")} onSave={(quantity) => saveInline(task, { quantity }, "quantity")} /> : (task.quantity != null ? task.quantity : "—")}
+                      </td>
+                    </tr>
                   );
                 })}
                 {canCreate && (

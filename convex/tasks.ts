@@ -388,7 +388,8 @@ export const assignableUsers = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const caps = await membershipCapabilities(ctx, membership);
     const prefix = args.kind === "jd" ? "tasks:jd" : "tasks:one_time";
-    if (!caps.has(`${prefix}:create` as any)) return [];
+    const canCreateOrUpdateSelf = caps.has(`${prefix}:create` as any) || caps.has(`${prefix}:update:self` as any);
+    if (!canCreateOrUpdateSelf) return [];
     let ids: Set<Id<"companyMemberships">>;
     if (caps.has(`${prefix}:assign:any` as any)) {
       const all = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);

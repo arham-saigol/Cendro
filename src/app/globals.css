@@ -343,8 +343,7 @@ button:disabled { cursor: not-allowed; }
 .task-table .col-meta { color: var(--ink-faint); white-space: nowrap; font-size: 12px; }
 .task-table td:has(.task-cell-input:focus) {
   position: relative;
-  z-index: 20;
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 10%, transparent);
+  z-index: 90;
 }
 
 /* Inline table pickers render the cell header and menu as one Notion-style surface. */
@@ -410,7 +409,7 @@ button:disabled { cursor: not-allowed; }
 .task-cell-popover-item:hover,
 .task-cell-popover-item:focus-visible { background: var(--surface-muted); color: var(--ink); }
 .task-cell-popover-scroll .task-cell-popover-body { max-height: 288px; overflow: auto; }
-.task-cell-popover-date { width: 280px !important; }
+.task-cell-popover-date { width: 250px !important; }
 .task-cell-popover-date .task-cell-popover-body { padding: 0; }
 
 .task-cell-control {
@@ -436,31 +435,34 @@ button:disabled { cursor: not-allowed; }
   display: block;
   width: 100%;
   min-width: 0;
-  height: 20px;
+  height: 41px;
 }
+.task-cell-editor-sizer { visibility: hidden; }
 .task-cell-input {
   position: absolute;
-  left: 0;
-  top: 50%;
-  z-index: 30;
+  left: -14px;
+  top: 0;
+  z-index: 91;
   display: block;
-  width: 100%;
+  box-sizing: border-box;
+  width: calc(100% + 28px);
   min-width: 0;
-  transform: translateY(-50%);
   resize: none;
   overflow: hidden;
-  border: 0;
-  background: transparent;
-  padding: 0;
-  color: inherit;
+  border: 1px solid var(--hairline);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 10px 8px;
+  color: var(--ink);
+  caret-color: var(--ink);
   font: inherit;
-  line-height: inherit;
+  line-height: 1.35;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   outline: none;
-  box-shadow: none;
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--ink) 11%, transparent), 0 1px 2px color-mix(in srgb, var(--ink) 8%, transparent);
 }
-.task-cell-input:focus { outline: none; box-shadow: none; }
+.task-cell-input:focus { outline: none; box-shadow: 0 8px 18px color-mix(in srgb, var(--ink) 11%, transparent), 0 1px 2px color-mix(in srgb, var(--ink) 8%, transparent); }
 .task-table .task-inline-control {
   height: 41px;
   padding: 0;
@@ -482,15 +484,20 @@ button:disabled { cursor: not-allowed; }
   padding-left: 4px;
   color: var(--ink-faint);
   font-size: 13px;
-  cursor: pointer;
   background: transparent !important;
 }
 .task-add-label {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
   padding: 4px 8px;
   border-radius: 6px;
   transition: background-color 0.12s ease, color 0.12s ease;
 }
-.task-add-row:hover .task-add-label { background: var(--surface-muted); color: var(--ink-muted); }
+.task-add-label:hover,
+.task-add-label:focus-visible { background: var(--surface-muted); color: var(--ink-muted); outline: none; }
 
 /* Notion-style status / priority select pills */
 .task-pill {

@@ -28,7 +28,7 @@ import {
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
@@ -92,31 +92,76 @@ function formFromTask(kind: Kind, task: any): TaskFormValues {
     assigneeMembershipIds: task.assigneeMembershipIds ?? [],
     recurrence: task.recurrence ?? "daily",
     priority: task.priority ?? "medium",
-    dueDate: kind === "one" && task.dueDate ? toDateField(task.dueDate) : "",
+    dueDate: kind === "one" && task.dueDate ? toDateField(task.dueDate, dateHasExplicitTime(task.dueDate)) : "",
     quantity: task.quantity ? String(task.quantity) : "",
     time: task.time ?? "",
     files: [],
   };
 }
 
-function toDateField(ms: number) {
+function dateHasExplicitTime(ms?: number | null) {
+  if (!ms) return false;
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return false;
+  return !(date.getHours() === 23 && date.getMinutes() === 59 && date.getSeconds() === 59);
+}
+function formatDateOnly(date: Date, month: "short" | "long" = "long") {
+  return new Intl.DateTimeFormat("en-US", { month, day: "numeric", year: "numeric" }).format(date);
+}
+function formatTimeOnly(date: Date) {
+  return new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" }).format(date);
+}
+function dateFieldHasTime(value: string) {
+  return /\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/i.test(value) || /\b\d{1,2}:\d{2}\b/.test(value);
+}
+function parseTimeParts(value: string) {
+  const match = /^\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*$/i.exec(value);
+  if (!match) return null;
+  let hours = Number(match[1]);
+  const minutes = match[2] ? Number(match[2]) : 0;
+  const meridiem = match[3]?.toLowerCase();
+  if (minutes < 0 || minutes > 59) return null;
+  if (meridiem) {
+    if (hours < 1 || hours > 12) return null;
+    if (meridiem === "pm" && hours !== 12) hours += 12;
+    if (meridiem === "am" && hours === 12) hours = 0;
+  } else if (hours < 0 || hours > 23) return null;
+  return { hours, minutes };
+}
+function applyTimeText(date: Date, timeText?: string) {
+  const parts = timeText ? parseTimeParts(timeText) : null;
+  if (!parts) return false;
+  date.setHours(parts.hours, parts.minutes, 0, 0);
+  return true;
+}
+function toDateField(ms: number, includeTime = false) {
   const date = new Date(ms);
   if (Number.isNaN(date.getTime())) return "";
-  const day = String(date.getDate()).padStart(2, "0");
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  return `${day}/${month}/${date.getFullYear()}`;
+  return includeTime ? `${formatDateOnly(date)} ${formatTimeOnly(date)}` : formatDateOnly(date);
 }
 function dateFromField(value: string) {
   const trimmed = value.trim();
   if (!trimmed) return null;
-  const slashMatch = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(trimmed);
-  const date = slashMatch ? new Date(Number(slashMatch[3]), Number(slashMatch[2]) - 1, Number(slashMatch[1])) : new Date(trimmed);
+  const lowered = trimmed.toLowerCase();
+  if (lowered === "today" || lowered === "now") return new Date();
+  if (lowered === "tomorrow") return new Date(Date.now() + 86_400_000);
+  if (lowered === "yesterday") return new Date(Date.now() - 86_400_000);
+
+  const slashMatch = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:[\s,]+(.+))?$/.exec(trimmed);
+  if (slashMatch) {
+    const year = Number(slashMatch[3].length === 2 ? `20${slashMatch[3]}` : slashMatch[3]);
+    const date = new Date(year, Number(slashMatch[2]) - 1, Number(slashMatch[1]));
+    if (slashMatch[4]) applyTimeText(date, slashMatch[4]);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  const date = new Date(trimmed);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 function fromDateInput(value: string) {
   const date = dateFromField(value);
   if (!date) return undefined;
-  date.setHours(23, 59, 59, 0);
+  if (!dateFieldHasTime(value)) date.setHours(23, 59, 59, 0);
   return date.getTime();
 }
 function quantityFromInput(value: string) { const parsed = Number(value); return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined; }
@@ -172,16 +217,9 @@ function priorityChipClasses(priority: Priority) {
 function dueLabel(task: any) {
   const ms = task.dueDate;
   if (!ms) return "—";
-  const day = 86_400_000;
-  const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
-  const dueDay = new Date(ms); dueDay.setHours(0, 0, 0, 0);
-  const delta = Math.round((dueDay.getTime() - startOfToday.getTime()) / day);
-  if (delta === 0) return "Today";
-  if (delta === 1) return "Tomorrow";
-  if (delta === -1) return "Yesterday";
-  if (delta > 1 && delta <= 6) return `In ${delta}d`;
-  if (delta < 0 && delta >= -6) return `${Math.abs(delta)}d ago`;
-  return formatDate(ms);
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return "—";
+  return dateHasExplicitTime(ms) ? `${formatDateOnly(date)} ${formatTimeOnly(date)}` : formatDateOnly(date);
 }
 function dueTone(task: any) {
   const ms = task.dueDate;
@@ -275,6 +313,8 @@ function TaskCellPopover({
   header,
   children,
   panelClassName,
+  showHeader = true,
+  hideTriggerOnOpen = true,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -284,14 +324,16 @@ function TaskCellPopover({
   header: React.ReactNode;
   children: React.ReactNode;
   panelClassName?: string;
+  showHeader?: boolean;
+  hideTriggerOnOpen?: boolean;
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const [rect, setRect] = useState<{ top: number; left: number; width: number } | null>(null);
+  const [rect, setRect] = useState<{ top: number; bottom: number; left: number; width: number } | null>(null);
 
   function measure() {
     const bounds = triggerRef.current?.getBoundingClientRect();
     if (!bounds) return;
-    setRect({ top: bounds.top, left: bounds.left - 14, width: Math.max(bounds.width + 28, 220) });
+    setRect({ top: bounds.top, bottom: bounds.bottom, left: bounds.left - 14, width: Math.max(bounds.width + 28, 220) });
   }
 
   useEffect(() => {
@@ -317,7 +359,7 @@ function TaskCellPopover({
         type="button"
         disabled={disabled || pending}
         data-interactive="true"
-        data-cell-popover-open={open ? "true" : undefined}
+        data-cell-popover-open={open && hideTriggerOnOpen ? "true" : undefined}
         onClick={(event) => { event.stopPropagation(); if (!open) measure(); onOpenChange(!open); }}
         className={cn("task-cell-control", pending && "opacity-60")}
         aria-label={ariaLabel}
@@ -328,8 +370,8 @@ function TaskCellPopover({
       {open && rect && (
         <>
           <button type="button" aria-label="Close menu" className="task-cell-popover-backdrop" onClick={(event) => { event.stopPropagation(); onOpenChange(false); }} />
-          <div className={cn("task-cell-popover", panelClassName)} style={{ top: rect.top, left: rect.left, width: rect.width }} data-interactive="true" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-            <div className="task-cell-popover-header">{header}</div>
+          <div className={cn("task-cell-popover", panelClassName)} style={{ top: showHeader ? rect.top : rect.bottom + 4, left: rect.left, width: rect.width }} data-interactive="true" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+            {showHeader && <div className="task-cell-popover-header">{header}</div>}
             <div className="task-cell-popover-body">{children}</div>
           </div>
         </>
@@ -581,20 +623,89 @@ function AssigneePicker({ assignable, selected, onChange, required = false }: { 
   );
 }
 
+function sameCalendarDay(a: Date | null, b: Date) {
+  return Boolean(a && a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate());
+}
+
 function DatePicker({ value, onChange, displayValue, compact = false }: { value: string; onChange: (value: string) => void; displayValue?: string; compact?: boolean }) {
   const selectedDate = dateFromField(value);
+  const initialIncludesTime = Boolean(selectedDate && dateFieldHasTime(value));
   const [open, setOpen] = useState(false);
-  const [today] = useState(() => toDateField(Date.now()));
+  const [includeTime, setIncludeTime] = useState(initialIncludesTime);
+  const [dateDraft, setDateDraft] = useState(() => selectedDate ? formatDateOnly(selectedDate, "short") : "");
+  const [timeDraft, setTimeDraft] = useState(() => initialIncludesTime && selectedDate ? formatTimeOnly(selectedDate) : "");
   const [monthDate, setMonthDate] = useState(() => selectedDate ?? new Date());
   const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
-  const daysInMonth = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getDate();
-  const blanks = (monthStart.getDay() + 6) % 7;
-  const monthLabel = monthDate.toLocaleString(undefined, { month: "long", year: "numeric" });
+  const calendarStart = new Date(monthStart);
+  calendarStart.setDate(1 - monthStart.getDay());
+  const monthLabel = monthDate.toLocaleString(undefined, { month: "short", year: "numeric" });
+  const todayDate = new Date();
 
-  function pick(day: number) {
-    onChange(toDateField(new Date(monthDate.getFullYear(), monthDate.getMonth(), day).getTime()));
-    setOpen(false);
+  useEffect(() => {
+    const nextDate = dateFromField(value);
+    const nextIncludesTime = Boolean(nextDate && dateFieldHasTime(value));
+    setIncludeTime(nextIncludesTime);
+    setDateDraft(nextDate ? formatDateOnly(nextDate, "short") : "");
+    setTimeDraft(nextIncludesTime && nextDate ? formatTimeOnly(nextDate) : "");
+    if (nextDate) setMonthDate(new Date(nextDate.getFullYear(), nextDate.getMonth(), 1));
+  }, [value]);
+
+  function emitDate(date: Date, withTime: boolean, timeSource: Date | null = selectedDate) {
+    const next = new Date(date);
+    if (withTime) {
+      const source = timeSource && dateFieldHasTime(value) ? timeSource : new Date();
+      next.setHours(source.getHours(), source.getMinutes(), 0, 0);
+    } else {
+      next.setHours(23, 59, 59, 0);
+    }
+    onChange(toDateField(next.getTime(), withTime));
   }
+
+  function commitDateDraft() {
+    const parsed = dateFromField(dateDraft);
+    if (!parsed) {
+      setDateDraft(selectedDate ? formatDateOnly(selectedDate, "short") : "");
+      return;
+    }
+    const draftIncludesTime = dateFieldHasTime(dateDraft);
+    setMonthDate(new Date(parsed.getFullYear(), parsed.getMonth(), 1));
+    if (draftIncludesTime) {
+      setIncludeTime(true);
+      onChange(toDateField(parsed.getTime(), true));
+    } else {
+      emitDate(parsed, includeTime);
+    }
+  }
+
+  function commitTimeDraft() {
+    const parts = parseTimeParts(timeDraft);
+    if (!parts) {
+      setTimeDraft(selectedDate && includeTime ? formatTimeOnly(selectedDate) : "");
+      return;
+    }
+    const next = selectedDate ? new Date(selectedDate) : new Date();
+    next.setHours(parts.hours, parts.minutes, 0, 0);
+    setIncludeTime(true);
+    onChange(toDateField(next.getTime(), true));
+  }
+
+  function pick(date: Date) {
+    setMonthDate(new Date(date.getFullYear(), date.getMonth(), 1));
+    emitDate(date, includeTime);
+  }
+
+  function jumpToCurrent() {
+    const now = new Date();
+    setMonthDate(new Date(now.getFullYear(), now.getMonth(), 1));
+    emitDate(now, includeTime, includeTime ? now : null);
+  }
+
+  function toggleIncludeTime(nextIncludesTime: boolean) {
+    setIncludeTime(nextIncludesTime);
+    const date = selectedDate ?? new Date();
+    emitDate(date, nextIncludesTime, nextIncludesTime ? (selectedDate && dateFieldHasTime(value) ? selectedDate : new Date()) : null);
+  }
+
 
   const header = (
     <>
@@ -603,32 +714,74 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
       {!compact && <ChevronDown className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />}
     </>
   );
+  const calendarDays = Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(calendarStart);
+    date.setDate(calendarStart.getDate() + index);
+    return date;
+  });
   const calendar = (
-    <div className={compact ? "p-3" : ""}>
-      <div className="mb-3 flex items-center justify-between">
-        <button type="button" className="task-icon-btn" onClick={() => setMonthDate(new Date(monthDate.getFullYear(), monthDate.getMonth() - 1, 1))} aria-label="Previous month"><ChevronLeft className="h-4 w-4" /></button>
-        <div className="text-[13px] font-semibold text-[var(--ink)]">{monthLabel}</div>
-        <button type="button" className="task-icon-btn" onClick={() => setMonthDate(new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 1))} aria-label="Next month"><ChevronRight className="h-4 w-4" /></button>
+    <div className="p-3">
+      <div className="mb-3 flex items-center gap-1.5">
+        <input
+          aria-label="Due date"
+          className="h-8 min-w-0 flex-1 rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2.5 text-[13px] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--focus-ring)]"
+          value={dateDraft}
+          onChange={(event) => setDateDraft(event.target.value)}
+          onBlur={commitDateDraft}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") { event.preventDefault(); commitDateDraft(); }
+            if (event.key === "Escape") setDateDraft(selectedDate ? formatDateOnly(selectedDate, "short") : "");
+          }}
+          placeholder="Jun 24, 2026"
+        />
+        {includeTime && (
+          <>
+            <input
+              aria-label="Due time"
+              className="h-8 w-[86px] rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2.5 text-[13px] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--focus-ring)]"
+              value={timeDraft}
+              onChange={(event) => setTimeDraft(event.target.value)}
+              onBlur={commitTimeDraft}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") { event.preventDefault(); commitTimeDraft(); }
+                if (event.key === "Escape") setTimeDraft(selectedDate && includeTime ? formatTimeOnly(selectedDate) : "");
+              }}
+              placeholder="5:00 PM"
+            />
+          </>
+        )}
+      </div>
+      <div className="mb-2 flex items-center gap-1.5">
+        <div className="flex-1 text-[13px] font-semibold text-[var(--ink)]">{monthLabel}</div>
+        <button type="button" className="rounded-md px-2 py-1 text-[12px] font-medium text-[var(--ink-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--ink)]" onClick={jumpToCurrent}>{includeTime ? "Now" : "Today"}</button>
+        <button type="button" className="task-icon-btn h-7 w-7" onClick={() => setMonthDate(new Date(monthDate.getFullYear(), monthDate.getMonth() - 1, 1))} aria-label="Previous month"><ChevronLeft className="h-4 w-4" /></button>
+        <button type="button" className="task-icon-btn h-7 w-7" onClick={() => setMonthDate(new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 1))} aria-label="Next month"><ChevronRight className="h-4 w-4" /></button>
       </div>
       <div className="grid grid-cols-7 gap-1 text-center text-[11px] font-medium text-[var(--ink-faint)]">
-        {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, index) => <div key={`${day}-${index}`} className="py-1">{day}</div>)}
+        {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((day) => <div key={day} className="py-1">{day}</div>)}
       </div>
       <div className="mt-1 grid grid-cols-7 gap-1">
-        {Array.from({ length: blanks }).map((_, index) => <div key={`blank-${index}`} />)}
-        {Array.from({ length: daysInMonth }).map((_, index) => {
-          const day = index + 1;
-          const dateValue = toDateField(new Date(monthDate.getFullYear(), monthDate.getMonth(), day).getTime());
-          const selected = value === dateValue;
+        {calendarDays.map((date) => {
+          const selected = sameCalendarDay(selectedDate, date);
+          const inCurrentMonth = date.getMonth() === monthDate.getMonth();
+          const isToday = sameCalendarDay(todayDate, date);
           return (
-            <button key={day} type="button" onClick={() => pick(day)} className={cn("h-8 rounded-md text-[13px] text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-muted)]", dateValue === today && "font-semibold text-[var(--primary)]", selected && "bg-[var(--primary)] !text-[var(--on-primary)] hover:!bg-[var(--primary-hover)]")}>
-              {day}
+            <button key={date.toISOString()} type="button" onClick={() => pick(date)} className={cn("h-8 rounded-md text-[13px] transition-colors hover:bg-[var(--surface-muted)]", inCurrentMonth ? "text-[var(--ink-secondary)]" : "text-[var(--ink-faint)]", isToday && "font-semibold text-[var(--primary)]", selected && "bg-[var(--primary)] !text-[var(--on-primary)] hover:!bg-[var(--primary-hover)]")}>
+              {date.getDate()}
             </button>
           );
         })}
       </div>
-      <div className="mt-3 flex items-center justify-between border-t border-[var(--hairline)] pt-3">
-        <Button type="button" size="sm" variant="ghost" onClick={() => { onChange(""); setOpen(false); }}>Clear</Button>
-        <Button type="button" size="sm" variant="secondary" onClick={() => { onChange(today); setMonthDate(new Date()); setOpen(false); }}>Today</Button>
+      <div className="mt-3 border-t border-[var(--hairline)] py-2">
+        <button type="button" role="switch" aria-checked={includeTime} className="flex w-full items-center justify-between rounded-md px-0 py-1.5 text-left text-[13px] text-[var(--ink-secondary)] hover:text-[var(--ink)]" onClick={() => toggleIncludeTime(!includeTime)}>
+          <span>Include time</span>
+          <span className={cn("relative h-5 w-9 rounded-full transition-colors", includeTime ? "bg-[var(--primary)]" : "bg-[var(--surface-pressed)]")}>
+            <span className={cn("absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform", includeTime ? "translate-x-[18px]" : "translate-x-0.5")} />
+          </span>
+        </button>
+      </div>
+      <div className="border-t border-[var(--hairline)] pt-1">
+        <button type="button" className="w-full rounded-md py-1.5 text-left text-[13px] text-[var(--ink-secondary)] hover:text-[var(--ink)]" onClick={() => { onChange(""); setOpen(false); }}>Clear</button>
       </div>
     </div>
   );
@@ -641,7 +794,7 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
         <button type="button" className="task-inline-control" data-interactive="true" onClick={(event) => event.stopPropagation()}>{header}</button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
-        <DropdownMenu.Content align="start" sideOffset={6} className="task-menu w-72 p-3" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+        <DropdownMenu.Content align="start" sideOffset={6} className="task-menu w-[250px] p-0" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
           {calendar}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
@@ -653,13 +806,16 @@ function InlineTextCell({ value, placeholder = "—", ariaLabel, onSave, require
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
   const savingRef = useRef(false);
+  const didFocusRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => { if (!editing) setDraft(value); }, [editing, value]);
-  useEffect(() => {
+  useEffect(() => { if (!editing) didFocusRef.current = false; }, [editing]);
+  useLayoutEffect(() => {
     if (!editing || !textareaRef.current) return;
-    textareaRef.current.style.height = "0px";
-    textareaRef.current.style.height = `${Math.max(30, textareaRef.current.scrollHeight)}px`;
+    const textarea = textareaRef.current;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.max(41, textarea.scrollHeight + 2)}px`;
   }, [draft, editing]);
 
   async function commit() {
@@ -676,7 +832,10 @@ function InlineTextCell({ value, placeholder = "—", ariaLabel, onSave, require
 
   if (editing) {
     return (
-      <span className="task-cell-editor">
+      <span className="task-cell-editor" data-interactive="true">
+        <span aria-hidden="true" className={cn("task-cell-control task-cell-editor-sizer", align === "right" && "justify-end text-right")}>
+          <span className={cn("min-w-0 truncate", !value && "text-[var(--ink-faint)]")}>{value || placeholder}</span>
+        </span>
         <textarea
           ref={textareaRef}
           aria-label={ariaLabel}
@@ -686,7 +845,14 @@ function InlineTextCell({ value, placeholder = "—", ariaLabel, onSave, require
           disabled={pending}
           value={draft}
           rows={1}
+          onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => event.stopPropagation()}
+          onFocus={(event) => {
+            if (didFocusRef.current) return;
+            const position = event.currentTarget.value.length;
+            event.currentTarget.setSelectionRange(position, position);
+            didFocusRef.current = true;
+          }}
           onChange={(event) => setDraft(event.target.value)}
           onBlur={() => void commit()}
           onKeyDown={(event) => {
@@ -1183,7 +1349,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                 <th><span className="inline-flex items-center gap-1.5"><Tag className="h-3.5 w-3.5" />Priority</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />Assignee</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />Status</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><CalendarDays className="h-3.5 w-3.5" />Due</span></th>
+                <th><span className="inline-flex items-center gap-1.5"><CalendarDays className="h-3.5 w-3.5" />Due Date</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />Time</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><QuantityIcon className="h-3.5 w-3.5" />Quantity</span></th>
               </tr>
@@ -1294,9 +1460,9 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                       </td>
                       <td><StatusBadge kind={kind} task={task} canUpdateOverride={rowCanEdit} cellTrigger={rowCanEdit} /></td>
                       {kind === "one" && (
-                        <td className="col-meta">
+                        <td className="whitespace-nowrap">
                           {rowCanEdit ? (
-                            <DatePicker value={task.dueDate ? toDateField(task.dueDate) : ""} displayValue={dueLabel(task)} compact onChange={(dueDate) => { void saveInline(task, { dueDate }, "due"); }} />
+                            <DatePicker value={task.dueDate ? toDateField(task.dueDate, dateHasExplicitTime(task.dueDate)) : ""} displayValue={dueLabel(task)} compact onChange={(dueDate) => { void saveInline(task, { dueDate }, "due"); }} />
                           ) : (
                             <span className={cn(dueTone(task) === "danger" && "font-medium text-[var(--danger)]", dueTone(task) === "warn" && "font-medium text-[var(--badge-yellow-fg)]", dueTone(task) === "muted" && "text-[var(--ink-faint)]")}>{dueLabel(task)}</span>
                           )}
@@ -1312,11 +1478,11 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                   );
                 })}
                 {canCreate && (
-                  <tr className="task-add-row" onClick={() => setCreateOpen(true)}>
+                  <tr className="task-add-row">
                     <td colSpan={kind === "jd" ? jdColumns : oneColumns}>
-                      <span className="task-add-label inline-flex items-center gap-1.5">
+                      <button type="button" className="task-add-label inline-flex items-center gap-1.5" onClick={() => setCreateOpen(true)}>
                         <Plus className="h-3.5 w-3.5" />New task
-                      </span>
+                      </button>
                     </td>
                   </tr>
                 )}

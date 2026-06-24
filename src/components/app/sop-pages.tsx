@@ -27,6 +27,7 @@ import { useCompany } from "./company-context";
 import { PageHeader } from "./page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SopRichTextEditor, SopRichTextViewer, richTextPlainText } from "./sop-rich-text";
 import { cn, formatDate, initials } from "@/lib/utils";
 
 type ScopeType = "company" | "branch" | "department" | "user";
@@ -191,7 +192,6 @@ function SopDialog({
   const [userMembershipId, setUserMembershipId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const contentRef = useRef<HTMLTextAreaElement>(null);
   const titleRef = useRef<HTMLTextAreaElement>(null);
 
   const createScopes = useMemo<CreateScopeType[]>(() => active?.capabilities.includes("sops:create") ? [
@@ -226,15 +226,16 @@ function SopDialog({
     if (scopeType === "user" && !scopeOptions.users.some((user) => user.membership._id === userMembershipId)) setUserMembershipId(scopeOptions.users[0]?.membership._id ?? "");
   }, [branchId, mode, open, scopeOptions, scopeType, userMembershipId]);
 
-  useEffect(() => autoSize(contentRef), [content, open]);
   useEffect(() => autoSize(titleRef), [title, open]);
+
+  const contentPlainText = richTextPlainText(content);
 
   async function submit() {
     if (!activeCompanyId || saving) return;
     const trimmedTitle = title.trim();
     const trimmedContent = content.trim();
     if (!trimmedTitle) { setError("Title is required."); return; }
-    if (!trimmedContent) { setError("SOP body is required."); return; }
+    if (!richTextPlainText(trimmedContent)) { setError("SOP body is required."); return; }
     if (mode === "create" && scopeType === "branch" && !branchId) { setError("Select a branch for this SOP."); return; }
     if (mode === "create" && scopeType === "user" && !userMembershipId) { setError("Select a user for this SOP."); return; }
     setSaving(true);
@@ -332,14 +333,12 @@ function SopDialog({
                 <div className="grid grid-cols-[120px_1fr] items-start gap-3 py-2">
                   <span className="pt-2 text-[13px] text-[var(--ink-muted)]">Body</span>
                   <div className="min-w-0">
-                    <textarea
-                      ref={contentRef}
-                      aria-label="SOP body"
-                      className="block w-full resize-none overflow-hidden border-none bg-transparent px-2 py-2 text-[13px] leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]"
-                      rows={5}
+                    <SopRichTextEditor
                       value={content}
-                      onChange={(event) => { setContent(event.target.value); setError(null); }}
                       placeholder="Write the procedure steps..."
+                      ariaLabel="SOP body"
+                      className="min-h-[132px] px-2 py-2 text-[13px] leading-6"
+                      onChange={(value) => { setContent(value); setError(null); }}
                     />
                   </div>
                 </div>
@@ -350,7 +349,7 @@ function SopDialog({
 
             <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--hairline)] px-6 py-4">
               <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>Cancel</Button>
-              <Button type="submit" size="lg" variant="primary" disabled={saving || !title.trim() || !content.trim() || !scopeTargetValid}>{saving ? "Saving..." : mode === "create" ? "Create SOP" : "Save changes"}</Button>
+              <Button type="submit" size="lg" variant="primary" disabled={saving || !title.trim() || !contentPlainText || !scopeTargetValid}>{saving ? "Saving..." : mode === "create" ? "Create SOP" : "Save changes"}</Button>
             </div>
           </form>
         </Dialog.Content>
@@ -363,9 +362,11 @@ function InlineTitleCell({ value, ariaLabel, pending, onSave }: { value: string;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
   const savingRef = useRef(false);
+  const didFocusRef = useRef(false);
   const ref = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => { if (!editing) setDraft(value); }, [editing, value]);
+  useEffect(() => { if (!editing) didFocusRef.current = false; }, [editing]);
   useLayoutEffect(() => { if (editing) autoSize(ref); }, [draft, editing]);
 
   async function commit() {
@@ -396,13 +397,19 @@ function InlineTitleCell({ value, ariaLabel, pending, onSave }: { value: string;
           value={draft}
           onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => event.stopPropagation()}
+          onFocus={(event) => {
+            if (didFocusRef.current) return;
+            const position = event.currentTarget.value.length;
+            event.currentTarget.setSelectionRange(position, position);
+            didFocusRef.current = true;
+          }}
           onChange={(event) => setDraft(event.target.value)}
           onBlur={() => void commit()}
           onKeyDown={(event) => {
             if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
             if (event.key === "Escape") { setDraft(value); setEditing(false); }
           }}
-          className="task-cell-input"
+          className="task-cell-input sop-title-cell-input"
         />
       </span>
     );
@@ -780,17 +787,12 @@ function EditableSopField({ value, placeholder, variant, ariaLabel, canEdit, onS
   const ref = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => { if (!focused) setDraft(value); }, [focused, value]);
-  useLayoutEffect(() => autoSize(ref), [draft, canEdit]);
-
-  if (!canEdit) {
-    if (variant === "title") return <h1 className="text-[26px] font-bold leading-tight tracking-[-0.025em] text-[var(--ink)]">{value}</h1>;
-    return value ? <p className="whitespace-pre-wrap text-[14px] leading-7 text-[var(--ink-secondary)]">{value}</p> : <p className="text-[14px] leading-7 text-[var(--ink-faint)]">{placeholder}</p>;
-  }
+  useLayoutEffect(() => { if (variant === "title") autoSize(ref); }, [draft, canEdit, variant]);
 
   async function commit() {
     const next = draft.trim();
     if (next === value.trim()) return;
-    if (!next) { setDraft(value); setState("error"); setError(variant === "title" ? "Title is required." : "Body is required."); return; }
+    if (variant === "body" ? !richTextPlainText(next) : !next) { setDraft(value); setState("error"); setError(variant === "title" ? "Title is required." : "Body is required."); return; }
     setState("saving");
     setError(null);
     const ok = await onSave(next);
@@ -804,6 +806,30 @@ function EditableSopField({ value, placeholder, variant, ariaLabel, canEdit, onS
     }
   }
 
+  if (!canEdit) {
+    if (variant === "title") return <h1 className="text-[26px] font-bold leading-tight tracking-[-0.025em] text-[var(--ink)]">{value}</h1>;
+    return <SopRichTextViewer value={value} placeholder={placeholder} />;
+  }
+
+  if (variant === "body") {
+    return (
+      <div className="task-detail-editable-wrap">
+        <SopRichTextEditor
+          value={draft}
+          placeholder={placeholder}
+          ariaLabel={ariaLabel}
+          onFocus={() => setFocused(true)}
+          onBlur={() => { setFocused(false); void commit(); }}
+          onEscape={() => { setDraft(value); setError(null); setState("idle"); }}
+          onChange={(next) => { setDraft(next); if (state === "error") setState("idle"); }}
+        />
+        {(state === "saving" || state === "saved" || error) && (
+          <div className="task-detail-save-state" data-error={error ? "true" : undefined} aria-live="polite">{error ?? (state === "saving" ? "Saving..." : "Saved")}</div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="task-detail-editable-wrap">
       <textarea
@@ -812,12 +838,12 @@ function EditableSopField({ value, placeholder, variant, ariaLabel, canEdit, onS
         value={draft}
         aria-label={ariaLabel}
         placeholder={placeholder}
-        className={cn("task-detail-editable", variant === "title" ? "task-detail-editable-title" : "task-detail-editable-description")}
+        className="task-detail-editable task-detail-editable-title"
         onFocus={() => setFocused(true)}
         onBlur={() => { setFocused(false); void commit(); }}
         onChange={(event) => { setDraft(event.target.value); if (state === "error") setState("idle"); }}
         onKeyDown={(event) => {
-          if (variant === "title" && event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
+          if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
           if (event.key === "Escape") { setDraft(value); setError(null); setState("idle"); event.currentTarget.blur(); }
         }}
       />

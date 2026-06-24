@@ -67,6 +67,18 @@ function updateAuthTargets(task: Pick<Doc<"jdTasks"> | Doc<"oneTimeTasks">, "ass
   return task.assigneeMembershipIds.length === 0 ? [task.createdByMembershipId] : task.assigneeMembershipIds;
 }
 
+async function canUpdateTask(ctx: Ctx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, task: Pick<Doc<"jdTasks"> | Doc<"oneTimeTasks">, "assigneeMembershipIds" | "createdByMembershipId">, kind: TaskKind) {
+  const caps = await membershipCapabilities(ctx, membership);
+  const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
+  const targets = updateAuthTargets(task);
+  if (caps.has(`${prefix}:update:any` as any)) return true;
+  if (caps.has(`${prefix}:update:managed` as any)) {
+    const scoped = await scopedMembershipIds(ctx, companyId, membership);
+    if (targets.every((id) => scoped.has(id))) return true;
+  }
+  return Boolean(caps.has(`${prefix}:update:self` as any) && targets.includes(membership._id));
+}
+
 async function currentJdCompletion(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: number) {
   return await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).unique();
 }
@@ -152,7 +164,7 @@ export const getJd = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const task = await ctx.db.get(args.taskId);
     if (!task || task.companyId !== args.companyId || !(await visible(ctx, args.companyId, membership, task))) throw new ConvexError("Task not found.");
-    return { task: await enrichedJd(ctx, task) };
+    return { task: await enrichedJd(ctx, task), canUpdate: await canUpdateTask(ctx, args.companyId, membership, task, "jd") };
   },
 });
 
@@ -183,6 +195,23 @@ export const updateJd = mutation({
     if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const state = await jdState(ctx, task);
     await ctx.db.patch(args.taskId, { title: nonEmpty(args.title, "Task title"), description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, assigneeMembershipIds: args.assigneeMembershipIds, overdueAt: state.isOverdue ? task.overdueAt ?? Date.now() : task.overdueAt, updatedAt: Date.now() });
+    return null;
+  },
+});
+
+export const updateJdText = mutation({
+  args: { companyId: v.id("companies"), taskId: v.id("jdTasks"), title: v.optional(v.string()), description: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    if (args.title === undefined && args.description === undefined) return null;
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const task = await ctx.db.get(args.taskId);
+    if (!task || task.companyId !== args.companyId) throw new ConvexError("Task not found.");
+    await assertCanUpdateTask(ctx, args.companyId, membership, updateAuthTargets(task), "jd");
+    await ctx.db.patch(args.taskId, {
+      ...(args.title !== undefined ? { title: nonEmpty(args.title, "Task title") } : {}),
+      ...(args.description !== undefined ? { description: cleanOptionalText(args.description) } : {}),
+      updatedAt: Date.now(),
+    });
     return null;
   },
 });
@@ -234,7 +263,7 @@ export const getOneTime = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const task = await ctx.db.get(args.taskId);
     if (!task || task.companyId !== args.companyId || !(await visible(ctx, args.companyId, membership, task))) throw new ConvexError("Task not found.");
-    return { task: await enrichedOneTime(ctx, task) };
+    return { task: await enrichedOneTime(ctx, task), canUpdate: await canUpdateTask(ctx, args.companyId, membership, task, "one_time") };
   },
 });
 
@@ -265,6 +294,23 @@ export const updateOneTime = mutation({
     if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     const state = oneState(task);
     await ctx.db.patch(args.taskId, { title: nonEmpty(args.title, "Task title"), description: cleanOptionalText(args.description), dueDate: args.dueDate, time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), assigneeMembershipIds: args.assigneeMembershipIds, priority: args.priority, overdueAt: state.isOverdue ? task.overdueAt ?? Date.now() : task.overdueAt, updatedAt: Date.now() });
+    return null;
+  },
+});
+
+export const updateOneTimeText = mutation({
+  args: { companyId: v.id("companies"), taskId: v.id("oneTimeTasks"), title: v.optional(v.string()), description: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    if (args.title === undefined && args.description === undefined) return null;
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const task = await ctx.db.get(args.taskId);
+    if (!task || task.companyId !== args.companyId) throw new ConvexError("Task not found.");
+    await assertCanUpdateTask(ctx, args.companyId, membership, updateAuthTargets(task), "one_time");
+    await ctx.db.patch(args.taskId, {
+      ...(args.title !== undefined ? { title: nonEmpty(args.title, "Task title") } : {}),
+      ...(args.description !== undefined ? { description: cleanOptionalText(args.description) } : {}),
+      updatedAt: Date.now(),
+    });
     return null;
   },
 });

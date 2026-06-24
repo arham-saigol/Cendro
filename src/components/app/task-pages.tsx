@@ -14,8 +14,6 @@ import {
   Clock,
   Flag,
   Inbox,
-  Maximize2,
-  Minimize2,
   PanelRight,
   Paperclip,
   Pencil,
@@ -27,10 +25,9 @@ import {
   User,
   X,
 } from "lucide-react";
-import Link from "next/link";
-import { useRouter, usePathname } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
@@ -1496,6 +1493,107 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   );
 }
 
+function EditableTaskText({ value, placeholder, ariaLabel, canEdit, required = false, variant, onSave }: { value: string; placeholder: string; ariaLabel: string; canEdit: boolean; required?: boolean; variant: "title" | "description"; onSave: (value: string) => Promise<boolean> }) {
+  const [draft, setDraft] = useState(value);
+  const [focused, setFocused] = useState(false);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [error, setError] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const latestValueRef = useRef(value);
+  const draftRef = useRef(value);
+  const savingRef = useRef(false);
+  const queuedRef = useRef(false);
+  const lastSentRef = useRef<string | null>(null);
+
+  useEffect(() => { draftRef.current = draft; }, [draft]);
+  useEffect(() => {
+    latestValueRef.current = value;
+    if (value.trim() === lastSentRef.current) lastSentRef.current = null;
+    if (!focused && !savingRef.current) setDraft(value);
+  }, [focused, value]);
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, [draft]);
+
+  const persist = useCallback(async function persistCurrent() {
+    if (!canEdit) return;
+    const next = draftRef.current.trim();
+    if (required && !next) {
+      setSaveState("error");
+      setError("Title is required.");
+      return;
+    }
+    if (next === latestValueRef.current.trim() || next === lastSentRef.current) return;
+    if (savingRef.current) {
+      queuedRef.current = true;
+      return;
+    }
+
+    savingRef.current = true;
+    setSaveState("saving");
+    setError(null);
+    const saved = await onSave(next);
+    savingRef.current = false;
+
+    if (!saved) {
+      lastSentRef.current = null;
+      queuedRef.current = false;
+      setDraft(latestValueRef.current);
+      setSaveState("error");
+      setError("Could not save.");
+      return;
+    }
+
+    lastSentRef.current = next;
+    setSaveState("saved");
+    window.setTimeout(() => setSaveState((current) => current === "saved" ? "idle" : current), 1200);
+    if (queuedRef.current || draftRef.current.trim() !== next) {
+      queuedRef.current = false;
+      void persistCurrent();
+    }
+  }, [canEdit, onSave, required]);
+
+  useEffect(() => {
+    if (!canEdit || draft.trim() === latestValueRef.current.trim()) return;
+    const timer = window.setTimeout(() => { void persist(); }, 800);
+    return () => window.clearTimeout(timer);
+  }, [canEdit, draft, persist]);
+
+  if (!canEdit) {
+    if (variant === "title") return <h1 className="text-[26px] font-bold leading-tight tracking-[-0.025em] text-[var(--ink)]">{value}</h1>;
+    return value ? <p className="whitespace-pre-wrap text-[14px] leading-7 text-[var(--ink-secondary)]">{value}</p> : <p className="text-[14px] leading-7 text-[var(--ink-faint)]">{placeholder}</p>;
+  }
+
+  return (
+    <div className="task-detail-editable-wrap">
+      <textarea
+        ref={textareaRef}
+        rows={1}
+        value={draft}
+        aria-label={ariaLabel}
+        placeholder={placeholder}
+        data-editable="true"
+        onFocus={() => setFocused(true)}
+        onBlur={() => { setFocused(false); void persist(); }}
+        onChange={(event) => { setDraft(event.target.value); setError(null); if (saveState === "error") setSaveState("idle"); }}
+        onKeyDown={(event) => {
+          if (variant === "title" && event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
+          if (event.key === "Escape") { setDraft(latestValueRef.current); setError(null); setSaveState("idle"); event.currentTarget.blur(); }
+        }}
+        className={cn("task-detail-editable", variant === "title" ? "task-detail-editable-title" : "task-detail-editable-description")}
+      />
+      {(saveState === "saving" || saveState === "saved" || error) && (
+        <div className="task-detail-save-state" data-error={error ? "true" : undefined} aria-live="polite">
+          {error ?? (saveState === "saving" ? "Saving..." : "Saved")}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TaskDetailSkeleton() {
   return (
     <div className="animate-pulse">
@@ -1544,25 +1642,16 @@ function AttachmentList({ attachments, canDelete, onDelete }: { attachments: any
   );
 }
 
-function PeekBar({ kind, id, isFullView, canEdit, onEdit }: { kind: Kind; id: string; isFullView: boolean; canEdit: boolean; onEdit: () => void }) {
+function PeekBar({ kind, canEdit, onEdit }: { kind: Kind; canEdit: boolean; onEdit: () => void }) {
   const router = useRouter();
   const base = kind === "jd" ? "/jd-tasks" : "/one-time-tasks";
 
   return (
     <div className="peek-bar -mt-7 -mx-6 px-2 md:-mt-8 md:-mx-9 md:px-3">
       <div className="flex items-center gap-1">
-        <button type="button" className="task-icon-btn" aria-label={isFullView ? "Back to list" : "Close details"} onClick={() => router.push(base)}>
+        <button type="button" className="task-icon-btn" aria-label="Close details" onClick={() => router.push(base)}>
           <ChevronsRight className="h-5 w-5" />
         </button>
-        {isFullView ? (
-          <button type="button" className="task-icon-btn" aria-label="Collapse to peek" onClick={() => router.push(`${base}/${id}`)}>
-            <Minimize2 className="h-[18px] w-[18px]" />
-          </button>
-        ) : (
-          <button type="button" className="task-icon-btn" aria-label="Open in full page" onClick={() => router.push(`${base}/${id}/full`)}>
-            <Maximize2 className="h-[18px] w-[18px]" />
-          </button>
-        )}
       </div>
       {canEdit && (
         <div className="flex items-center gap-1">
@@ -1577,9 +1666,7 @@ function PeekBar({ kind, id, isFullView, canEdit, onEdit }: { kind: Kind; id: st
 
 export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const { activeCompanyId, active, email } = useCompany();
-  const pathname = usePathname();
   const taskType = taskTypeFor(kind);
-  const isFullView = pathname.endsWith("/full");
   const data = useQuery(kind === "jd" ? api.tasks.getJd : api.tasks.getOneTime, activeCompanyId ? { companyId: activeCompanyId, taskId: id as any } : "skip") as any;
   const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskType } : "skip") as any[] | undefined;
   const commentsQuery = usePaginatedQuery(api.tasks.listComments, activeCompanyId ? { companyId: activeCompanyId, taskType, taskId: id } : "skip", { initialNumItems: 25 });
@@ -1591,10 +1678,13 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const generateUploadUrl = useMutation(api.tasks.generateAttachmentUploadUrl);
   const addAttachment = useMutation(api.tasks.addAttachment);
   const deleteAttachment = useMutation(api.tasks.deleteAttachment);
+  const updateJdText = useMutation(api.tasks.updateJdText);
+  const updateOneTimeText = useMutation(api.tasks.updateOneTimeText);
   const [editOpen, setEditOpen] = useState(false);
   const [body, setBody] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [textError, setTextError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [optimisticComments, setOptimisticComments] = useState<any[]>([]);
   const [optimisticCommentBodies, setOptimisticCommentBodies] = useState<Record<string, string>>({});
@@ -1608,7 +1698,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const comments = useMemo(() => [...(((commentsQuery.results as any[]) ?? []).slice().reverse()).filter((commentRow) => !optimisticDeletedCommentIds.includes(commentRow._id)).map((commentRow) => ({ ...commentRow, body: optimisticCommentBodies[commentRow._id] ?? commentRow.body })), ...optimisticComments], [commentsQuery.results, optimisticCommentBodies, optimisticComments, optimisticDeletedCommentIds]);
   const canManageAttachments = active?.capabilities.includes("tasks:attachment:add") ?? false;
   const canComment = active?.capabilities.includes("tasks:comment") ?? false;
-  const canEdit = canEditTasks(active, kind);
+  const canEdit = Boolean(data?.canUpdate);
 
   useLayoutEffect(() => {
     const textarea = commentTextareaRef.current;
@@ -1635,6 +1725,19 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
 
   if (!data) return <TaskDetailSkeleton />;
   const task = data.task;
+
+  async function saveTaskText(patch: { title?: string; description?: string }) {
+    if (!activeCompanyId) return false;
+    setTextError(null);
+    try {
+      if (kind === "jd") await updateJdText({ companyId: activeCompanyId, taskId: task._id as Id<"jdTasks">, ...patch });
+      else await updateOneTimeText({ companyId: activeCompanyId, taskId: task._id as Id<"oneTimeTasks">, ...patch });
+      return true;
+    } catch (err) {
+      setTextError(err instanceof Error ? err.message : "Could not update the task.");
+      return false;
+    }
+  }
 
   async function upload(file: File) {
     if (!activeCompanyId) return;
@@ -1711,25 +1814,17 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
     }
   }
 
-  const base = kind === "jd" ? "/jd-tasks" : "/one-time-tasks";
-  const sectionLabel = kind === "jd" ? "JD Tasks" : "One-Time Tasks";
   const primaryAssignee = task.assignees?.[0];
 
   return (
     <div>
-      <PeekBar kind={kind} id={id} isFullView={isFullView} canEdit={canEdit} onEdit={() => setEditOpen(true)} />
+      <PeekBar kind={kind} canEdit={canEdit} onEdit={() => setEditOpen(true)} />
       <TaskDialog kind={kind} mode="edit" open={editOpen} onOpenChange={setEditOpen} task={task} assignable={assignable ?? []} />
 
-      {isFullView && (
-        <nav className="mb-4 flex items-center gap-1.5 text-[12.5px] text-[var(--ink-muted)]">
-          <Link href={base} className="rounded transition-colors hover:text-[var(--ink)]">{sectionLabel}</Link>
-          <ChevronRight className="h-3 w-3 text-[var(--ink-faint)]" />
-          <span className="truncate text-[var(--ink)]">{task.title}</span>
-        </nav>
-      )}
+      {textError && <p className="alert-error mt-4 rounded-md p-2 text-[13px]" role="alert">{textError}</p>}
 
       <div className="pt-6">
-        <h1 className="text-[26px] font-semibold leading-tight tracking-[-0.025em] text-[var(--ink)]">{task.title}</h1>
+        <EditableTaskText value={task.title ?? ""} placeholder="Untitled task" ariaLabel="Edit task title" canEdit={canEdit} required variant="title" onSave={(title) => saveTaskText({ title })} />
       </div>
 
       <div className="task-section !mt-6">
@@ -1744,7 +1839,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
             ) : "Unassigned"}
           </PropertyRow>
           <PropertyRow icon={<StatusIcon className="h-3.5 w-3.5" />} label="Status">
-            <StatusBadge kind={kind} task={task} size="md" />
+            <StatusBadge kind={kind} task={task} size="md" canUpdateOverride={canEdit} />
           </PropertyRow>
           {kind === "jd" ? (
             <PropertyRow icon={<FrequencyIcon className="h-3.5 w-3.5" />} label="Frequency">
@@ -1766,11 +1861,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
 
       <section className="task-section">
         <h2 className="task-section-title">Description</h2>
-        {task.description ? (
-          <p className="whitespace-pre-wrap text-[14px] leading-7 text-[var(--ink-secondary)]">{task.description}</p>
-        ) : (
-          <p className="text-[14px] leading-7 text-[var(--ink-faint)]">No description.</p>
-        )}
+        <EditableTaskText value={task.description ?? ""} placeholder={canEdit ? "Add description..." : "No description."} ariaLabel="Edit task description" canEdit={canEdit} variant="description" onSave={(description) => saveTaskText({ description })} />
       </section>
 
       <section className="task-section">

@@ -201,7 +201,6 @@ button:disabled { cursor: not-allowed; }
 /* ---------- Task pages (Notion-like) ---------- */
 
 .task-list-pane { height: 100%; overflow-y: auto; }
-.task-fullpage { height: 100%; overflow-y: auto; }
 
 /* Detail drawer that slides in from the right edge */
 .task-drawer-click-target {
@@ -657,6 +656,51 @@ button:disabled { cursor: not-allowed; }
 
 /* Section headers */
 .task-section { margin-top: 30px; }
+.task-detail-editable-wrap { position: relative; }
+.task-detail-editable {
+  display: block;
+  width: 100%;
+  resize: none;
+  overflow: hidden;
+  border: 0 !important;
+  border-radius: 6px;
+  background: transparent !important;
+  margin: -2px -4px;
+  padding: 2px 4px;
+  outline: none !important;
+  box-shadow: none !important;
+  appearance: none;
+}
+.task-detail-editable:hover,
+.task-detail-editable:focus,
+.task-detail-editable:focus-visible,
+.task-detail-editable:active {
+  border: 0 !important;
+  background: transparent !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+.task-detail-editable::placeholder { color: var(--ink-faint); opacity: 1; }
+.task-detail-editable-title {
+  min-height: 36px;
+  color: var(--ink);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+}
+.task-detail-editable-description {
+  min-height: 28px;
+  color: var(--ink-secondary);
+  font-size: 14px;
+  line-height: 1.75;
+}
+.task-detail-save-state {
+  margin-top: 5px;
+  color: var(--ink-faint);
+  font-size: 11.5px;
+}
+.task-detail-save-state[data-error="true"] { color: var(--danger); }
 .task-section-title {
   margin-bottom: 10px;
   color: var(--ink-muted);

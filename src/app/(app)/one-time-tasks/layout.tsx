@@ -1,27 +1,17 @@
 "use client";
 
-import { useParams, usePathname, useRouter } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { TaskList } from "@/components/app/task-pages";
 import { cn } from "@/lib/utils";
 
 export default function OneTimeTasksLayout({ children }: { children: React.ReactNode }) {
   const params = useParams<{ id?: string }>();
-  const pathname = usePathname();
   const router = useRouter();
   const taskId = params?.id;
-  const isFullView = pathname.endsWith("/full");
-  const isDetail = Boolean(taskId) && !isFullView;
+  const isDetail = Boolean(taskId);
   const base = "/one-time-tasks";
   const reduceMotion = useReducedMotion();
-
-  if (isFullView) {
-    return (
-      <div className="task-fullpage">
-        <div className="mx-auto w-full max-w-[760px] px-8 py-9 md:px-10">{children}</div>
-      </div>
-    );
-  }
 
   return (
     <div className="relative h-full overflow-hidden">

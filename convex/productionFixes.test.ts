@@ -80,6 +80,20 @@ describe("production permission and validation fixes", () => {
     await expect(t.withIdentity(identity("admin")).mutation(api.tasks.updateOneTime, { companyId, taskId: oneTimeTaskId, title: "One-time task", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [], priority: "medium" })).rejects.toThrow("Task assignee is required");
   });
 
+  test("task text updates use per-task update permissions", async () => {
+    const { t, companyId, adminMembershipId, employeeMembershipId } = await seedCompany();
+    const selfTaskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, { companyId, title: "Old title", description: "Old body", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [employeeMembershipId], priority: "medium" });
+    const adminTaskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, { companyId, title: "Admin task", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [adminMembershipId], priority: "medium" });
+
+    await expect(t.withIdentity(identity("employee")).mutation(api.tasks.updateOneTimeText, { companyId, taskId: selfTaskId, title: "New title", description: "New body" })).resolves.toBeNull();
+    await expect(t.withIdentity(identity("employee")).mutation(api.tasks.updateOneTimeText, { companyId, taskId: adminTaskId, title: "Nope" })).rejects.toThrow("update this task");
+
+    const detail = await t.withIdentity(identity("employee")).query(api.tasks.getOneTime, { companyId, taskId: selfTaskId });
+    expect(detail.canUpdate).toBe(true);
+    expect(detail.task.title).toBe("New title");
+    expect(detail.task.description).toBe("New body");
+  });
+
   test("analytics requires an effective analytics:view capability", async () => {
     const { t, companyId, employeeMembershipId } = await seedCompany();
     await t.run(async (ctx) => {

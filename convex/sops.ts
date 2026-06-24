@@ -1,53 +1,105 @@
 import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
-import { action, internalAction, internalMutation, internalQuery, mutation, query } from "./_generated/server";
+import { action, internalAction, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { requireCapability, requireMembership, visibleSop } from "./permissions";
+import type { Capability } from "../src/lib/permissions";
+import { membershipCapabilities, requireCapability, requireMembership, visibleSop } from "./permissions";
 import { nonEmpty } from "./validation";
+
+function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.email; }
+function fullName(user: Doc<"appUsers">) { return [firstName(user), user.secondName?.trim()].filter(Boolean).join(" ") || user.email; }
 
 async function assertTargets(ctx: any, companyId: Id<"companies">, args: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
   for (const branchId of args.branchIds) { const branch = await ctx.db.get(branchId); if (!branch || branch.companyId !== companyId) throw new ConvexError("Branch not found."); }
   for (const departmentId of args.departmentIds) { const department = await ctx.db.get(departmentId); if (!department || department.companyId !== companyId) throw new ConvexError("Department not found."); }
-  for (const membershipId of args.userMembershipIds) { const membership = await ctx.db.get(membershipId); if (!membership || membership.companyId !== companyId) throw new ConvexError("User not found."); }
+  for (const membershipId of args.userMembershipIds) { const membership = await ctx.db.get(membershipId); if (!membership || membership.companyId !== companyId || !membership.active) throw new ConvexError("User not found."); }
 }
-function manageCapability(scopeType: "company" | "branch" | "department" | "user") { return scopeType === "company" ? "sops:manage:company" : scopeType === "branch" ? "sops:manage:branch" : scopeType === "department" ? "sops:manage:department" : "sops:manage:user"; }
+function assertScopeSelection(args: { scopeType: "company" | "branch" | "department" | "user"; branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
+  if (args.scopeType === "company" && (args.branchIds.length || args.departmentIds.length || args.userMembershipIds.length)) throw new ConvexError("Company-wide SOPs cannot target a branch or user.");
+  if (args.scopeType === "branch" && (args.branchIds.length !== 1 || args.departmentIds.length || args.userMembershipIds.length)) throw new ConvexError("Select one branch for branch scope.");
+  if (args.scopeType === "department" && (args.departmentIds.length !== 1 || args.branchIds.length || args.userMembershipIds.length)) throw new ConvexError("Select one department for department scope.");
+  if (args.scopeType === "user" && (args.userMembershipIds.length !== 1 || args.branchIds.length || args.departmentIds.length)) throw new ConvexError("Select one user for user scope.");
+}
+function manageCapability(scopeType: "company" | "branch" | "department" | "user"): Capability { return scopeType === "company" ? "sops:manage:company" : scopeType === "branch" ? "sops:manage:branch" : scopeType === "department" ? "sops:manage:department" : "sops:manage:user"; }
 async function deleteEmbeddings(ctx: any, sopId: Id<"sops">) { for (const row of await ctx.db.query("sopEmbeddings").withIndex("by_sop", (q: any) => q.eq("sopId", sopId)).take(100)) await ctx.db.delete(row._id); }
 async function deleteScopeRows(ctx: any, sopId: Id<"sops">) {
   for (const row of await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q: any) => q.eq("sopId", sopId)).take(500)) await ctx.db.delete(row._id);
   for (const row of await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q: any) => q.eq("sopId", sopId)).take(500)) await ctx.db.delete(row._id);
   for (const row of await ctx.db.query("sopUserScopes").withIndex("by_sop", (q: any) => q.eq("sopId", sopId)).take(500)) await ctx.db.delete(row._id);
 }
-async function insertScopeRows(ctx: any, companyId: Id<"companies">, sopId: Id<"sops">, args: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
+async function insertScopeRows(ctx: MutationCtx, companyId: Id<"companies">, sopId: Id<"sops">, args: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
   for (const branchId of args.branchIds) await ctx.db.insert("sopBranchScopes", { companyId, sopId, branchId });
   for (const departmentId of args.departmentIds) await ctx.db.insert("sopDepartmentScopes", { companyId, sopId, departmentId });
   for (const userMembershipId of args.userMembershipIds) await ctx.db.insert("sopUserScopes", { companyId, sopId, userMembershipId });
 }
-async function withScopes(ctx: any, sop: Doc<"sops">) {
-  const branchIds = (await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q: any) => q.eq("sopId", sop._id)).take(500)).map((row: any) => row.branchId);
-  const departmentIds = (await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q: any) => q.eq("sopId", sop._id)).take(500)).map((row: any) => row.departmentId);
-  const userMembershipIds = (await ctx.db.query("sopUserScopes").withIndex("by_sop", (q: any) => q.eq("sopId", sop._id)).take(500)).map((row: any) => row.userMembershipId);
-  return { ...sop, branchIds, departmentIds, userMembershipIds };
+async function withScopes(ctx: QueryCtx, sop: Doc<"sops">, companyName?: string) {
+  const branchIds = (await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500)).map((row) => row.branchId);
+  const departmentIds = (await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500)).map((row) => row.departmentId);
+  const userMembershipIds = (await ctx.db.query("sopUserScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500)).map((row) => row.userMembershipId);
+  let scopeTargetName = companyName ?? "Company";
+  let scopeTargetUser: { firstName: string; name: string; imageUrl: string | null } | null = null;
+  if (sop.scopeType === "branch") {
+    const branch = branchIds[0] ? await ctx.db.get(branchIds[0]) : null;
+    scopeTargetName = branch?.companyId === sop.companyId ? branch.name : "Unknown branch";
+  } else if (sop.scopeType === "department") {
+    const department = departmentIds[0] ? await ctx.db.get(departmentIds[0]) : null;
+    scopeTargetName = department?.companyId === sop.companyId ? department.name : "Unknown department";
+  } else if (sop.scopeType === "user") {
+    const membership = userMembershipIds[0] ? await ctx.db.get(userMembershipIds[0]) : null;
+    const user = membership?.companyId === sop.companyId ? await ctx.db.get(membership.userId) : null;
+    if (user) {
+      scopeTargetName = fullName(user);
+      scopeTargetUser = { firstName: firstName(user), name: scopeTargetName, imageUrl: user.imageUrl ?? null };
+    } else {
+      scopeTargetName = "Unknown user";
+    }
+  }
+  return { ...sop, branchIds, departmentIds, userMembershipIds, scopeTargetName, scopeTargetUser };
 }
 
 export const list = query({
   args: { companyId: v.id("companies"), search: v.optional(v.string()), paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
+    const company = await ctx.db.get(args.companyId);
     // Visibility/search filtering happens after database pagination, so pages may contain fewer items than requested; continuation tokens still advance correctly.
     const page = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
     const out = [];
     const search = args.search?.trim().toLowerCase();
     for (const sop of page.page) {
       if (await visibleSop(ctx, args.companyId, membership, sop)) {
-        if (!search || sop.title.toLowerCase().includes(search) || sop.content.toLowerCase().includes(search)) out.push(await withScopes(ctx, sop));
+        if (!search || sop.title.toLowerCase().includes(search) || sop.content.toLowerCase().includes(search)) out.push(await withScopes(ctx, sop, company?.name));
       }
     }
     return { ...page, page: out };
   },
 });
 
-export const get = query({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found."); return await withScopes(ctx, sop); } });
+export const get = query({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found."); const company = await ctx.db.get(args.companyId); return await withScopes(ctx, sop, company?.name); } });
+
+const scopeOptionCapabilities: Capability[] = ["sops:create", "sops:manage:company", "sops:manage:branch", "sops:manage:user"];
+
+export const scopeOptions = query({
+  args: { companyId: v.id("companies") },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const capabilities = await membershipCapabilities(ctx, membership);
+    if (!scopeOptionCapabilities.some((capability) => capabilities.has(capability))) throw new ConvexError("You do not have access to do that.");
+    const canUseBranch = capabilities.has("sops:manage:branch");
+    const canUseUser = capabilities.has("sops:manage:user");
+    const [branches, memberships] = await Promise.all([
+      canUseBranch ? ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500) : Promise.resolve([]),
+      canUseUser ? ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500) : Promise.resolve([]),
+    ]);
+    const users = [];
+    for (const membership of memberships.filter((m) => m.active)) {
+      const user = await ctx.db.get(membership.userId);
+      if (user) users.push({ membership: { _id: membership._id, role: membership.role }, user: { name: fullName(user), firstName: firstName(user), imageUrl: user.imageUrl ?? null } });
+    }
+    return { branches: branches.map((branch) => ({ _id: branch._id, name: branch.name })), users };
+  },
+});
 
 export const create = mutation({
   args: { companyId: v.id("companies"), title: v.string(), content: v.string(), scopeType: v.union(v.literal("company"), v.literal("branch"), v.literal("department"), v.literal("user")), branchIds: v.array(v.id("branches")), departmentIds: v.array(v.id("departments")), userMembershipIds: v.array(v.id("companyMemberships")) },
@@ -56,6 +108,7 @@ export const create = mutation({
     await requireCapability(ctx, args.companyId, manageCapability(args.scopeType));
     const title = nonEmpty(args.title, "Title");
     const content = nonEmpty(args.content, "SOP body");
+    assertScopeSelection(args);
     await assertTargets(ctx, args.companyId, args);
     const now = Date.now();
     const id = await ctx.db.insert("sops", { companyId: args.companyId, title, content, scopeType: args.scopeType, creatorMembershipId: membership._id, updatedByMembershipId: membership._id, createdAt: now, updatedAt: now });
@@ -66,6 +119,25 @@ export const create = mutation({
 });
 
 export const update = mutation({ args: { companyId: v.id("companies"), sopId: v.id("sops"), title: v.string(), content: v.string() }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found."); await requireCapability(ctx, args.companyId, manageCapability(sop.scopeType)); await ctx.db.patch(args.sopId, { title: nonEmpty(args.title, "Title"), content: nonEmpty(args.content, "SOP body"), updatedByMembershipId: membership._id, updatedAt: Date.now() }); await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: args.sopId }); } });
+
+export const updateScope = mutation({
+  args: { companyId: v.id("companies"), sopId: v.id("sops"), scopeType: v.union(v.literal("company"), v.literal("branch"), v.literal("user")), branchIds: v.array(v.id("branches")), userMembershipIds: v.array(v.id("companyMemberships")) },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const sop = await ctx.db.get(args.sopId);
+    if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found.");
+    await requireCapability(ctx, args.companyId, manageCapability(sop.scopeType));
+    await requireCapability(ctx, args.companyId, manageCapability(args.scopeType));
+    const scopeArgs = { scopeType: args.scopeType, branchIds: args.branchIds, departmentIds: [], userMembershipIds: args.userMembershipIds };
+    assertScopeSelection(scopeArgs);
+    await assertTargets(ctx, args.companyId, scopeArgs);
+    await deleteScopeRows(ctx, args.sopId);
+    await ctx.db.patch(args.sopId, { scopeType: args.scopeType, updatedByMembershipId: membership._id, updatedAt: Date.now() });
+    await insertScopeRows(ctx, args.companyId, args.sopId, scopeArgs);
+    await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: args.sopId });
+  },
+});
+
 export const remove = mutation({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found."); await requireCapability(ctx, args.companyId, manageCapability(sop.scopeType)); await deleteEmbeddings(ctx, args.sopId); await deleteScopeRows(ctx, args.sopId); await ctx.db.delete(args.sopId); } });
 
 async function textSearch(ctx: any, args: { companyId: Id<"companies">; query: string }) {

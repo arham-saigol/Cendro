@@ -432,6 +432,8 @@ button:disabled { cursor: not-allowed; }
 .task-cell-control:hover,
 .task-cell-control:focus,
 .task-cell-control:focus-visible { background: transparent; box-shadow: none; outline: none; }
+.sop-detail-prop-value .task-cell-control { height: 22px; width: auto; }
+.sop-detail-prop-value .task-cell-popover-root { height: 22px; }
 .task-cell-editor {
   position: relative;
   display: block;
@@ -584,6 +586,22 @@ button:disabled { cursor: not-allowed; }
 .task-pill[data-interactive="true"] { cursor: pointer; }
 .task-pill[data-interactive="true"]:hover { filter: brightness(0.95); }
 .task-pill[data-interactive="true"]:active { filter: brightness(0.9); }
+.sop-scope-pill {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 22px;
+  box-sizing: border-box;
+  border-radius: 3px;
+  padding-block: 2px;
+  padding-inline: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.sop-scope-pill-md { min-height: 24px; padding-block: 3px; padding-inline: 9px; font-size: 13px; line-height: 17px; }
 .task-pill-dot { width: 7px; height: 7px; border-radius: 999px; flex-shrink: 0; }
 .task-pill-chevron { opacity: 0.55; flex-shrink: 0; }
 

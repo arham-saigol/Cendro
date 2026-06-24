@@ -141,7 +141,7 @@ export async function assertCanUpdateTask(ctx: Ctx, companyId: Id<"companies">, 
 
 export async function visibleSop(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, sop: Doc<"sops">) {
   if (sop.companyId !== companyId) return false;
-  if (sop.scopeType === "company" || m.role === "Admin") return true;
+  if (sop.scopeType === "company") return true;
   if (sop.scopeType === "user") {
     const rows = await ctx.db.query("sopUserScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
     return rows.some((row) => row.userMembershipId === m._id);

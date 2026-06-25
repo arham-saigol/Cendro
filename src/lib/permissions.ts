@@ -1,4 +1,119 @@
-export const roles=["Admin","Manager","Employee"] as const; export type Role=(typeof roles)[number];
-export const capabilities=["analytics:view:company","analytics:view:managed_scope","analytics:view:self","tasks:jd:create","tasks:jd:assign:any","tasks:jd:assign:managed","tasks:jd:update:any","tasks:jd:update:managed","tasks:jd:update:self","tasks:one_time:create","tasks:one_time:assign:any","tasks:one_time:assign:managed","tasks:one_time:update:any","tasks:one_time:update:managed","tasks:one_time:update:self","tasks:comment","tasks:attachment:add","sops:create","sops:manage:company","sops:manage:branch","sops:manage:department","sops:manage:user","company:manage_branches","company:manage_departments","company:invite_users","company:manage_users","company:manage_permissions"] as const;
-export type Capability=(typeof capabilities)[number];
-export const defaultRoleCapabilities:Record<Role,Capability[]>={Admin:[...capabilities],Manager:["analytics:view:managed_scope","analytics:view:self","tasks:jd:create","tasks:jd:assign:managed","tasks:jd:update:managed","tasks:jd:update:self","tasks:one_time:create","tasks:one_time:assign:managed","tasks:one_time:update:managed","tasks:one_time:update:self","tasks:comment","tasks:attachment:add","sops:create","sops:manage:branch","sops:manage:department"],Employee:["analytics:view:self","tasks:jd:update:self","tasks:one_time:update:self","tasks:comment","tasks:attachment:add"]};
+export const roles = ["Admin", "Manager", "Employee"] as const;
+export type Role = (typeof roles)[number];
+
+export const capabilities = [
+  "analytics:view:company",
+  "analytics:view:managed_scope",
+  "analytics:view:self",
+  "tasks:jd:create",
+  "tasks:jd:assign:self",
+  "tasks:jd:assign:any",
+  "tasks:jd:assign:managed",
+  "tasks:jd:update:any",
+  "tasks:jd:update:managed",
+  "tasks:jd:update:self",
+  "tasks:one_time:create",
+  "tasks:one_time:assign:self",
+  "tasks:one_time:assign:any",
+  "tasks:one_time:assign:managed",
+  "tasks:one_time:update:any",
+  "tasks:one_time:update:managed",
+  "tasks:one_time:update:self",
+  "tasks:comment",
+  "tasks:attachment:add",
+  "sops:create",
+  "sops:manage:company",
+  "sops:manage:branch",
+  "sops:manage:department",
+  "sops:manage:user",
+  "company:manage_settings",
+  "company:manage_branches",
+  "company:manage_departments",
+  "company:invite_users",
+  "company:manage_users",
+  "company:manage_permissions",
+] as const;
+
+export type Capability = (typeof capabilities)[number];
+
+export const companyManagementCapabilities: Capability[] = ["company:manage_settings", "company:manage_branches", "company:manage_departments", "company:invite_users", "company:manage_users", "company:manage_permissions"];
+
+export function canViewDashboard(capabilities: readonly string[] | null | undefined) {
+  return Boolean(capabilities?.some((capability) => capability === "analytics:view:self" || capability === "analytics:view:managed_scope" || capability === "analytics:view:company"));
+}
+
+export function canAccessCompanyManagement(capabilities: readonly string[] | null | undefined) {
+  return Boolean(capabilities?.some((capability) => companyManagementCapabilities.includes(capability as Capability)));
+}
+
+export const defaultRoleCapabilities: Record<Role, Capability[]> = {
+  Admin: [...capabilities],
+  Manager: [
+    "analytics:view:managed_scope",
+    "analytics:view:self",
+    "tasks:jd:create",
+    "tasks:jd:assign:self",
+    "tasks:jd:assign:managed",
+    "tasks:jd:update:managed",
+    "tasks:jd:update:self",
+    "tasks:one_time:create",
+    "tasks:one_time:assign:self",
+    "tasks:one_time:assign:managed",
+    "tasks:one_time:update:managed",
+    "tasks:one_time:update:self",
+    "tasks:comment",
+    "tasks:attachment:add",
+    "sops:create",
+    "sops:manage:branch",
+    "sops:manage:department",
+  ],
+  Employee: [
+    "analytics:view:self",
+    "tasks:jd:update:self",
+    "tasks:one_time:update:self",
+    "tasks:comment",
+    "tasks:attachment:add",
+  ],
+};
+
+export const capabilityLabels: Record<Capability, string> = {
+  "analytics:view:company": "View company dashboard",
+  "analytics:view:managed_scope": "View managed dashboard",
+  "analytics:view:self": "View own dashboard",
+  "tasks:jd:create": "Create JD tasks",
+  "tasks:jd:assign:self": "Assign JD tasks to self",
+  "tasks:jd:assign:any": "Assign JD tasks to anyone",
+  "tasks:jd:assign:managed": "Assign JD tasks to managed people",
+  "tasks:jd:update:any": "Edit any JD task",
+  "tasks:jd:update:managed": "Edit managed JD tasks",
+  "tasks:jd:update:self": "Edit own JD tasks",
+  "tasks:one_time:create": "Create one-time tasks",
+  "tasks:one_time:assign:self": "Assign one-time tasks to self",
+  "tasks:one_time:assign:any": "Assign one-time tasks to anyone",
+  "tasks:one_time:assign:managed": "Assign one-time tasks to managed people",
+  "tasks:one_time:update:any": "Edit any one-time task",
+  "tasks:one_time:update:managed": "Edit managed one-time tasks",
+  "tasks:one_time:update:self": "Edit own one-time tasks",
+  "tasks:comment": "Comment on tasks",
+  "tasks:attachment:add": "Add task attachments",
+  "sops:create": "Create SOPs",
+  "sops:manage:company": "Manage company SOPs",
+  "sops:manage:branch": "Manage branch SOPs",
+  "sops:manage:department": "Manage department SOPs",
+  "sops:manage:user": "Manage user SOPs",
+  "company:manage_settings": "Manage company settings",
+  "company:manage_branches": "Manage branches",
+  "company:manage_departments": "Manage departments",
+  "company:invite_users": "Invite users",
+  "company:manage_users": "Manage users",
+  "company:manage_permissions": "Manage permissions",
+};
+
+export const capabilityGroups: { title: string; capabilities: Capability[] }[] = [
+  { title: "Dashboard", capabilities: ["analytics:view:self", "analytics:view:managed_scope", "analytics:view:company"] },
+  { title: "JD tasks", capabilities: ["tasks:jd:create", "tasks:jd:assign:self", "tasks:jd:assign:managed", "tasks:jd:assign:any", "tasks:jd:update:self", "tasks:jd:update:managed", "tasks:jd:update:any"] },
+  { title: "One-time tasks", capabilities: ["tasks:one_time:create", "tasks:one_time:assign:self", "tasks:one_time:assign:managed", "tasks:one_time:assign:any", "tasks:one_time:update:self", "tasks:one_time:update:managed", "tasks:one_time:update:any"] },
+  { title: "Task collaboration", capabilities: ["tasks:comment", "tasks:attachment:add"] },
+  { title: "SOPs", capabilities: ["sops:create", "sops:manage:company", "sops:manage:branch", "sops:manage:department", "sops:manage:user"] },
+  { title: "Company", capabilities: ["company:manage_settings", "company:manage_branches", "company:manage_departments", "company:invite_users", "company:manage_users", "company:manage_permissions"] },
+];

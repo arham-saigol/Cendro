@@ -98,7 +98,6 @@ export async function scopedMembershipIds(ctx: Ctx, companyId: Id<"companies">, 
     const all = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(500);
     return new Set(all.filter((x) => x.active).map((x) => x._id));
   }
-  if (m.role === "Employee") return new Set<Id<"companyMemberships">>([m._id]);
   const ids = new Set<Id<"companyMemberships">>([m._id]);
   const userScopes = await ctx.db.query("managerUserScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", m._id)).take(500);
   for (const row of userScopes) await addActiveMembership(ctx, ids, companyId, row.userMembershipId);
@@ -123,8 +122,8 @@ export async function assertCanAssign(ctx: Ctx, companyId: Id<"companies">, m: D
     const scoped = await scopedMembershipIds(ctx, companyId, m);
     if (assignees.every((id) => scoped.has(id))) return;
   }
-  if (assignees.length > 0 && assignees.every((id) => id === m._id)) return;
-  throw new ConvexError("You can only assign tasks inside your scope.");
+  if (caps.has(`${prefix}:assign:self` as Capability) && assignees.length > 0 && assignees.every((id) => id === m._id)) return;
+  throw new ConvexError("You can only assign tasks inside your allowed scope.");
 }
 
 export async function assertCanUpdateTask(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, assignees: Id<"companyMemberships">[], kind: "jd" | "one_time") {
@@ -182,8 +181,9 @@ export type SopVisibilityContext = {
   managerDepartmentScopes: Set<Id<"departments">>;
 };
 
-export async function buildSopVisibilityContext(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">): Promise<SopVisibilityContext | null> {
-  if (m.role !== "Manager") return null;
+export async function buildSopVisibilityContext(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, precomputedCaps?: Set<Capability>): Promise<SopVisibilityContext | null> {
+  const caps = precomputedCaps ?? await membershipCapabilities(ctx, m);
+  if (!caps.has("sops:manage:branch") && !caps.has("sops:manage:department") && !caps.has("sops:manage:user")) return null;
   const scoped = await scopedMembershipIds(ctx, companyId, m);
   const membershipBranchSet = await membershipBranchIds(ctx, scoped);
   const membershipDepartmentSet = await membershipDepartmentIds(ctx, scoped);
@@ -198,12 +198,14 @@ export async function buildSopVisibilityContext(ctx: Ctx, companyId: Id<"compani
   };
 }
 
-export async function visibleSop(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, sop: Doc<"sops">, visibility?: SopVisibilityContext | null) {
+export async function visibleSop(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, sop: Doc<"sops">, visibility?: SopVisibilityContext | null, precomputedCaps?: Set<Capability>) {
   if (sop.companyId !== companyId) return false;
   if (m.role === "Admin") return true;
-  if (m.role !== "Manager") return await visibleSopForSelf(ctx, companyId, m, sop);
+  const caps = precomputedCaps ?? await membershipCapabilities(ctx, m);
+  if (caps.has("sops:manage:company")) return true;
+  if (!caps.has("sops:manage:branch") && !caps.has("sops:manage:department") && !caps.has("sops:manage:user")) return await visibleSopForSelf(ctx, companyId, m, sop);
   if (sop.scopeType === "company") return true;
-  const v = visibility ?? await buildSopVisibilityContext(ctx, companyId, m);
+  const v = visibility ?? await buildSopVisibilityContext(ctx, companyId, m, caps);
   if (!v) return false;
   if (sop.scopeType === "user") {
     const rows = await ctx.db.query("sopUserScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);

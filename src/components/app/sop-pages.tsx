@@ -27,6 +27,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
+import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -1258,7 +1259,7 @@ export function SopDetail({ id }: { id: string }) {
     <div>
       <div className="peek-bar -mt-7 -mx-6 px-2 md:-mt-8 md:-mx-9 md:px-3">
         <div className="flex items-center gap-1">
-          <button type="button" className="task-icon-btn" aria-label="Close details" onClick={() => router.push("/sops")}>
+          <button type="button" className="task-icon-btn" aria-label="Close details" onClick={() => { if (!requestDetailDrawerClose("/sops")) router.push("/sops"); }}>
             <ChevronsRight className="h-5 w-5" />
           </button>
         </div>

@@ -1,16 +1,18 @@
 "use client";
 
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { useDetailDrawerClose } from "@/components/app/detail-drawer-motion";
 import { SopList } from "@/components/app/sop-pages";
 import { cn } from "@/lib/utils";
 
 export default function SopsLayout({ children }: { children: React.ReactNode }) {
   const params = useParams<{ id?: string }>();
-  const router = useRouter();
   const sopId = params?.id;
   const isDetail = Boolean(sopId);
+  const base = "/sops";
   const reduceMotion = useReducedMotion();
+  const { closing, close } = useDetailDrawerClose(base, isDetail, sopId ?? null);
 
   return (
     <div className="relative h-full overflow-hidden">
@@ -25,7 +27,7 @@ export default function SopsLayout({ children }: { children: React.ReactNode }) 
           type="button"
           aria-label="Close SOP details"
           className="task-drawer-click-target hidden lg:block"
-          onClick={() => router.push("/sops")}
+          onClick={() => close()}
         />
       )}
 
@@ -35,8 +37,8 @@ export default function SopsLayout({ children }: { children: React.ReactNode }) 
             key="sop-drawer"
             className="task-drawer"
             initial={reduceMotion ? { opacity: 0 } : { x: 32, opacity: 0 }}
-            animate={reduceMotion ? { opacity: 1 } : { x: 0, opacity: 1 }}
-            exit={reduceMotion ? { opacity: 0 } : { x: 24, opacity: 0 }}
+            animate={closing ? (reduceMotion ? { opacity: 0 } : { x: 32, opacity: 0 }) : (reduceMotion ? { opacity: 1 } : { x: 0, opacity: 1 })}
+            exit={reduceMotion ? { opacity: 0 } : { x: 32, opacity: 0 }}
             transition={reduceMotion ? { duration: 0.1 } : { duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
           >
             <div className="task-drawer-inner">

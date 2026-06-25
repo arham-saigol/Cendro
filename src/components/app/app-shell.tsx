@@ -27,10 +27,11 @@ import { AiPanel } from "./ai-panel";
 import { useTheme } from "./theme";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { canAccessCompanyManagement, canViewDashboard } from "@/lib/permissions";
 import { cn, initials } from "@/lib/utils";
 
 const nav = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, requiresDashboard: true },
   { href: "/jd-tasks", label: "JD tasks", icon: Repeat },
   { href: "/one-time-tasks", label: "One-time tasks", icon: Check },
   { href: "/sops", label: "SOPs", icon: FileText },
@@ -306,8 +307,9 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
     if (accessStatus === "signedOut") router.replace(`/sign-in?redirect_url=${encodeURIComponent(path)}`);
   }, [accessStatus, path, router]);
 
-  const canManageCompany = active?.capabilities?.includes("company:manage_permissions") ?? false;
-  const visibleNav = useMemo(() => nav.filter((item) => !item.requiresCompanyManagement || canManageCompany), [canManageCompany]);
+  const canOpenCompanyManagement = canAccessCompanyManagement(active?.capabilities);
+  const canViewActiveDashboard = canViewDashboard(active?.capabilities);
+  const visibleNav = useMemo(() => nav.filter((item) => (!item.requiresCompanyManagement || canOpenCompanyManagement) && (!item.requiresDashboard || canViewActiveDashboard)), [canOpenCompanyManagement, canViewActiveDashboard]);
 
   if (accessStatus === "loading") {
     return (
@@ -332,6 +334,24 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
         <h1 className="text-xl font-semibold">Finishing sign-in</h1>
         <p className="mt-2 text-sm text-[var(--ink-muted)]">We are setting up your authenticated session. Refresh the page in a moment.</p>
         {email && <p className="mt-3 text-xs text-[var(--ink-faint)]">Signed in as {email}</p>}
+      </ShellCard>
+    );
+  }
+
+  if (accessStatus === "paused") {
+    return (
+      <ShellCard>
+        <div className="mb-4">
+          <AccountCompanyMenu />
+        </div>
+        <h1 className="text-xl font-semibold">Access paused</h1>
+        <p className="mt-2 text-sm text-[var(--ink-muted)]">Your access to the app has currently been paused. Please contact your administrator.</p>
+        {email && <p className="mt-3 text-xs text-[var(--ink-faint)]">Signed in as {email}</p>}
+        {isPlatformAdmin && (
+          <Button asChild className="mt-4" variant="primary">
+            <Link href="/admin">Open platform admin</Link>
+          </Button>
+        )}
       </ShellCard>
     );
   }

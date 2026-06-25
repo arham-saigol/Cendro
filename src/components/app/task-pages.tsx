@@ -31,6 +31,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
+import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -1693,10 +1694,14 @@ function PeekBar({ kind, canEdit, onEdit }: { kind: Kind; canEdit: boolean; onEd
   const router = useRouter();
   const base = kind === "jd" ? "/jd-tasks" : "/one-time-tasks";
 
+  function closeDetails() {
+    if (!requestDetailDrawerClose(base)) router.push(base);
+  }
+
   return (
     <div className="peek-bar -mt-7 -mx-6 px-2 md:-mt-8 md:-mx-9 md:px-3">
       <div className="flex items-center gap-1">
-        <button type="button" className="task-icon-btn" aria-label="Close details" onClick={() => router.push(base)}>
+        <button type="button" className="task-icon-btn" aria-label="Close details" onClick={closeDetails}>
           <ChevronsRight className="h-5 w-5" />
         </button>
       </div>

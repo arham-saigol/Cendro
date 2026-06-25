@@ -7,8 +7,9 @@ import type { Capability } from "../src/lib/permissions";
 import { membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds, visibleSop, visibleSopForSelf } from "./permissions";
 import { nonEmpty } from "./validation";
 
-function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.email; }
-function fullName(user: Doc<"appUsers">) { return [firstName(user), user.secondName?.trim()].filter(Boolean).join(" ") || user.email; }
+const unnamedUserDisplay = "Unnamed user";
+function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.secondName?.trim() || unnamedUserDisplay; }
+function fullName(user: Doc<"appUsers">) { return [user.firstName.trim(), user.secondName?.trim()].filter(Boolean).join(" ") || unnamedUserDisplay; }
 
 async function assertTargets(ctx: any, companyId: Id<"companies">, args: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
   for (const branchId of args.branchIds) { const branch = await ctx.db.get(branchId); if (!branch || branch.companyId !== companyId) throw new ConvexError("Branch not found."); }
@@ -26,9 +27,21 @@ const sopViewValidator = v.union(v.literal("all"), v.literal("my"));
 const sopScopeFilterValidator = v.union(v.literal("all"), v.literal("company"), v.literal("branch"), v.literal("department"), v.literal("user"));
 async function deleteEmbeddings(ctx: any, sopId: Id<"sops">) { for (const row of await ctx.db.query("sopEmbeddings").withIndex("by_sop", (q: any) => q.eq("sopId", sopId)).take(100)) await ctx.db.delete(row._id); }
 async function deleteScopeRows(ctx: any, sopId: Id<"sops">) {
-  for (const row of await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q: any) => q.eq("sopId", sopId)).take(500)) await ctx.db.delete(row._id);
-  for (const row of await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q: any) => q.eq("sopId", sopId)).take(500)) await ctx.db.delete(row._id);
-  for (const row of await ctx.db.query("sopUserScopes").withIndex("by_sop", (q: any) => q.eq("sopId", sopId)).take(500)) await ctx.db.delete(row._id);
+  while (true) {
+    const rows = await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q: any) => q.eq("sopId", sopId)).take(500);
+    if (!rows.length) break;
+    for (const row of rows) await ctx.db.delete(row._id);
+  }
+  while (true) {
+    const rows = await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q: any) => q.eq("sopId", sopId)).take(500);
+    if (!rows.length) break;
+    for (const row of rows) await ctx.db.delete(row._id);
+  }
+  while (true) {
+    const rows = await ctx.db.query("sopUserScopes").withIndex("by_sop", (q: any) => q.eq("sopId", sopId)).take(500);
+    if (!rows.length) break;
+    for (const row of rows) await ctx.db.delete(row._id);
+  }
 }
 async function insertScopeRows(ctx: MutationCtx, companyId: Id<"companies">, sopId: Id<"sops">, args: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
   for (const branchId of args.branchIds) await ctx.db.insert("sopBranchScopes", { companyId, sopId, branchId });
@@ -119,7 +132,7 @@ export const listRows = query({
 
 export const get = query({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found."); const company = await ctx.db.get(args.companyId); return await withScopes(ctx, sop, company?.name); } });
 
-const scopeOptionCapabilities: Capability[] = ["sops:create", "sops:manage:company", "sops:manage:branch", "sops:manage:user"];
+const scopeOptionCapabilities: Capability[] = ["sops:manage:branch", "sops:manage:user"];
 
 export const scopeOptions = query({
   args: { companyId: v.id("companies") },
@@ -133,9 +146,10 @@ export const scopeOptions = query({
       canUseBranch ? ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500) : Promise.resolve([]),
       canUseUser ? ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500) : Promise.resolve([]),
     ]);
+    const activeMemberships = memberships.filter((m) => m.active);
+    const userRows = await Promise.all(activeMemberships.map(async (membership) => ({ membership, user: await ctx.db.get(membership.userId) })));
     const users = [];
-    for (const membership of memberships.filter((m) => m.active)) {
-      const user = await ctx.db.get(membership.userId);
+    for (const { membership, user } of userRows) {
       if (user) users.push({ membership: { _id: membership._id, role: membership.role }, user: { name: fullName(user), firstName: firstName(user), imageUrl: user.imageUrl ?? null } });
     }
     return { branches: branches.map((branch) => ({ _id: branch._id, name: branch.name })), users };

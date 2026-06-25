@@ -159,8 +159,70 @@ function closestBlock(node: Node | null, editor: HTMLElement) {
   return editor;
 }
 
+function closestTag(node: Node | null, editor: HTMLElement, tags: string[]) {
+  let current = closestElement(node, editor);
+  while (current && current !== editor) {
+    if (tags.includes(current.tagName)) return current;
+    current = current.parentElement;
+  }
+  return null;
+}
+
+function selectionHasTag(editor: HTMLElement, selection: Selection | null, tags: string[]) {
+  return Boolean(closestTag(selection?.anchorNode ?? null, editor, tags) || closestTag(selection?.focusNode ?? null, editor, tags));
+}
+
+function placeCaretAtEnd(element: HTMLElement) {
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.collapse(false);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function unwrapElement(element: HTMLElement) {
+  const parent = element.parentNode;
+  if (!parent) return;
+  while (element.firstChild) parent.insertBefore(element.firstChild, element);
+  parent.removeChild(element);
+}
+
+function toggleInlineTag(editor: HTMLElement, tagName: "strong" | "em") {
+  const selection = window.getSelection();
+  if (!selectionInside(editor, selection) || !selection?.rangeCount) return;
+  const active = closestTag(selection.anchorNode, editor, [tagName.toUpperCase(), tagName === "strong" ? "B" : "I"]);
+  if (active) { unwrapElement(active); return; }
+  if (selection.isCollapsed) return;
+  const range = selection.getRangeAt(0);
+  const wrapper = document.createElement(tagName);
+  wrapper.appendChild(range.extractContents());
+  range.insertNode(wrapper);
+  selection.removeAllRanges();
+  const nextRange = document.createRange();
+  nextRange.selectNodeContents(wrapper);
+  selection.addRange(nextRange);
+}
+
+function setBlockTag(editor: HTMLElement, tagName: "p" | "h1") {
+  const selection = window.getSelection();
+  if (!selectionInside(editor, selection) || !selection?.rangeCount) return;
+  const block = closestBlock(selection.anchorNode, editor);
+  const next = document.createElement(tagName);
+  if (block === editor) {
+    while (editor.firstChild) next.appendChild(editor.firstChild);
+    if (!next.childNodes.length) next.appendChild(document.createElement("br"));
+    editor.appendChild(next);
+  } else {
+    next.innerHTML = block.innerHTML || "<br>";
+    block.replaceWith(next);
+  }
+  placeCaretAtEnd(next);
+}
+
 export function SopRichTextViewer({ value, placeholder }: { value: string; placeholder?: string }) {
   if (!richTextPlainText(value)) return <p className="text-[14px] leading-7 text-[var(--ink-faint)]">{placeholder}</p>;
+  // markdownToRichHtml escapes user text before reintroducing the limited tags rendered here.
   return <div className="sop-rich-content" dangerouslySetInnerHTML={{ __html: markdownToRichHtml(value) }} />;
 }
 
@@ -226,8 +288,8 @@ export function SopRichTextEditor({
       visible: true,
       left,
       top,
-      bold: document.queryCommandState("bold"),
-      italic: document.queryCommandState("italic"),
+      bold: selectionHasTag(editor, selection, ["STRONG", "B"]),
+      italic: selectionHasTag(editor, selection, ["EM", "I"]),
       h1: activeBlock.tagName === "H1",
     });
   }, [focused]);
@@ -249,11 +311,11 @@ export function SopRichTextEditor({
     const editor = editorRef.current;
     if (!editor) return;
     editor.focus();
-    document.execCommand(command, false, value);
-    window.setTimeout(() => {
-      emitChange();
-      updateToolbar();
-    }, 0);
+    if (command === "bold") toggleInlineTag(editor, "strong");
+    else if (command === "italic") toggleInlineTag(editor, "em");
+    else setBlockTag(editor, value === "h1" ? "h1" : "p");
+    emitChange();
+    updateToolbar();
   }
 
   function toggleHeading() {

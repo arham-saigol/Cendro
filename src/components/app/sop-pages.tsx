@@ -72,7 +72,7 @@ function canCreateSops(active: { capabilities: string[] } | null | undefined) {
   return Boolean(active?.capabilities.includes("sops:create") && editableScopeTypes.some((scope) => active.capabilities.includes(`sops:manage:${scope}`)));
 }
 function canLoadSopScopeOptions(active: { capabilities: string[] } | null | undefined) {
-  return Boolean(active?.capabilities.some((capability) => capability === "sops:create" || capability.startsWith("sops:manage:")));
+  return Boolean(active?.capabilities.some((capability) => capability === "sops:manage:branch" || capability === "sops:manage:user"));
 }
 
 function relativeTime(ms?: number) {
@@ -150,6 +150,22 @@ function firstDisplayName(user: SopTargetUser, fallback: string) {
   const first = user?.firstName?.trim();
   if (first) return first;
   return fallback.trim().split(/\s+/)[0] || fallback;
+}
+
+function valuesMatch(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (Array.isArray(a) || Array.isArray(b)) return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((item, index) => valuesMatch(item, b[index]));
+  if (a && b && typeof a === "object" && typeof b === "object") {
+    const aRecord = a as Record<string, unknown>;
+    const bRecord = b as Record<string, unknown>;
+    const keys = Object.keys(aRecord);
+    return keys.length === Object.keys(bRecord).length && keys.every((key) => valuesMatch(aRecord[key], bRecord[key]));
+  }
+  return false;
+}
+
+function patchMatches(row: any, patch: Record<string, unknown>) {
+  return Object.entries(patch).every(([key, value]) => valuesMatch(row[key], value));
 }
 
 function SopUserAvatar({ name, imageUrl }: { name: string; imageUrl?: string | null }) {
@@ -265,7 +281,6 @@ function SopDialog({
   const { activeCompanyId, active } = useCompany();
   const create = useMutation(api.sops.create);
   const update = useMutation(api.sops.update);
-  const scopeOptions = useQuery(api.sops.scopeOptions, mode === "create" && open && activeCompanyId ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [scopeType, setScopeType] = useState<CreateScopeType>("company");
@@ -281,6 +296,8 @@ function SopDialog({
     ...(active.capabilities.includes("sops:manage:user") ? ["user" as const] : []),
   ] : [], [active]);
   const defaultCreateScope = createScopes[0] ?? "company";
+  const canSelectCreateTarget = createScopes.includes("branch") || createScopes.includes("user");
+  const scopeOptions = useQuery(api.sops.scopeOptions, mode === "create" && open && activeCompanyId && canSelectCreateTarget ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const scopeTargetValid = mode !== "create" || scopeType === "company" || (scopeType === "branch" ? Boolean(branchId) : Boolean(userMembershipId));
 
   useEffect(() => {
@@ -643,6 +660,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [pendingCell, setPendingCell] = useState<string | null>(null);
+  const [optimisticRows, setOptimisticRows] = useState<Record<string, Record<string, unknown>>>({});
   const debouncedSearch = useDebouncedValue(search);
   const canUseAllSops = active?.membership.role === "Admin" || active?.membership.role === "Manager";
   const effectiveSopView: SopView = canUseAllSops ? sopView : "my";
@@ -660,13 +678,26 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   const update = useMutation(api.sops.update);
   const updateScope = useMutation(api.sops.updateScope);
   const isLoading = sops === undefined;
-  const rows = sops ?? [];
+  const serverRows = useMemo(() => sops ?? [], [sops]);
+  const rows = useMemo(() => serverRows.map((sop) => ({ ...sop, ...optimisticRows[sop._id] })), [optimisticRows, serverRows]);
   const canCreate = canCreateSops(active);
   const editableScopes = useMemo(() => editableScopeTypes.filter((scope) => canManageSop(active, scope)), [active]);
   const filterCount = [scopeFilter !== "all", branchFilter !== "all", effectiveSopView === "all" && personFilter !== "all"].filter(Boolean).length;
   const hasActiveFilters = filterCount > 0 || search.trim() !== "";
 
   useEffect(() => { if (searchOpen) searchInputRef.current?.focus(); }, [searchOpen]);
+
+  useEffect(() => {
+    setOptimisticRows((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [id, patch] of Object.entries(current)) {
+        const row = serverRows.find((candidate) => candidate._id === id);
+        if (!row || patchMatches(row, patch)) { delete next[id]; changed = true; }
+      }
+      return changed ? next : current;
+    });
+  }, [serverRows]);
 
   useEffect(() => {
     if (!activeCompanyId) return;
@@ -683,12 +714,14 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   async function saveTitle(sop: any, title: string) {
     if (!activeCompanyId) return false;
     const key = `${sop._id}:title`;
+    setOptimisticRows((current) => ({ ...current, [sop._id]: { ...current[sop._id], title } }));
     setPendingCell(key);
     setInlineError(null);
     try {
       await update({ companyId: activeCompanyId, sopId: sop._id as Id<"sops">, title, content: sop.content });
       return true;
     } catch (err) {
+      setOptimisticRows((current) => { const next = { ...current }; delete next[sop._id]; return next; });
       setInlineError(err instanceof Error ? err.message : "Could not update the SOP.");
       return false;
     } finally {
@@ -711,13 +744,18 @@ export function SopList({ selectedId }: { selectedId?: string }) {
       userMembershipIds = [userMembershipId as Id<"companyMemberships">];
     }
     if (nextScopeType === sop.scopeType && (nextScopeType !== "branch" || branchIds[0] === sop.branchIds?.[0]) && (nextScopeType !== "user" || userMembershipIds[0] === sop.userMembershipIds?.[0])) return true;
+    const scopeTargetUser = nextScopeType === "user" ? scopeOptions?.users.find((user) => user.membership._id === userMembershipIds[0])?.user ?? sop.scopeTargetUser : null;
+    const scopeTargetName = nextScopeType === "company" ? active?.company.name ?? "Company" : nextScopeType === "branch" ? scopeOptions?.branches.find((branch) => branch._id === branchIds[0])?.name ?? sop.scopeTargetName : scopeTargetUser?.name ?? sop.scopeTargetName;
+    const optimisticPatch = { scopeType: nextScopeType, branchIds, userMembershipIds, scopeTargetName, scopeTargetUser };
     const key = `${sop._id}:${label}`;
+    setOptimisticRows((current) => ({ ...current, [sop._id]: { ...current[sop._id], ...optimisticPatch } }));
     setPendingCell(key);
     setInlineError(null);
     try {
       await updateScope({ companyId: activeCompanyId, sopId: sop._id as Id<"sops">, scopeType: nextScopeType, branchIds, userMembershipIds });
       return true;
     } catch (err) {
+      setOptimisticRows((current) => { const next = { ...current }; delete next[sop._id]; return next; });
       setInlineError(err instanceof Error ? err.message : "Could not update the SOP scope.");
       return false;
     } finally {
@@ -820,7 +858,9 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                   const rowCanEdit = canManageSop(active, sopScope);
                   const targetName = sopTargetName(sop, active?.company.name);
                   const pending = (field: string) => pendingCell === `${sop._id}:${field}`;
-                  const openDetails = () => router.push(`/sops/${sop._id}`);
+                  const detailsHref = `/sops/${sop._id}`;
+                  const prefetchDetails = () => router.prefetch(detailsHref);
+                  const openDetails = () => router.push(detailsHref);
                   return (
                     <tr
                       key={sop._id}
@@ -828,6 +868,8 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                       data-clickable={!rowCanEdit ? "true" : undefined}
                       data-selected={sop._id === selectedId}
                       tabIndex={!rowCanEdit ? 0 : undefined}
+                      onMouseEnter={prefetchDetails}
+                      onFocus={prefetchDetails}
                       onClick={(event) => {
                         if (rowCanEdit) return;
                         if ((event.target as HTMLElement).closest("[data-interactive='true']")) return;
@@ -852,6 +894,8 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                               data-tooltip="Open in side peek"
                               className="task-title-open"
                               onPointerDown={(event) => event.stopPropagation()}
+                              onMouseEnter={prefetchDetails}
+                              onFocus={prefetchDetails}
                               onClick={(event) => { event.stopPropagation(); openDetails(); }}
                               aria-label={`Open details for ${sop.title}`}
                             >
@@ -917,7 +961,7 @@ function EditableSopField({ value, placeholder, variant, ariaLabel, canEdit, onS
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
 
-  useEffect(() => { if (!focused) setDraft(value); }, [focused, value]);
+  useEffect(() => { if (!focused && state !== "saving") setDraft(value); }, [focused, state, value]);
   useLayoutEffect(() => { if (variant === "title") autoSize(ref); }, [draft, canEdit, variant]);
 
   async function commit() {
@@ -1027,7 +1071,7 @@ function SopDetailSkeleton() {
 export function SopDetail({ id }: { id: string }) {
   const router = useRouter();
   const { activeCompanyId, active } = useCompany();
-  const sop = useQuery(api.sops.get, activeCompanyId ? { companyId: activeCompanyId, sopId: id as Id<"sops"> } : "skip") as any;
+  const serverSop = useQuery(api.sops.get, activeCompanyId ? { companyId: activeCompanyId, sopId: id as Id<"sops"> } : "skip") as any;
   const scopeOptions = useQuery(api.sops.scopeOptions, activeCompanyId && canLoadSopScopeOptions(active) ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const update = useMutation(api.sops.update);
   const updateScope = useMutation(api.sops.updateScope);
@@ -1039,8 +1083,14 @@ export function SopDetail({ id }: { id: string }) {
   const [pendingProperty, setPendingProperty] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
+  const [optimisticSop, setOptimisticSop] = useState<Record<string, unknown> | null>(null);
 
-  if (!sop) return <SopDetailSkeleton />;
+  useEffect(() => {
+    if (serverSop && optimisticSop && patchMatches(serverSop, optimisticSop)) setOptimisticSop(null);
+  }, [optimisticSop, serverSop]);
+
+  if (!serverSop) return <SopDetailSkeleton />;
+  const sop = optimisticSop ? { ...serverSop, ...optimisticSop } : serverSop;
   const sopScope = sop.scopeType as ScopeType;
   const editableScope = editableScopeTypes.includes(sopScope as EditableScopeType) ? sopScope as EditableScopeType : null;
   const canEdit = canManageSop(active, sopScope);
@@ -1048,11 +1098,14 @@ export function SopDetail({ id }: { id: string }) {
 
   async function saveText(patch: { title?: string; body?: string }) {
     if (!activeCompanyId) return false;
+    const optimisticPatch = { ...(patch.title !== undefined ? { title: patch.title } : {}), ...(patch.body !== undefined ? { content: patch.body } : {}) };
+    setOptimisticSop((current) => ({ ...(current ?? {}), ...optimisticPatch }));
     setFieldError(null);
     try {
       await update({ companyId: activeCompanyId, sopId: id as Id<"sops">, title: patch.title ?? sop.title, content: patch.body ?? sop.content });
       return true;
     } catch (err) {
+      setOptimisticSop(null);
       setFieldError(err instanceof Error ? err.message : "Could not update the SOP.");
       return false;
     }
@@ -1073,12 +1126,17 @@ export function SopDetail({ id }: { id: string }) {
       userMembershipIds = [userMembershipId as Id<"companyMemberships">];
     }
     if (nextScopeType === sop.scopeType && (nextScopeType !== "branch" || branchIds[0] === sop.branchIds?.[0]) && (nextScopeType !== "user" || userMembershipIds[0] === sop.userMembershipIds?.[0])) return true;
+    const scopeTargetUser = nextScopeType === "user" ? scopeOptions?.users.find((user) => user.membership._id === userMembershipIds[0])?.user ?? sop.scopeTargetUser : null;
+    const scopeTargetName = nextScopeType === "company" ? active?.company.name ?? "Company" : nextScopeType === "branch" ? scopeOptions?.branches.find((branch) => branch._id === branchIds[0])?.name ?? sop.scopeTargetName : scopeTargetUser?.name ?? sop.scopeTargetName;
+    const optimisticPatch = { scopeType: nextScopeType, branchIds, userMembershipIds, scopeTargetName, scopeTargetUser };
+    setOptimisticSop((current) => ({ ...(current ?? {}), ...optimisticPatch }));
     setPendingProperty(label);
     setFieldError(null);
     try {
       await updateScope({ companyId: activeCompanyId, sopId: id as Id<"sops">, scopeType: nextScopeType, branchIds, userMembershipIds });
       return true;
     } catch (err) {
+      setOptimisticSop(null);
       setFieldError(err instanceof Error ? err.message : "Could not update the SOP scope.");
       return false;
     } finally {

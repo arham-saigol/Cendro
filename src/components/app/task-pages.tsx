@@ -1279,22 +1279,6 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
         </div>
       </div>
 
-      {selectionCount > 0 && (
-        <div className="task-bulk-bar mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-[var(--hairline)] bg-[var(--surface-pressed)] px-3 py-2 text-[13px]">
-          <span className="font-medium text-[var(--ink)]">{selectionCount} selected</span>
-          <span className="text-[var(--ink-faint)]">·</span>
-          <span className="text-[var(--ink-muted)]">{selectedVisibleCount > 0 && selectedVisibleCount < selectionCount ? `${selectedVisibleCount} on this page` : "All on this page"}</span>
-          <div className="ml-auto flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={clearSelection} disabled={deleting}>Cancel</Button>
-            <Button variant="danger" size="sm" onClick={handleDeleteSelection} disabled={!canDeleteSelection}>
-              <Trash2 className="h-3.5 w-3.5" />
-              {selectionCount === 1 ? "Delete" : `Delete ${selectionCount}`}
-            </Button>
-          </div>
-          {deleteError && <p className="alert-error basis-full rounded-md px-2 py-1.5 text-[12.5px]" role="alert">{deleteError}</p>}
-        </div>
-      )}
-
       {inlineError && (
         <div className="alert-error mb-3 flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-[13px]" role="alert">
           <span>{inlineError}</span>
@@ -1302,7 +1286,25 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
         </div>
       )}
 
-      <div className="task-table-wrap relative -ml-11 w-[calc(100%+2.75rem)] overflow-x-auto pl-11">
+      <div className="relative">
+        {selectionCount > 0 && (
+          <div className="task-selection-layer">
+            <div className="task-selection-pill" role="status" aria-live="polite">
+              <span className="task-selection-pill-count">{selectionCount} selected</span>
+              <span className="task-selection-pill-divider" aria-hidden="true" />
+              <button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={deleting} aria-label="Cancel selection">
+                <X className="h-4 w-4" />
+              </button>
+              <span className="task-selection-pill-divider" aria-hidden="true" />
+              <button type="button" className="task-selection-pill-btn" data-danger="true" onClick={handleDeleteSelection} disabled={!canDeleteSelection} aria-label={selectionCount === 1 ? "Delete selected task" : `Delete ${selectionCount} selected tasks`}>
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+            {deleteError && <p className="alert-error task-selection-error" role="alert">{deleteError}</p>}
+          </div>
+        )}
+
+        <div className="task-table-wrap relative -ml-11 w-[calc(100%+2.75rem)] overflow-x-auto pl-11">
         {visibleTasks.length > 0 && (
           <div className="task-checkbox-rail pointer-events-none absolute left-0 top-0 z-10 flex w-11 flex-col pr-2">
             <div className="flex h-9 items-center justify-end group/head pointer-events-auto">
@@ -1488,6 +1490,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );

@@ -174,29 +174,47 @@ export async function visibleSopForSelf(ctx: Ctx, companyId: Id<"companies">, m:
   return sopDepartments.some((row) => departmentIds.has(row.departmentId));
 }
 
-export async function visibleSop(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, sop: Doc<"sops">) {
+export type SopVisibilityContext = {
+  scopedMembershipIds: Set<Id<"companyMemberships">>;
+  membershipBranchIds: Set<Id<"branches">>;
+  membershipDepartmentIds: Set<Id<"departments">>;
+  managerBranchScopes: Set<Id<"branches">>;
+  managerDepartmentScopes: Set<Id<"departments">>;
+};
+
+export async function buildSopVisibilityContext(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">): Promise<SopVisibilityContext | null> {
+  if (m.role !== "Manager") return null;
+  const scoped = await scopedMembershipIds(ctx, companyId, m);
+  const membershipBranchSet = await membershipBranchIds(ctx, scoped);
+  const membershipDepartmentSet = await membershipDepartmentIds(ctx, scoped);
+  const managedBranches = await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", m._id)).take(500);
+  const managedDepartments = await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", m._id)).take(500);
+  return {
+    scopedMembershipIds: scoped,
+    membershipBranchIds: membershipBranchSet,
+    membershipDepartmentIds: membershipDepartmentSet,
+    managerBranchScopes: new Set(managedBranches.map((row) => row.branchId)),
+    managerDepartmentScopes: new Set(managedDepartments.map((row) => row.departmentId)),
+  };
+}
+
+export async function visibleSop(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, sop: Doc<"sops">, visibility?: SopVisibilityContext | null) {
   if (sop.companyId !== companyId) return false;
   if (m.role === "Admin") return true;
   if (m.role !== "Manager") return await visibleSopForSelf(ctx, companyId, m, sop);
   if (sop.scopeType === "company") return true;
-
-  const scopedMemberships = await scopedMembershipIds(ctx, companyId, m);
+  const v = visibility ?? await buildSopVisibilityContext(ctx, companyId, m);
+  if (!v) return false;
   if (sop.scopeType === "user") {
     const rows = await ctx.db.query("sopUserScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
-    return rows.some((row) => scopedMemberships.has(row.userMembershipId));
+    return rows.some((row) => v.scopedMembershipIds.has(row.userMembershipId));
   }
   if (sop.scopeType === "branch") {
-    const branchIds = await membershipBranchIds(ctx, scopedMemberships);
-    const managedBranches = await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", m._id)).take(500);
-    for (const row of managedBranches) branchIds.add(row.branchId);
     const sopBranches = await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
-    return sopBranches.some((row) => branchIds.has(row.branchId));
+    return sopBranches.some((row) => v.membershipBranchIds.has(row.branchId) || v.managerBranchScopes.has(row.branchId));
   }
-  const departmentIds = await membershipDepartmentIds(ctx, scopedMemberships);
-  const managedDepartments = await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", m._id)).take(500);
-  for (const row of managedDepartments) departmentIds.add(row.departmentId);
   const sopDepartments = await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
-  return sopDepartments.some((row) => departmentIds.has(row.departmentId));
+  return sopDepartments.some((row) => v.membershipDepartmentIds.has(row.departmentId) || v.managerDepartmentScopes.has(row.departmentId));
 }
 
 export function assertPlatformAdminEmail(email?: string | null) {

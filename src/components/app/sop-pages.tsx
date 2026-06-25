@@ -22,7 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation, useQuery, useQuery_experimental } from "convex/react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
@@ -840,7 +840,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
                     <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{hasActiveFilters ? "No matching SOPs" : "No SOPs yet"}</div>
-                    <p className="mt-1 max-w-[300px] text-[13px] text-[var(--ink-muted)]">{hasActiveFilters ? "Try adjusting your search or filters." : "Create your first procedure to get started."}</p>
+                    <p className="mt-1 max-w-[300px] text-[13px] text-[var(--ink-muted)]">{hasActiveFilters ? "Try adjusting your search or filters." : canCreate ? "Create your first procedure to get started." : "No procedures have been added yet."}</p>
                     {canCreate && !hasActiveFilters && (
                       <Button className="mt-4" size="sm" variant="primary" onClick={() => setCreateOpen(true)}><Plus className="h-3.5 w-3.5" />New SOP</Button>
                     )}
@@ -1068,10 +1068,22 @@ function SopDetailSkeleton() {
   );
 }
 
+function SopDetailNotFound({ onBack }: { onBack: () => void }) {
+  return (
+    <div className="task-empty">
+      <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><FileText className="h-5 w-5" /></span>
+      <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">Procedure not found</div>
+      <p className="mt-1 max-w-[300px] text-[13px] text-[var(--ink-muted)]">This procedure may have been removed, or you no longer have access to it.</p>
+      <Button className="mt-4" size="sm" variant="ghost" onClick={onBack}>Back to procedures</Button>
+    </div>
+  );
+}
+
 export function SopDetail({ id }: { id: string }) {
   const router = useRouter();
   const { activeCompanyId, active } = useCompany();
-  const serverSop = useQuery(api.sops.get, activeCompanyId ? { companyId: activeCompanyId, sopId: id as Id<"sops"> } : "skip") as any;
+  const serverSopResult = useQuery_experimental({ query: api.sops.get, args: activeCompanyId ? { companyId: activeCompanyId, sopId: id as Id<"sops"> } : "skip" });
+  const serverSop = serverSopResult.status === "success" ? (serverSopResult.data as any) : undefined;
   const scopeOptions = useQuery(api.sops.scopeOptions, activeCompanyId && canLoadSopScopeOptions(active) ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const update = useMutation(api.sops.update);
   const updateScope = useMutation(api.sops.updateScope);
@@ -1089,6 +1101,7 @@ export function SopDetail({ id }: { id: string }) {
     if (serverSop && optimisticSop && patchMatches(serverSop, optimisticSop)) setOptimisticSop(null);
   }, [optimisticSop, serverSop]);
 
+  if (serverSopResult.status === "error") return <SopDetailNotFound onBack={() => router.push("/sops")} />;
   if (!serverSop) return <SopDetailSkeleton />;
   const sop = optimisticSop ? { ...serverSop, ...optimisticSop } : serverSop;
   const sopScope = sop.scopeType as ScopeType;

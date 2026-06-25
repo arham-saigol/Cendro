@@ -246,6 +246,7 @@ export function SopRichTextEditor({
   onEscape?: () => void;
 }) {
   const editorRef = useRef<HTMLDivElement>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
   const lastEmittedRef = useRef(value);
   const [focused, setFocused] = useState(false);
   const [toolbar, setToolbar] = useState<ToolbarState>({ visible: false, left: 0, top: 0, bold: false, italic: false, h1: false });
@@ -329,7 +330,9 @@ export function SopRichTextEditor({
   }
 
   function handleBlur(event: FocusEvent<HTMLDivElement>) {
-    if (event.currentTarget.contains(event.relatedTarget)) return;
+    const next = event.relatedTarget as Node | null;
+    if (event.currentTarget.contains(next)) return;
+    if (next && toolbarRef.current?.contains(next)) return;
     setFocused(false);
     setToolbar((current) => ({ ...current, visible: false }));
     if (!richTextPlainText(lastEmittedRef.current)) editorRef.current!.innerHTML = "";
@@ -349,7 +352,7 @@ export function SopRichTextEditor({
   }
 
   const toolbarNode = toolbar.visible && typeof document !== "undefined" ? createPortal(
-    <div className="sop-rich-toolbar" style={{ left: toolbar.left, top: toolbar.top }} onMouseDown={(event) => event.preventDefault()}>
+    <div ref={toolbarRef} className="sop-rich-toolbar" style={{ left: toolbar.left, top: toolbar.top }} onMouseDown={(event) => event.preventDefault()}>
       <button type="button" className="sop-rich-toolbar-btn" data-active={toolbar.bold || undefined} aria-label="Bold" onClick={() => runCommand("bold")}><Bold className="h-3.5 w-3.5" /></button>
       <button type="button" className="sop-rich-toolbar-btn" data-active={toolbar.italic || undefined} aria-label="Italic" onClick={() => runCommand("italic")}><Italic className="h-3.5 w-3.5" /></button>
       <button type="button" className="sop-rich-toolbar-btn" data-active={toolbar.h1 || undefined} aria-label="Heading 1" onClick={toggleHeading}><Heading1 className="h-3.5 w-3.5" /></button>

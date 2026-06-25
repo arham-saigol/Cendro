@@ -31,7 +31,9 @@ async function seedCompany() {
 
 async function allowEmployeeCreate({ t, companyId, employeeMembershipId }: Seed) {
   await t.run(async (ctx) => {
-    await ctx.db.insert("permissionOverrides", { companyId, membershipId: employeeMembershipId, capability: "tasks:one_time:create", effect: "allow", updatedAt: Date.now() });
+    const now = Date.now();
+    await ctx.db.insert("permissionOverrides", { companyId, membershipId: employeeMembershipId, capability: "tasks:one_time:create", effect: "allow", updatedAt: now });
+    await ctx.db.insert("permissionOverrides", { companyId, membershipId: employeeMembershipId, capability: "tasks:one_time:assign:self", effect: "allow", updatedAt: now });
   });
 }
 
@@ -56,7 +58,7 @@ describe("production permission and validation fixes", () => {
     await expect(t.withIdentity(identity("employee")).mutation(api.tasks.completeOneTime, { companyId, taskId })).resolves.toBeNull();
   });
 
-  test("self-assignment works even without assign capabilities", async () => {
+  test("self-assignment requires the explicit self-assign capability", async () => {
     const seeded = await seedCompany();
     const { t, companyId, employeeMembershipId } = seeded;
     await allowEmployeeCreate(seeded);
@@ -224,6 +226,38 @@ describe("production permission and validation fixes", () => {
     const taskId = await t.withIdentity(identity("employee")).mutation(api.tasks.createOneTime, { companyId, title: "Comment target", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [employeeMembershipId], priority: "medium" });
 
     await expect(t.withIdentity(identity("employee")).mutation(api.tasks.addComment, { companyId, taskType: "one_time", taskId, body: "   " })).rejects.toThrow("Comment is required");
+  });
+
+  test("accepting an invitation applies assignments, managed scope, and permission overrides", async () => {
+    const { t, companyId, employeeMembershipId } = await seedCompany();
+    const token = "invite-token";
+    const { branchId, departmentId } = await t.run(async (ctx) => {
+      const now = Date.now();
+      const branchId = await ctx.db.insert("branches", { companyId, name: "HQ", createdAt: now, updatedAt: now });
+      const departmentId = await ctx.db.insert("departments", { companyId, branchId, name: "Ops", createdAt: now, updatedAt: now });
+      await ctx.db.insert("invitations", { companyId, email: "new@example.com", role: "Employee", branchIds: [branchId], departmentIds: [departmentId], managedBranchIds: [branchId], managedDepartmentIds: [departmentId], managedUserMembershipIds: [employeeMembershipId], permissionOverrides: [{ capability: "tasks:one_time:create", effect: "allow" }, { capability: "tasks:one_time:assign:self", effect: "allow" }], token, status: "pending", createdAt: now, expiresAt: now + 86_400_000 });
+      return { branchId, departmentId };
+    });
+
+    await expect(t.withIdentity(identity("new", "new@example.com")).mutation(api.invitations.accept, { token })).resolves.toMatchObject({ companyId });
+    const result = await t.run(async (ctx) => {
+      const user = await ctx.db.query("appUsers").withIndex("by_email", (q) => q.eq("email", "new@example.com")).unique();
+      const membership = user ? await ctx.db.query("companyMemberships").withIndex("by_company_user", (q) => q.eq("companyId", companyId).eq("userId", user._id)).unique() : null;
+      const branchAssignments = membership ? await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membership._id)).take(10) : [];
+      const departmentAssignments = membership ? await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membership._id)).take(10) : [];
+      const managedBranches = membership ? await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(10) : [];
+      const managedDepartments = membership ? await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(10) : [];
+      const managedUsers = membership ? await ctx.db.query("managerUserScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(10) : [];
+      const overrides = membership ? await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", membership._id)).take(10) : [];
+      return { membership, branchAssignments, departmentAssignments, managedBranches, managedDepartments, managedUsers, overrides };
+    });
+    expect(result.membership?.role).toBe("Employee");
+    expect(result.branchAssignments.map((row) => row.branchId)).toEqual([branchId]);
+    expect(result.departmentAssignments.map((row) => row.departmentId)).toEqual([departmentId]);
+    expect(result.managedBranches.map((row) => row.branchId)).toEqual([branchId]);
+    expect(result.managedDepartments.map((row) => row.departmentId)).toEqual([departmentId]);
+    expect(result.managedUsers.map((row) => row.userMembershipId)).toEqual([employeeMembershipId]);
+    expect(result.overrides.map((row) => [row.capability, row.effect]).sort()).toEqual([["tasks:one_time:assign:self", "allow"], ["tasks:one_time:create", "allow"]]);
   });
 
   test("invitation email config failures are surfaced and not marked sent", async () => {

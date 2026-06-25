@@ -18,8 +18,18 @@ function StatCard({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 export default function Dashboard() {
-  const { activeCompanyId } = useCompany();
-  const data = useQuery(api.analytics.summary, activeCompanyId ? { companyId: activeCompanyId } : "skip");
+  const { activeCompanyId, active } = useCompany();
+  const canViewDashboard = Boolean(active?.capabilities?.some((capability) => capability === "analytics:view:self" || capability === "analytics:view:managed_scope" || capability === "analytics:view:company"));
+  const data = useQuery(api.analytics.summary, activeCompanyId && canViewDashboard ? { companyId: activeCompanyId } : "skip");
+
+  if (!canViewDashboard) {
+    return (
+      <div className="app-page">
+        <PageHeader title="Dashboard" description="Dashboard access is disabled for your user." />
+        <Card className="p-5 text-sm text-[var(--ink-muted)]">Ask an admin to enable dashboard analytics if you need access.</Card>
+      </div>
+    );
+  }
 
   if (!data) {
     return (

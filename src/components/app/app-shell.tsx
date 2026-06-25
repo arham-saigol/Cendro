@@ -30,7 +30,7 @@ import { Input } from "@/components/ui/input";
 import { cn, initials } from "@/lib/utils";
 
 const nav = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, requiresDashboard: true },
   { href: "/jd-tasks", label: "JD tasks", icon: Repeat },
   { href: "/one-time-tasks", label: "One-time tasks", icon: Check },
   { href: "/sops", label: "SOPs", icon: FileText },
@@ -307,7 +307,8 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
   }, [accessStatus, path, router]);
 
   const canManageCompany = active?.capabilities?.includes("company:manage_permissions") ?? false;
-  const visibleNav = useMemo(() => nav.filter((item) => !item.requiresCompanyManagement || canManageCompany), [canManageCompany]);
+  const canViewDashboard = Boolean(active?.capabilities?.some((capability) => capability === "analytics:view:self" || capability === "analytics:view:managed_scope" || capability === "analytics:view:company"));
+  const visibleNav = useMemo(() => nav.filter((item) => (!item.requiresCompanyManagement || canManageCompany) && (!item.requiresDashboard || canViewDashboard)), [canManageCompany, canViewDashboard]);
 
   if (accessStatus === "loading") {
     return (

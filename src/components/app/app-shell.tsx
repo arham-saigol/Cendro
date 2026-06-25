@@ -338,6 +338,19 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
     );
   }
 
+  if (accessStatus === "paused") {
+    return (
+      <ShellCard>
+        <div className="mb-4">
+          <AccountCompanyMenu />
+        </div>
+        <h1 className="text-xl font-semibold">Access paused</h1>
+        <p className="mt-2 text-sm text-[var(--ink-muted)]">Your access to the app has currently been paused. Please contact your administrator.</p>
+        {email && <p className="mt-3 text-xs text-[var(--ink-faint)]">Signed in as {email}</p>}
+      </ShellCard>
+    );
+  }
+
   if (accessStatus === "noCompanies") {
     return (
       <ShellCard>

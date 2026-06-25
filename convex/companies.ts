@@ -26,7 +26,11 @@ export const accessStatus = query({
     if (!user) return { status: "profileMissing" as const, email: identity.email ?? null };
 
     const companies = await accessibleCompanies(ctx);
-    if (companies.length === 0) return { status: "noCompanies" as const, email: user.email };
+    if (companies.length === 0) {
+      const memberships = await ctx.db.query("companyMemberships").withIndex("by_user", (q) => q.eq("userId", user._id)).take(100);
+      if (memberships.some((membership) => !membership.active)) return { status: "paused" as const, email: user.email };
+      return { status: "noCompanies" as const, email: user.email };
+    }
 
     return { status: "ready" as const, email: user.email, companies };
   },

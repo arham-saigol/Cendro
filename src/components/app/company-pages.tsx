@@ -4,9 +4,11 @@ import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   Building2,
+  CalendarDays,
   Check,
   ChevronDown,
   ChevronRight,
+  CirclePause,
   GripVertical,
   Layers,
   LucideIcon,
@@ -18,6 +20,8 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
+  UserCog,
+  UserMinus,
   Users,
   X,
 } from "lucide-react";
@@ -260,6 +264,102 @@ function CompanyFilterMenu({
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
+  );
+}
+
+function ColumnHeading({ icon: Icon, children }: { icon: LucideIcon; children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <Icon className="h-3.5 w-3.5" />
+      {children}
+    </span>
+  );
+}
+
+function PeopleCellMenu<T extends string>({
+  value,
+  options,
+  onChange,
+  ariaLabel,
+  disabled = false,
+  placeholder = "—",
+  renderValue,
+}: {
+  value: T;
+  options: { value: T; label: string; helper?: string }[];
+  onChange: (value: T) => void;
+  ariaLabel: string;
+  disabled?: boolean;
+  placeholder?: string;
+  renderValue?: (option: { value: T; label: string; helper?: string } | undefined) => React.ReactNode;
+}) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState<{ top: number; left: number; width: number } | null>(null);
+  const selected = options.find((option) => option.value === value);
+  const label = selected?.label || placeholder;
+  const content = renderValue ? renderValue(selected) : <span className={cn("min-w-0 truncate", !selected && "text-[var(--ink-faint)]")}>{label}</span>;
+
+  function measure() {
+    const bounds = triggerRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    setRect({ top: bounds.top, left: bounds.left - 14, width: Math.max(bounds.width + 28, 220) });
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    measure();
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [open]);
+
+  if (disabled) {
+    return <span className="task-cell-control cursor-not-allowed opacity-55">{content}</span>;
+  }
+
+  return (
+    <span className="task-cell-popover-root">
+      <button
+        ref={triggerRef}
+        type="button"
+        className="task-cell-control"
+        data-interactive="true"
+        data-cell-popover-open={open ? "true" : undefined}
+        onClick={(event) => { event.stopPropagation(); if (!open) measure(); setOpen(!open); }}
+        aria-label={ariaLabel}
+        aria-expanded={open}
+      >
+        {content}
+      </button>
+      {open && rect && (
+        <>
+          <button type="button" aria-label="Close menu" className="task-cell-popover-backdrop" onClick={(event) => { event.stopPropagation(); setOpen(false); }} />
+          <div className="task-cell-popover" style={{ top: rect.top, left: rect.left, width: rect.width }} data-interactive="true" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+            <div className="task-cell-popover-header">{content}</div>
+            <div className="task-cell-popover-body">
+              {options.map((option) => (
+                <button key={option.value} type="button" onClick={() => { setOpen(false); if (option.value !== value) onChange(option.value); }} className="task-cell-popover-item">
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">{option.label}</span>
+                    {option.helper && <span className="block truncate text-[11.5px] text-[var(--ink-muted)]">{option.helper}</span>}
+                  </span>
+                  {option.value === value && <Check className="h-3.5 w-3.5 text-[var(--ink-faint)]" />}
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </span>
   );
 }
 
@@ -758,254 +858,124 @@ type PeopleView = "members" | "invitations";
 
 function PeopleTab({
   data,
-  onConfigure,
   onInvite,
+  onRoleChange,
+  onBranchChange,
+  onDepartmentChange,
+  onStatusChange,
+  onRemoveUsers,
   canManageUsers,
+  canManagePermissions,
   canInvite,
 }: {
   data: Overview;
-  onConfigure: (user: UserRow) => void;
   onInvite: () => void;
+  onRoleChange: (user: UserRow, role: Role) => Promise<void>;
+  onBranchChange: (user: UserRow, branchId: Id<"branches"> | "") => Promise<void>;
+  onDepartmentChange: (user: UserRow, departmentId: Id<"departments"> | "") => Promise<void>;
+  onStatusChange: (user: UserRow, active: boolean) => Promise<void>;
+  onRemoveUsers: (membershipIds: Id<"companyMemberships">[]) => Promise<void>;
   canManageUsers: boolean;
+  canManagePermissions: boolean;
   canInvite: boolean;
 }) {
   const [view, setView] = useState<PeopleView>("members");
   const [query, setQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState<Role | "all">("all");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<Id<"companyMemberships">>>(new Set());
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
   const branchMap = useMemo(() => new Map(data.branches.map((b) => [b._id, b.name])), [data.branches]);
   const departmentMap = useMemo(() => new Map(data.departments.map((d) => [d._id, d.name])), [data.departments]);
-
   const normalized = query.trim().toLowerCase();
+  const filteredUsers = useMemo(() => data.users.filter((user) => (!normalized || `${user.user.name} ${user.user.email}`.toLowerCase().includes(normalized)) && (roleFilter === "all" || user.membership.role === roleFilter)), [data.users, normalized, roleFilter]);
+  const filteredInvitations = useMemo(() => data.invitations.filter((invitation) => (!normalized || invitation.email.toLowerCase().includes(normalized)) && (roleFilter === "all" || invitation.role === roleFilter)), [data.invitations, normalized, roleFilter]);
+  const visibleUserIds = filteredUsers.map((user) => user.membership._id);
+  const selectedVisibleCount = visibleUserIds.reduce((count, id) => count + (selectedIds.has(id) ? 1 : 0), 0);
+  const allVisibleSelected = filteredUsers.length > 0 && selectedVisibleCount === filteredUsers.length;
+  const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
+  const selectionCount = selectedIds.size;
 
-  const filteredUsers = useMemo(() => {
-    return data.users.filter((user) => {
-      if (normalized && !`${user.user.name} ${user.user.email}`.toLowerCase().includes(normalized)) return false;
-      if (roleFilter !== "all" && user.membership.role !== roleFilter) return false;
-      return true;
+  useEffect(() => {
+    setSelectedIds((current) => {
+      const known = new Set(data.users.map((user) => user.membership._id));
+      const next = new Set(Array.from(current).filter((id) => known.has(id)));
+      return next.size === current.size ? current : next;
     });
-  }, [data.users, normalized, roleFilter]);
+  }, [data.users]);
+  useEffect(() => { if (view !== "members" && selectedIds.size > 0) setSelectedIds(new Set()); }, [selectedIds.size, view]);
 
-  const filteredInvitations = useMemo(() => {
-    return data.invitations.filter((invitation) => {
-      if (normalized && !invitation.email.toLowerCase().includes(normalized)) return false;
-      if (roleFilter !== "all" && invitation.role !== roleFilter) return false;
-      return true;
-    });
-  }, [data.invitations, normalized, roleFilter]);
+  function toggleOne(id: Id<"companyMemberships">) {
+    setSelectedIds((current) => { const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next; });
+    setRemoveError(null);
+  }
+  function toggleAllVisible() {
+    setSelectedIds((current) => { const next = new Set(current); if (allVisibleSelected) for (const id of visibleUserIds) next.delete(id); else for (const id of visibleUserIds) next.add(id); return next; });
+    setRemoveError(null);
+  }
+  function clearSelection() { setSelectedIds(new Set()); setRemoveError(null); }
+  async function removeSelected() {
+    if (selectionCount === 0 || removing) return;
+    setRemoving(true); setRemoveError(null);
+    try { await onRemoveUsers(Array.from(selectedIds)); setSelectedIds(new Set()); }
+    catch (err) { setRemoveError(err instanceof Error ? err.message : "Could not remove selected users."); }
+    finally { setRemoving(false); }
+  }
 
   const filterCount = (roleFilter !== "all" ? 1 : 0) + (query.trim() !== "" ? 1 : 0);
   const isEmpty = view === "members" ? filteredUsers.length === 0 : filteredInvitations.length === 0;
 
   return (
-    <div className="company-tab-body">
-      <div className="mb-3 flex flex-wrap items-center gap-2">
+    <div className="company-tab-body company-people-body">
+      <div className="flex flex-wrap items-center gap-2">
         <div className="task-view-toggle" aria-label="People view">
-          <button type="button" className="task-view-button" data-active={view === "members"} onClick={() => setView("members")}>
-            <Users className="h-4 w-4" />
-            Members
-            <span className="rounded-full bg-[var(--surface-pressed)] px-1.5 text-[11px] font-medium tabular-nums text-[var(--ink-muted)]">
-              {data.users.length}
-            </span>
-          </button>
-          <button type="button" className="task-view-button" data-active={view === "invitations"} onClick={() => setView("invitations")}>
-            <MailPlus className="h-4 w-4" />
-            Invitations
-            <span className="rounded-full bg-[var(--surface-pressed)] px-1.5 text-[11px] font-medium tabular-nums text-[var(--ink-muted)]">
-              {data.invitations.length}
-            </span>
-          </button>
+          <button type="button" className="task-view-button" data-active={view === "members"} onClick={() => setView("members")}><Users className="h-4 w-4" />Members<span className="rounded-full bg-[var(--surface-pressed)] px-1.5 text-[11px] font-medium tabular-nums text-[var(--ink-muted)]">{data.users.length}</span></button>
+          <button type="button" className="task-view-button" data-active={view === "invitations"} onClick={() => setView("invitations")}><MailPlus className="h-4 w-4" />Invitations<span className="rounded-full bg-[var(--surface-pressed)] px-1.5 text-[11px] font-medium tabular-nums text-[var(--ink-muted)]">{data.invitations.length}</span></button>
         </div>
         <div className="ml-auto flex flex-1 items-center justify-end gap-2">
           <div className="task-search-control" data-open={searchOpen || query.trim() !== ""}>
-            <Input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              className="task-search-input border-none focus:border-none bg-transparent"
-              placeholder={view === "members" ? "Search by name or email" : "Search invitations"}
-              aria-label={view === "members" ? "Search members" : "Search invitations"}
-              tabIndex={searchOpen || query.trim() !== "" ? 0 : -1}
-            />
-            <button
-              type="button"
-              className="task-search-button"
-              aria-label={query ? "Clear search" : "Search people"}
-              onClick={() => {
-                if (query) setQuery("");
-                else setSearchOpen((open) => !open);
-              }}
-            >
-              {query ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
-            </button>
+            <Input value={query} onChange={(event) => setQuery(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder={view === "members" ? "Search by name or email" : "Search invitations"} aria-label={view === "members" ? "Search members" : "Search invitations"} tabIndex={searchOpen || query.trim() !== "" ? 0 : -1} />
+            <button type="button" className="task-search-button" aria-label={query ? "Clear search" : "Search people"} onClick={() => { if (query) setQuery(""); else setSearchOpen((open) => !open); }}>{query ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}</button>
           </div>
           <CompanyFilterMenu roleFilter={roleFilter} activeCount={filterCount} onRoleChange={setRoleFilter} />
-          {canInvite && (
-            <Button variant="primary" size="sm" onClick={onInvite}>
-              <MailPlus className="h-4 w-4" />
-              Invite
-            </Button>
-          )}
+          {canInvite && <Button variant="primary" size="sm" onClick={onInvite}><MailPlus className="h-4 w-4" />Invite</Button>}
         </div>
       </div>
 
       {view === "members" ? (
-        <div className="company-table-wrap">
-          <table className="task-table">
-            <thead>
-              <tr>
-                <th className="min-w-[220px]">
-                  <span className="inline-flex items-center gap-1.5">
-                    <Users className="h-3.5 w-3.5" />
-                    Member
-                  </span>
-                </th>
-                <th className="w-28">Role</th>
-                <th className="min-w-[120px]">Branch</th>
-                <th className="min-w-[140px]">Department</th>
-                <th className="w-28">Status</th>
-                <th className="w-32">Joined</th>
-                <th className="w-28" />
-              </tr>
-            </thead>
-            <tbody>
-              {isEmpty ? (
-                <tr>
-                  <td colSpan={7} className="!h-auto !border-0 !bg-transparent py-2">
-                    <EmptyState
-                      icon={Users}
-                      title={query || roleFilter !== "all" ? "No matching members" : "No members yet"}
-                      message={
-                        query || roleFilter !== "all"
-                          ? "Try adjusting your search or filters."
-                          : "Invite the first person to join this workspace."
-                      }
-                      action={
-                        canInvite && !query && roleFilter === "all" ? (
-                          <Button size="sm" variant="primary" onClick={onInvite}>
-                            <MailPlus className="h-3.5 w-3.5" />
-                            Invite member
-                          </Button>
-                        ) : undefined
-                      }
-                    />
-                  </td>
-                </tr>
-              ) : (
-                filteredUsers.map((user) => (
-                  <tr key={user.membership._id} className="group/row">
-                    <td>
-                      <div className="flex items-center gap-2.5">
-                        <MemberAvatar name={user.user.name} email={user.user.email} />
-                        <div className="min-w-0">
-                          <div className="truncate text-[13px] font-medium text-[var(--ink)]">{user.user.name || user.user.email}</div>
-                          <div className="truncate text-[12px] text-[var(--ink-muted)]">{user.user.email}</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td>
-                      <Badge tone={roleTone[user.membership.role]}>{user.membership.role}</Badge>
-                    </td>
-                    <td className="text-[var(--ink-secondary)]">
-                      <span className="truncate">{user.branchIds.map((id) => branchMap.get(id)).filter(Boolean).join(", ") || "—"}</span>
-                    </td>
-                    <td className="text-[var(--ink-secondary)]">
-                      <span className="truncate">{user.departmentIds.map((id) => departmentMap.get(id)).filter(Boolean).join(", ") || "—"}</span>
-                    </td>
-                    <td>
-                      <Badge tone={user.membership.active ? "green" : "neutral"}>{user.membership.active ? "Active" : "Inactive"}</Badge>
-                    </td>
-                    <td className="text-[12.5px] text-[var(--ink-secondary)]">{formatDate(user.membership.createdAt)}</td>
-                    <td className="text-right">
-                      {canManageUsers && (
-                        <Button size="sm" variant="ghost" onClick={() => onConfigure(user)}>
-                          Permissions
-                        </Button>
-                      )}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+        <div className="relative">
+          {selectionCount > 0 && <div className="task-selection-layer"><div className="task-selection-pill" role="status" aria-live="polite"><span className="task-selection-pill-count">{selectionCount} selected</span><span className="task-selection-pill-divider" aria-hidden="true" /><button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={removing} aria-label="Cancel selection"><X className="h-4 w-4" /></button><span className="task-selection-pill-divider" aria-hidden="true" /><button type="button" className="task-selection-pill-btn" data-danger="true" onClick={() => void removeSelected()} disabled={removing} aria-label={selectionCount === 1 ? "Remove selected user" : `Remove ${selectionCount} selected users`} title="Remove user"><UserMinus className="h-4 w-4" /></button></div>{removeError && <p className="alert-error task-selection-error" role="alert">{removeError}</p>}</div>}
+          <div className="company-table-wrap task-table-wrap relative -ml-11 w-[calc(100%+2.75rem)] overflow-x-auto pl-11">
+            {canManageUsers && filteredUsers.length > 0 && <div className="task-checkbox-rail pointer-events-none absolute left-0 top-0 z-10 flex w-11 flex-col pr-2"><div className="flex h-9 items-center justify-end group/head pointer-events-auto"><Checkbox checked={allVisibleSelected} indeterminate={someVisibleSelected} onCheckedChange={toggleAllVisible} aria-label={allVisibleSelected ? "Unselect all users" : "Select all users"} className={cn("transition-opacity", selectionCount > 0 ? "opacity-100" : "opacity-0 group-hover/head:opacity-100")} /></div>{filteredUsers.map((user) => { const isChecked = selectedIds.has(user.membership._id); return <div key={`rail-${user.membership._id}`} className="group/rail flex h-[41px] items-center justify-end pointer-events-auto"><Checkbox checked={isChecked} onCheckedChange={() => toggleOne(user.membership._id)} aria-label={isChecked ? `Unselect ${user.user.name || user.user.email}` : `Select ${user.user.name || user.user.email}`} className={cn("transition-opacity", isChecked ? "opacity-100" : "opacity-0 group-hover/rail:opacity-100 focus-visible:opacity-100")} /></div>; })}</div>}
+            <table className="task-table">
+              <thead><tr className="group/head"><th className="min-w-[220px]"><ColumnHeading icon={Users}>Member</ColumnHeading></th><th className="w-32"><ColumnHeading icon={UserCog}>Role</ColumnHeading></th><th className="min-w-[140px]"><ColumnHeading icon={Building2}>Branch</ColumnHeading></th><th className="min-w-[160px]"><ColumnHeading icon={Layers}>Department</ColumnHeading></th><th className="w-28"><ColumnHeading icon={CirclePause}>Status</ColumnHeading></th><th className="w-32"><ColumnHeading icon={CalendarDays}>Joined</ColumnHeading></th></tr></thead>
+              <tbody>
+                {isEmpty ? <tr><td colSpan={6} className="!h-auto !border-0 !bg-transparent py-2"><EmptyState icon={Users} title={query || roleFilter !== "all" ? "No matching members" : "No members yet"} message={query || roleFilter !== "all" ? "Try adjusting your search or filters." : "Invite the first person to join this workspace."} action={canInvite && !query && roleFilter === "all" ? <Button size="sm" variant="primary" onClick={onInvite}><MailPlus className="h-3.5 w-3.5" />Invite member</Button> : undefined} /></td></tr> : filteredUsers.map((user) => {
+                  const isChecked = selectedIds.has(user.membership._id);
+                  const branchId: Id<"branches"> | "" = user.branchIds[0] ?? "";
+                  const departmentId: Id<"departments"> | "" = user.departmentIds[0] ?? "";
+                  const branchOptions: { value: Id<"branches"> | ""; label: string }[] = [{ value: "", label: "No branch" }, ...data.branches.map((branch) => ({ value: branch._id, label: branch.name }))];
+                  const departmentOptions: { value: Id<"departments"> | ""; label: string }[] = [{ value: "", label: "No department" }, ...data.departments.filter((department) => department.branchId === branchId).map((department) => ({ value: department._id, label: department.name }))];
+                  return (
+                    <tr key={user.membership._id} className="group/row" data-checked={isChecked ? "true" : undefined}>
+                      <td><div className="flex items-center gap-2.5"><MemberAvatar name={user.user.name} email={user.user.email} /><div className="min-w-0"><div className="truncate text-[13px] font-medium text-[var(--ink)]">{user.user.name || user.user.email}</div><div className="truncate text-[12px] text-[var(--ink-muted)]">{user.user.email}</div></div></div></td>
+                      <td><PeopleCellMenu value={user.membership.role} options={roles.map((role) => ({ value: role, label: role }))} onChange={(role) => { if (role !== user.membership.role) void onRoleChange(user, role); }} ariaLabel={`Change role for ${user.user.name || user.user.email}`} disabled={!canManagePermissions} renderValue={(option) => <Badge tone={roleTone[(option?.value ?? user.membership.role) as Role]}>{option?.label ?? user.membership.role}</Badge>} /></td>
+                      <td><PeopleCellMenu value={branchId} options={branchOptions} onChange={(nextBranchId) => { if (nextBranchId !== branchId) void onBranchChange(user, nextBranchId); }} ariaLabel={`Change branch for ${user.user.name || user.user.email}`} disabled={!canManageUsers} /></td>
+                      <td><PeopleCellMenu value={departmentId} options={departmentOptions} onChange={(nextDepartmentId) => { if (nextDepartmentId !== departmentId) void onDepartmentChange(user, nextDepartmentId); }} ariaLabel={`Change department for ${user.user.name || user.user.email}`} disabled={!canManageUsers || !branchId} placeholder={branchId ? "—" : "Select branch first"} /></td>
+                      <td><PeopleCellMenu value={user.membership.active ? "active" : "paused"} options={[{ value: "active", label: "Active" }, { value: "paused", label: "Paused" }]} onChange={(status) => { const active = status === "active"; if (active !== user.membership.active) void onStatusChange(user, active); }} ariaLabel={`Change status for ${user.user.name || user.user.email}`} disabled={!canManageUsers} renderValue={(option) => <Badge tone={(option?.value ?? (user.membership.active ? "active" : "paused")) === "active" ? "green" : "neutral"}>{option?.label ?? (user.membership.active ? "Active" : "Paused")}</Badge>} /></td>
+                      <td className="text-[12.5px] text-[var(--ink-secondary)]">{formatDate(user.membership.createdAt)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
-        <div className="company-table-wrap">
-          <table className="task-table">
-            <thead>
-              <tr>
-                <th className="min-w-[220px]">
-                  <span className="inline-flex items-center gap-1.5">
-                    <MailPlus className="h-3.5 w-3.5" />
-                    Invitation
-                  </span>
-                </th>
-                <th className="w-28">Role</th>
-                <th className="min-w-[120px]">Branch</th>
-                <th className="min-w-[140px]">Department</th>
-                <th className="w-28">Status</th>
-                <th className="w-32">Invited</th>
-                <th className="w-28" />
-              </tr>
-            </thead>
-            <tbody>
-              {isEmpty ? (
-                <tr>
-                  <td colSpan={7} className="!h-auto !border-0 !bg-transparent py-2">
-                    <EmptyState
-                      icon={MailPlus}
-                      title={query || roleFilter !== "all" ? "No matching invitations" : "No pending invitations"}
-                      message={
-                        query || roleFilter !== "all"
-                          ? "Try adjusting your search or filters."
-                          : "Invite a person to send them a join link."
-                      }
-                      action={
-                        canInvite && !query && roleFilter === "all" ? (
-                          <Button size="sm" variant="primary" onClick={onInvite}>
-                            <MailPlus className="h-3.5 w-3.5" />
-                            Invite member
-                          </Button>
-                        ) : undefined
-                      }
-                    />
-                  </td>
-                </tr>
-              ) : (
-                filteredInvitations.map((invitation) => (
-                  <tr key={invitation._id} className="group/row">
-                    <td>
-                      <div className="flex items-center gap-2.5">
-                        <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-[var(--surface-muted)] text-[var(--ink-faint)]">
-                          <MailPlus className="h-3.5 w-3.5" />
-                        </span>
-                        <div className="min-w-0">
-                          <div className="truncate text-[13px] font-medium text-[var(--ink)]">{invitation.email}</div>
-                          <div className="truncate text-[12px] text-[var(--ink-muted)]">Pending invitation</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td>
-                      <Badge tone={roleTone[invitation.role]}>{invitation.role}</Badge>
-                    </td>
-                    <td className="text-[var(--ink-secondary)]">
-                      <span className="truncate">{invitation.branchIds.map((id) => branchMap.get(id)).filter(Boolean).join(", ") || "—"}</span>
-                    </td>
-                    <td className="text-[var(--ink-secondary)]">
-                      <span className="truncate">{invitation.departmentIds.map((id) => departmentMap.get(id)).filter(Boolean).join(", ") || "—"}</span>
-                    </td>
-                    <td>
-                      <Badge tone="yellow" className="capitalize">
-                        {invitation.status}
-                      </Badge>
-                    </td>
-                    <td className="text-[12.5px] text-[var(--ink-secondary)]">{formatDate(invitation.createdAt)}</td>
-                    <td />
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+        <div className="company-table-wrap"><table className="task-table"><thead><tr><th className="min-w-[220px]"><ColumnHeading icon={MailPlus}>Invitation</ColumnHeading></th><th className="w-28"><ColumnHeading icon={UserCog}>Role</ColumnHeading></th><th className="min-w-[120px]"><ColumnHeading icon={Building2}>Branch</ColumnHeading></th><th className="min-w-[140px]"><ColumnHeading icon={Layers}>Department</ColumnHeading></th><th className="w-28"><ColumnHeading icon={CirclePause}>Status</ColumnHeading></th><th className="w-32"><ColumnHeading icon={CalendarDays}>Invited</ColumnHeading></th></tr></thead><tbody>
+          {isEmpty ? <tr><td colSpan={6} className="!h-auto !border-0 !bg-transparent py-2"><EmptyState icon={MailPlus} title={query || roleFilter !== "all" ? "No matching invitations" : "No pending invitations"} message={query || roleFilter !== "all" ? "Try adjusting your search or filters." : "Invite a person to send them a join link."} action={canInvite && !query && roleFilter === "all" ? <Button size="sm" variant="primary" onClick={onInvite}><MailPlus className="h-3.5 w-3.5" />Invite member</Button> : undefined} /></td></tr> : filteredInvitations.map((invitation) => <tr key={invitation._id} className="group/row"><td><div className="flex items-center gap-2.5"><span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-[var(--surface-muted)] text-[var(--ink-faint)]"><MailPlus className="h-3.5 w-3.5" /></span><div className="min-w-0"><div className="truncate text-[13px] font-medium text-[var(--ink)]">{invitation.email}</div><div className="truncate text-[12px] text-[var(--ink-muted)]">Pending invitation</div></div></div></td><td><Badge tone={roleTone[invitation.role]}>{invitation.role}</Badge></td><td className="text-[var(--ink-secondary)]"><span className="truncate">{invitation.branchIds.map((id) => branchMap.get(id)).filter(Boolean).join(", ") || "—"}</span></td><td className="text-[var(--ink-secondary)]"><span className="truncate">{invitation.departmentIds.map((id) => departmentMap.get(id)).filter(Boolean).join(", ") || "—"}</span></td><td><Badge tone="yellow" className="capitalize">{invitation.status}</Badge></td><td className="text-[12.5px] text-[var(--ink-secondary)]">{formatDate(invitation.createdAt)}</td></tr>)}
+        </tbody></table></div>
       )}
     </div>
   );
@@ -1607,6 +1577,39 @@ export default function Company() {
   const reorderBranches = useMutation(api.companyManagement.reorderBranches);
   const moveDepartment = useMutation(api.companyManagement.moveDepartment);
   const invite = useAction(api.companyManagement.inviteUser);
+  const setUserRole = useMutation(api.companyManagement.setUserRole).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
+    if (!current) return;
+    localStore.setQuery(api.companyManagement.overview, { companyId: args.companyId }, {
+      ...current,
+      users: current.users.map((row) => row.membership._id === args.membershipId ? { ...row, membership: { ...row.membership, role: args.role }, overrides: [] } : row),
+    } as any);
+  });
+  const setAssignments = useMutation(api.companyManagement.setAssignments).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
+    if (!current) return;
+    localStore.setQuery(api.companyManagement.overview, { companyId: args.companyId }, {
+      ...current,
+      users: current.users.map((row) => row.membership._id === args.membershipId ? { ...row, branchIds: args.branchIds, departmentIds: args.departmentIds } : row),
+    } as any);
+  });
+  const setUserActive = useMutation(api.companyManagement.setUserActive).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
+    if (!current) return;
+    localStore.setQuery(api.companyManagement.overview, { companyId: args.companyId }, {
+      ...current,
+      users: current.users.map((row) => row.membership._id === args.membershipId ? { ...row, membership: { ...row.membership, active: args.active } } : row),
+    } as any);
+  });
+  const removeUsers = useMutation(api.companyManagement.removeUsers).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
+    if (!current) return;
+    const removing = new Set(args.membershipIds);
+    localStore.setQuery(api.companyManagement.overview, { companyId: args.companyId }, {
+      ...current,
+      users: current.users.map((row) => removing.has(row.membership._id) ? { ...row, membership: { ...row.membership, active: false }, branchIds: [], departmentIds: [], scope: { branchIds: [], departmentIds: [], userMembershipIds: [] }, overrides: [] } : row),
+    } as any);
+  });
   const setUserPermissions = useMutation(api.companyManagement.setUserPermissions).withOptimisticUpdate((localStore, args) => {
     const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
     if (!current) return;
@@ -1646,6 +1649,7 @@ export default function Company() {
   const canManageBranches = active?.capabilities.includes("company:manage_branches") ?? false;
   const canManageDepartments = active?.capabilities.includes("company:manage_departments") ?? false;
   const canManageUsers = active?.capabilities.includes("company:manage_users") ?? false;
+  const canManagePermissions = active?.capabilities.includes("company:manage_permissions") ?? false;
   const canInvite = active?.capabilities.includes("company:invite_users") ?? false;
 
   async function run(action: () => Promise<unknown>, message = "Something went wrong.") {
@@ -1697,6 +1701,37 @@ export default function Company() {
       managedUserMembershipIds: draft.managedUserMembershipIds,
       permissionOverrides: data.capabilities.map((capability) => ({ capability, effect: draft.overrides[capability] })),
     });
+  }
+
+  async function changeUserRole(user: UserRow, role: Role) {
+    if (!activeCompanyId) return;
+    await setUserRole({ companyId: activeCompanyId, membershipId: user.membership._id, role });
+  }
+
+  async function changeUserBranch(user: UserRow, branchId: Id<"branches"> | "") {
+    if (!activeCompanyId || !data) return;
+    const departmentIds = user.departmentIds.filter((departmentId) => {
+      const department = data.departments.find((item) => item._id === departmentId);
+      return Boolean(branchId && department?.branchId === branchId);
+    });
+    await setAssignments({ companyId: activeCompanyId, membershipId: user.membership._id, branchIds: branchId ? [branchId] : [], departmentIds });
+  }
+
+  async function changeUserDepartment(user: UserRow, departmentId: Id<"departments"> | "") {
+    if (!activeCompanyId) return;
+    const branchId = user.branchIds[0];
+    if (!branchId) return;
+    await setAssignments({ companyId: activeCompanyId, membershipId: user.membership._id, branchIds: [branchId], departmentIds: departmentId ? [departmentId] : [] });
+  }
+
+  async function changeUserStatus(user: UserRow, active: boolean) {
+    if (!activeCompanyId) return;
+    await setUserActive({ companyId: activeCompanyId, membershipId: user.membership._id, active });
+  }
+
+  async function removeSelectedUsers(membershipIds: Id<"companyMemberships">[]) {
+    if (!activeCompanyId || membershipIds.length === 0) return;
+    await removeUsers({ companyId: activeCompanyId, membershipIds });
   }
 
   return (
@@ -1751,9 +1786,14 @@ export default function Company() {
             {tab === "people" && (
               <PeopleTab
                 data={data}
-                onConfigure={(user) => setPermissionsMembershipId(user.membership._id)}
                 onInvite={() => setInviteOpen(true)}
+                onRoleChange={changeUserRole}
+                onBranchChange={changeUserBranch}
+                onDepartmentChange={changeUserDepartment}
+                onStatusChange={changeUserStatus}
+                onRemoveUsers={removeSelectedUsers}
                 canManageUsers={canManageUsers}
+                canManagePermissions={canManagePermissions}
                 canInvite={canInvite}
               />
             )}

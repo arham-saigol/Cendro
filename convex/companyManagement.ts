@@ -2,7 +2,7 @@ import { ConvexError, v } from "convex/values";
 import { action, internalMutation, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { requireCapability } from "./permissions";
+import { membershipCapabilities, requireCapability } from "./permissions";
 import { capabilities, defaultRoleCapabilities, type Capability, type Role } from "../src/lib/permissions";
 import { nonEmpty, normalizeEmail } from "./validation";
 
@@ -73,6 +73,27 @@ async function assertPermissionManagerRemains(ctx: any, companyId: Id<"companies
     if (caps.has("company:manage_permissions")) return;
   }
   throw new ConvexError("At least one active member must be able to manage permissions.");
+}
+
+async function assertPermissionManagerRemainsAfterActiveChanges(ctx: any, companyId: Id<"companies">, activeChanges: Map<Id<"companyMemberships">, boolean>) {
+  const memberships = await ctx.db.query("companyMemberships").withIndex("by_company", (q: any) => q.eq("companyId", companyId)).take(500);
+  for (const membership of memberships) {
+    const active = activeChanges.get(membership._id) ?? membership.active;
+    if (!active) continue;
+    const caps = await membershipCapabilities(ctx, membership);
+    if (caps.has("company:manage_permissions")) return;
+  }
+  throw new ConvexError("At least one active member must be able to manage permissions.");
+}
+
+async function clearUserManagementRows(ctx: any, membershipId: Id<"companyMemberships">) {
+  for (const row of await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+  for (const row of await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+  for (const row of await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+  for (const row of await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+  for (const row of await ctx.db.query("managerUserScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+  for (const row of await ctx.db.query("managerUserScopes").withIndex("by_user", (q: any) => q.eq("userMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+  for (const row of await ctx.db.query("permissionOverrides").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
 }
 
 export const overview = query({
@@ -170,7 +191,45 @@ export const moveDepartment = mutation({
     }
   },
 });
-export const setUserRole = mutation({ args: { companyId: v.id("companies"), membershipId: v.id("companyMemberships"), role: roleValidator }, handler: async (ctx, args) => { await requireCapability(ctx, args.companyId, "company:manage_permissions"); await assertMembership(ctx, args.companyId, args.membershipId); await assertPermissionManagerRemains(ctx, args.companyId, args.membershipId, args.role); await ctx.db.patch(args.membershipId, { role: args.role, updatedAt: Date.now() }); } });
+export const setUserRole = mutation({
+  args: { companyId: v.id("companies"), membershipId: v.id("companyMemberships"), role: roleValidator },
+  handler: async (ctx, args) => {
+    await requireCapability(ctx, args.companyId, "company:manage_permissions");
+    await assertMembership(ctx, args.companyId, args.membershipId);
+    const inheritAll = capabilities.map((capability) => ({ membershipId: args.membershipId, capability, effect: "inherit" as const }));
+    await assertPermissionManagerRemains(ctx, args.companyId, args.membershipId, args.role, inheritAll);
+    await ctx.db.patch(args.membershipId, { role: args.role, updatedAt: Date.now() });
+    for (const row of await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", args.membershipId)).take(500)) await ctx.db.delete(row._id);
+  },
+});
+
+export const setUserActive = mutation({
+  args: { companyId: v.id("companies"), membershipId: v.id("companyMemberships"), active: v.boolean() },
+  handler: async (ctx, args) => {
+    await requireCapability(ctx, args.companyId, "company:manage_users");
+    const membership = await assertMembership(ctx, args.companyId, args.membershipId);
+    if (membership.active === args.active) return null;
+    await assertPermissionManagerRemainsAfterActiveChanges(ctx, args.companyId, new Map([[args.membershipId, args.active]]));
+    await ctx.db.patch(args.membershipId, { active: args.active, updatedAt: Date.now() });
+    return null;
+  },
+});
+
+export const removeUsers = mutation({
+  args: { companyId: v.id("companies"), membershipIds: v.array(v.id("companyMemberships")) },
+  handler: async (ctx, args) => {
+    await requireCapability(ctx, args.companyId, "company:manage_users");
+    const membershipIds = unique(args.membershipIds);
+    for (const membershipId of membershipIds) await assertMembership(ctx, args.companyId, membershipId);
+    await assertPermissionManagerRemainsAfterActiveChanges(ctx, args.companyId, new Map(membershipIds.map((membershipId) => [membershipId, false])));
+    const now = Date.now();
+    for (const membershipId of membershipIds) {
+      await clearUserManagementRows(ctx, membershipId);
+      await ctx.db.patch(membershipId, { active: false, updatedAt: now });
+    }
+    return null;
+  },
+});
 
 export const setAssignments = mutation({
   args: { companyId: v.id("companies"), membershipId: v.id("companyMemberships"), branchIds: v.array(v.id("branches")), departmentIds: v.array(v.id("departments")) },

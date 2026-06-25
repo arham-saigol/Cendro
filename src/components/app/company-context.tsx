@@ -12,12 +12,13 @@ export type CompanyAccess = {
   capabilities: string[];
 };
 
-type AccessStatus = "loading" | "signedOut" | "convexUnauthenticated" | "profileMissing" | "noCompanies" | "ready";
+type AccessStatus = "loading" | "signedOut" | "convexUnauthenticated" | "profileMissing" | "paused" | "noCompanies" | "ready";
 
 type AccessResult =
   | { status: "signedOut" }
   | { status: "convexUnauthenticated" }
   | { status: "profileMissing"; email: string | null }
+  | { status: "paused"; email: string }
   | { status: "noCompanies"; email: string }
   | { status: "ready"; email: string; companies: CompanyAccess[] };
 

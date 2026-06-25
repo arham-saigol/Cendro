@@ -36,6 +36,10 @@ export const capabilities = [
 
 export type Capability = (typeof capabilities)[number];
 
+export function canViewDashboard(capabilities: readonly string[] | null | undefined) {
+  return Boolean(capabilities?.some((capability) => capability === "analytics:view:self" || capability === "analytics:view:managed_scope" || capability === "analytics:view:company"));
+}
+
 export const defaultRoleCapabilities: Record<Role, Capability[]> = {
   Admin: [...capabilities],
   Manager: [

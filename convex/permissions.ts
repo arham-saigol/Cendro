@@ -181,8 +181,8 @@ export type SopVisibilityContext = {
   managerDepartmentScopes: Set<Id<"departments">>;
 };
 
-export async function buildSopVisibilityContext(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">): Promise<SopVisibilityContext | null> {
-  const caps = await membershipCapabilities(ctx, m);
+export async function buildSopVisibilityContext(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, precomputedCaps?: Set<Capability>): Promise<SopVisibilityContext | null> {
+  const caps = precomputedCaps ?? await membershipCapabilities(ctx, m);
   if (!caps.has("sops:manage:branch") && !caps.has("sops:manage:department") && !caps.has("sops:manage:user")) return null;
   const scoped = await scopedMembershipIds(ctx, companyId, m);
   const membershipBranchSet = await membershipBranchIds(ctx, scoped);
@@ -198,13 +198,13 @@ export async function buildSopVisibilityContext(ctx: Ctx, companyId: Id<"compani
   };
 }
 
-export async function visibleSop(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, sop: Doc<"sops">, visibility?: SopVisibilityContext | null) {
+export async function visibleSop(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, sop: Doc<"sops">, visibility?: SopVisibilityContext | null, precomputedCaps?: Set<Capability>) {
   if (sop.companyId !== companyId) return false;
   if (m.role === "Admin") return true;
-  const caps = await membershipCapabilities(ctx, m);
+  const caps = precomputedCaps ?? await membershipCapabilities(ctx, m);
   if (!caps.has("sops:manage:branch") && !caps.has("sops:manage:department") && !caps.has("sops:manage:user")) return await visibleSopForSelf(ctx, companyId, m, sop);
   if (sop.scopeType === "company") return true;
-  const v = visibility ?? await buildSopVisibilityContext(ctx, companyId, m);
+  const v = visibility ?? await buildSopVisibilityContext(ctx, companyId, m, caps);
   if (!v) return false;
   if (sop.scopeType === "user") {
     const rows = await ctx.db.query("sopUserScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);

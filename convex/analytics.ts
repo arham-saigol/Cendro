@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
-import { membershipCapabilities, requireMembership, scopedMembershipIds, visibleSop } from "./permissions";
+import { buildSopVisibilityContext, membershipCapabilities, requireMembership, scopedMembershipIds, visibleSop } from "./permissions";
 import type { Doc, Id } from "./_generated/dataModel";
 
 async function allActiveMembershipIds(ctx: QueryCtx, companyId: Id<"companies">) {
@@ -20,8 +20,9 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
     const overdueOne = visibleOne.filter((t) => t.status !== "completed" && (t.overdueAt || (t.dueDate && t.dueDate < Date.now()))).length;
     const completedOne = visibleOne.filter((t) => t.status === "completed").length;
     const sops = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
+    const sopVisibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
     let sopCount = 0;
-    for (const sop of sops) if (await visibleSop(ctx, args.companyId, membership, sop)) sopCount++;
+    for (const sop of sops) if (await visibleSop(ctx, args.companyId, membership, sop, sopVisibility, caps)) sopCount++;
     const recent = membership.role === "Admin"
       ? (await ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(8)).map((event) => ({ _id: event._id, action: event.action, targetType: event.targetType, createdAt: event.createdAt }))
       : [];

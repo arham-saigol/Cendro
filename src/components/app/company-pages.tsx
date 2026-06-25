@@ -1613,16 +1613,27 @@ export default function Company() {
   const reorderBranches = useMutation(api.companyManagement.reorderBranches);
   const moveDepartment = useMutation(api.companyManagement.moveDepartment);
   const invite = useAction(api.companyManagement.inviteUser);
-  const setRole = useMutation(api.companyManagement.setUserRole);
-  const setAssignments = useMutation(api.companyManagement.setAssignments);
-  const setScope = useMutation(api.companyManagement.setManagerScope);
-  const setOverride = useMutation(api.companyManagement.setPermissionOverride);
+  const setUserPermissions = useMutation(api.companyManagement.setUserPermissions).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
+    if (!current) return;
+    localStore.setQuery(api.companyManagement.overview, { companyId: args.companyId }, {
+      ...current,
+      users: current.users.map((row) => row.membership._id === args.membershipId ? {
+        ...row,
+        membership: { ...row.membership, role: args.role },
+        branchIds: args.branchIds,
+        departmentIds: args.departmentIds,
+        scope: { branchIds: args.managedBranchIds, departmentIds: args.managedDepartmentIds, userMembershipIds: args.managedUserMembershipIds },
+        overrides: args.permissionOverrides.flatMap((override) => override.effect === "inherit" ? [] : [{ capability: override.capability, effect: override.effect }]),
+      } : row),
+    } as any);
+  });
 
   const [tab, setTab] = useState<TabValue>("general");
   const [companyName, setCompanyName] = useState("");
   const [savingName, setSavingName] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
-  const [permissionsUser, setPermissionsUser] = useState<UserRow | undefined>();
+  const [permissionsMembershipId, setPermissionsMembershipId] = useState<Id<"companyMemberships"> | undefined>();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1630,6 +1641,8 @@ export default function Company() {
       setCompanyName(data.company?.name ?? active?.company.name ?? "");
     }
   }, [active?.company.name, data]);
+
+  const permissionsUser = useMemo(() => data?.users.find((user) => user.membership._id === permissionsMembershipId), [data?.users, permissionsMembershipId]);
 
   if (!data) return <CompanySkeleton />;
 
@@ -1678,16 +1691,18 @@ export default function Company() {
   }
 
   async function savePermissions(user: UserRow, draft: PermissionDraft) {
-    if (!activeCompanyId) return;
-    await setRole({ companyId: activeCompanyId, membershipId: user.membership._id, role: draft.role });
-    await setAssignments({ companyId: activeCompanyId, membershipId: user.membership._id, branchIds: draft.branchIds, departmentIds: draft.departmentIds });
-    await setScope({ companyId: activeCompanyId, managerMembershipId: user.membership._id, branchIds: draft.managedBranchIds, departmentIds: draft.managedDepartmentIds, userMembershipIds: draft.managedUserMembershipIds });
-    const initial = draftFromUser(user).overrides;
-    for (const capability of data?.capabilities ?? []) {
-      if (initial[capability] !== draft.overrides[capability]) {
-        await setOverride({ companyId: activeCompanyId, membershipId: user.membership._id, capability, effect: draft.overrides[capability] });
-      }
-    }
+    if (!activeCompanyId || !data) return;
+    await setUserPermissions({
+      companyId: activeCompanyId,
+      membershipId: user.membership._id,
+      role: draft.role,
+      branchIds: draft.branchIds,
+      departmentIds: draft.departmentIds,
+      managedBranchIds: draft.managedBranchIds,
+      managedDepartmentIds: draft.managedDepartmentIds,
+      managedUserMembershipIds: draft.managedUserMembershipIds,
+      permissionOverrides: data.capabilities.map((capability) => ({ capability, effect: draft.overrides[capability] })),
+    });
   }
 
   return (
@@ -1742,19 +1757,19 @@ export default function Company() {
             {tab === "people" && (
               <PeopleTab
                 data={data}
-                onConfigure={setPermissionsUser}
+                onConfigure={(user) => setPermissionsMembershipId(user.membership._id)}
                 onInvite={() => setInviteOpen(true)}
                 canManageUsers={canManageUsers}
                 canInvite={canInvite}
               />
             )}
-            {tab === "permissions" && <PermissionsTab data={data} onConfigure={setPermissionsUser} canManageUsers={canManageUsers} />}
+            {tab === "permissions" && <PermissionsTab data={data} onConfigure={(user) => setPermissionsMembershipId(user.membership._id)} canManageUsers={canManageUsers} />}
           </div>
         </main>
       </div>
 
       <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} data={data} onInvite={inviteMember} />
-      <PermissionsDialog open={Boolean(permissionsUser)} onOpenChange={(open) => !open && setPermissionsUser(undefined)} data={data} user={permissionsUser} onSave={savePermissions} />
+      <PermissionsDialog open={Boolean(permissionsMembershipId)} onOpenChange={(open) => !open && setPermissionsMembershipId(undefined)} data={data} user={permissionsUser} onSave={savePermissions} />
     </div>
   );
 }

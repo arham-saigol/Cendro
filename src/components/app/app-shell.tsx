@@ -27,6 +27,7 @@ import { AiPanel } from "./ai-panel";
 import { useTheme } from "./theme";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { canViewDashboard } from "@/lib/permissions";
 import { cn, initials } from "@/lib/utils";
 
 const nav = [
@@ -307,8 +308,8 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
   }, [accessStatus, path, router]);
 
   const canManageCompany = active?.capabilities?.includes("company:manage_permissions") ?? false;
-  const canViewDashboard = Boolean(active?.capabilities?.some((capability) => capability === "analytics:view:self" || capability === "analytics:view:managed_scope" || capability === "analytics:view:company"));
-  const visibleNav = useMemo(() => nav.filter((item) => (!item.requiresCompanyManagement || canManageCompany) && (!item.requiresDashboard || canViewDashboard)), [canManageCompany, canViewDashboard]);
+  const canViewActiveDashboard = canViewDashboard(active?.capabilities);
+  const visibleNav = useMemo(() => nav.filter((item) => (!item.requiresCompanyManagement || canManageCompany) && (!item.requiresDashboard || canViewActiveDashboard)), [canManageCompany, canViewActiveDashboard]);
 
   if (accessStatus === "loading") {
     return (

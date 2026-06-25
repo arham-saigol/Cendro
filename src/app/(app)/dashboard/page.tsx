@@ -7,6 +7,7 @@ import { PageHeader } from "@/components/app/page-header";
 import { useCompany } from "@/components/app/company-context";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { canViewDashboard } from "@/lib/permissions";
 
 function StatCard({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -19,10 +20,10 @@ function StatCard({ label, value }: { label: string; value: React.ReactNode }) {
 
 export default function Dashboard() {
   const { activeCompanyId, active } = useCompany();
-  const canViewDashboard = Boolean(active?.capabilities?.some((capability) => capability === "analytics:view:self" || capability === "analytics:view:managed_scope" || capability === "analytics:view:company"));
-  const data = useQuery(api.analytics.summary, activeCompanyId && canViewDashboard ? { companyId: activeCompanyId } : "skip");
+  const canViewActiveDashboard = canViewDashboard(active?.capabilities);
+  const data = useQuery(api.analytics.summary, activeCompanyId && canViewActiveDashboard ? { companyId: activeCompanyId } : "skip");
 
-  if (!canViewDashboard) {
+  if (!canViewActiveDashboard) {
     return (
       <div className="app-page">
         <PageHeader title="Dashboard" description="Dashboard access is disabled for your user." />

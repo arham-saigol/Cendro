@@ -6,6 +6,7 @@ import {
   Building2,
   CalendarDays,
   Check,
+  ChevronsRight,
   ChevronDown,
   ChevronRight,
   CirclePause,
@@ -14,6 +15,7 @@ import {
   LucideIcon,
   MailPlus,
   Network,
+  PanelRight,
   Plus,
   Search,
   Settings,
@@ -27,12 +29,14 @@ import {
 } from "lucide-react";
 import { useAction, useMutation, useQuery } from "convex/react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { motion, useReducedMotion } from "motion/react";
 import { DragDropProvider, useDroppable } from "@dnd-kit/react";
 import type { DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "@/components/app/company-context";
+import { DETAIL_DRAWER_CLOSE_MS } from "@/components/app/detail-drawer-motion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -98,11 +102,11 @@ const roleTone: Record<Role, "blue" | "green" | "neutral"> = {
   Employee: "neutral",
 };
 
-const TABS: { value: TabValue; label: string; icon: LucideIcon; getCount?: (data: Overview) => number }[] = [
+const TABS: { value: TabValue; label: string; icon: LucideIcon }[] = [
   { value: "general", label: "General", icon: Settings },
-  { value: "structure", label: "Structure", icon: Network, getCount: (data) => data.branches.length + data.departments.length },
-  { value: "people", label: "People", icon: Users, getCount: (data) => data.users.length + data.invitations.length },
-  { value: "permissions", label: "Permissions", icon: ShieldCheck, getCount: (data) => data.users.reduce((total, user) => total + user.overrides.length, 0) },
+  { value: "structure", label: "Structure", icon: Network },
+  { value: "people", label: "People", icon: Users },
+  { value: "permissions", label: "Permissions", icon: ShieldCheck },
 ];
 
 const TAB_COPY: Record<TabValue, { title: string; description: string }> = {
@@ -985,7 +989,7 @@ function PeopleTab({
 /*  Permissions tab                                                */
 /* ============================================================== */
 
-function PermissionsTab({ data, onConfigure, canManageUsers }: { data: Overview; onConfigure: (user: UserRow) => void; canManageUsers: boolean }) {
+function PermissionsTab({ data, onOpenDetails, selectedMembershipId }: { data: Overview; onOpenDetails: (user: UserRow) => void; selectedMembershipId?: Id<"companyMemberships"> }) {
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const normalized = query.trim().toLowerCase();
@@ -1000,29 +1004,8 @@ function PermissionsTab({ data, onConfigure, canManageUsers }: { data: Overview;
   }, [data.users, normalized]);
 
   return (
-    <div className="company-tab-body">
-      <div className="grid gap-3 md:grid-cols-3">
-        {roles.map((role) => {
-          const members = data.users.filter((user) => user.membership.role === role).length;
-          return (
-            <div key={role} className="company-role-card">
-              <div className="flex items-center justify-between gap-2">
-                <Badge tone={roleTone[role]}>{role}</Badge>
-                <span className="text-[12px] text-[var(--ink-faint)] tabular-nums">{members} member{members === 1 ? "" : "s"}</span>
-              </div>
-              <div className="mt-3 text-[13px] font-medium text-[var(--ink)] tabular-nums">{defaultRoleCapabilities[role].length} default permissions</div>
-              <p className="mt-1 text-[12px] leading-5 text-[var(--ink-muted)]">Overrides below should stay rare so roles remain predictable.</p>
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <div>
-          <p className="text-[13px] text-[var(--ink-secondary)]">
-            Permissions are role-based by default. Add overrides only when a member needs an exception.
-          </p>
-        </div>
+    <div className="company-tab-body company-permissions-body">
+      <div className="flex flex-wrap items-center gap-2">
         <div className="ml-auto flex flex-1 items-center justify-end gap-2">
           <div className="task-search-control" data-open={searchOpen || query.trim() !== ""}>
             <Input
@@ -1052,28 +1035,22 @@ function PermissionsTab({ data, onConfigure, canManageUsers }: { data: Overview;
         <table className="task-table">
           <thead>
             <tr>
-              <th className="min-w-[220px]">
-                <span className="inline-flex items-center gap-1.5">
-                  <Users className="h-3.5 w-3.5" />
-                  Member
-                </span>
-              </th>
-              <th className="w-28">Role</th>
-              <th className="min-w-[260px]">Overrides</th>
-              <th className="w-24" />
+              <th className="min-w-[220px]"><ColumnHeading icon={Users}>Member</ColumnHeading></th>
+              <th className="w-28"><ColumnHeading icon={UserCog}>Role</ColumnHeading></th>
+              <th className="min-w-[260px]"><ColumnHeading icon={ShieldCheck}>Overrides</ColumnHeading></th>
             </tr>
           </thead>
           <tbody>
             {usersWithOverrides.length === 0 ? (
               <tr>
-                <td colSpan={4} className="!h-auto !border-0 !bg-transparent py-2">
+                <td colSpan={3} className="!h-auto !border-0 !bg-transparent py-2">
                   <EmptyState
                     icon={ShieldCheck}
                     title={query ? "No matching members" : "No manual exceptions"}
                     message={
                       query
                         ? "Try a different name or email."
-                        : "Everyone follows their role defaults. Open a member from the People tab to add an override if needed."
+                        : "Everyone follows their role defaults. Open a member's permissions drawer to add an override if needed."
                     }
                   />
                 </td>
@@ -1085,20 +1062,33 @@ function PermissionsTab({ data, onConfigure, canManageUsers }: { data: Overview;
                   .slice(0, 3);
                 const extra = user.overrides.length - overrideLabels.length;
                 return (
-                  <tr key={user.membership._id} className="group/row">
-                    <td>
-                      <div className="flex items-center gap-2.5">
-                        <MemberAvatar name={user.user.name} email={user.user.email} />
-                        <div className="min-w-0">
-                          <div className="truncate text-[13px] font-medium text-[var(--ink)]">{user.user.name || user.user.email}</div>
-                          <div className="truncate text-[12px] text-[var(--ink-muted)]">{user.user.email}</div>
+                  <tr key={user.membership._id} data-selected={user.membership._id === selectedMembershipId ? "true" : undefined} className="group/row">
+                    <td className="col-task max-w-[320px]">
+                      <div className="task-title-cell">
+                        <div className="flex min-w-0 items-center gap-2.5">
+                          <MemberAvatar name={user.user.name} email={user.user.email} />
+                          <div className="min-w-0">
+                            <div className="truncate text-[13px] font-medium text-[var(--ink)]">{user.user.name || user.user.email}</div>
+                            <div className="truncate text-[12px] text-[var(--ink-muted)]">{user.user.email}</div>
+                          </div>
                         </div>
+                        <button
+                          type="button"
+                          data-interactive="true"
+                          data-tooltip="Open permissions"
+                          className="task-title-open"
+                          onClick={(event) => { event.stopPropagation(); onOpenDetails(user); }}
+                          aria-label={`Open permissions for ${user.user.name || user.user.email}`}
+                        >
+                          <PanelRight className="h-3.5 w-3.5" />
+                          <span>OPEN</span>
+                        </button>
                       </div>
                     </td>
                     <td>
                       <Badge tone={roleTone[user.membership.role]}>{user.membership.role}</Badge>
                     </td>
-                    <td>
+                    <td className="max-w-[320px]">
                       <div className="flex min-w-0 flex-col">
                         <span className="text-[12.5px] text-[var(--ink-secondary)] tabular-nums">
                           {user.overrides.length} override{user.overrides.length === 1 ? "" : "s"}
@@ -1108,13 +1098,6 @@ function PermissionsTab({ data, onConfigure, canManageUsers }: { data: Overview;
                           {extra > 0 && `, +${extra} more`}
                         </span>
                       </div>
-                    </td>
-                    <td className="text-right">
-                      {canManageUsers && (
-                        <Button size="sm" variant="ghost" onClick={() => onConfigure(user)}>
-                          Configure
-                        </Button>
-                      )}
                     </td>
                   </tr>
                 );
@@ -1285,42 +1268,110 @@ function InviteDialog({
 /*  Permissions dialog                                             */
 /* ============================================================== */
 
-function MultiSelectList<T extends string>({
-  title,
+function PermissionProperty({ icon, label, children, muted = false, className }: { icon: React.ReactNode; label: string; children: React.ReactNode; muted?: boolean; className?: string }) {
+  return (
+    <div className={cn("flex min-w-[74px] flex-col items-start gap-1", className)}>
+      <span className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold leading-4 text-[var(--ink-muted)]">
+        <span className="grid h-4 w-4 place-items-center text-[var(--ink-faint)] [&_svg]:shrink-0">{icon}</span>
+        {label}
+      </span>
+      <div className={cn("sop-detail-prop-value flex min-h-[22px] w-full min-w-0 items-center text-[13px] leading-5 text-[var(--ink)]", muted && "text-[var(--ink-faint)]")}>{children}</div>
+    </div>
+  );
+}
+
+function PermissionMultiSelectPopover<T extends string>({
+  ariaLabel,
   empty,
+  header,
   options,
   selected,
   onChange,
+  disabled = false,
+  children,
 }: {
-  title: string;
+  ariaLabel: string;
   empty: string;
+  header: React.ReactNode;
   options: { id: T; label: string; helper?: string }[];
   selected: T[];
   onChange: (ids: T[]) => void;
+  disabled?: boolean;
+  children: React.ReactNode;
 }) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const selectedSet = new Set(selected);
+
+  function measure() {
+    const bounds = triggerRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    const width = Math.max(bounds.width, 260);
+    const left = Math.min(Math.max(12, bounds.left), Math.max(12, window.innerWidth - width - 12));
+    const below = bounds.bottom + 6;
+    const above = Math.max(12, bounds.top - 326);
+    const top = below + 326 > window.innerHeight && bounds.top > 326 ? above : Math.min(below, Math.max(12, window.innerHeight - 120));
+    setRect({ top, left, width });
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    measure();
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [open]);
+
   return (
-    <div>
-      <div className="mb-1.5 text-[11.5px] font-medium text-[var(--ink-muted)]">{title}</div>
-      <div className="max-h-32 overflow-auto rounded-md border border-[var(--hairline)] p-1">
-        {options.length === 0 ? (
-          <div className="px-2 py-1.5 text-[12px] text-[var(--ink-muted)]">{empty}</div>
-        ) : (
-          options.map((option) => {
-            const toggle = () => onChange(selectedSet.has(option.id) ? selected.filter((id) => id !== option.id) : [...selected, option.id]);
-            return (
-              <div key={option.id} className="flex items-center gap-2 rounded px-2 py-1.5 hover:bg-[var(--surface-hover)]">
-                <Checkbox checked={selectedSet.has(option.id)} aria-label={option.label} onCheckedChange={toggle} />
-                <button type="button" className="min-w-0 flex-1 text-left" onClick={toggle}>
-                  <span className="block truncate text-[13px] text-[var(--ink)]">{option.label}</span>
-                  {option.helper && <span className="block truncate text-[11px] text-[var(--ink-muted)]">{option.helper}</span>}
-                </button>
-              </div>
-            );
-          })
-        )}
-      </div>
-    </div>
+    <span className="inline-flex w-full min-w-0">
+      <button
+        ref={triggerRef}
+        type="button"
+        className="prop-inline-text w-full justify-start disabled:cursor-not-allowed disabled:opacity-60"
+        disabled={disabled}
+        data-interactive="true"
+        onClick={() => { if (!open) measure(); setOpen(!open); }}
+        aria-label={ariaLabel}
+        aria-expanded={open}
+      >
+        {children}
+      </button>
+      {open && rect && (
+        <>
+          <button type="button" aria-label="Close menu" className="task-cell-popover-backdrop" onClick={(event) => { event.stopPropagation(); setOpen(false); }} />
+          <div className="task-cell-popover task-cell-popover-scroll" style={{ top: rect.top, left: rect.left, width: rect.width }} data-interactive="true" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+            <div className="task-cell-popover-header">{header}</div>
+            <div className="task-cell-popover-body">
+              {options.length === 0 ? (
+                <div className="px-2.5 py-3 text-[13px] text-[var(--ink-muted)]">{empty}</div>
+              ) : (
+                options.map((option) => {
+                  const toggle = () => onChange(selectedSet.has(option.id) ? selected.filter((id) => id !== option.id) : [...selected, option.id]);
+                  return (
+                    <div key={option.id} className="task-cell-popover-item">
+                      <Checkbox checked={selectedSet.has(option.id)} aria-label={option.label} onCheckedChange={toggle} />
+                      <button type="button" className="min-w-0 flex-1 text-left" onClick={toggle}>
+                        <span className="block truncate">{option.label}</span>
+                        {option.helper && <span className="block truncate text-[11.5px] text-[var(--ink-muted)]">{option.helper}</span>}
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </span>
   );
 }
 
@@ -1328,10 +1379,12 @@ function PermissionGroups({
   role,
   overrides,
   onChange,
+  disabled = false,
 }: {
   role: Role;
   overrides: Record<Capability, Effect>;
   onChange: (next: Record<Capability, Effect>) => void;
+  disabled?: boolean;
 }) {
   const effective = useMemo(() => effectiveCapabilities(role, overrides), [role, overrides]);
   return (
@@ -1351,8 +1404,8 @@ function PermissionGroups({
               };
               return (
                 <div key={capability} className="flex items-start gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--surface-hover)]">
-                  <Checkbox checked={checked} aria-label={capabilityLabels[capability]} onCheckedChange={toggle} />
-                  <button type="button" className="min-w-0 flex-1 text-left" onClick={toggle}>
+                  <Checkbox checked={checked} disabled={disabled} aria-label={capabilityLabels[capability]} onCheckedChange={toggle} />
+                  <button type="button" className="min-w-0 flex-1 text-left disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled} onClick={toggle}>
                     <span className="block text-[13px] text-[var(--ink)]">{capabilityLabels[capability]}</span>
                     <span className="text-[11px] text-[var(--ink-muted)]">
                       {effect === "inherit" ? (inherited ? "Inherited from role" : "Off by default") : effect === "allow" ? "Manually allowed" : "Manually denied"}
@@ -1374,122 +1427,200 @@ function PermissionsDialog({
   data,
   user,
   onSave,
+  canManagePermissions,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   data: Overview;
   user?: UserRow;
   onSave: (user: UserRow, draft: PermissionDraft) => Promise<void>;
+  canManagePermissions: boolean;
 }) {
+  const reduceMotion = useReducedMotion();
+  const [closing, setClosing] = useState(false);
+  const closeTimerRef = useRef<number | null>(null);
   const [draft, setDraft] = useState<PermissionDraft>(() =>
     user
       ? draftFromUser(user)
       : { role: "Employee", branchIds: [], departmentIds: [], managedBranchIds: [], managedDepartmentIds: [], managedUserMembershipIds: [], overrides: { ...emptyOverrides } },
   );
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const saveVersionRef = useRef(0);
 
   useEffect(() => {
     if (open && user) {
       setDraft(draftFromUser(user));
       setError(null);
+      setClosing(false);
     }
   }, [open, user]);
+
+  useEffect(() => {
+    return () => {
+      if (closeTimerRef.current != null) window.clearTimeout(closeTimerRef.current);
+    };
+  }, []);
 
   if (!user) return null;
 
   const branches = data.branches.map((branch) => ({ id: branch._id, label: branch.name }));
-  const departments = data.departments.map((department) => ({
-    id: department._id,
-    label: department.name,
-    helper: data.branches.find((branch) => branch._id === department.branchId)?.name,
-  }));
+  const selectedBranchIds = new Set(draft.branchIds);
+  const departments = data.departments
+    .filter((department) => selectedBranchIds.has(department.branchId))
+    .map((department) => ({
+      id: department._id,
+      label: department.name,
+      helper: data.branches.find((branch) => branch._id === department.branchId)?.name,
+    }));
   const people = data.users
     .filter((row) => row.membership._id !== user.membership._id)
     .map((row) => ({ id: row.membership._id, label: row.user.name || row.user.email, helper: row.membership.role }));
-  const overrideCount = Object.values(draft.overrides).filter((effect) => effect !== "inherit").length;
+  const managedBranchIds = new Set(draft.managedBranchIds);
+  const managedDepartments = data.departments
+    .filter((department) => managedBranchIds.has(department.branchId))
+    .map((department) => ({
+      id: department._id,
+      label: department.name,
+      helper: data.branches.find((branch) => branch._id === department.branchId)?.name,
+    }));
+  const branchNames = draft.branchIds
+    .map((branchId) => data.branches.find((branch) => branch._id === branchId)?.name)
+    .filter((name): name is string => Boolean(name));
+  const departmentNames = draft.departmentIds
+    .map((departmentId) => data.departments.find((department) => department._id === departmentId)?.name)
+    .filter((name): name is string => Boolean(name));
+  const branchText = branchNames.length === 0 ? "No branch" : branchNames.length === 1 ? branchNames[0] : `${branchNames.length} branches`;
+  const departmentText = draft.branchIds.length === 0 ? "Select branch first" : departmentNames.length === 0 ? "No department" : departmentNames.length === 1 ? departmentNames[0] : `${departmentNames.length} departments`;
 
-  async function submit() {
-    setSaving(true);
-    setError(null);
-    try {
-      await onSave(user!, draft);
+  function closePermissions() {
+    if (closing) return;
+    setClosing(true);
+    if (closeTimerRef.current != null) window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
       onOpenChange(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save permissions.");
-    } finally {
-      setSaving(false);
-    }
+      setClosing(false);
+    }, DETAIL_DRAWER_CLOSE_MS);
+  }
+
+  function updateDraft(next: PermissionDraft) {
+    setDraft(next);
+    if (!canManagePermissions) return;
+    const version = ++saveVersionRef.current;
+    setError(null);
+    void onSave(user!, next).catch((err) => {
+      if (version === saveVersionRef.current) setError(err instanceof Error ? err.message : "Could not save permissions.");
+    });
+  }
+
+  function updateBranches(branchIds: Id<"branches">[]) {
+    const branchSet = new Set(branchIds);
+    updateDraft({
+      ...draft,
+      branchIds,
+      departmentIds: draft.departmentIds.filter((departmentId) => {
+        const department = data.departments.find((item) => item._id === departmentId);
+        return Boolean(department && branchSet.has(department.branchId));
+      }),
+    });
+  }
+
+  function updateManagedBranches(managedBranchIds: Id<"branches">[]) {
+    const branchSet = new Set(managedBranchIds);
+    updateDraft({
+      ...draft,
+      managedBranchIds,
+      managedDepartmentIds: draft.managedDepartmentIds.filter((departmentId) => {
+        const department = data.departments.find((item) => item._id === departmentId);
+        return Boolean(department && branchSet.has(department.branchId));
+      }),
+    });
   }
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+    <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (nextOpen) onOpenChange(true); else closePermissions(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/35 backdrop-blur-[2px]" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(880px,94dvh)] w-[min(900px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]">
-          <div className="flex items-start justify-between border-b border-[var(--hairline)] px-5 py-4">
-            <div className="flex min-w-0 items-center gap-3">
-              <MemberAvatar name={user.user.name} email={user.user.email} size="md" />
-              <div className="min-w-0">
-                <Dialog.Title className="truncate text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">{user.user.name || user.user.email}</Dialog.Title>
-                <Dialog.Description className="mt-0.5 text-[12.5px] text-[var(--ink-muted)]">Role defaults are inherited first. Toggle permissions only for exceptions.</Dialog.Description>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-transparent" />
+        <Dialog.Content asChild>
+          <motion.aside
+            className="task-drawer !fixed"
+            initial={reduceMotion ? { opacity: 0 } : { x: 32, opacity: 0 }}
+            animate={closing ? (reduceMotion ? { opacity: 0 } : { x: 32, opacity: 0 }) : (reduceMotion ? { opacity: 1 } : { x: 0, opacity: 1 })}
+            transition={reduceMotion ? { duration: 0.1 } : { duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+          >
+            <div className="task-drawer-inner">
+              <div className="mx-auto flex min-h-full w-full max-w-[560px] flex-col px-6 py-7 md:px-9 md:py-8">
+                <div className="peek-bar -mt-7 -mx-6 px-2 md:-mt-8 md:-mx-9 md:px-3">
+                  <button type="button" className="task-icon-btn" aria-label="Close permissions" onClick={closePermissions}>
+                    <ChevronsRight className="h-5 w-5" />
+                  </button>
+                </div>
+
+                <div className="pt-6">
+                  <Dialog.Title className="text-[26px] font-bold leading-tight tracking-[-0.025em] text-[var(--ink)]">Permissions</Dialog.Title>
+                  <Dialog.Description className="sr-only">Manage permissions for {user.user.name || user.user.email}</Dialog.Description>
+                </div>
+
+                <section className="task-section !mt-8">
+                  <div className="prop-list">
+                    <div className="prop-row">
+                      <span className="prop-label"><UserCog className="h-3.5 w-3.5" />Role</span>
+                      <div className="prop-value">
+                        <PeopleCellMenu value={draft.role} options={roles.map((role) => ({ value: role, label: role }))} onChange={(role) => updateDraft({ ...draft, role })} ariaLabel={`Change role for ${user.user.name || user.user.email}`} disabled={!canManagePermissions} renderValue={(option) => <Badge tone={roleTone[(option?.value ?? draft.role) as Role]}>{option?.label ?? draft.role}</Badge>} />
+                      </div>
+                    </div>
+                    <div className="prop-row">
+                      <span className="prop-label"><Building2 className="h-3.5 w-3.5" />Branch</span>
+                      <div className="prop-value truncate">
+                        <PermissionMultiSelectPopover ariaLabel="Change branches" empty="No branches" header={<span className="min-w-0 flex-1 truncate">Branches</span>} options={branches} selected={draft.branchIds} disabled={!canManagePermissions} onChange={updateBranches}>
+                          <span className="truncate">{branchText}</span>
+                        </PermissionMultiSelectPopover>
+                      </div>
+                    </div>
+                    <div className="prop-row">
+                      <span className="prop-label"><Layers className="h-3.5 w-3.5" />Department</span>
+                      <div className={cn("prop-value truncate", draft.departmentIds.length === 0 && "prop-value--muted")}>
+                        <PermissionMultiSelectPopover ariaLabel="Change departments" empty="No departments in selected branches" header={<span className="min-w-0 flex-1 truncate">Departments</span>} options={departments} selected={draft.departmentIds} disabled={!canManagePermissions || draft.branchIds.length === 0} onChange={(departmentIds) => updateDraft({ ...draft, departmentIds })}>
+                          <span className="truncate">{departmentText}</span>
+                        </PermissionMultiSelectPopover>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="task-section">
+                  <h2 className="task-section-title">Managed scope</h2>
+                  <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+                    <PermissionProperty icon={<Users className="h-3.5 w-3.5" />} label="People" className="min-w-[120px]">
+                      <PermissionMultiSelectPopover ariaLabel="Change people under this user" empty="No other people" header={<span className="min-w-0 flex-1 truncate">People under this user</span>} options={people} selected={draft.managedUserMembershipIds} disabled={!canManagePermissions} onChange={(managedUserMembershipIds) => updateDraft({ ...draft, managedUserMembershipIds })}>
+                        <span className="block w-full rounded-md py-1 text-[20px] font-semibold leading-none tracking-[-0.02em] tabular-nums">{draft.managedUserMembershipIds.length}</span>
+                      </PermissionMultiSelectPopover>
+                    </PermissionProperty>
+                    <PermissionProperty icon={<Building2 className="h-3.5 w-3.5" />} label="Branches" className="min-w-[120px]">
+                      <PermissionMultiSelectPopover ariaLabel="Change branches under this user" empty="No branches" header={<span className="min-w-0 flex-1 truncate">Branches under this user</span>} options={branches} selected={draft.managedBranchIds} disabled={!canManagePermissions} onChange={updateManagedBranches}>
+                        <span className="block w-full rounded-md py-1 text-[20px] font-semibold leading-none tracking-[-0.02em] tabular-nums">{draft.managedBranchIds.length}</span>
+                      </PermissionMultiSelectPopover>
+                    </PermissionProperty>
+                    <PermissionProperty icon={<Layers className="h-3.5 w-3.5" />} label="Departments" muted={draft.managedDepartmentIds.length === 0} className="min-w-[120px]">
+                      <PermissionMultiSelectPopover ariaLabel="Change departments under this user" empty="No departments in selected branches" header={<span className="min-w-0 flex-1 truncate">Departments under this user</span>} options={managedDepartments} selected={draft.managedDepartmentIds} disabled={!canManagePermissions || draft.managedBranchIds.length === 0} onChange={(managedDepartmentIds) => updateDraft({ ...draft, managedDepartmentIds })}>
+                        <span className="block w-full rounded-md py-1 text-[20px] font-semibold leading-none tracking-[-0.02em] tabular-nums">{draft.managedDepartmentIds.length}</span>
+                      </PermissionMultiSelectPopover>
+                    </PermissionProperty>
+                  </div>
+                </section>
+
+                <section className="task-section !mt-10">
+                  <PermissionGroups role={draft.role} overrides={draft.overrides} disabled={!canManagePermissions} onChange={(overrides) => updateDraft({ ...draft, overrides })} />
+                </section>
+
+                {error && (
+                  <p className="alert-error mt-5 rounded-md px-3 py-2 text-[12.5px]" role="alert">
+                    {error}
+                  </p>
+                )}
               </div>
             </div>
-            <Dialog.Close asChild>
-              <button type="button" className="task-icon-btn" aria-label="Close">
-                <X className="h-4 w-4" />
-              </button>
-            </Dialog.Close>
-          </div>
-
-          <div className="flex-1 overflow-auto p-5">
-            <div className="grid gap-5 xl:grid-cols-[300px_1fr]">
-              <aside className="space-y-4">
-                <div className="company-dialog-card">
-                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]">Role</div>
-                  <SelectField value={draft.role} onChange={(role) => setDraft({ ...draft, role })}>
-                    {roles.map((item) => (
-                      <option key={item} value={item}>
-                        {item}
-                      </option>
-                    ))}
-                  </SelectField>
-                </div>
-                <div className="company-dialog-card space-y-4">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]">Member placement</div>
-                  <MultiSelectList title="Branches" empty="No branches" options={branches} selected={draft.branchIds} onChange={(branchIds) => setDraft({ ...draft, branchIds })} />
-                  <MultiSelectList title="Departments" empty="No departments" options={departments} selected={draft.departmentIds} onChange={(departmentIds) => setDraft({ ...draft, departmentIds })} />
-                </div>
-                <div className="company-dialog-card space-y-4">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]">Managed scope</div>
-                  <MultiSelectList title="People under this user" empty="No other people" options={people} selected={draft.managedUserMembershipIds} onChange={(managedUserMembershipIds) => setDraft({ ...draft, managedUserMembershipIds })} />
-                  <MultiSelectList title="Branches under this user" empty="No branches" options={branches} selected={draft.managedBranchIds} onChange={(managedBranchIds) => setDraft({ ...draft, managedBranchIds })} />
-                  <MultiSelectList title="Departments under this user" empty="No departments" options={departments} selected={draft.managedDepartmentIds} onChange={(managedDepartmentIds) => setDraft({ ...draft, managedDepartmentIds })} />
-                </div>
-              </aside>
-              <div className="company-dialog-card">
-                <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]">Permissions</div>
-                <PermissionGroups role={draft.role} overrides={draft.overrides} onChange={(overrides) => setDraft({ ...draft, overrides })} />
-              </div>
-            </div>
-          </div>
-
-          {error && (
-            <p className="alert-error mx-5 mb-3 rounded-md px-3 py-2 text-[12.5px]" role="alert">
-              {error}
-            </p>
-          )}
-          <div className="flex items-center justify-between border-t border-[var(--hairline)] bg-[var(--surface)] px-5 py-3 text-[12px] text-[var(--ink-muted)]">
-            <span className="tabular-nums">{overrideCount} manual override{overrideCount === 1 ? "" : "s"}</span>
-            <div className="flex gap-2">
-              <Dialog.Close asChild>
-                <Button>Cancel</Button>
-              </Dialog.Close>
-              <Button variant="primary" onClick={submit} disabled={saving}>
-                {saving ? "Saving..." : "Save permissions"}
-              </Button>
-            </div>
-          </div>
+          </motion.aside>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -1500,14 +1631,13 @@ function PermissionsDialog({
 /*  Sidebar nav                                                    */
 /* ============================================================== */
 
-function CompanySidebar({ tab, setTab, data }: { tab: TabValue; setTab: (value: TabValue) => void; data: Overview }) {
+function CompanySidebar({ tab, setTab }: { tab: TabValue; setTab: (value: TabValue) => void }) {
   return (
     <aside className="company-nav" aria-label="Company management sections">
       <nav className="company-nav-list" role="tablist" aria-label="Company settings">
         {TABS.map((item) => {
           const Icon = item.icon;
           const isActive = tab === item.value;
-          const count = item.getCount?.(data);
           return (
             <button
               key={item.value}
@@ -1520,7 +1650,6 @@ function CompanySidebar({ tab, setTab, data }: { tab: TabValue; setTab: (value: 
             >
               <Icon className="h-4 w-4" />
               <span className="truncate">{item.label}</span>
-              {count !== undefined && count > 0 && <span className="company-nav-count">{count}</span>}
             </button>
           );
         })}
@@ -1747,7 +1876,7 @@ export default function Company() {
 
       <div className="company-shell">
         <div className="company-sidebar-wrap">
-          <CompanySidebar tab={tab} setTab={setTab} data={data} />
+          <CompanySidebar tab={tab} setTab={setTab} />
         </div>
         <main className="company-main">
           <CompanyContentHeader tab={tab} />
@@ -1797,13 +1926,13 @@ export default function Company() {
                 canInvite={canInvite}
               />
             )}
-            {tab === "permissions" && <PermissionsTab data={data} onConfigure={(user) => setPermissionsMembershipId(user.membership._id)} canManageUsers={canManageUsers} />}
+            {tab === "permissions" && <PermissionsTab data={data} selectedMembershipId={permissionsMembershipId} onOpenDetails={(user) => setPermissionsMembershipId(user.membership._id)} />}
           </div>
         </main>
       </div>
 
       <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} data={data} onInvite={inviteMember} />
-      <PermissionsDialog open={Boolean(permissionsMembershipId)} onOpenChange={(open) => !open && setPermissionsMembershipId(undefined)} data={data} user={permissionsUser} onSave={savePermissions} />
+      <PermissionsDialog open={Boolean(permissionsMembershipId)} onOpenChange={(open) => !open && setPermissionsMembershipId(undefined)} data={data} user={permissionsUser} onSave={savePermissions} canManagePermissions={canManagePermissions} />
     </div>
   );
 }

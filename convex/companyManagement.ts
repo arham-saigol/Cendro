@@ -72,8 +72,8 @@ export const overview = query({
     const { membership } = await requireCapability(ctx, args.companyId, "company:manage_permissions");
     const company = await ctx.db.get(args.companyId);
     if (!company || company.deletedAt) throw new ConvexError("Company not found.");
-    const branches = await ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
-    const departments = await ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
+    const branches = (await ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
+    const departments = (await ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
     const ms = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
     const users = [];
     for (const m of ms) {
@@ -82,14 +82,14 @@ export const overview = query({
       const departmentIds = (await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500)).map((a) => a.departmentId);
       const scope = await managerScope(ctx, m._id);
       const overrides = await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500);
-      if (user) users.push({ membership: { _id: m._id, role: m.role, active: m.active }, user: { _id: user._id, name: fullName(user), firstName: firstName(user), secondName: user.secondName ?? "", email: user.email }, branchIds, departmentIds, scope, overrides: overrides.map((o) => ({ _id: o._id, capability: o.capability, effect: o.effect })) });
+      if (user) users.push({ membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt }, user: { _id: user._id, name: fullName(user), firstName: firstName(user), secondName: user.secondName ?? "", email: user.email }, branchIds, departmentIds, scope, overrides: overrides.map((o) => ({ _id: o._id, capability: o.capability, effect: o.effect })) });
     }
     const invitations = await ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100);
     return {
       company: { _id: company._id, name: company.name },
-      currentMembership: { _id: membership._id, role: membership.role, active: membership.active },
-      branches: branches.map((b) => ({ _id: b._id, name: b.name })),
-      departments: departments.map((d) => ({ _id: d._id, branchId: d.branchId, name: d.name })),
+      currentMembership: { _id: membership._id, role: membership.role, active: membership.active, createdAt: membership.createdAt },
+      branches: branches.map((b) => ({ _id: b._id, name: b.name, order: b.order })),
+      departments: departments.map((d) => ({ _id: d._id, branchId: d.branchId, name: d.name, order: d.order })),
       users,
       invitations: invitations.map((i) => ({ _id: i._id, email: i.email, role: i.role, status: i.status, createdAt: i.createdAt, expiresAt: i.expiresAt, branchIds: i.branchIds ?? [], departmentIds: i.departmentIds ?? [], managedBranchIds: i.managedBranchIds ?? [], managedDepartmentIds: i.managedDepartmentIds ?? [], managedUserMembershipIds: i.managedUserMembershipIds ?? [], permissionOverrides: i.permissionOverrides ?? [] })),
       capabilities,
@@ -109,10 +109,37 @@ export const updateCompanyName = mutation({
   },
 });
 
-export const createBranch = mutation({ args: { companyId: v.id("companies"), name: v.string() }, handler: async (ctx, args) => { const { user } = await requireCapability(ctx, args.companyId, "company:manage_branches"); const now = Date.now(); const id = await ctx.db.insert("branches", { companyId: args.companyId, name: nonEmpty(args.name, "Branch name"), createdAt: now, updatedAt: now }); await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "branch.create", targetType: "branch", targetId: id, createdAt: now }); return id; } });
+export const createBranch = mutation({ args: { companyId: v.id("companies"), name: v.string() }, handler: async (ctx, args) => { const { user } = await requireCapability(ctx, args.companyId, "company:manage_branches"); const now = Date.now(); const count = (await ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500)).length; const id = await ctx.db.insert("branches", { companyId: args.companyId, name: nonEmpty(args.name, "Branch name"), order: count, createdAt: now, updatedAt: now }); await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "branch.create", targetType: "branch", targetId: id, createdAt: now }); return id; } });
 export const deleteBranch = mutation({ args: { companyId: v.id("companies"), branchId: v.id("branches") }, handler: async (ctx, args) => { const { user } = await requireCapability(ctx, args.companyId, "company:manage_branches"); await assertBranch(ctx, args.companyId, args.branchId); const deps = await ctx.db.query("departments").withIndex("by_branch", (q) => q.eq("branchId", args.branchId)).take(1); if (deps.length) throw new ConvexError("Delete departments under this branch first."); const assignments = await ctx.db.query("userBranchAssignments").withIndex("by_branch", (q) => q.eq("branchId", args.branchId)).take(1); if (assignments.length) throw new ConvexError("Remove user branch assignments before deleting this branch."); const scopes = await ctx.db.query("managerBranchScopes").withIndex("by_branch", (q) => q.eq("branchId", args.branchId)).take(1); if (scopes.length) throw new ConvexError("Remove managed scopes before deleting this branch."); const sopScopes = await ctx.db.query("sopBranchScopes").withIndex("by_branch", (q) => q.eq("branchId", args.branchId)).take(1); if (sopScopes.length) throw new ConvexError("Remove SOP scopes before deleting this branch."); await ctx.db.delete(args.branchId); await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "branch.delete", targetType: "branch", targetId: args.branchId, createdAt: Date.now() }); } });
-export const createDepartment = mutation({ args: { companyId: v.id("companies"), branchId: v.id("branches"), name: v.string() }, handler: async (ctx, args) => { const { user } = await requireCapability(ctx, args.companyId, "company:manage_departments"); await assertBranch(ctx, args.companyId, args.branchId); const now = Date.now(); const id = await ctx.db.insert("departments", { companyId: args.companyId, branchId: args.branchId, name: nonEmpty(args.name, "Department name"), createdAt: now, updatedAt: now }); await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "department.create", targetType: "department", targetId: id, createdAt: now }); return id; } });
+export const createDepartment = mutation({ args: { companyId: v.id("companies"), branchId: v.id("branches"), name: v.string() }, handler: async (ctx, args) => { const { user } = await requireCapability(ctx, args.companyId, "company:manage_departments"); await assertBranch(ctx, args.companyId, args.branchId); const now = Date.now(); const count = (await ctx.db.query("departments").withIndex("by_branch", (q) => q.eq("branchId", args.branchId)).take(500)).length; const id = await ctx.db.insert("departments", { companyId: args.companyId, branchId: args.branchId, name: nonEmpty(args.name, "Department name"), order: count, createdAt: now, updatedAt: now }); await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "department.create", targetType: "department", targetId: id, createdAt: now }); return id; } });
 export const deleteDepartment = mutation({ args: { companyId: v.id("companies"), departmentId: v.id("departments") }, handler: async (ctx, args) => { const { user } = await requireCapability(ctx, args.companyId, "company:manage_departments"); await assertDepartment(ctx, args.companyId, args.departmentId); const assignments = await ctx.db.query("userDepartmentAssignments").withIndex("by_department", (q) => q.eq("departmentId", args.departmentId)).take(1); if (assignments.length) throw new ConvexError("Remove user department assignments before deleting this department."); const scopes = await ctx.db.query("managerDepartmentScopes").withIndex("by_department", (q) => q.eq("departmentId", args.departmentId)).take(1); if (scopes.length) throw new ConvexError("Remove managed scopes before deleting this department."); const sopScopes = await ctx.db.query("sopDepartmentScopes").withIndex("by_department", (q) => q.eq("departmentId", args.departmentId)).take(1); if (sopScopes.length) throw new ConvexError("Remove SOP scopes before deleting this department."); await ctx.db.delete(args.departmentId); await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "department.delete", targetType: "department", targetId: args.departmentId, createdAt: Date.now() }); } });
+
+export const reorderBranches = mutation({
+  args: { companyId: v.id("companies"), orderedBranchIds: v.array(v.id("branches")) },
+  handler: async (ctx, args) => {
+    await requireCapability(ctx, args.companyId, "company:manage_branches");
+    const now = Date.now();
+    for (let i = 0; i < args.orderedBranchIds.length; i++) {
+      const branch = await assertBranch(ctx, args.companyId, args.orderedBranchIds[i]);
+      await ctx.db.patch(branch._id, { order: i, updatedAt: now });
+    }
+  },
+});
+
+export const moveDepartment = mutation({
+  args: { companyId: v.id("companies"), departmentId: v.id("departments"), toBranchId: v.id("branches"), orderedDepartmentIds: v.array(v.id("departments")) },
+  handler: async (ctx, args) => {
+    await requireCapability(ctx, args.companyId, "company:manage_departments");
+    const department = await assertDepartment(ctx, args.companyId, args.departmentId);
+    await assertBranch(ctx, args.companyId, args.toBranchId);
+    await ctx.db.patch(department._id, { branchId: args.toBranchId, updatedAt: Date.now() });
+    const now = Date.now();
+    for (let i = 0; i < args.orderedDepartmentIds.length; i++) {
+      const dep = await assertDepartment(ctx, args.companyId, args.orderedDepartmentIds[i]);
+      await ctx.db.patch(dep._id, { branchId: args.toBranchId, order: i, updatedAt: now });
+    }
+  },
+});
 export const setUserRole = mutation({ args: { companyId: v.id("companies"), membershipId: v.id("companyMemberships"), role: roleValidator }, handler: async (ctx, args) => { await requireCapability(ctx, args.companyId, "company:manage_users"); await assertMembership(ctx, args.companyId, args.membershipId); await assertPermissionManagerRemains(ctx, args.companyId, args.membershipId, args.role); await ctx.db.patch(args.membershipId, { role: args.role, updatedAt: Date.now() }); } });
 
 export const setAssignments = mutation({

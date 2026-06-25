@@ -492,6 +492,77 @@ button:disabled { cursor: not-allowed; }
 /* Floating selection rail rendered to the left of the task table */
 .task-checkbox-rail { user-select: none; }
 .task-checkbox-rail > div + div { border-top: 1px solid transparent; }
+.task-selection-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 45;
+  transform: translateY(calc(-100% - 10px));
+  pointer-events: none;
+}
+.task-selection-pill {
+  pointer-events: auto;
+  display: inline-flex;
+  height: 34px;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--ink) 14%, transparent), 0 1px 3px color-mix(in srgb, var(--ink) 14%, transparent);
+  color: var(--ink-secondary);
+  font-size: 13px;
+  line-height: 1;
+}
+.task-selection-pill-count {
+  display: inline-flex;
+  height: 34px;
+  align-items: center;
+  padding: 0 12px;
+  font-weight: 500;
+  color: var(--primary);
+  white-space: nowrap;
+}
+.task-selection-pill-divider {
+  display: block;
+  flex: 0 0 1px;
+  height: 34px;
+  background: var(--hairline);
+}
+.task-selection-pill-btn {
+  display: inline-grid;
+  height: 34px;
+  min-width: 34px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--ink-secondary);
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.task-selection-pill-btn:hover,
+.task-selection-pill-btn:focus-visible {
+  background: var(--surface-hover);
+  color: var(--ink);
+  outline: none;
+}
+.task-selection-pill-btn[data-danger="true"]:hover,
+.task-selection-pill-btn[data-danger="true"]:focus-visible {
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  color: var(--danger);
+}
+.task-selection-pill-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.task-selection-error {
+  pointer-events: auto;
+  margin-top: 6px;
+  max-width: min(360px, calc(100vw - 32px));
+  border-radius: 8px;
+  padding: 6px 9px;
+  font-size: 12.5px;
+}
 
 
 .task-add-row td {

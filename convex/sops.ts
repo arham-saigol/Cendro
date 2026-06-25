@@ -270,7 +270,19 @@ export const updateScope = mutation({
   },
 });
 
-export const remove = mutation({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found."); await requireCapability(ctx, args.companyId, manageCapability(sop.scopeType)); await deleteEmbeddings(ctx, args.sopId); await deleteScopeRows(ctx, args.sopId); await ctx.db.delete(args.sopId); } });
+async function purgeSop(ctx: MutationCtx, companyId: Id<"companies">, sopId: Id<"sops">) {
+  const { membership } = await requireMembership(ctx, companyId);
+  const sop = await ctx.db.get(sopId);
+  if (!sop || sop.companyId !== companyId || !(await visibleSop(ctx, companyId, membership, sop))) throw new ConvexError("SOP not found.");
+  await requireCapability(ctx, companyId, manageCapability(sop.scopeType));
+  await deleteEmbeddings(ctx, sopId);
+  await deleteScopeRows(ctx, sopId);
+  await ctx.db.delete(sopId);
+}
+
+export const remove = mutation({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { await purgeSop(ctx, args.companyId, args.sopId); } });
+
+export const removeBulk = mutation({ args: { companyId: v.id("companies"), sopIds: v.array(v.id("sops")) }, handler: async (ctx, args) => { for (const sopId of args.sopIds) await purgeSop(ctx, args.companyId, sopId); } });
 
 async function textSearch(ctx: any, args: { companyId: Id<"companies">; query: string }) {
   const { membership } = await requireMembership(ctx, args.companyId);

@@ -29,6 +29,7 @@ import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
 import { PageHeader } from "./page-header";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { SopRichTextEditor, SopRichTextViewer, richTextPlainText } from "./sop-rich-text";
 import { cn, formatDate, initials } from "@/lib/utils";
@@ -658,6 +659,9 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   const [branchFilter, setBranchFilter] = useState("all");
   const [personFilter, setPersonFilter] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [pendingCell, setPendingCell] = useState<string | null>(null);
   const [optimisticRows, setOptimisticRows] = useState<Record<string, Record<string, unknown>>>({});
@@ -677,6 +681,8 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   const filterOptions = useQuery(api.sops.filterOptions, activeCompanyId && canUseAllSops ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const update = useMutation(api.sops.update);
   const updateScope = useMutation(api.sops.updateScope);
+  const remove = useMutation(api.sops.remove);
+  const removeBulk = useMutation(api.sops.removeBulk);
   const isLoading = sops === undefined;
   const serverRows = useMemo(() => sops ?? [], [sops]);
   const rows = useMemo(() => serverRows.map((sop) => ({ ...sop, ...optimisticRows[sop._id] })), [optimisticRows, serverRows]);
@@ -684,6 +690,12 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   const editableScopes = useMemo(() => editableScopeTypes.filter((scope) => canManageSop(active, scope)), [active]);
   const filterCount = [scopeFilter !== "all", branchFilter !== "all", effectiveSopView === "all" && personFilter !== "all"].filter(Boolean).length;
   const hasActiveFilters = filterCount > 0 || search.trim() !== "";
+  const visibleIds = rows.map((sop) => sop._id as string);
+  const selectedVisibleCount = visibleIds.reduce((count, id) => count + (selectedIds.has(id) ? 1 : 0), 0);
+  const allVisibleSelected = rows.length > 0 && selectedVisibleCount === rows.length;
+  const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
+  const selectionCount = selectedIds.size;
+  const canDeleteSelection = selectionCount > 0 && !deleting;
 
   useEffect(() => { if (searchOpen) searchInputRef.current?.focus(); }, [searchOpen]);
 
@@ -710,6 +722,68 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   useEffect(() => {
     if (effectiveSopView === "my" && personFilter !== "all") setPersonFilter("all");
   }, [effectiveSopView, personFilter]);
+
+  useEffect(() => {
+    if (rows.length && selectedIds.size > 0) {
+      const known = new Set(rows.map((sop) => sop._id as string));
+      const valid = new Set<string>();
+      for (const id of selectedIds) if (known.has(id)) valid.add(id);
+      if (valid.size !== selectedIds.size) setSelectedIds(valid);
+    } else if (!rows.length && selectedIds.size > 0) {
+      setSelectedIds(new Set());
+    }
+  }, [rows, selectedIds]);
+
+  useEffect(() => {
+    if (!createOpen || selectionCount === 0) return;
+    setSelectedIds(new Set());
+    setDeleteError(null);
+  }, [createOpen, selectionCount]);
+
+  function toggleOne(id: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setDeleteError(null);
+  }
+
+  function toggleAllVisible() {
+    setSelectedIds((current) => {
+      if (allVisibleSelected) {
+        const next = new Set(current);
+        for (const id of visibleIds) next.delete(id);
+        return next;
+      }
+      const next = new Set(current);
+      for (const id of visibleIds) next.add(id);
+      return next;
+    });
+    setDeleteError(null);
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+    setDeleteError(null);
+  }
+
+  async function handleDeleteSelection() {
+    if (!activeCompanyId || deleting || selectionCount === 0) return;
+    setDeleting(true);
+    setDeleteError(null);
+    const ids = Array.from(selectedIds);
+    try {
+      if (ids.length === 1) await remove({ companyId: activeCompanyId, sopId: ids[0] as Id<"sops"> });
+      else await removeBulk({ companyId: activeCompanyId, sopIds: ids as Id<"sops">[] });
+      setSelectedIds(new Set());
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Could not delete the selected SOPs.");
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   async function saveTitle(sop: any, title: string) {
     if (!activeCompanyId) return false;
@@ -812,7 +886,52 @@ export function SopList({ selectedId }: { selectedId?: string }) {
         </div>
       )}
 
-      <div className="task-table-wrap">
+      <div className="relative">
+        {selectionCount > 0 && (
+          <div className="task-selection-layer">
+            <div className="task-selection-pill" role="status" aria-live="polite">
+              <span className="task-selection-pill-count">{selectionCount} selected</span>
+              <span className="task-selection-pill-divider" aria-hidden="true" />
+              <button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={deleting} aria-label="Cancel selection">
+                <X className="h-4 w-4" />
+              </button>
+              <span className="task-selection-pill-divider" aria-hidden="true" />
+              <button type="button" className="task-selection-pill-btn" data-danger="true" onClick={handleDeleteSelection} disabled={!canDeleteSelection} aria-label={selectionCount === 1 ? "Delete selected SOP" : `Delete ${selectionCount} selected SOPs`}>
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+            {deleteError && <p className="alert-error task-selection-error" role="alert">{deleteError}</p>}
+          </div>
+        )}
+
+        <div className="task-table-wrap relative -ml-11 w-[calc(100%+2.75rem)] overflow-x-auto pl-11">
+        {rows.length > 0 && (
+          <div className="task-checkbox-rail pointer-events-none absolute left-0 top-0 z-10 flex w-11 flex-col pr-2">
+            <div className="flex h-9 items-center justify-end group/head pointer-events-auto">
+              <Checkbox
+                checked={allVisibleSelected}
+                indeterminate={someVisibleSelected}
+                onCheckedChange={toggleAllVisible}
+                disabled={rows.length === 0}
+                aria-label={allVisibleSelected ? "Unselect all SOPs" : "Select all SOPs"}
+                className={cn("transition-opacity", selectionCount > 0 ? "opacity-100" : "opacity-0 group-hover/head:opacity-100")}
+              />
+            </div>
+            {rows.map((sop) => {
+              const isChecked = selectedIds.has(sop._id);
+              return (
+                <div key={`rail-${sop._id}`} className="group/rail flex h-[41px] items-center justify-end pointer-events-auto">
+                  <Checkbox
+                    checked={isChecked}
+                    onCheckedChange={() => toggleOne(sop._id)}
+                    aria-label={isChecked ? `Unselect ${sop.title}` : `Select ${sop.title}`}
+                    className={cn("transition-opacity", isChecked ? "opacity-100" : "opacity-0 group-hover/row:opacity-100 group-hover/rail:opacity-100 focus-visible:opacity-100")}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
         <table className="task-table">
           <thead>
             <tr className="group/head">
@@ -853,6 +972,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
             ) : (
               <>
                 {rows.map((sop) => {
+                  const isChecked = selectedIds.has(sop._id);
                   const sopScope = sop.scopeType as ScopeType;
                   const editableScope = editableScopeTypes.includes(sopScope as EditableScopeType) ? sopScope as EditableScopeType : null;
                   const rowCanEdit = canManageSop(active, sopScope);
@@ -867,6 +987,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                       data-row="sop"
                       data-clickable={!rowCanEdit ? "true" : undefined}
                       data-selected={sop._id === selectedId}
+                      data-checked={isChecked ? "true" : undefined}
                       tabIndex={!rowCanEdit ? 0 : undefined}
                       onMouseEnter={prefetchDetails}
                       onFocus={prefetchDetails}
@@ -936,6 +1057,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
             )}
           </tbody>
         </table>
+        </div>
       </div>
 
     </div>
@@ -1029,27 +1151,6 @@ function EditableSopField({ value, placeholder, variant, ariaLabel, canEdit, onS
   );
 }
 
-function SopDeleteDialog({ open, onOpenChange, onConfirm, pending }: { open: boolean; onOpenChange: (open: boolean) => void; onConfirm: () => void; pending: boolean }) {
-  return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex w-[min(420px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]">
-          <div className="flex shrink-0 items-center justify-between border-b border-[var(--hairline)] px-6 py-4">
-            <Dialog.Title className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">Delete SOP</Dialog.Title>
-            <Dialog.Close asChild><button type="button" className="task-icon-btn" aria-label="Close"><X className="h-4 w-4" /></button></Dialog.Close>
-          </div>
-          <Dialog.Description className="px-6 pt-4 text-[13px] leading-6 text-[var(--ink-secondary)]">This permanently deletes the procedure. This action can&apos;t be undone.</Dialog.Description>
-          <div className="flex shrink-0 items-center justify-end gap-2 px-6 py-4">
-            <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button type="button" variant="danger" disabled={pending} onClick={onConfirm}>{pending ? "Deleting..." : "Delete"}</Button>
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
-  );
-}
-
 function SopDetailSkeleton() {
   return (
     <div className="animate-pulse">
@@ -1087,13 +1188,9 @@ export function SopDetail({ id }: { id: string }) {
   const scopeOptions = useQuery(api.sops.scopeOptions, activeCompanyId && canLoadSopScopeOptions(active) ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const update = useMutation(api.sops.update);
   const updateScope = useMutation(api.sops.updateScope);
-  const remove = useMutation(api.sops.remove);
   const editableScopes = useMemo(() => editableScopeTypes.filter((scope) => canManageSop(active, scope)), [active]);
   const [editOpen, setEditOpen] = useState(false);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [pendingProperty, setPendingProperty] = useState<string | null>(null);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
   const [optimisticSop, setOptimisticSop] = useState<Record<string, unknown> | null>(null);
 
@@ -1157,20 +1254,6 @@ export function SopDetail({ id }: { id: string }) {
     }
   }
 
-  async function handleDelete() {
-    if (!activeCompanyId || deleting) return;
-    setDeleting(true);
-    setDeleteError(null);
-    try {
-      await remove({ companyId: activeCompanyId, sopId: id as Id<"sops"> });
-      router.push("/sops");
-    } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : "Could not delete the SOP.");
-    } finally {
-      setDeleting(false);
-    }
-  }
-
   return (
     <div>
       <div className="peek-bar -mt-7 -mx-6 px-2 md:-mt-8 md:-mx-9 md:px-3">
@@ -1184,18 +1267,13 @@ export function SopDetail({ id }: { id: string }) {
             <button type="button" className="task-icon-btn" aria-label="Edit SOP" onClick={() => setEditOpen(true)}>
               <Pencil className="h-4 w-4" />
             </button>
-            <button type="button" className="task-icon-btn" aria-label="Delete SOP" onClick={() => setDeleteOpen(true)}>
-              <Trash2 className="h-4 w-4" />
-            </button>
           </div>
         )}
       </div>
 
       <SopDialog mode="edit" open={editOpen} onOpenChange={setEditOpen} sop={sop} />
-      <SopDeleteDialog open={deleteOpen} onOpenChange={(open) => { setDeleteOpen(open); if (!open) setDeleteError(null); }} onConfirm={handleDelete} pending={deleting} />
 
       {fieldError && <p className="alert-error mt-4 rounded-md p-2 text-[13px]" role="alert">{fieldError}</p>}
-      {deleteError && <p className="alert-error mt-4 rounded-md p-2 text-[13px]" role="alert">{deleteError}</p>}
 
       <div className="pt-6">
         <EditableSopField value={sop.title ?? ""} placeholder="Untitled procedure" ariaLabel="Edit SOP title" canEdit={canEdit} variant="title" onSave={(title) => saveText({ title })} />

@@ -1379,8 +1379,6 @@ button:disabled { cursor: not-allowed; }
   display: flex;
   flex-direction: column;
   gap: 2px;
-  border: 1px solid var(--hairline);
-  border-radius: 10px;
   background: var(--surface);
   padding: 6px;
   max-width: 720px;
@@ -1401,7 +1399,8 @@ button:disabled { cursor: not-allowed; }
 .structure-row:hover { background: var(--surface-hover); }
 .structure-row-branch { font-weight: 600; }
 .structure-row-department { padding-left: 4px; }
-.structure-row.is-dragging { opacity: 0.4; }
+.structure-row.is-dragging,
+.structure-branch.is-dragging { opacity: 0.4; }
 .structure-dropzone {
   min-height: 8px;
   margin: 1px 0;

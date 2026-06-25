@@ -26,6 +26,11 @@ async function assertMembership(ctx: any, companyId: Id<"companies">, membership
   return membership;
 }
 function unique<T>(items: T[]) { return Array.from(new Set(items)); }
+function assertSameIdSet<T>(actual: T[], expected: T[], message: string) {
+  if (new Set(actual).size !== actual.length || actual.length !== expected.length) throw new ConvexError(message);
+  const expectedSet = new Set(expected);
+  if (actual.some((id) => !expectedSet.has(id))) throw new ConvexError(message);
+}
 function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.email; }
 function fullName(user: Doc<"appUsers">) { return [firstName(user), user.secondName?.trim()].filter(Boolean).join(" ") || user.email; }
 
@@ -122,9 +127,14 @@ export const reorderBranches = mutation({
   args: { companyId: v.id("companies"), orderedBranchIds: v.array(v.id("branches")) },
   handler: async (ctx, args) => {
     await requireCapability(ctx, args.companyId, "company:manage_branches");
+    const currentBranches = await ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
+    assertSameIdSet(args.orderedBranchIds, currentBranches.map((branch) => branch._id), "Branch order is stale. Refresh and try again.");
+
+    const branchesById = new Map(currentBranches.map((branch) => [branch._id, branch]));
     const now = Date.now();
     for (let i = 0; i < args.orderedBranchIds.length; i++) {
-      const branch = await assertBranch(ctx, args.companyId, args.orderedBranchIds[i]);
+      const branch = branchesById.get(args.orderedBranchIds[i]);
+      if (!branch) throw new ConvexError("Branch order is stale. Refresh and try again.");
       await ctx.db.patch(branch._id, { order: i, updatedAt: now });
     }
   },
@@ -136,11 +146,27 @@ export const moveDepartment = mutation({
     await requireCapability(ctx, args.companyId, "company:manage_departments");
     const department = await assertDepartment(ctx, args.companyId, args.departmentId);
     await assertBranch(ctx, args.companyId, args.toBranchId);
-    await ctx.db.patch(department._id, { branchId: args.toBranchId, updatedAt: Date.now() });
+
+    const currentDestinationDepartments = await ctx.db.query("departments").withIndex("by_branch", (q) => q.eq("branchId", args.toBranchId)).take(500);
+    const currentDestinationIds = currentDestinationDepartments.map((dep) => dep._id);
+    const expectedDestinationIds = currentDestinationIds.includes(department._id) ? currentDestinationIds : [...currentDestinationIds, department._id];
+    assertSameIdSet(args.orderedDepartmentIds, expectedDestinationIds, "Department order is stale. Refresh and try again.");
+
+    const orderedDepartments: Doc<"departments">[] = [];
+    for (const departmentId of args.orderedDepartmentIds) {
+      const dep = await assertDepartment(ctx, args.companyId, departmentId);
+      if (dep._id !== department._id && dep.branchId !== args.toBranchId) throw new ConvexError("Department order is stale. Refresh and try again.");
+      orderedDepartments.push(dep);
+    }
+
     const now = Date.now();
-    for (let i = 0; i < args.orderedDepartmentIds.length; i++) {
-      const dep = await assertDepartment(ctx, args.companyId, args.orderedDepartmentIds[i]);
-      await ctx.db.patch(dep._id, { branchId: args.toBranchId, order: i, updatedAt: now });
+    for (let i = 0; i < orderedDepartments.length; i++) {
+      await ctx.db.patch(orderedDepartments[i]._id, { branchId: args.toBranchId, order: i, updatedAt: now });
+    }
+
+    if (department.branchId !== args.toBranchId) {
+      const sourceDepartments = (await ctx.db.query("departments").withIndex("by_branch", (q) => q.eq("branchId", department.branchId)).take(500)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
+      for (let i = 0; i < sourceDepartments.length; i++) await ctx.db.patch(sourceDepartments[i]._id, { order: i, updatedAt: now });
     }
   },
 });

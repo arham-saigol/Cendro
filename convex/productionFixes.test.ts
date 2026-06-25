@@ -207,6 +207,38 @@ describe("production permission and validation fixes", () => {
     await expect(t.withIdentity(identity("manager")).mutation(api.sops.updateScope, { companyId, sopId: inScopeSopId, scopeType: "branch", branchIds: [managedBranchId], userMembershipIds: [] })).resolves.toBeNull();
   });
 
+  test("structure reorders require complete sets and move departments atomically", async () => {
+    const { t, companyId } = await seedCompany();
+    const ids = await t.run(async (ctx) => {
+      const now = Date.now();
+      const firstBranchId = await ctx.db.insert("branches", { companyId, name: "First", order: 0, createdAt: now, updatedAt: now });
+      const secondBranchId = await ctx.db.insert("branches", { companyId, name: "Second", order: 1, createdAt: now, updatedAt: now });
+      const thirdBranchId = await ctx.db.insert("branches", { companyId, name: "Third", order: 2, createdAt: now, updatedAt: now });
+      const movingDepartmentId = await ctx.db.insert("departments", { companyId, branchId: firstBranchId, name: "Moving", order: 0, createdAt: now, updatedAt: now });
+      const remainingDepartmentId = await ctx.db.insert("departments", { companyId, branchId: firstBranchId, name: "Remaining", order: 1, createdAt: now, updatedAt: now });
+      const destinationDepartmentId = await ctx.db.insert("departments", { companyId, branchId: secondBranchId, name: "Destination", order: 0, createdAt: now, updatedAt: now });
+      return { firstBranchId, secondBranchId, thirdBranchId, movingDepartmentId, remainingDepartmentId, destinationDepartmentId };
+    });
+
+    await expect(t.withIdentity(identity("admin")).mutation(api.companyManagement.reorderBranches, { companyId, orderedBranchIds: [ids.secondBranchId, ids.firstBranchId] })).rejects.toThrow("Branch order is stale");
+    await expect(t.withIdentity(identity("admin")).mutation(api.companyManagement.reorderBranches, { companyId, orderedBranchIds: [ids.secondBranchId, ids.firstBranchId, ids.thirdBranchId] })).resolves.toBeNull();
+
+    await expect(t.withIdentity(identity("admin")).mutation(api.companyManagement.moveDepartment, { companyId, departmentId: ids.movingDepartmentId, toBranchId: ids.secondBranchId, orderedDepartmentIds: [ids.movingDepartmentId] })).rejects.toThrow("Department order is stale");
+    await expect(t.withIdentity(identity("admin")).mutation(api.companyManagement.moveDepartment, { companyId, departmentId: ids.movingDepartmentId, toBranchId: ids.secondBranchId, orderedDepartmentIds: [ids.destinationDepartmentId, ids.movingDepartmentId] })).resolves.toBeNull();
+
+    const result = await t.run(async (ctx) => {
+      const branches = await ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(10);
+      const movingDepartment = await ctx.db.get(ids.movingDepartmentId);
+      const remainingDepartment = await ctx.db.get(ids.remainingDepartmentId);
+      const destinationDepartment = await ctx.db.get(ids.destinationDepartmentId);
+      return { branches, movingDepartment, remainingDepartment, destinationDepartment };
+    });
+    expect(result.branches.sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map((branch) => branch._id)).toEqual([ids.secondBranchId, ids.firstBranchId, ids.thirdBranchId]);
+    expect(result.destinationDepartment).toMatchObject({ branchId: ids.secondBranchId, order: 0 });
+    expect(result.movingDepartment).toMatchObject({ branchId: ids.secondBranchId, order: 1 });
+    expect(result.remainingDepartment).toMatchObject({ branchId: ids.firstBranchId, order: 0 });
+  });
+
   test("permission overrides cannot remove the last effective permission manager", async () => {
     const { t, companyId, secondAdminMembershipId } = await seedCompany();
     await t.withIdentity(identity("admin")).mutation(api.companyManagement.setUserRole, { companyId, membershipId: secondAdminMembershipId, role: "Employee" });

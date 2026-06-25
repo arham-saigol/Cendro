@@ -24,6 +24,7 @@ import {
 import { useAction, useMutation, useQuery } from "convex/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { DragDropProvider, useDroppable } from "@dnd-kit/react";
+import type { DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
@@ -355,6 +356,8 @@ const BRANCH_GROUP = "branches";
 const BRANCH_TYPE = "branch";
 const DEPT_TYPE = "department";
 
+type BranchSortableData = { kind: typeof BRANCH_TYPE };
+type DepartmentSortableData = { kind: typeof DEPT_TYPE };
 type ZoneData = { kind: "branchZone"; branchId: Id<"branches"> };
 
 function arrayMove<T>(items: T[], from: number, to: number): T[] {
@@ -374,6 +377,7 @@ function StructureBranchRow({
   canDrag,
   onToggleCollapse,
   onDelete,
+  children,
 }: {
   branch: BranchRow;
   index: number;
@@ -383,46 +387,51 @@ function StructureBranchRow({
   canDrag: boolean;
   onToggleCollapse: () => void;
   onDelete: () => void;
+  children?: React.ReactNode;
 }) {
-  const { ref, handleRef, isDragging } = useSortable({
+  const { ref, targetRef, handleRef, isDragging } = useSortable<BranchSortableData>({
     id: branch._id,
     index,
     group: BRANCH_GROUP,
     type: BRANCH_TYPE,
     accept: BRANCH_TYPE,
     disabled: !canDrag,
+    data: { kind: BRANCH_TYPE },
   });
   return (
-    <div
-      ref={ref}
-      className={cn("structure-row structure-row-branch", isDragging && "is-dragging")}
-    >
-      {canDrag && (
-        <button type="button" ref={handleRef} className="structure-grip" aria-label="Drag branch">
-          <GripVertical className="h-3.5 w-3.5" />
-        </button>
-      )}
-      <button
-        type="button"
-        className="structure-chevron"
-        onClick={onToggleCollapse}
-        aria-label={isCollapsed ? "Expand branch" : "Collapse branch"}
+    <div ref={ref} className={cn("structure-branch", isDragging && "is-dragging")}>
+      <div
+        ref={targetRef}
+        className={cn("structure-row structure-row-branch", isDragging && "is-dragging")}
       >
-        {depCount > 0 ? (isCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />) : <span className="h-3.5 w-3.5" />}
-      </button>
-      <Building2 className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
-      <span className="min-w-0 flex-1 truncate font-medium text-[var(--ink)]">{branch.name}</span>
-      <span className="structure-count">{depCount} dept{depCount === 1 ? "" : "s"} · {memberCount} member{memberCount === 1 ? "" : "s"}</span>
-      {canDrag && (
+        {canDrag && (
+          <button type="button" ref={handleRef} className="structure-grip" aria-label="Drag branch">
+            <GripVertical className="h-3.5 w-3.5" />
+          </button>
+        )}
         <button
           type="button"
-          className="task-icon-btn"
-          onClick={onDelete}
-          aria-label={`Delete branch ${branch.name}`}
+          className="structure-chevron"
+          onClick={onToggleCollapse}
+          aria-label={isCollapsed ? "Expand branch" : "Collapse branch"}
         >
-          <Trash2 className="h-3.5 w-3.5" />
+          {depCount > 0 ? (isCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />) : <span className="h-3.5 w-3.5" />}
         </button>
-      )}
+        <Building2 className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
+        <span className="min-w-0 flex-1 truncate font-medium text-[var(--ink)]">{branch.name}</span>
+        <span className="structure-count">{depCount} dept{depCount === 1 ? "" : "s"} · {memberCount} member{memberCount === 1 ? "" : "s"}</span>
+        {canDrag && (
+          <button
+            type="button"
+            className="task-icon-btn"
+            onClick={onDelete}
+            aria-label={`Delete branch ${branch.name}`}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+      {children}
     </div>
   );
 }
@@ -442,13 +451,14 @@ function StructureDepartmentRow({
   canDrag: boolean;
   onDelete: () => void;
 }) {
-  const { ref, handleRef, isDragging } = useSortable({
+  const { ref, handleRef, isDragging } = useSortable<DepartmentSortableData>({
     id: dep._id,
     index,
     group: branchId,
     type: DEPT_TYPE,
     accept: DEPT_TYPE,
     disabled: !canDrag,
+    data: { kind: DEPT_TYPE },
   });
   return (
     <div
@@ -563,7 +573,7 @@ function StructureTab({
 
   function commitDepartmentToBranch(deptId: Id<"departments">, toBranchId: Id<"branches">) {
     const dragged = departments.find((d) => d._id === deptId);
-    if (!dragged || dragged.branchId === toBranchId) return;
+    if (!dragged) return;
     const without = departments.filter((d) => d._id !== deptId);
     const toList = without.filter((d) => d.branchId === toBranchId);
     toList.push({ ...dragged, branchId: toBranchId });
@@ -578,7 +588,6 @@ function StructureTab({
     deptId: Id<"departments">,
     fromBranch: Id<"branches">,
     toBranch: Id<"branches">,
-    fromIndex: number,
     toIndex: number,
   ) {
     const dragged = departments.find((d) => d._id === deptId);
@@ -593,60 +602,46 @@ function StructureTab({
     if (fromBranch !== toBranch) expand(toBranch);
   }
 
-  function handleDragEnd(event: { canceled: boolean; operation: { source: unknown; target: unknown } }) {
+  function handleDragEnd(event: DragEndEvent) {
     isDragging.current = false;
     if (event.canceled) return;
-    const source = event.operation.source as { id: unknown; initialIndex?: number; index?: number; initialGroup?: unknown; group?: unknown } | null;
-    const target = event.operation.target as { data?: ZoneData } | null;
+    const { source, target } = event.operation;
     if (!source) return;
 
-    // Dropped onto a branch drop zone → append department to that branch.
+    // Dropped onto a branch drop zone → append only departments to that branch.
     if (target?.data?.kind === "branchZone") {
-      const deptId = source.id as Id<"departments">;
-      commitDepartmentToBranch(deptId, target.data.branchId);
+      if (source.data?.kind !== DEPT_TYPE) return;
+      commitDepartmentToBranch(source.id as Id<"departments">, target.data.branchId as Id<"branches">);
       return;
     }
 
-    if (!isSortable(source as never)) return;
-    const src = source as {
-      id: unknown;
-      initialIndex: number;
-      index: number;
-      initialGroup: unknown;
-      group: unknown;
-    };
+    if (!isSortable(source)) return;
 
     // Branch reorder (top-level group).
-    if (src.initialGroup === BRANCH_GROUP) {
-      if (src.initialIndex === src.index) return;
-      const reordered = arrayMove(branches, src.initialIndex, src.index).map((b, i) => ({ ...b, order: i }));
+    if (source.data?.kind === BRANCH_TYPE) {
+      if (source.initialGroup !== BRANCH_GROUP || source.initialIndex === source.index) return;
+      const reordered = arrayMove(branches, source.initialIndex, source.index).map((b, i) => ({ ...b, order: i }));
       setBranches(reordered);
       onReorderBranches(reordered.map((b) => b._id));
       return;
     }
 
     // Department move (within or across branches).
-    const fromBranch = src.initialGroup as Id<"branches">;
-    const toBranch = src.group as Id<"branches">;
+    if (source.data?.kind !== DEPT_TYPE) return;
+    const fromBranch = source.initialGroup as Id<"branches">;
+    const toBranch = source.group as Id<"branches">;
     if (!fromBranch || !toBranch) return;
-    commitDepartmentSort(src.id as Id<"departments">, fromBranch, toBranch, src.initialIndex, src.index);
+    commitDepartmentSort(source.id as Id<"departments">, fromBranch, toBranch, source.index);
   }
 
   return (
     <div className="company-tab-body">
       <div className="company-tab-section">
-        <div className="company-section-heading">
-          <div className="min-w-0">
-            <h2 className="company-tab-section-title">Structure</h2>
-            <p className="company-tab-section-description">Branches hold departments. Drag to reorder or move a department into another branch.</p>
-          </div>
-        </div>
-
         <DragDropProvider
           onDragStart={() => { isDragging.current = true; }}
           onDragEnd={handleDragEnd}
         >
-          <div className="structure-tree mt-4">
+          <div className="structure-tree">
             {branches.length === 0 && (
               <EmptyState
                 icon={Network}
@@ -681,18 +676,17 @@ function StructureTab({
               const depCount = deps.length;
               const memberCount = memberCountForBranch(branch._id);
               return (
-                <div key={branch._id} className="structure-branch">
-                  <StructureBranchRow
-                    branch={branch}
-                    index={branchIndex}
-                    depCount={depCount}
-                    memberCount={memberCount}
-                    isCollapsed={isCollapsed}
-                    canDrag={canManageBranches}
-                    onToggleCollapse={() => toggleCollapse(branch._id)}
-                    onDelete={() => onDeleteBranch(branch._id)}
-                  />
-
+                <StructureBranchRow
+                  key={branch._id}
+                  branch={branch}
+                  index={branchIndex}
+                  depCount={depCount}
+                  memberCount={memberCount}
+                  isCollapsed={isCollapsed}
+                  canDrag={canManageBranches}
+                  onToggleCollapse={() => toggleCollapse(branch._id)}
+                  onDelete={() => onDeleteBranch(branch._id)}
+                >
                   {!isCollapsed && (
                     <div className="structure-departments">
                       {deps.map((dep, depIndex) => (
@@ -728,7 +722,7 @@ function StructureTab({
                       )}
                     </div>
                   )}
-                </div>
+                </StructureBranchRow>
               );
             })}
 

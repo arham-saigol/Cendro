@@ -12,7 +12,7 @@ export default function OneTimeTasksLayout({ children }: { children: React.React
   const isDetail = Boolean(taskId);
   const base = "/one-time-tasks";
   const reduceMotion = useReducedMotion();
-  const { closing, close } = useDetailDrawerClose(base, isDetail);
+  const { closing, close } = useDetailDrawerClose(base, isDetail, taskId ?? null);
 
   return (
     <div className="relative h-full overflow-hidden">

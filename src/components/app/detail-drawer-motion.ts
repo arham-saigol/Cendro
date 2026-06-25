@@ -15,7 +15,7 @@ export function requestDetailDrawerClose(base: string) {
   return event.defaultPrevented;
 }
 
-export function useDetailDrawerClose(base: string, isOpen: boolean) {
+export function useDetailDrawerClose(base: string, isOpen: boolean, selectedDetailId: string | null | undefined) {
   const router = useRouter();
   const [closing, setClosing] = useState(false);
   const timerRef = useRef<number | null>(null);
@@ -52,6 +52,11 @@ export function useDetailDrawerClose(base: string, isOpen: boolean) {
     clearTimer();
     setClosing(false);
   }, [clearTimer, isOpen]);
+
+  useEffect(() => {
+    clearTimer();
+    setClosing(false);
+  }, [clearTimer, selectedDetailId]);
 
   useEffect(() => clearTimer, [clearTimer]);
 

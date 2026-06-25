@@ -12,7 +12,7 @@ export default function JdTasksLayout({ children }: { children: React.ReactNode 
   const isDetail = Boolean(taskId);
   const base = "/jd-tasks";
   const reduceMotion = useReducedMotion();
-  const { closing, close } = useDetailDrawerClose(base, isDetail);
+  const { closing, close } = useDetailDrawerClose(base, isDetail, taskId ?? null);
 
   return (
     <div className="relative h-full overflow-hidden">

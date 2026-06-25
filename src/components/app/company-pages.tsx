@@ -42,7 +42,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { cn, formatDate, initials } from "@/lib/utils";
-import { capabilityGroups, capabilityLabels, defaultRoleCapabilities, roles, type Capability, type Role } from "@/lib/permissions";
+import { canAccessCompanyManagement, capabilityGroups, capabilityLabels, defaultRoleCapabilities, roles, type Capability, type Role } from "@/lib/permissions";
 
 /* ============================================================== */
 /*  Types                                                          */
@@ -108,6 +108,13 @@ const TABS: { value: TabValue; label: string; icon: LucideIcon }[] = [
   { value: "people", label: "People", icon: Users },
   { value: "permissions", label: "Permissions", icon: ShieldCheck },
 ];
+
+function canViewCompanyTab(tab: TabValue, capabilities: readonly string[] | null | undefined) {
+  if (tab === "general") return Boolean(capabilities?.includes("company:manage_settings"));
+  if (tab === "structure") return Boolean(capabilities?.some((capability) => capability === "company:manage_branches" || capability === "company:manage_departments"));
+  if (tab === "people") return Boolean(capabilities?.some((capability) => capability === "company:manage_users" || capability === "company:invite_users" || capability === "company:manage_permissions"));
+  return Boolean(capabilities?.includes("company:manage_permissions"));
+}
 
 const TAB_COPY: Record<TabValue, { title: string; description: string }> = {
   general: {
@@ -620,8 +627,8 @@ function StructureTab({
   onCreateDepartment: (branchId: Id<"branches">, name: string) => void;
   onDeleteBranch: (id: Id<"branches">) => void;
   onDeleteDepartment: (id: Id<"departments">) => void;
-  onReorderBranches: (orderedBranchIds: Id<"branches">[]) => void;
-  onMoveDepartment: (departmentId: Id<"departments">, toBranchId: Id<"branches">, orderedDepartmentIds: Id<"departments">[]) => void;
+  onReorderBranches: (orderedBranchIds: Id<"branches">[]) => Promise<void>;
+  onMoveDepartment: (departmentId: Id<"departments">, toBranchId: Id<"branches">, orderedDepartmentIds: Id<"departments">[]) => Promise<void>;
 }) {
   const [branches, setBranches] = useState<BranchRow[]>(data.branches);
   const [departments, setDepartments] = useState<DepartmentRow[]>(data.departments);
@@ -675,7 +682,8 @@ function StructureTab({
   const setNewDeptName = (branchId: Id<"branches">, value: string) =>
     setNewDeptByBranch((prev) => ({ ...prev, [branchId]: value }));
 
-  function commitDepartmentToBranch(deptId: Id<"departments">, toBranchId: Id<"branches">) {
+  async function commitDepartmentToBranch(deptId: Id<"departments">, toBranchId: Id<"branches">) {
+    const previousDepartments = departments;
     const dragged = departments.find((d) => d._id === deptId);
     if (!dragged) return;
     const without = departments.filter((d) => d._id !== deptId);
@@ -684,16 +692,21 @@ function StructureTab({
     const reindexed = toList.map((d, i) => ({ ...d, branchId: toBranchId, order: i }));
     const others = without.filter((d) => d.branchId !== toBranchId);
     setDepartments([...others, ...reindexed]);
-    onMoveDepartment(deptId, toBranchId, reindexed.map((d) => d._id));
-    expand(toBranchId);
+    try {
+      await onMoveDepartment(deptId, toBranchId, reindexed.map((d) => d._id));
+      expand(toBranchId);
+    } catch {
+      setDepartments(previousDepartments);
+    }
   }
 
-  function commitDepartmentSort(
+  async function commitDepartmentSort(
     deptId: Id<"departments">,
     fromBranch: Id<"branches">,
     toBranch: Id<"branches">,
     toIndex: number,
   ) {
+    const previousDepartments = departments;
     const dragged = departments.find((d) => d._id === deptId);
     if (!dragged) return;
     const without = departments.filter((d) => d._id !== deptId);
@@ -702,8 +715,12 @@ function StructureTab({
     const reindexed = toList.map((d, i) => ({ ...d, branchId: toBranch, order: i }));
     const others = without.filter((d) => d.branchId !== toBranch);
     setDepartments([...others, ...reindexed]);
-    onMoveDepartment(deptId, toBranch, reindexed.map((d) => d._id));
-    if (fromBranch !== toBranch) expand(toBranch);
+    try {
+      await onMoveDepartment(deptId, toBranch, reindexed.map((d) => d._id));
+      if (fromBranch !== toBranch) expand(toBranch);
+    } catch {
+      setDepartments(previousDepartments);
+    }
   }
 
   function handleDragEnd(event: DragEndEvent) {
@@ -715,7 +732,7 @@ function StructureTab({
     // Dropped onto a branch drop zone → append only departments to that branch.
     if (target?.data?.kind === "branchZone") {
       if (source.data?.kind !== DEPT_TYPE) return;
-      commitDepartmentToBranch(source.id as Id<"departments">, target.data.branchId as Id<"branches">);
+      void commitDepartmentToBranch(source.id as Id<"departments">, target.data.branchId as Id<"branches">);
       return;
     }
 
@@ -724,9 +741,10 @@ function StructureTab({
     // Branch reorder (top-level group).
     if (source.data?.kind === BRANCH_TYPE) {
       if (source.initialGroup !== BRANCH_GROUP || source.initialIndex === source.index) return;
+      const previousBranches = branches;
       const reordered = arrayMove(branches, source.initialIndex, source.index).map((b, i) => ({ ...b, order: i }));
       setBranches(reordered);
-      onReorderBranches(reordered.map((b) => b._id));
+      void onReorderBranches(reordered.map((b) => b._id)).catch(() => setBranches(previousBranches));
       return;
     }
 
@@ -735,7 +753,7 @@ function StructureTab({
     const fromBranch = source.initialGroup as Id<"branches">;
     const toBranch = source.group as Id<"branches">;
     if (!fromBranch || !toBranch) return;
-    commitDepartmentSort(source.id as Id<"departments">, fromBranch, toBranch, source.index);
+    void commitDepartmentSort(source.id as Id<"departments">, fromBranch, toBranch, source.index);
   }
 
   return (
@@ -1631,11 +1649,11 @@ function PermissionsDialog({
 /*  Sidebar nav                                                    */
 /* ============================================================== */
 
-function CompanySidebar({ tab, setTab }: { tab: TabValue; setTab: (value: TabValue) => void }) {
+function CompanySidebar({ tab, setTab, tabs }: { tab: TabValue; setTab: (value: TabValue) => void; tabs: typeof TABS }) {
   return (
     <aside className="company-nav" aria-label="Company management sections">
       <nav className="company-nav-list" role="tablist" aria-label="Company settings">
-        {TABS.map((item) => {
+        {tabs.map((item) => {
           const Icon = item.icon;
           const isActive = tab === item.value;
           return (
@@ -1698,7 +1716,22 @@ function CompanySkeleton() {
 export default function Company() {
   const { activeCompanyId, active } = useCompany();
   const data = useQuery(api.companyManagement.overview, activeCompanyId ? { companyId: activeCompanyId } : "skip") as Overview | undefined;
-  const updateCompanyName = useMutation(api.companyManagement.updateCompanyName);
+  const updateCompanyName = useMutation(api.companyManagement.updateCompanyName).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
+    if (current) {
+      localStore.setQuery(api.companyManagement.overview, { companyId: args.companyId }, {
+        ...current,
+        company: current.company ? { ...current.company, name: args.name } : current.company,
+      } as any);
+    }
+    const access = localStore.getQuery(api.companies.accessStatus, {}) as any;
+    if (access?.status === "ready") {
+      localStore.setQuery(api.companies.accessStatus, {}, {
+        ...access,
+        companies: access.companies.map((row: any) => row.company._id === args.companyId ? { ...row, company: { ...row.company, name: args.name } } : row),
+      });
+    }
+  });
   const createBranch = useMutation(api.companyManagement.createBranch);
   const createDepartment = useMutation(api.companyManagement.createDepartment);
   const deleteBranch = useMutation(api.companyManagement.deleteBranch);
@@ -1769,8 +1802,14 @@ export default function Company() {
   }, [active?.company.name, data]);
 
   const permissionsUser = useMemo(() => data?.users.find((user) => user.membership._id === permissionsMembershipId), [data?.users, permissionsMembershipId]);
+  const visibleTabs = useMemo(() => TABS.filter((item) => canViewCompanyTab(item.value, active?.capabilities)), [active?.capabilities]);
+
+  useEffect(() => {
+    if (visibleTabs.length > 0 && !visibleTabs.some((item) => item.value === tab)) setTab(visibleTabs[0].value);
+  }, [tab, visibleTabs]);
 
   if (!data) return <CompanySkeleton />;
+  if (!canAccessCompanyManagement(active?.capabilities) || visibleTabs.length === 0) return <EmptyState icon={Building2} title="No company management access" message="Ask an admin to grant access to a company management section." />;
 
   const currentCompany = data.company ?? active?.company;
   const nameDirty = companyName.trim() !== (currentCompany?.name ?? "") && companyName.trim() !== "";
@@ -1780,6 +1819,7 @@ export default function Company() {
   const canManageUsers = active?.capabilities.includes("company:manage_users") ?? false;
   const canManagePermissions = active?.capabilities.includes("company:manage_permissions") ?? false;
   const canInvite = active?.capabilities.includes("company:invite_users") ?? false;
+  const activeTab = visibleTabs.some((item) => item.value === tab) ? tab : visibleTabs[0].value;
 
   async function run(action: () => Promise<unknown>, message = "Something went wrong.") {
     setError(null);
@@ -1876,13 +1916,13 @@ export default function Company() {
 
       <div className="company-shell">
         <div className="company-sidebar-wrap">
-          <CompanySidebar tab={tab} setTab={setTab} />
+          <CompanySidebar tab={activeTab} setTab={setTab} tabs={visibleTabs} />
         </div>
         <main className="company-main">
-          <CompanyContentHeader tab={tab} />
+          <CompanyContentHeader tab={activeTab} />
 
           <div className="company-main-body">
-            {tab === "general" && (
+            {activeTab === "general" && (
               <GeneralTab
                 data={data}
                 companyName={companyName}
@@ -1893,7 +1933,7 @@ export default function Company() {
                 onSaveName={saveCompanyName}
               />
             )}
-            {tab === "structure" && (
+            {activeTab === "structure" && (
               <StructureTab
                 data={data}
                 canManageBranches={canManageBranches}
@@ -1906,27 +1946,35 @@ export default function Company() {
                 onDeleteDepartment={(departmentId) =>
                   activeCompanyId && window.confirm("Delete this department? Assignments must be removed first.") && run(async () => deleteDepartment({ companyId: activeCompanyId, departmentId }), "Could not delete department.")
                 }
-                onReorderBranches={(orderedBranchIds) => activeCompanyId && run(async () => reorderBranches({ companyId: activeCompanyId, orderedBranchIds }), "Could not reorder branches.")}
-                onMoveDepartment={(departmentId, toBranchId, orderedDepartmentIds) =>
-                  activeCompanyId && run(async () => moveDepartment({ companyId: activeCompanyId, departmentId, toBranchId, orderedDepartmentIds }), "Could not move department.")
-                }
+                onReorderBranches={async (orderedBranchIds) => {
+                  if (!activeCompanyId) return;
+                  setError(null);
+                  try { await reorderBranches({ companyId: activeCompanyId, orderedBranchIds }); }
+                  catch (err) { setError(err instanceof Error ? err.message : "Could not reorder branches."); throw err; }
+                }}
+                onMoveDepartment={async (departmentId, toBranchId, orderedDepartmentIds) => {
+                  if (!activeCompanyId) return;
+                  setError(null);
+                  try { await moveDepartment({ companyId: activeCompanyId, departmentId, toBranchId, orderedDepartmentIds }); }
+                  catch (err) { setError(err instanceof Error ? err.message : "Could not move department."); throw err; }
+                }}
               />
             )}
-            {tab === "people" && (
+            {activeTab === "people" && (
               <PeopleTab
                 data={data}
                 onInvite={() => setInviteOpen(true)}
-                onRoleChange={changeUserRole}
-                onBranchChange={changeUserBranch}
-                onDepartmentChange={changeUserDepartment}
-                onStatusChange={changeUserStatus}
+                onRoleChange={(user, role) => run(() => changeUserRole(user, role), "Could not update role.")}
+                onBranchChange={(user, branchId) => run(() => changeUserBranch(user, branchId), "Could not update branch.")}
+                onDepartmentChange={(user, departmentId) => run(() => changeUserDepartment(user, departmentId), "Could not update department.")}
+                onStatusChange={(user, active) => run(() => changeUserStatus(user, active), "Could not update status.")}
                 onRemoveUsers={removeSelectedUsers}
                 canManageUsers={canManageUsers}
                 canManagePermissions={canManagePermissions}
                 canInvite={canInvite}
               />
             )}
-            {tab === "permissions" && <PermissionsTab data={data} selectedMembershipId={permissionsMembershipId} onOpenDetails={(user) => setPermissionsMembershipId(user.membership._id)} />}
+            {activeTab === "permissions" && <PermissionsTab data={data} selectedMembershipId={permissionsMembershipId} onOpenDetails={(user) => setPermissionsMembershipId(user.membership._id)} />}
           </div>
         </main>
       </div>

@@ -12,7 +12,7 @@ export default function SopsLayout({ children }: { children: React.ReactNode }) 
   const isDetail = Boolean(sopId);
   const base = "/sops";
   const reduceMotion = useReducedMotion();
-  const { closing, close } = useDetailDrawerClose(base, isDetail);
+  const { closing, close } = useDetailDrawerClose(base, isDetail, sopId ?? null);
 
   return (
     <div className="relative h-full overflow-hidden">

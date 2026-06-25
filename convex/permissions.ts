@@ -202,6 +202,7 @@ export async function visibleSop(ctx: Ctx, companyId: Id<"companies">, m: Doc<"c
   if (sop.companyId !== companyId) return false;
   if (m.role === "Admin") return true;
   const caps = precomputedCaps ?? await membershipCapabilities(ctx, m);
+  if (caps.has("sops:manage:company")) return true;
   if (!caps.has("sops:manage:branch") && !caps.has("sops:manage:department") && !caps.has("sops:manage:user")) return await visibleSopForSelf(ctx, companyId, m, sop);
   if (sop.scopeType === "company") return true;
   const v = visibility ?? await buildSopVisibilityContext(ctx, companyId, m, caps);

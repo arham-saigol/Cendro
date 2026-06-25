@@ -2,8 +2,8 @@ import { ConvexError, v } from "convex/values";
 import { action, internalMutation, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { membershipCapabilities, requireCapability } from "./permissions";
-import { capabilities, defaultRoleCapabilities, type Capability, type Role } from "../src/lib/permissions";
+import { membershipCapabilities, requireCapability, requireMembership } from "./permissions";
+import { capabilities, companyManagementCapabilities, defaultRoleCapabilities, type Capability, type Role } from "../src/lib/permissions";
 import { nonEmpty, normalizeEmail } from "./validation";
 
 const roleValidator = v.union(v.literal("Admin"), v.literal("Manager"), v.literal("Employee"));
@@ -99,29 +99,35 @@ async function clearUserManagementRows(ctx: any, membershipId: Id<"companyMember
 export const overview = query({
   args: { companyId: v.id("companies") },
   handler: async (ctx, args) => {
-    const { membership } = await requireCapability(ctx, args.companyId, "company:manage_permissions");
-    const company = await ctx.db.get(args.companyId);
-    if (!company || company.deletedAt) throw new ConvexError("Company not found.");
-    const branches = (await ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
-    const departments = (await ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
-    const ms = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
+    const { membership, company } = await requireMembership(ctx, args.companyId);
+    const caps = await membershipCapabilities(ctx, membership);
+    if (!companyManagementCapabilities.some((capability) => caps.has(capability))) throw new ConvexError("You do not have access to do that.");
+    if (company.deletedAt) throw new ConvexError("Company not found.");
+
+    const canReadStructure = caps.has("company:manage_branches") || caps.has("company:manage_departments") || caps.has("company:manage_users") || caps.has("company:invite_users") || caps.has("company:manage_permissions");
+    const canReadUsers = caps.has("company:manage_users") || caps.has("company:manage_permissions");
+    const canReadInvitations = caps.has("company:invite_users") || caps.has("company:manage_permissions");
+    const canReadPermissions = caps.has("company:manage_permissions");
+    const branches = canReadStructure ? (await ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt) : [];
+    const departments = canReadStructure ? (await ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt) : [];
+    const ms = canReadUsers ? await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500) : [];
     const users = [];
     for (const m of ms) {
       const user = await ctx.db.get(m.userId);
       const branchIds = (await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500)).map((a) => a.branchId);
       const departmentIds = (await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500)).map((a) => a.departmentId);
-      const scope = await managerScope(ctx, m._id);
-      const overrides = await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500);
-      if (user) users.push({ membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt }, user: { _id: user._id, name: fullName(user), firstName: firstName(user), secondName: user.secondName ?? "", email: user.email }, branchIds, departmentIds, scope, overrides: overrides.map((o) => ({ _id: o._id, capability: o.capability, effect: o.effect })) });
+      const scope = canReadPermissions ? await managerScope(ctx, m._id) : { branchIds: [], departmentIds: [], userMembershipIds: [] };
+      const overrides = canReadPermissions ? await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500) : [];
+      if (user) users.push({ membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt }, user: { _id: user._id, name: fullName(user), firstName: firstName(user), secondName: canReadPermissions ? user.secondName ?? "" : "", email: user.email }, branchIds, departmentIds, scope, overrides: overrides.map((o) => ({ _id: o._id, capability: o.capability, effect: o.effect })) });
     }
-    const invitations = await ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100);
+    const invitations = canReadInvitations ? await ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100) : [];
     return {
       company: { _id: company._id, name: company.name },
       currentMembership: { _id: membership._id, role: membership.role, active: membership.active, createdAt: membership.createdAt },
       branches: branches.map((b) => ({ _id: b._id, name: b.name, order: b.order })),
       departments: departments.map((d) => ({ _id: d._id, branchId: d.branchId, name: d.name, order: d.order })),
       users,
-      invitations: invitations.map((i) => ({ _id: i._id, email: i.email, role: i.role, status: i.status, createdAt: i.createdAt, expiresAt: i.expiresAt, branchIds: i.branchIds ?? [], departmentIds: i.departmentIds ?? [], managedBranchIds: i.managedBranchIds ?? [], managedDepartmentIds: i.managedDepartmentIds ?? [], managedUserMembershipIds: i.managedUserMembershipIds ?? [], permissionOverrides: i.permissionOverrides ?? [] })),
+      invitations: invitations.map((i) => ({ _id: i._id, email: i.email, role: i.role, status: i.status, createdAt: i.createdAt, expiresAt: i.expiresAt, branchIds: i.branchIds ?? [], departmentIds: i.departmentIds ?? [], managedBranchIds: canReadPermissions ? i.managedBranchIds ?? [] : [], managedDepartmentIds: canReadPermissions ? i.managedDepartmentIds ?? [] : [], managedUserMembershipIds: canReadPermissions ? i.managedUserMembershipIds ?? [] : [], permissionOverrides: canReadPermissions ? i.permissionOverrides ?? [] : [] })),
       capabilities,
     };
   },

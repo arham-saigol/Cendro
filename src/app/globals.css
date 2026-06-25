@@ -1422,10 +1422,14 @@ button:disabled { cursor: not-allowed; }
   cursor: grab;
   transition: opacity 0.12s ease;
 }
-.structure-row:hover .structure-grip { opacity: 1; }
+.structure-row:hover .structure-grip,
+.structure-row:focus-within .structure-grip,
+.structure-grip:focus-visible { opacity: 1; }
 .structure-grip:active { cursor: grabbing; }
 .structure-row .task-icon-btn { opacity: 0; transition: opacity 0.12s ease; }
-.structure-row:hover .task-icon-btn { opacity: 1; }
+.structure-row:hover .task-icon-btn,
+.structure-row:focus-within .task-icon-btn,
+.structure-row .task-icon-btn:focus-visible { opacity: 1; }
 .structure-chevron {
   display: inline-flex;
   align-items: center;

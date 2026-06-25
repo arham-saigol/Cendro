@@ -36,8 +36,14 @@ export const capabilities = [
 
 export type Capability = (typeof capabilities)[number];
 
+export const companyManagementCapabilities: Capability[] = ["company:manage_settings", "company:manage_branches", "company:manage_departments", "company:invite_users", "company:manage_users", "company:manage_permissions"];
+
 export function canViewDashboard(capabilities: readonly string[] | null | undefined) {
   return Boolean(capabilities?.some((capability) => capability === "analytics:view:self" || capability === "analytics:view:managed_scope" || capability === "analytics:view:company"));
+}
+
+export function canAccessCompanyManagement(capabilities: readonly string[] | null | undefined) {
+  return Boolean(capabilities?.some((capability) => companyManagementCapabilities.includes(capability as Capability)));
 }
 
 export const defaultRoleCapabilities: Record<Role, Capability[]> = {

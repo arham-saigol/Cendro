@@ -197,12 +197,12 @@ export const filterOptions = query({
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     const caps = await membershipCapabilities(ctx, membership);
-    const canFilterManaged = membership.role === "Admin" || caps.has("sops:manage:branch") || caps.has("sops:manage:department") || caps.has("sops:manage:user") || caps.has("analytics:view:managed_scope") || caps.has("analytics:view:company");
+    const canFilterManaged = membership.role === "Admin" || caps.has("sops:manage:company") || caps.has("sops:manage:branch") || caps.has("sops:manage:department") || caps.has("sops:manage:user") || caps.has("analytics:view:managed_scope") || caps.has("analytics:view:company");
     if (!canFilterManaged) return { branches: [], users: [] };
 
     const branchIds = new Set<Id<"branches">>();
     let userIds: Set<Id<"companyMemberships">>;
-    if (membership.role === "Admin" || caps.has("analytics:view:company")) {
+    if (membership.role === "Admin" || caps.has("sops:manage:company") || caps.has("analytics:view:company")) {
       const [branches, memberships] = await Promise.all([
         ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500),
         ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500),

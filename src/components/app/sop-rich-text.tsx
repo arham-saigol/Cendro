@@ -1,8 +1,7 @@
 "use client";
 
 import { Bold, Heading1, Italic } from "lucide-react";
-import { createPortal } from "react-dom";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
 import { cn } from "@/lib/utils";
 
 const toolbarWidth = 104;
@@ -137,8 +136,8 @@ function htmlToMarkdown(html: string) {
 }
 
 function selectionInside(editor: HTMLElement, selection: Selection | null) {
-  if (!selection?.anchorNode) return false;
-  return editor.contains(selection.anchorNode);
+  if (!selection?.anchorNode || !selection.focusNode) return false;
+  return editor.contains(selection.anchorNode) && editor.contains(selection.focusNode);
 }
 
 function closestElement(node: Node | null, editor: HTMLElement) {
@@ -245,8 +244,10 @@ export function SopRichTextEditor({
   onBlur?: () => void;
   onEscape?: () => void;
 }) {
+  const wrapRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
+  const selectionRangeRef = useRef<Range | null>(null);
   const lastEmittedRef = useRef(value);
   const [focused, setFocused] = useState(false);
   const [toolbar, setToolbar] = useState<ToolbarState>({ visible: false, left: 0, top: 0, bold: false, italic: false, h1: false });
@@ -268,22 +269,27 @@ export function SopRichTextEditor({
   }
 
   const updateToolbar = useCallback(() => {
+    const wrap = wrapRef.current;
     const editor = editorRef.current;
-    if (!editor || typeof window === "undefined") return;
+    if (!wrap || !editor || typeof window === "undefined") return;
     const selection = window.getSelection();
-    if (!focused || !selectionInside(editor, selection)) {
+    if (!focused || !selectionInside(editor, selection) || !selection?.rangeCount || selection.isCollapsed || selection.toString().trim() === "") {
+      selectionRangeRef.current = null;
       setToolbar((current) => ({ ...current, visible: false }));
       return;
     }
 
-    const range = selection!.rangeCount ? selection!.getRangeAt(0) : null;
-    const activeBlock = closestBlock(selection!.anchorNode, editor);
-    let rect = range?.getBoundingClientRect();
-    if (!rect || rect.width + rect.height === 0 || selection!.isCollapsed) rect = activeBlock.getBoundingClientRect();
+    const range = selection.getRangeAt(0);
+    const activeBlock = closestBlock(selection.anchorNode, editor);
+    let rect = range.getBoundingClientRect();
+    if (!rect || rect.width + rect.height === 0) rect = activeBlock.getBoundingClientRect();
     if (!rect || rect.width + rect.height === 0) rect = editor.getBoundingClientRect();
+    selectionRangeRef.current = range.cloneRange();
 
-    const left = Math.max(8, Math.min(window.innerWidth - toolbarWidth - 8, rect.left + rect.width / 2 - toolbarWidth / 2));
-    const top = Math.max(8, rect.top - 46);
+    const wrapRect = wrap.getBoundingClientRect();
+    const left = Math.max(0, Math.min(wrapRect.width - toolbarWidth, rect.left - wrapRect.left + rect.width / 2 - toolbarWidth / 2));
+    const preferredTop = rect.top - wrapRect.top - 46;
+    const top = preferredTop >= 0 ? preferredTop : rect.bottom - wrapRect.top + 8;
 
     setToolbar({
       visible: true,
@@ -312,6 +318,12 @@ export function SopRichTextEditor({
     const editor = editorRef.current;
     if (!editor) return;
     editor.focus();
+    const selection = window.getSelection();
+    const range = selectionRangeRef.current;
+    if (selection && range) {
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
     if (command === "bold") toggleInlineTag(editor, "strong");
     else if (command === "italic") toggleInlineTag(editor, "em");
     else setBlockTag(editor, value === "h1" ? "h1" : "p");
@@ -321,6 +333,13 @@ export function SopRichTextEditor({
 
   function toggleHeading() {
     runCommand("formatBlock", toolbar.h1 ? "p" : "h1");
+  }
+
+  function handleToolbarMouseDown(event: MouseEvent<HTMLButtonElement>, command: "bold" | "italic" | "heading") {
+    event.preventDefault();
+    event.stopPropagation();
+    if (command === "heading") toggleHeading();
+    else runCommand(command);
   }
 
   function handleFocus() {
@@ -351,17 +370,16 @@ export function SopRichTextEditor({
     }
   }
 
-  const toolbarNode = toolbar.visible && typeof document !== "undefined" ? createPortal(
+  const toolbarNode = toolbar.visible ? (
     <div ref={toolbarRef} className="sop-rich-toolbar" style={{ left: toolbar.left, top: toolbar.top }} onMouseDown={(event) => event.preventDefault()}>
-      <button type="button" className="sop-rich-toolbar-btn" data-active={toolbar.bold || undefined} aria-label="Bold" onClick={() => runCommand("bold")}><Bold className="h-3.5 w-3.5" /></button>
-      <button type="button" className="sop-rich-toolbar-btn" data-active={toolbar.italic || undefined} aria-label="Italic" onClick={() => runCommand("italic")}><Italic className="h-3.5 w-3.5" /></button>
-      <button type="button" className="sop-rich-toolbar-btn" data-active={toolbar.h1 || undefined} aria-label="Heading 1" onClick={toggleHeading}><Heading1 className="h-3.5 w-3.5" /></button>
-    </div>,
-    document.body,
+      <button type="button" className="sop-rich-toolbar-btn" data-active={toolbar.bold || undefined} aria-label="Bold" onMouseDown={(event) => handleToolbarMouseDown(event, "bold")}><Bold className="h-3.5 w-3.5" /></button>
+      <button type="button" className="sop-rich-toolbar-btn" data-active={toolbar.italic || undefined} aria-label="Italic" onMouseDown={(event) => handleToolbarMouseDown(event, "italic")}><Italic className="h-3.5 w-3.5" /></button>
+      <button type="button" className="sop-rich-toolbar-btn" data-active={toolbar.h1 || undefined} aria-label="Heading 1" onMouseDown={(event) => handleToolbarMouseDown(event, "heading")}><Heading1 className="h-3.5 w-3.5" /></button>
+    </div>
   ) : null;
 
   return (
-    <div className="sop-rich-editor-wrap">
+    <div ref={wrapRef} className="sop-rich-editor-wrap">
       <div
         ref={editorRef}
         role="textbox"

@@ -897,8 +897,9 @@ button:disabled { cursor: not-allowed; }
 .sop-rich-editor li,
 .sop-rich-content li { padding-left: 0.1rem; }
 .sop-rich-toolbar {
-  position: fixed;
+  position: absolute;
   z-index: 120;
+  pointer-events: auto;
   display: flex;
   align-items: center;
   gap: 1px;

@@ -366,7 +366,7 @@ function SopDialog({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(760px,92dvh)] w-[min(560px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]">
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(820px,94dvh)] w-[min(560px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]">
           <div className="flex shrink-0 items-center justify-between border-b border-[var(--hairline)] px-6 py-4">
             <Dialog.Title className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">{mode === "create" ? "New SOP" : "Edit SOP"}</Dialog.Title>
             <Dialog.Close asChild><button type="button" className="task-icon-btn" aria-label="Close"><X className="h-4 w-4" /></button></Dialog.Close>
@@ -436,7 +436,7 @@ function SopDialog({
                       value={content}
                       placeholder="Write the procedure steps..."
                       ariaLabel="SOP body"
-                      className="min-h-[132px] px-2 py-2 text-[13px] leading-6"
+                      className="min-h-[176px] px-2 py-2 text-[13px] leading-6"
                       onChange={(value) => { setContent(value); setError(null); }}
                     />
                   </div>

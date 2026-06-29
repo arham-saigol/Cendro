@@ -93,6 +93,8 @@ describe("production permission and validation fixes", () => {
     const updated = await t.withIdentity(identity("admin")).query(api.companyManagement.overview, { companyId });
     expect(updated.company.timeZone).toBe("UTC");
     expect(updated.company.hasTimeZone).toBe(true);
+    const auditEvents = await t.run(async (ctx) => await ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", companyId)).order("desc").take(1));
+    expect(auditEvents[0]).toMatchObject({ companyId, action: "company.time_zone_update", targetType: "company", targetId: companyId });
     await expect(t.withIdentity(identity("admin")).mutation(api.companyManagement.updateCompanyTimeZone, { companyId, timeZone: "Not/AZone" })).rejects.toThrow("valid time zone");
   });
 

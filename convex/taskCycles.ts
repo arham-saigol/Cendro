@@ -139,7 +139,7 @@ export function previousJdCycle(recurrence: JdRecurrence, now = Date.now(), time
   return { start, end: current.start };
 }
 
-export function elapsedJdCyclesSince(recurrence: JdRecurrence, activeAt: number, now = Date.now(), maxCycles = 200, timeZone?: string | null): JdCycle[] {
+export function elapsedJdCyclesSince(recurrence: JdRecurrence, activeAt: number, now = Date.now(), maxCycles = 200, timeZone?: string | null): { cycles: JdCycle[]; nextActiveAt: number } {
   const current = currentJdCycle(recurrence, now, timeZone);
   let start = currentJdCycle(recurrence, activeAt, timeZone).start;
   const cycles: JdCycle[] = [];
@@ -148,5 +148,5 @@ export function elapsedJdCyclesSince(recurrence: JdRecurrence, activeAt: number,
     if (end <= now) cycles.push({ start, end });
     start = end;
   }
-  return cycles;
+  return { cycles, nextActiveAt: start };
 }

@@ -94,12 +94,13 @@ async function currentJdCycleRecord(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart:
 }
 
 async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string) {
-  const cycles = elapsedJdCyclesSince(task.recurrence, task.cycleStartedAt ?? task.createdAt, now, 200, timeZone ?? await companyTimeZone(ctx, task.companyId));
+  const { cycles, nextActiveAt } = elapsedJdCyclesSince(task.recurrence, task.cycleStartedAt, now, 200, timeZone ?? await companyTimeZone(ctx, task.companyId));
   for (const cycle of cycles) {
     const done = await currentJdCompletion(ctx, task._id, cycle.start);
     const recorded = await currentJdCycleRecord(ctx, task._id, cycle.start);
     if (!done && !recorded) await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.end, status: "missed", recordedAt: now });
   }
+  if (cycles.length > 0) await ctx.db.patch(task._id, { cycleStartedAt: nextActiveAt });
 }
 
 async function jdState(ctx: Ctx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string) {
@@ -215,7 +216,8 @@ export const updateJd = mutation({
     const now = Date.now();
     const timeZone = await companyTimeZone(ctx, args.companyId);
     await recordMissedJdCycles(ctx, task, now, timeZone);
-    await ctx.db.patch(args.taskId, { title: nonEmpty(args.title, "Task title"), description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, assigneeMembershipIds: args.assigneeMembershipIds, ...(args.recurrence !== task.recurrence ? { status: "due" as const, statusCycleStart: currentJdCycle(args.recurrence, now, timeZone).start } : {}), updatedAt: now });
+    const nextCycleStart = currentJdCycle(args.recurrence, now, timeZone).start;
+    await ctx.db.patch(args.taskId, { title: nonEmpty(args.title, "Task title"), description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, assigneeMembershipIds: args.assigneeMembershipIds, ...(args.recurrence !== task.recurrence ? { cycleStartedAt: nextCycleStart, status: "due" as const, statusCycleStart: nextCycleStart } : {}), updatedAt: now });
     return null;
   },
 });
@@ -263,13 +265,14 @@ export const updateJdFields = mutation({
     const now = Date.now();
     const timeZone = await companyTimeZone(ctx, args.companyId);
     await recordMissedJdCycles(ctx, task, now, timeZone);
+    const nextCycleStart = args.recurrence !== undefined ? currentJdCycle(args.recurrence, now, timeZone).start : undefined;
     await ctx.db.patch(args.taskId, {
       ...(args.title !== undefined ? { title: nonEmpty(args.title, "Task title") } : {}),
       ...(args.description !== undefined ? { description: cleanOptionalText(args.description) } : {}),
       ...(args.time !== undefined ? { time: cleanOptionalText(args.time) } : {}),
       ...(args.quantity !== undefined ? { quantity: args.quantity === null ? undefined : cleanOptionalQuantity(args.quantity) } : {}),
       ...(args.recurrence !== undefined ? { recurrence: args.recurrence } : {}),
-      ...(args.recurrence !== undefined && args.recurrence !== task.recurrence ? { status: "due" as const, statusCycleStart: currentJdCycle(args.recurrence, now, timeZone).start } : {}),
+      ...(args.recurrence !== undefined && args.recurrence !== task.recurrence ? { cycleStartedAt: nextCycleStart, status: "due" as const, statusCycleStart: nextCycleStart } : {}),
       ...(args.assigneeMembershipIds !== undefined ? { assigneeMembershipIds: args.assigneeMembershipIds } : {}),
       updatedAt: now,
     });

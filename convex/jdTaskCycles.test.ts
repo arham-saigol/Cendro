@@ -2,7 +2,7 @@
 
 import { convexTest } from "convex-test";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import schema from "./schema";
 import { currentJdCycle } from "./taskCycles";
 
@@ -50,6 +50,22 @@ describe("JD task cycle behavior", () => {
     expect(detail.task.state.currentCycleEnd).toBe(utc(2026, 6, 29));
   });
 
+  test("daily JD task uses the company time zone across local midnight", async () => {
+    vi.setSystemTime(utc(2026, 6, 26, 3, 30));
+    const { t, companyId, adminMembershipId } = await seedCompany("America/New_York");
+
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Daily check", description: "", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    const beforeMidnight = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
+
+    expect(beforeMidnight.task.state.currentCycleStart).toBe(utc(2026, 6, 25, 4));
+    expect(beforeMidnight.task.state.currentCycleEnd).toBe(utc(2026, 6, 26, 4));
+
+    vi.setSystemTime(utc(2026, 6, 26, 4));
+    const afterMidnight = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
+
+    expect(afterMidnight.task.state.currentCycleStart).toBe(utc(2026, 6, 26, 4));
+  });
+
   test("weekly JD task rolls into the next Monday cycle and resets to not started", async () => {
     vi.setSystemTime(utc(2026, 6, 25, 12));
     const { t, companyId, adminMembershipId } = await seedCompany();
@@ -93,6 +109,28 @@ describe("JD task cycle behavior", () => {
     expect(detail.task.state.isOverdue).toBe(false);
     expect(rows.find((row) => row._id === taskId)?.state.rawStatus).toBe("due");
     expect(records).toMatchObject([{ cycleStart: utc(2026, 6, 22), cycleEnd: utc(2026, 6, 29), status: "missed" }]);
+  });
+
+  test("recordMissedJdCyclesBatch records overdue cycles without changing task status", async () => {
+    vi.setSystemTime(utc(2026, 1, 1, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Daily check", description: "", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    await t.withIdentity(identity("admin")).mutation(api.tasks.updateJdStatus, { companyId, taskId, status: "in_progress" });
+
+    vi.setSystemTime(utc(2026, 7, 22, 12));
+    const before = await t.run(async (ctx) => await ctx.db.get(taskId));
+    await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
+    await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
+    const after = await t.run(async (ctx) => await ctx.db.get(taskId));
+    const records = await t.run(async (ctx) => await ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).take(250));
+
+    expect(records).toHaveLength(202);
+    expect(records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ cycleStart: utc(2026, 1, 1), cycleEnd: utc(2026, 1, 2), status: "missed" }),
+      expect.objectContaining({ cycleStart: utc(2026, 7, 21), cycleEnd: utc(2026, 7, 22), status: "missed" }),
+    ]));
+    expect(after?.status).toBe(before?.status);
+    expect(after?.statusCycleStart).toBe(before?.statusCycleStart);
   });
 
   test("completed previous JD cycle starts the new current cycle as not started", async () => {

@@ -1839,6 +1839,7 @@ export default function Company() {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [permissionsMembershipId, setPermissionsMembershipId] = useState<Id<"companyMemberships"> | undefined>();
   const [error, setError] = useState<string | null>(null);
+  const autoTimeZoneAttempts = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (data) {
@@ -1857,8 +1858,14 @@ export default function Company() {
   useEffect(() => {
     if (!activeCompanyId || !data?.company || data.company.hasTimeZone || !active?.capabilities.includes("company:manage_settings")) return;
     const detected = browserTimeZone();
+    const attemptKey = `${activeCompanyId}:${detected}`;
+    if (autoTimeZoneAttempts.current.has(attemptKey)) return;
+    autoTimeZoneAttempts.current.add(attemptKey);
     setCompanyTimeZone(detected);
-    void updateCompanyTimeZone({ companyId: activeCompanyId, timeZone: detected });
+    void updateCompanyTimeZone({ companyId: activeCompanyId, timeZone: detected }).catch((err) => {
+      console.error("Could not auto-detect company time zone.", err);
+      setError(err instanceof Error ? err.message : "Could not auto-detect company time zone.");
+    });
   }, [active?.capabilities, activeCompanyId, data?.company, updateCompanyTimeZone]);
 
   if (!data) return <CompanySkeleton />;

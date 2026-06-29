@@ -33,7 +33,7 @@ async function seedDashboardCompany() {
     await ctx.db.insert("userBranchAssignments", { companyId, membershipId: hiddenMembershipId, branchId: branchBId });
     await ctx.db.insert("userDepartmentAssignments", { companyId, membershipId: hiddenMembershipId, departmentId: departmentBId });
     await ctx.db.insert("managerBranchScopes", { companyId, managerMembershipId, branchId: branchAId, updatedAt: now });
-    return { companyId, branchAId, branchBId, departmentAId, departmentBId, adminMembershipId, managerMembershipId, employeeMembershipId, hiddenMembershipId };
+    return { companyId, branchAId, branchBId, departmentAId, departmentBId, adminUserId, employeeUserId, adminMembershipId, managerMembershipId, employeeMembershipId, hiddenMembershipId };
   });
 
   await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, {
@@ -81,5 +81,44 @@ describe("dashboard analytics scoping", () => {
     expect(employee.comparisons.employees).toEqual([]);
     await expect(t.withIdentity(identity("employee")).query(api.analytics.dashboard, { companyId, membershipId: hiddenMembershipId })).rejects.toThrow("outside your analytics scope");
     await expect(t.withIdentity(identity("employee")).query(api.analytics.dashboard, { companyId, branchId: branchAId })).rejects.toThrow("not available");
+  });
+
+  test("dashboard person display fallbacks do not expose emails", async () => {
+    const { t, companyId, employeeUserId, employeeMembershipId } = await seedDashboardCompany();
+    await t.run(async (ctx) => {
+      await ctx.db.patch(employeeUserId, { firstName: "", secondName: "" });
+    });
+
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId });
+    const employee = dashboard.filterOptions.employees.find((row) => row._id === employeeMembershipId);
+    expect(employee).toMatchObject({ name: "Unknown", firstName: "Unknown" });
+    expect(JSON.stringify(dashboard)).not.toContain("employee@example.com");
+  });
+
+  test("recurring history inside the date window contributes even when the current task row is outside it", async () => {
+    const { t, companyId, adminMembershipId, employeeMembershipId } = await seedDashboardCompany();
+    const completedAt = Date.now() - 5 * 86_400_000;
+    await t.run(async (ctx) => {
+      const old = Date.now() - 60 * 86_400_000;
+      const taskId = await ctx.db.insert("jdTasks", {
+        companyId,
+        title: "Historical JD cycle",
+        description: "",
+        recurrence: "daily",
+        cycleStartedAt: old,
+        status: "due",
+        statusCycleStart: old,
+        assigneeMembershipIds: [employeeMembershipId],
+        createdByMembershipId: adminMembershipId,
+        createdAt: old,
+        updatedAt: old,
+      });
+      await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId: taskId, cycleStart: completedAt - 86_400_000, completedByMembershipId: employeeMembershipId, completedAt });
+    });
+
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, datePreset: "30d", taskType: "jd" });
+    expect(dashboard.jdCycleHealth.completedCycles).toBe(1);
+    expect(dashboard.recent.completions.map((event) => event.title)).toContain("Historical JD cycle");
+    expect(dashboard.trends.reduce((sum, point) => sum + point.completed, 0)).toBe(1);
   });
 });

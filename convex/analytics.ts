@@ -29,7 +29,6 @@ type Person = {
   role: Doc<"companyMemberships">["role"];
   name: string;
   firstName: string;
-  email: string;
   imageUrl: string | null;
 };
 
@@ -84,11 +83,11 @@ const priorityFilterValidator = v.union(v.literal("all"), v.literal("low"), v.li
 const frequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
 
 function firstName(user: Doc<"appUsers">) {
-  return user.firstName.trim() || user.email;
+  return user.firstName.trim() || "Unknown";
 }
 
 function fullName(user: Doc<"appUsers">) {
-  return [firstName(user), user.secondName?.trim()].filter(Boolean).join(" ") || user.email;
+  return [user.firstName.trim(), user.secondName?.trim()].filter(Boolean).join(" ") || "Unknown";
 }
 
 function safeRate(part: number, total: number) {
@@ -139,7 +138,6 @@ async function loadPeople(ctx: QueryCtx, membershipIds: Set<Id<"companyMembershi
       role: membership.role,
       name: fullName(user),
       firstName: firstName(user),
-      email: user.email,
       imageUrl: user.imageUrl ?? null,
     });
   }
@@ -236,8 +234,7 @@ function touchesDateWindow(task: DashboardTask, start: number, end: number) {
   return [task.createdAt, task.updatedAt, task.dueAt, task.overdueAt, task.completedAt].some((value) => typeof value === "number" && value >= start && value <= end);
 }
 
-function matchesDashboardFilters(task: DashboardTask, args: DashboardArgs, start: number, end: number) {
-  if (!touchesDateWindow(task, start, end)) return false;
+function matchesDashboardFilters(task: DashboardTask, args: DashboardArgs) {
   if (args.taskType && args.taskType !== "all" && task.kind !== args.taskType) return false;
   if (args.status && args.status !== "all" && task.status !== args.status) return false;
   if (args.priority && args.priority !== "all" && task.priority !== args.priority) return false;
@@ -503,7 +500,11 @@ export const dashboard = query({
     assertAllowedFilters(args, access.dashboardRole, access.scopedIds, allowedOrg.branchIds, allowedOrg.departmentIds, access.membership._id);
 
     const built = await buildTasks(ctx, args.companyId, access.scopedIds, assignments.byMembership, now, access.company.timeZone);
-    const filteredTasks = built.tasks.filter((task) => matchesDashboardFilters(task, args, range.start, range.end));
+    const taskIdsWithWindowHistory = new Set([
+      ...built.completionEvents.filter((event) => event.at >= range.start && event.at <= range.end).map((event) => event.taskId),
+      ...built.missedEvents.filter((event) => event.at >= range.start && event.at <= range.end).map((event) => event.taskId),
+    ]);
+    const filteredTasks = built.tasks.filter((task) => matchesDashboardFilters(task, args) && (touchesDateWindow(task, range.start, range.end) || taskIdsWithWindowHistory.has(task.id)));
     const filteredTaskIds = new Set(filteredTasks.map((task) => task.id));
     const completionEvents = built.completionEvents.filter((event) => filteredTaskIds.has(event.taskId) && event.at >= range.start && event.at <= range.end);
     const missedEvents = built.missedEvents.filter((event) => filteredTaskIds.has(event.taskId) && event.at >= range.start && event.at <= range.end);

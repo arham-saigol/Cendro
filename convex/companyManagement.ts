@@ -4,11 +4,22 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { membershipCapabilities, requireCapability, requireMembership } from "./permissions";
 import { capabilities, companyManagementCapabilities, defaultRoleCapabilities, type Capability, type Role } from "../src/lib/permissions";
+import { defaultTimeZone } from "./taskCycles";
 import { nonEmpty, normalizeEmail } from "./validation";
 
 const roleValidator = v.union(v.literal("Admin"), v.literal("Manager"), v.literal("Employee"));
 const invitationOverrideValidator = v.object({ capability: v.string(), effect: v.union(v.literal("allow"), v.literal("deny")) });
 const permissionDraftOverrideValidator = v.object({ capability: v.string(), effect: v.union(v.literal("allow"), v.literal("deny"), v.literal("inherit")) });
+
+function cleanTimeZone(value: string) {
+  const timeZone = nonEmpty(value, "Time zone");
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format(0);
+    return timeZone;
+  } catch {
+    throw new ConvexError("Select a valid time zone.");
+  }
+}
 
 async function assertBranch(ctx: any, companyId: Id<"companies">, branchId: Id<"branches">) {
   const branch = await ctx.db.get(branchId);
@@ -122,7 +133,7 @@ export const overview = query({
     }
     const invitations = canReadInvitations ? await ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100) : [];
     return {
-      company: { _id: company._id, name: company.name },
+      company: { _id: company._id, name: company.name, timeZone: company.timeZone ?? defaultTimeZone, hasTimeZone: Boolean(company.timeZone) },
       currentMembership: { _id: membership._id, role: membership.role, active: membership.active, createdAt: membership.createdAt },
       branches: branches.map((b) => ({ _id: b._id, name: b.name, order: b.order })),
       departments: departments.map((d) => ({ _id: d._id, branchId: d.branchId, name: d.name, order: d.order })),
@@ -142,6 +153,18 @@ export const updateCompanyName = mutation({
     const name = nonEmpty(args.name, "Company name");
     await ctx.db.patch(args.companyId, { name });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "company.update", targetType: "company", targetId: args.companyId, createdAt: Date.now() });
+  },
+});
+
+export const updateCompanyTimeZone = mutation({
+  args: { companyId: v.id("companies"), timeZone: v.string() },
+  handler: async (ctx, args) => {
+    const { user } = await requireCapability(ctx, args.companyId, "company:manage_settings");
+    const company = await ctx.db.get(args.companyId);
+    if (!company || company.deletedAt) throw new ConvexError("Company not found.");
+    const timeZone = cleanTimeZone(args.timeZone);
+    await ctx.db.patch(args.companyId, { timeZone });
+    await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "company.time_zone_update", targetType: "company", targetId: args.companyId, createdAt: Date.now() });
   },
 });
 

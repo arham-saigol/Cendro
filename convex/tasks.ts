@@ -1,36 +1,22 @@
 import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
-import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
+import { currentJdCycle, defaultTimeZone, elapsedJdCyclesSince } from "./taskCycles";
 import { assertCanAssign, assertCanUpdateTask, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
 
-type Rec = Doc<"jdTasks">["recurrence"];
 type ManualStatus = "due" | "in_progress" | "completed";
 type TaskKind = "jd" | "one_time";
 type Ctx = QueryCtx | MutationCtx;
 type TaskVisibilityAuth = { caps: Set<Capability>; getScopedMembershipIds: () => Promise<Set<Id<"companyMemberships">>> };
 
-const day = 86_400_000;
-const recurrenceValidator = v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
+const recurrenceValidator = v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
 const priorityValidator = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
 const statusValidator = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
-const jdFrequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"), v.literal("every_other_day"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
-
-function sod(ms: number) { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); }
-function addM(ms: number, m: number) { const d = new Date(ms); d.setMonth(d.getMonth() + m); return d.getTime(); }
-function next(s: number, r: Rec) {
-  switch (r) {
-    case "daily": return s + day;
-    case "every_other_day": return s + 2 * day;
-    case "monthly": return addM(s, 1);
-    case "semiannually": return addM(s, 6);
-    case "annually": return addM(s, 12);
-  }
-}
-function cycle(cycleStartedAt: number, r: Rec, now = Date.now()) { let start = sod(cycleStartedAt); let end = next(start, r); while (end <= now) { start = end; end = next(start, r); } return { start, end }; }
-function prevCycle(cycleStartedAt: number, r: Rec) { const c = cycle(cycleStartedAt, r); let prev = sod(cycleStartedAt); let end = next(prev, r); while (end < c.start) { prev = end; end = next(prev, r); } return c.start === sod(cycleStartedAt) ? null : { start: prev, end: c.start }; }
+const jdFrequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
 function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Not Started" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
 function cleanOptionalText(value?: string) { const text = value?.trim(); return text ? text : undefined; }
 function cleanOptionalQuantity(value?: number) { return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined; }
@@ -94,19 +80,35 @@ async function canUpdateTask(ctx: Ctx, companyId: Id<"companies">, membership: D
   return Boolean(caps.has(`${prefix}:update:self` as any) && targets.includes(membership._id));
 }
 
+async function companyTimeZone(ctx: Ctx, companyId: Id<"companies">) {
+  const company = await ctx.db.get(companyId);
+  return company?.timeZone ?? defaultTimeZone;
+}
+
 async function currentJdCompletion(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: number) {
   return await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).unique();
 }
 
-async function jdState(ctx: Ctx, task: Doc<"jdTasks">) {
-  const c = cycle(task.cycleStartedAt, task.recurrence);
-  const p = prevCycle(task.cycleStartedAt, task.recurrence);
+async function currentJdCycleRecord(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: number) {
+  return await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).unique();
+}
+
+async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string) {
+  const { cycles, nextActiveAt } = elapsedJdCyclesSince(task.recurrence, task.cycleStartedAt, now, 200, timeZone ?? await companyTimeZone(ctx, task.companyId));
+  for (const cycle of cycles) {
+    const done = await currentJdCompletion(ctx, task._id, cycle.start);
+    const recorded = await currentJdCycleRecord(ctx, task._id, cycle.start);
+    if (!done && !recorded) await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.end, status: "missed", recordedAt: now });
+  }
+  if (cycles.length > 0) await ctx.db.patch(task._id, { cycleStartedAt: nextActiveAt });
+}
+
+async function jdState(ctx: Ctx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string) {
+  const c = currentJdCycle(task.recurrence, now, timeZone ?? await companyTimeZone(ctx, task.companyId));
   const currentDone = await currentJdCompletion(ctx, task._id, c.start);
-  const prevDone = p ? await currentJdCompletion(ctx, task._id, p.start) : null;
   const last = (await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_completedAt", (q) => q.eq("jdTaskId", task._id)).order("desc").take(1))[0];
-  const isOverdue = Boolean(task.overdueAt) || Boolean(p && !prevDone);
-  const status: ManualStatus | "overdue" = isOverdue ? "overdue" : currentDone ? "completed" : task.statusCycleStart === c.start ? task.status : "due";
-  return { status: statusLabel(status), rawStatus: status, isOverdue, currentCycleStart: c.start, currentCycleEnd: c.end, dueAt: c.end, lastCompletedAt: last?.completedAt ?? null };
+  const status: ManualStatus = currentDone || (task.statusCycleStart === c.start && task.status === "completed") ? "completed" : task.statusCycleStart === c.start ? task.status : "due";
+  return { status: statusLabel(status), rawStatus: status, isOverdue: false, currentCycleStart: c.start, currentCycleEnd: c.end, dueAt: c.end, lastCompletedAt: last?.completedAt ?? null };
 }
 
 function oneState(task: Doc<"oneTimeTasks">) {
@@ -123,7 +125,7 @@ async function getVisibleTask(ctx: Ctx, companyId: Id<"companies">, membership: 
   return { normalized, task };
 }
 
-async function enrichedJd(ctx: Ctx, task: Doc<"jdTasks">) { return { ...task, state: await jdState(ctx, task), assignees: await enrich(ctx, task.assigneeMembershipIds) }; }
+async function enrichedJd(ctx: Ctx, task: Doc<"jdTasks">, timeZone?: string) { return { ...task, state: await jdState(ctx, task, Date.now(), timeZone), assignees: await enrich(ctx, task.assigneeMembershipIds) }; }
 async function enrichedOneTime(ctx: Ctx, task: Doc<"oneTimeTasks">) { return { ...task, state: oneState(task), assignees: await enrich(ctx, task.assigneeMembershipIds) }; }
 function matchesSearch(task: { title: string }, search?: string) {
   const needle = search?.trim().toLowerCase();
@@ -189,13 +191,13 @@ export const getJd = query({
 export const createJd = mutation({
   args: { companyId: v.id("companies"), title: v.string(), description: v.optional(v.string()), time: v.optional(v.string()), quantity: v.optional(v.number()), recurrence: recurrenceValidator, assigneeMembershipIds: v.array(v.id("companyMemberships")) },
   handler: async (ctx, args) => {
-    const { membership, user } = await requireCapability(ctx, args.companyId, "tasks:jd:create");
+    const { membership, user, company } = await requireCapability(ctx, args.companyId, "tasks:jd:create");
     const title = nonEmpty(args.title, "Task title");
     requireTaskAssignee(args.assigneeMembershipIds);
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
-    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: sod(now), assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now });
     return id;
   },
@@ -211,8 +213,11 @@ export const updateJd = mutation({
     requireTaskAssignee(args.assigneeMembershipIds);
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
     if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
-    const state = await jdState(ctx, task);
-    await ctx.db.patch(args.taskId, { title: nonEmpty(args.title, "Task title"), description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, assigneeMembershipIds: args.assigneeMembershipIds, overdueAt: state.isOverdue ? task.overdueAt ?? Date.now() : task.overdueAt, updatedAt: Date.now() });
+    const now = Date.now();
+    const timeZone = await companyTimeZone(ctx, args.companyId);
+    await recordMissedJdCycles(ctx, task, now, timeZone);
+    const nextCycleStart = currentJdCycle(args.recurrence, now, timeZone).start;
+    await ctx.db.patch(args.taskId, { title: nonEmpty(args.title, "Task title"), description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, assigneeMembershipIds: args.assigneeMembershipIds, ...(args.recurrence !== task.recurrence ? { cycleStartedAt: nextCycleStart, status: "due" as const, statusCycleStart: nextCycleStart } : {}), updatedAt: now });
     return null;
   },
 });
@@ -257,16 +262,19 @@ export const updateJdFields = mutation({
       await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
       await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     }
-    const state = await jdState(ctx, task);
+    const now = Date.now();
+    const timeZone = await companyTimeZone(ctx, args.companyId);
+    await recordMissedJdCycles(ctx, task, now, timeZone);
+    const nextCycleStart = args.recurrence !== undefined ? currentJdCycle(args.recurrence, now, timeZone).start : undefined;
     await ctx.db.patch(args.taskId, {
       ...(args.title !== undefined ? { title: nonEmpty(args.title, "Task title") } : {}),
       ...(args.description !== undefined ? { description: cleanOptionalText(args.description) } : {}),
       ...(args.time !== undefined ? { time: cleanOptionalText(args.time) } : {}),
       ...(args.quantity !== undefined ? { quantity: args.quantity === null ? undefined : cleanOptionalQuantity(args.quantity) } : {}),
       ...(args.recurrence !== undefined ? { recurrence: args.recurrence } : {}),
+      ...(args.recurrence !== undefined && args.recurrence !== task.recurrence ? { cycleStartedAt: nextCycleStart, status: "due" as const, statusCycleStart: nextCycleStart } : {}),
       ...(args.assigneeMembershipIds !== undefined ? { assigneeMembershipIds: args.assigneeMembershipIds } : {}),
-      overdueAt: state.isOverdue ? task.overdueAt ?? Date.now() : task.overdueAt,
-      updatedAt: Date.now(),
+      updatedAt: now,
     });
     return null;
   },
@@ -277,13 +285,11 @@ async function setJdStatus(ctx: MutationCtx, companyId: Id<"companies">, taskId:
   const task = await ctx.db.get(taskId);
   if (!task || task.companyId !== companyId) throw new ConvexError("Task not found.");
   await assertCanUpdateTask(ctx, companyId, membership, updateAuthTargets(task), "jd");
-  const state = await jdState(ctx, task);
-  if (state.isOverdue) {
-    if (!task.overdueAt) await ctx.db.patch(taskId, { overdueAt: Date.now(), updatedAt: Date.now() });
-    throw new ConvexError("Overdue tasks are locked and cannot be changed back.");
-  }
-  const existing = await currentJdCompletion(ctx, taskId, state.currentCycleStart);
   const now = Date.now();
+  const timeZone = await companyTimeZone(ctx, companyId);
+  await recordMissedJdCycles(ctx, task, now, timeZone);
+  const state = await jdState(ctx, task, now, timeZone);
+  const existing = await currentJdCompletion(ctx, taskId, state.currentCycleStart);
   if (status === "completed") {
     if (!existing) await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId: taskId, cycleStart: state.currentCycleStart, completedByMembershipId: membership._id, completedAt: now, note: cleanOptionalText(note) });
   } else if (existing) {
@@ -300,6 +306,26 @@ export const updateJdStatus = mutation({
 export const completeJd = mutation({
   args: { companyId: v.id("companies"), taskId: v.id("jdTasks"), note: v.optional(v.string()) },
   handler: async (ctx, args) => { await setJdStatus(ctx, args.companyId, args.taskId, "completed", args.note); return null; },
+});
+
+export const listJdCycleRecords = query({
+  args: { companyId: v.id("companies"), taskId: v.id("jdTasks") },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const task = await ctx.db.get(args.taskId);
+    if (!task || task.companyId !== args.companyId || !(await visible(ctx, args.companyId, membership, task, "jd"))) throw new ConvexError("Task not found.");
+    return await ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", args.taskId)).order("desc").take(100);
+  },
+});
+
+export const recordMissedJdCyclesBatch = internalMutation({
+  args: { cursor: v.optional(v.union(v.string(), v.null())) },
+  handler: async (ctx, args) => {
+    const page = await ctx.db.query("jdTasks").paginate({ numItems: 10, cursor: args.cursor ?? null });
+    for (const task of page.page) await recordMissedJdCycles(ctx, task);
+    if (!page.isDone) await ctx.scheduler.runAfter(0, internal.tasks.recordMissedJdCyclesBatch, { cursor: page.continueCursor });
+    return page.page.length;
+  },
 });
 
 export const listOneTime = query({
@@ -443,6 +469,8 @@ async function purgeJdTask(ctx: MutationCtx, companyId: Id<"companies">, taskId:
   await assertCanUpdateTask(ctx, companyId, membership, updateAuthTargets(task), "jd");
   const completions = await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect();
   for (const completion of completions) await ctx.db.delete(completion._id);
+  const cycleRecords = await ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect();
+  for (const cycleRecord of cycleRecords) await ctx.db.delete(cycleRecord._id);
   const comments = await ctx.db.query("taskComments").withIndex("by_task", (q) => q.eq("taskType", "jd").eq("taskId", taskId)).collect();
   for (const comment of comments) await ctx.db.delete(comment._id);
   const attachments = await ctx.db.query("taskAttachments").withIndex("by_task", (q) => q.eq("taskType", "jd").eq("taskId", taskId)).collect();
@@ -686,13 +714,13 @@ export const aiCreateOneTime = mutation({
 export const aiCreateJd = mutation({
   args: { companyId: v.id("companies"), title: v.string(), description: v.optional(v.string()), recurrence: recurrenceValidator, assigneeMembershipIds: v.array(v.id("companyMemberships")) },
   handler: async (ctx, args) => {
-    const { membership, user } = await requireCapability(ctx, args.companyId, "tasks:jd:create");
+    const { membership, user, company } = await requireCapability(ctx, args.companyId, "tasks:jd:create");
     const title = nonEmpty(args.title, "Task title");
     requireTaskAssignee(args.assigneeMembershipIds);
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
-    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: sod(now), assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now });
     const task = await ctx.db.get(id);
     if (!task) throw new ConvexError("Task not found.");

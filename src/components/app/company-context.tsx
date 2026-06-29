@@ -7,7 +7,7 @@ import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 
 export type CompanyAccess = {
-  company: { _id: Id<"companies">; name: string };
+  company: { _id: Id<"companies">; name: string; timeZone?: string };
   membership: { _id: Id<"companyMemberships">; role: string };
   capabilities: string[];
 };

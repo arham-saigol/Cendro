@@ -40,7 +40,7 @@ import { cn, formatDate, initials } from "@/lib/utils";
 
 type Kind = "jd" | "one";
 type Priority = "low" | "medium" | "high";
-type Frequency = "daily" | "every_other_day" | "monthly" | "semiannually" | "annually";
+type Frequency = "daily" | "every_other_day" | "weekly" | "monthly" | "semiannually" | "annually";
 type ManualStatus = "due" | "in_progress" | "completed";
 type StatusFilter = "all" | ManualStatus | "overdue";
 type TaskView = "all" | "my";
@@ -61,6 +61,7 @@ type TaskFormValues = {
 const frequencies: { value: Frequency; label: string }[] = [
   { value: "daily", label: "Daily" },
   { value: "every_other_day", label: "Alternate days" },
+  { value: "weekly", label: "Weekly" },
   { value: "monthly", label: "Monthly" },
   { value: "semiannually", label: "Bi-yearly" },
   { value: "annually", label: "Yearly" },

@@ -41,6 +41,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { browserTimeZone, DEFAULT_TIME_ZONE, timeZoneOptions } from "@/lib/time-zones";
 import { cn, formatDate, initials } from "@/lib/utils";
 import { canAccessCompanyManagement, capabilityGroups, capabilityLabels, defaultRoleCapabilities, roles, type Capability, type Role } from "@/lib/permissions";
 
@@ -73,7 +74,7 @@ type InvitationRow = {
   permissionOverrides?: Override[];
 };
 type Overview = {
-  company?: { _id: Id<"companies">; name: string };
+  company?: { _id: Id<"companies">; name: string; timeZone: string; hasTimeZone: boolean };
   currentMembership: MembershipCore;
   branches: BranchRow[];
   departments: DepartmentRow[];
@@ -395,19 +396,31 @@ function GeneralTab({
   data,
   companyName,
   setCompanyName,
+  timeZone,
+  setTimeZone,
+  savingTimeZone,
+  canManageSettings,
   nameDirty,
   savingName,
-  canManageSettings,
   onSaveName,
+  onSaveTimeZone,
 }: {
   data: Overview;
   companyName: string;
   setCompanyName: (value: string) => void;
+  timeZone: string;
+  setTimeZone: (value: string) => void;
+  savingTimeZone: boolean;
+  canManageSettings: boolean;
   nameDirty: boolean;
   savingName: boolean;
-  canManageSettings: boolean;
   onSaveName: () => Promise<void> | void;
+  onSaveTimeZone: (timeZone: string) => Promise<void> | void;
 }) {
+  const options = timeZoneOptions(timeZone);
+  const savedTimeZone = data.company?.timeZone ?? DEFAULT_TIME_ZONE;
+  const timeZoneDirty = timeZone !== savedTimeZone;
+
   return (
     <div className="company-tab-body">
       <section className="company-settings-section">
@@ -441,6 +454,20 @@ function GeneralTab({
                     {savingName ? "Saving..." : "Save"}
                   </button>
                 )}
+              </div>
+            </div>
+          </div>
+          <div className="company-settings-row">
+            <div className="min-w-0">
+              <div className="company-settings-label">Time zone</div>
+              <p className="company-settings-help">Used for JD task cycle boundaries. Browser detection falls back to GMT+5.</p>
+            </div>
+            <div className="company-settings-control">
+              <div className="company-name-field">
+                <SelectField value={timeZone} onChange={(value) => { setTimeZone(value); void onSaveTimeZone(value); }} disabled={!canManageSettings || savingTimeZone} className="min-w-[220px]">
+                  {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </SelectField>
+                {timeZoneDirty && canManageSettings && <span className="text-[12px] text-[var(--ink-muted)]">Saving…</span>}
               </div>
             </div>
           </div>
@@ -1732,6 +1759,22 @@ export default function Company() {
       });
     }
   });
+  const updateCompanyTimeZone = useMutation(api.companyManagement.updateCompanyTimeZone).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
+    if (current) {
+      localStore.setQuery(api.companyManagement.overview, { companyId: args.companyId }, {
+        ...current,
+        company: current.company ? { ...current.company, timeZone: args.timeZone, hasTimeZone: true } : current.company,
+      } as any);
+    }
+    const access = localStore.getQuery(api.companies.accessStatus, {}) as any;
+    if (access?.status === "ready") {
+      localStore.setQuery(api.companies.accessStatus, {}, {
+        ...access,
+        companies: access.companies.map((row: any) => row.company._id === args.companyId ? { ...row, company: { ...row.company, timeZone: args.timeZone } } : row),
+      });
+    }
+  });
   const createBranch = useMutation(api.companyManagement.createBranch);
   const createDepartment = useMutation(api.companyManagement.createDepartment);
   const deleteBranch = useMutation(api.companyManagement.deleteBranch);
@@ -1790,16 +1833,20 @@ export default function Company() {
 
   const [tab, setTab] = useState<TabValue>("general");
   const [companyName, setCompanyName] = useState("");
+  const [companyTimeZone, setCompanyTimeZone] = useState(DEFAULT_TIME_ZONE);
   const [savingName, setSavingName] = useState(false);
+  const [savingTimeZone, setSavingTimeZone] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [permissionsMembershipId, setPermissionsMembershipId] = useState<Id<"companyMemberships"> | undefined>();
   const [error, setError] = useState<string | null>(null);
+  const autoTimeZoneAttempts = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (data) {
       setCompanyName(data.company?.name ?? active?.company.name ?? "");
+      setCompanyTimeZone(data.company?.timeZone ?? active?.company.timeZone ?? DEFAULT_TIME_ZONE);
     }
-  }, [active?.company.name, data]);
+  }, [active?.company.name, active?.company.timeZone, data]);
 
   const permissionsUser = useMemo(() => data?.users.find((user) => user.membership._id === permissionsMembershipId), [data?.users, permissionsMembershipId]);
   const visibleTabs = useMemo(() => TABS.filter((item) => canViewCompanyTab(item.value, active?.capabilities)), [active?.capabilities]);
@@ -1807,6 +1854,19 @@ export default function Company() {
   useEffect(() => {
     if (visibleTabs.length > 0 && !visibleTabs.some((item) => item.value === tab)) setTab(visibleTabs[0].value);
   }, [tab, visibleTabs]);
+
+  useEffect(() => {
+    if (!activeCompanyId || !data?.company || data.company.hasTimeZone || !active?.capabilities.includes("company:manage_settings")) return;
+    const detected = browserTimeZone();
+    const attemptKey = `${activeCompanyId}:${detected}`;
+    if (autoTimeZoneAttempts.current.has(attemptKey)) return;
+    autoTimeZoneAttempts.current.add(attemptKey);
+    setCompanyTimeZone(detected);
+    void updateCompanyTimeZone({ companyId: activeCompanyId, timeZone: detected }).catch((err) => {
+      console.error("Could not auto-detect company time zone.", err);
+      setError(err instanceof Error ? err.message : "Could not auto-detect company time zone.");
+    });
+  }, [active?.capabilities, activeCompanyId, data?.company, updateCompanyTimeZone]);
 
   if (!data) return <CompanySkeleton />;
   if (!canAccessCompanyManagement(active?.capabilities) || visibleTabs.length === 0) return <EmptyState icon={Building2} title="No company management access" message="Ask an admin to grant access to a company management section." />;
@@ -1839,6 +1899,19 @@ export default function Company() {
       setError(err instanceof Error ? err.message : "Could not update the company name.");
     } finally {
       setSavingName(false);
+    }
+  }
+
+  async function saveCompanyTimeZone(timeZone: string) {
+    if (!activeCompanyId || timeZone === currentCompany?.timeZone) return;
+    setSavingTimeZone(true);
+    try {
+      await updateCompanyTimeZone({ companyId: activeCompanyId, timeZone });
+    } catch (err) {
+      setCompanyTimeZone(currentCompany?.timeZone ?? DEFAULT_TIME_ZONE);
+      setError(err instanceof Error ? err.message : "Could not update the time zone.");
+    } finally {
+      setSavingTimeZone(false);
     }
   }
 
@@ -1927,10 +2000,14 @@ export default function Company() {
                 data={data}
                 companyName={companyName}
                 setCompanyName={setCompanyName}
+                timeZone={companyTimeZone}
+                setTimeZone={setCompanyTimeZone}
+                savingTimeZone={savingTimeZone}
                 nameDirty={nameDirty}
                 savingName={savingName}
                 canManageSettings={canManageSettings}
                 onSaveName={saveCompanyName}
+                onSaveTimeZone={saveCompanyTimeZone}
               />
             )}
             {activeTab === "structure" && (

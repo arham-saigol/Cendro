@@ -366,13 +366,14 @@ function bucketLabel(ms: number) {
 }
 
 function buildTrend(tasks: DashboardTask[], completionEvents: CompletionEvent[], missedEvents: MissedEvent[], start: number, end: number) {
-  const bucketCount = 8;
   const span = Math.max(1, end - start);
+  const rangeDays = Math.max(1, Math.round(span / dayMs));
+  const bucketCount = Math.min(8, rangeDays);
   const bucketSize = Math.ceil(span / bucketCount);
   const buckets = Array.from({ length: bucketCount }, (_, index) => {
     const bucketStart = start + index * bucketSize;
     const bucketEnd = index === bucketCount - 1 ? end : Math.min(end, bucketStart + bucketSize - 1);
-    return { label: bucketLabel(bucketStart), start: bucketStart, end: bucketEnd, completed: 0, overdue: 0, workload: 0 };
+    return { bucketStart, label: bucketLabel(bucketStart), start: bucketStart, end: bucketEnd, completed: 0, overdue: 0, workload: 0 };
   });
   const add = (at: number, key: "completed" | "overdue" | "workload") => {
     if (at < start || at > end) return;
@@ -385,7 +386,7 @@ function buildTrend(tasks: DashboardTask[], completionEvents: CompletionEvent[],
     add(task.createdAt, "workload");
     if (task.kind === "one_time" && task.overdueAt) add(task.overdueAt, "overdue");
   }
-  return buckets.map((bucket) => ({ label: bucket.label, completed: bucket.completed, overdue: bucket.overdue, workload: bucket.workload }));
+  return buckets.map((bucket) => ({ bucketStart: bucket.bucketStart, label: bucket.label, completed: bucket.completed, overdue: bucket.overdue, workload: bucket.workload }));
 }
 
 function buildPersonPerformance(tasks: DashboardTask[], people: Map<Id<"companyMemberships">, Person>, allowedIds: Set<Id<"companyMemberships">>) {

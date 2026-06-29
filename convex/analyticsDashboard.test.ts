@@ -83,6 +83,15 @@ describe("dashboard analytics scoping", () => {
     await expect(t.withIdentity(identity("employee")).query(api.analytics.dashboard, { companyId, branchId: branchAId })).rejects.toThrow("not available");
   });
 
+  test("7-day trends use daily buckets with stable unique identifiers", async () => {
+    const { t, companyId } = await seedDashboardCompany();
+
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, datePreset: "7d" });
+    expect(dashboard.trends).toHaveLength(7);
+    expect(new Set(dashboard.trends.map((point) => point.bucketStart)).size).toBe(dashboard.trends.length);
+    expect(new Set(dashboard.trends.map((point) => point.label)).size).toBe(dashboard.trends.length);
+  });
+
   test("dashboard person display fallbacks do not expose emails", async () => {
     const { t, companyId, employeeUserId, employeeMembershipId } = await seedDashboardCompany();
     await t.run(async (ctx) => {

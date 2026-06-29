@@ -23,6 +23,7 @@ import {
   Trophy,
   Users,
 } from "lucide-react";
+import { motion, useReducedMotion } from "motion/react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
@@ -43,7 +44,8 @@ type PriorityFilter = "all" | "low" | "medium" | "high";
 type FrequencyFilter = "all" | "daily" | "every_other_day" | "weekly" | "monthly" | "semiannually" | "annually";
 
 type BreakdownItem = { key: string; label: string; value: number };
-type TrendPoint = { label: string; completed: number; overdue: number; workload: number };
+type TrendMetric = "completed" | "overdue" | "workload";
+type TrendPoint = { bucketStart: number; label: string; completed: number; overdue: number; workload: number };
 type PerformanceRow = {
   id: string;
   name: string;
@@ -168,11 +170,169 @@ function openTaskCount(data: DashboardData) {
 }
 
 function cssColorFor(key: string) {
-  if (key === "completed") return "var(--badge-green-fg)";
+  if (key === "completed" || key === "low") return "var(--badge-green-fg)";
   if (key === "overdue" || key === "high") return "var(--danger)";
   if (key === "in_progress" || key === "one_time" || key === "jd" || key === "medium") return "var(--primary)";
   return "color-mix(in srgb, var(--ink-faint) 70%, transparent)";
 }
+
+function toneClass(tone: "neutral" | "accent" | "success" | "danger") {
+  if (tone === "success") return "text-[var(--badge-green-fg)]";
+  if (tone === "danger") return "text-[var(--danger)]";
+  if (tone === "accent") return "text-[var(--primary)]";
+  return "text-[var(--ink)]";
+}
+
+function toneForRate(rate: number) {
+  return rate >= 80 ? "success" : rate >= 50 ? "neutral" : "danger";
+}
+
+// ------------------------------------------------------------------
+// Layout primitives
+// ------------------------------------------------------------------
+
+function DashboardCard({
+  children,
+  className,
+  hover = false,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  hover?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-2xl border border-[var(--hairline)] bg-[var(--surface)]",
+        hover && "transition-colors duration-200 hover:border-[var(--hairline-strong)]",
+        className,
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Section({
+  title,
+  description,
+  actions,
+  children,
+  className,
+}: {
+  title: string;
+  description?: string;
+  actions?: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <section className={cn("mt-8", className)}>
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">{title}</h2>
+          {description && <p className="mt-1 text-[13px] text-[var(--ink-muted)]">{description}</p>}
+        </div>
+        {actions}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function PanelHeader({
+  title,
+  description,
+  icon,
+  actions,
+}: {
+  title: string;
+  description?: string;
+  icon?: React.ReactNode;
+  actions?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3 px-5 pb-3 pt-4">
+      <div className="flex items-start gap-2.5">
+        {icon && <span className="mt-0.5 text-[var(--ink-faint)]">{icon}</span>}
+        <div className="min-w-0">
+          <h3 className="text-[13px] font-semibold text-[var(--ink)]">{title}</h3>
+          {description && <p className="mt-0.5 truncate text-[12px] text-[var(--ink-faint)]">{description}</p>}
+        </div>
+      </div>
+      {actions}
+    </div>
+  );
+}
+
+function MetricCard({
+  icon,
+  label,
+  value,
+  helper,
+  tone = "neutral",
+}: {
+  icon?: React.ReactNode;
+  label: string;
+  value: React.ReactNode;
+  helper?: React.ReactNode;
+  tone?: "neutral" | "accent" | "success" | "danger";
+}) {
+  return (
+    <DashboardCard hover className="p-5">
+      <div className="flex items-start justify-between gap-3">
+        <span className="text-[12px] font-medium text-[var(--ink-muted)]">{label}</span>
+        {icon && (
+          <span className="grid h-7 w-7 place-items-center rounded-lg bg-[var(--surface-muted)] text-[var(--ink-faint)]">
+            {icon}
+          </span>
+        )}
+      </div>
+      <div className={cn("mt-3 text-[32px] font-semibold leading-none tracking-[-0.04em] tabular-nums", toneClass(tone))}>
+        {value}
+      </div>
+      {helper && <div className="mt-2 text-[12px] text-[var(--ink-faint)]">{helper}</div>}
+    </DashboardCard>
+  );
+}
+
+function MiniMetric({
+  label,
+  value,
+  helper,
+  tone = "neutral",
+}: {
+  label: string;
+  value: React.ReactNode;
+  helper?: React.ReactNode;
+  tone?: "neutral" | "accent" | "success" | "danger";
+}) {
+  return (
+    <div className="rounded-xl border border-[var(--hairline)] bg-[var(--surface-muted)]/40 p-4">
+      <div className="text-[12px] font-medium text-[var(--ink-muted)]">{label}</div>
+      <div className={cn("mt-2 text-[22px] font-semibold leading-none tracking-[-0.03em] tabular-nums", toneClass(tone))}>
+        {value}
+      </div>
+      {helper && <div className="mt-1.5 text-[11px] text-[var(--ink-faint)]">{helper}</div>}
+    </div>
+  );
+}
+
+function EmptyPanel({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="flex min-h-[180px] flex-col items-center justify-center px-5 py-10 text-center">
+      <span className="grid h-10 w-10 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]">
+        <Inbox className="h-4 w-4" />
+      </span>
+      <div className="mt-3 text-[13px] font-medium text-[var(--ink)]">{title}</div>
+      <p className="mt-1 max-w-[280px] text-[12px] leading-snug text-[var(--ink-faint)]">{description}</p>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------
+// Filters
+// ------------------------------------------------------------------
 
 function DashboardSelect<T extends string>({
   label,
@@ -191,12 +351,20 @@ function DashboardSelect<T extends string>({
 }) {
   return (
     <Select value={value} onValueChange={(next) => onChange(next as T)} disabled={disabled}>
-      <SelectTrigger aria-label={label} className={cn("h-8 rounded-md border-[var(--hairline)] bg-[var(--surface)] text-[13px] shadow-none", className)}>
+      <SelectTrigger
+        aria-label={label}
+        className={cn(
+          "h-9 rounded-lg border-[var(--hairline)] bg-[var(--surface)] text-[13px] shadow-none transition-colors hover:border-[var(--hairline-strong)]",
+          className,
+        )}
+      >
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
         {options.map((option) => (
-          <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+          <SelectItem key={option.value} value={option.value}>
+            {option.label}
+          </SelectItem>
         ))}
       </SelectContent>
     </Select>
@@ -223,7 +391,11 @@ function DashFilterSubmenu<T extends string>({
       <DropdownMenu.Portal>
         <DropdownMenu.SubContent sideOffset={7} alignOffset={-5} className="task-menu min-w-52">
           {options.map((option) => (
-            <DropdownMenu.Item key={option.value} onSelect={() => onChange(option.value)} className="task-menu-item">
+            <DropdownMenu.Item
+              key={option.value}
+              onSelect={() => onChange(option.value)}
+              className="task-menu-item"
+            >
               <span className="min-w-0 flex-1 truncate">{option.label}</span>
               {value === option.value && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
             </DropdownMenu.Item>
@@ -258,7 +430,12 @@ function DashFilterMenu({
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
-        <button type="button" className="task-toolbar-icon" data-active={activeCount > 0} aria-label="More dashboard filters">
+        <button
+          type="button"
+          className="task-toolbar-icon"
+          data-active={activeCount > 0}
+          aria-label="More dashboard filters"
+        >
           <SlidersHorizontal className="h-4 w-4" />
           {activeCount > 0 && <span className="task-toolbar-badge">{activeCount}</span>}
         </button>
@@ -315,32 +492,71 @@ function FilterBar({
   onReset: () => void;
 }) {
   const showScopeFilters = data?.role === "Admin" || data?.role === "Manager";
-  const branchOptions = useMemo(() => [{ value: "all", label: "All branches" }, ...(data?.filterOptions.branches ?? []).map((branch) => ({ value: branch._id, label: branch.name }))], [data]);
+  const branchOptions = useMemo(
+    () => [{ value: "all", label: "All branches" }, ...(data?.filterOptions.branches ?? []).map((b) => ({ value: b._id, label: b.name }))],
+    [data],
+  );
   const departmentOptions = useMemo(() => {
-    const departments = (data?.filterOptions.departments ?? []).filter((department) => branchId === "all" || department.branchId === branchId);
-    return [{ value: "all", label: "All departments" }, ...departments.map((department) => ({ value: department._id, label: department.name }))];
+    const departments = (data?.filterOptions.departments ?? []).filter((d) => branchId === "all" || d.branchId === branchId);
+    return [{ value: "all", label: "All departments" }, ...departments.map((d) => ({ value: d._id, label: d.name }))];
   }, [branchId, data]);
   const employeeOptions = useMemo(() => {
-    const employees = (data?.filterOptions.employees ?? []).filter((employee) => {
-      if (branchId !== "all" && !employee.branchIds.includes(branchId)) return false;
-      if (departmentId !== "all" && !employee.departmentIds.includes(departmentId)) return false;
+    const employees = (data?.filterOptions.employees ?? []).filter((e) => {
+      if (branchId !== "all" && !e.branchIds.includes(branchId)) return false;
+      if (departmentId !== "all" && !e.departmentIds.includes(departmentId)) return false;
       return true;
     });
-    return [{ value: "all", label: "All people" }, ...employees.map((employee) => ({ value: employee._id, label: employee.name }))];
+    return [{ value: "all", label: "All people" }, ...employees.map((e) => ({ value: e._id, label: e.name }))];
   }, [branchId, data, departmentId]);
 
   const secondaryActive = [taskType !== "all", status !== "all", priority !== "all", frequency !== "all"].filter(Boolean).length;
-  const activeFilterCount = [datePreset !== "30d", taskType !== "all", status !== "all", priority !== "all", frequency !== "all", branchId !== "all", departmentId !== "all", membershipId !== "all"].filter(Boolean).length;
+  const activeFilterCount = [
+    datePreset !== "30d",
+    taskType !== "all",
+    status !== "all",
+    priority !== "all",
+    frequency !== "all",
+    branchId !== "all",
+    departmentId !== "all",
+    membershipId !== "all",
+  ].filter(Boolean).length;
 
   return (
-    <div className="mb-6 rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-2">
+    <DashboardCard className="mb-6 p-3">
       <div className="flex flex-wrap items-center gap-2">
-        <DashboardSelect label="Date range" value={datePreset} options={dateOptions} onChange={onDatePreset} className="w-[124px]" />
+        <DashboardSelect label="Date range" value={datePreset} options={dateOptions} onChange={onDatePreset} className="w-[120px]" />
         {showScopeFilters && (
           <>
-            <DashboardSelect label="Branch" value={branchId} options={branchOptions} onChange={(value) => { onBranch(value); onDepartment("all"); onMembership("all"); }} className="w-[160px]" />
-            <DashboardSelect label="Department" value={departmentId} options={departmentOptions} onChange={(value) => { onDepartment(value); onMembership("all"); }} className="w-[176px]" disabled={departmentOptions.length <= 1} />
-            <DashboardSelect label="People" value={membershipId} options={employeeOptions} onChange={onMembership} className="w-[176px]" disabled={employeeOptions.length <= 1} />
+            <DashboardSelect
+              label="Branch"
+              value={branchId}
+              options={branchOptions}
+              onChange={(value) => {
+                onBranch(value);
+                onDepartment("all");
+                onMembership("all");
+              }}
+              className="w-[150px]"
+            />
+            <DashboardSelect
+              label="Department"
+              value={departmentId}
+              options={departmentOptions}
+              onChange={(value) => {
+                onDepartment(value);
+                onMembership("all");
+              }}
+              className="w-[170px]"
+              disabled={departmentOptions.length <= 1}
+            />
+            <DashboardSelect
+              label="People"
+              value={membershipId}
+              options={employeeOptions}
+              onChange={onMembership}
+              className="w-[170px]"
+              disabled={employeeOptions.length <= 1}
+            />
           </>
         )}
         <div className="ml-auto flex items-center gap-2">
@@ -355,117 +571,43 @@ function FilterBar({
             onFrequency={onFrequency}
             activeCount={secondaryActive}
           />
-          <Button variant="ghost" className="h-8 text-[13px]" onClick={onReset} disabled={activeFilterCount === 0}>
+          <Button variant="ghost" className="h-9 text-[13px]" onClick={onReset} disabled={activeFilterCount === 0}>
             <RotateCcw className="h-3.5 w-3.5" />
             Reset
-            {activeFilterCount > 0 && <span className="ml-1 rounded bg-[var(--surface-muted)] px-1 py-0.5 text-[11px] font-medium tabular-nums text-[var(--ink-faint)]">{activeFilterCount}</span>}
+            {activeFilterCount > 0 && (
+              <span className="ml-1.5 rounded-md bg-[var(--surface-muted)] px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-[var(--ink-faint)]">
+                {activeFilterCount}
+              </span>
+            )}
           </Button>
         </div>
       </div>
-    </div>
+    </DashboardCard>
   );
 }
 
-function EmptyPanel({ title, description }: { title: string; description: string }) {
-  return (
-    <div className="flex min-h-[190px] flex-col items-center justify-center px-5 py-10 text-center">
-      <span className="grid h-10 w-10 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-4 w-4" /></span>
-      <div className="mt-3 text-[13px] font-medium text-[var(--ink)]">{title}</div>
-      <p className="mt-1 max-w-[300px] text-[12px] leading-snug text-[var(--ink-faint)]">{description}</p>
-    </div>
-  );
-}
-
-function Panel({
-  title,
-  description,
-  icon,
-  actions,
-  children,
-  className,
-}: {
-  title: string;
-  description?: string;
-  icon?: React.ReactNode;
-  actions?: React.ReactNode;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <Card className={cn("overflow-hidden rounded-lg border-[var(--hairline)] bg-[var(--surface)] shadow-none", className)}>
-      <div className="flex min-h-[52px] items-center justify-between gap-3 border-b border-[var(--hairline)] px-4 py-3">
-        <div className="min-w-0">
-          <h2 className="inline-flex min-w-0 items-center gap-2 text-[13px] font-semibold text-[var(--ink)]">
-            {icon && <span className="text-[var(--ink-faint)]">{icon}</span>}
-            <span className="truncate">{title}</span>
-          </h2>
-          {description && <p className="mt-0.5 truncate text-[12px] text-[var(--ink-faint)]">{description}</p>}
-        </div>
-        {actions}
-      </div>
-      {children}
-    </Card>
-  );
-}
-
-function SectionBlock({ title, children, className }: { title: string; children: React.ReactNode; className?: string }) {
-  return (
-    <section className={cn("mt-7", className)}>
-      <div className="mb-2 flex items-center gap-2">
-        <div className="h-px flex-1 bg-[var(--hairline)]" />
-        <h2 className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--ink-faint)]">{title}</h2>
-        <div className="h-px flex-1 bg-[var(--hairline)]" />
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function StatCard({
-  icon,
-  label,
-  value,
-  helper,
-  tone = "neutral",
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: React.ReactNode;
-  helper?: React.ReactNode;
-  tone?: "neutral" | "accent" | "success" | "danger";
-}) {
-  const toneClass = tone === "success" ? "text-[var(--badge-green-fg)]" : tone === "danger" ? "text-[var(--danger)]" : tone === "accent" ? "text-[var(--primary)]" : "text-[var(--ink)]";
-  return (
-    <div className="group min-w-0 rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-4 transition-colors duration-150 hover:bg-[var(--canvas-soft)]">
-      <div className="flex items-center justify-between gap-3 text-[var(--ink-faint)]">
-        <span className="inline-flex min-w-0 items-center gap-1.5 text-[12px] font-medium">
-          <span className="shrink-0">{icon}</span>
-          <span className="truncate">{label}</span>
-        </span>
-      </div>
-      <div className={cn("mt-3 text-[28px] font-semibold leading-none tracking-[-0.035em] tabular-nums", toneClass)}>{value}</div>
-      {helper && <div className="mt-2 min-h-[16px] truncate text-[12px] text-[var(--ink-faint)]">{helper}</div>}
-    </div>
-  );
-}
-
-function OverviewGrid({ children, compact = false }: { children: React.ReactNode; compact?: boolean }) {
-  return <div className={cn("grid gap-3", compact ? "sm:grid-cols-2 lg:grid-cols-3" : "sm:grid-cols-2 xl:grid-cols-4")}>{children}</div>;
-}
+// ------------------------------------------------------------------
+// Charts & breakdowns
+// ------------------------------------------------------------------
 
 function SegmentBar({ items }: { items: BreakdownItem[] }) {
   const total = items.reduce((sum, item) => sum + item.value, 0);
   if (total === 0) return <div className="h-2 rounded-full bg-[var(--surface-muted)]" />;
   return (
     <div className="flex h-2 overflow-hidden rounded-full bg-[var(--surface-muted)]" aria-hidden="true">
-      {items.filter((item) => item.value > 0).map((item) => (
-        <span key={item.key} style={{ width: `${Math.max(4, (item.value / total) * 100)}%`, background: cssColorFor(item.key) }} />
-      ))}
+      {items
+        .filter((item) => item.value > 0)
+        .map((item) => (
+          <span
+            key={item.key}
+            style={{ width: `${Math.max(4, (item.value / total) * 100)}%`, background: cssColorFor(item.key) }}
+          />
+        ))}
     </div>
   );
 }
 
-function BreakdownPanel({
+function BreakdownCard({
   title,
   description,
   items,
@@ -478,69 +620,119 @@ function BreakdownPanel({
 }) {
   const total = items.reduce((sum, item) => sum + item.value, 0);
   return (
-    <Panel title={title} description={description} icon={icon}>
-      <div className="p-4">
+    <DashboardCard>
+      <PanelHeader title={title} description={description} icon={icon} />
+      <div className="px-5 pb-5">
         <SegmentBar items={items} />
         <div className="mt-4 space-y-1">
           {items.map((item) => (
-            <div key={item.key} className="flex items-center gap-2.5 rounded-md px-1.5 py-1.5 text-[13px] transition-colors hover:bg-[var(--canvas-soft)]">
+            <div
+              key={item.key}
+              className="flex items-center gap-3 rounded-lg px-2 py-1.5 text-[13px] transition-colors hover:bg-[var(--surface-muted)]"
+            >
               <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: cssColorFor(item.key) }} />
               <span className="min-w-0 flex-1 truncate text-[var(--ink-secondary)]">{item.label}</span>
               <span className="font-medium tabular-nums text-[var(--ink)]">{formatNumber(item.value)}</span>
-              <span className="w-9 text-right text-[12px] tabular-nums text-[var(--ink-faint)]">{total ? formatPercent(safePercent(item.value, total)) : "0%"}</span>
+              <span className="w-9 text-right text-[12px] tabular-nums text-[var(--ink-faint)]">
+                {total ? formatPercent(safePercent(item.value, total)) : "0%"}
+              </span>
             </div>
           ))}
         </div>
       </div>
-    </Panel>
+    </DashboardCard>
   );
 }
 
 function TrendChart({ data }: { data: TrendPoint[] }) {
   const width = 720;
   const height = 260;
-  const padding = { top: 18, right: 18, bottom: 34, left: 36 };
+  const padding = { top: 18, right: 18, bottom: 34, left: 40 };
   const max = Math.max(1, ...data.flatMap((point) => [point.completed, point.overdue, point.workload]));
   const baselineY = height - padding.bottom;
   const x = (index: number) => padding.left + (index / Math.max(1, data.length - 1)) * (width - padding.left - padding.right);
   const y = (value: number) => padding.top + (1 - value / max) * (height - padding.top - padding.bottom);
-  const line = (key: keyof TrendPoint) => data.map((point, index) => `${x(index)},${y(Number(point[key]))}`).join(" ");
+  const line = (key: TrendMetric) => data.map((point, index) => `${x(index)},${y(point[key])}`).join(" ");
   const isEmpty = data.every((point) => point.completed === 0 && point.overdue === 0 && point.workload === 0);
-  if (isEmpty) return <EmptyPanel title="No trend data yet" description="Completions, overdue work, and new workload will appear as matching tasks change." />;
 
-  const completedArea = data.length > 0
-    ? `M ${x(0)},${baselineY} ` + data.map((point, index) => `L ${x(index)},${y(point.completed)}`).join(" ") + ` L ${x(data.length - 1)},${baselineY} Z`
-    : "";
+  if (isEmpty) {
+    return <EmptyPanel title="No trend data yet" description="Completions, overdue work, and new workload will appear as matching tasks change." />;
+  }
+
+  const completedArea =
+    data.length > 0
+      ? `M ${x(0)},${baselineY} ` + data.map((point, index) => `L ${x(index)},${y(point.completed)}`).join(" ") + ` L ${x(data.length - 1)},${baselineY} Z`
+      : "";
   const labelSkip = data.length > 12 ? Math.ceil(data.length / 12) : 1;
 
   return (
-    <div className="px-4 pb-4 pt-3">
-      <svg viewBox={`0 0 ${width} ${height}`} className="h-[260px] w-full" role="img" aria-label="Task completion, overdue, and workload trend chart">
+    <div className="px-5 pb-5 pt-2">
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-[240px] w-full" role="img" aria-label="Task completion, overdue, and workload trend chart">
+        <defs>
+          <linearGradient id="completedGradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--badge-green-fg)" stopOpacity="0.22" />
+            <stop offset="100%" stopColor="var(--badge-green-fg)" stopOpacity="0" />
+          </linearGradient>
+        </defs>
         {[0, 0.5, 1].map((tick) => (
           <g key={tick}>
-            <line x1={padding.left} x2={width - padding.right} y1={y(max * tick)} y2={y(max * tick)} stroke="var(--hairline)" strokeWidth={tick === 0 ? 1.5 : 1} />
-            <text x={padding.left - 8} y={y(max * tick) + 3} textAnchor="end" fill="var(--ink-faint)" fontSize="10">{formatNumber(Math.round(max * tick))}</text>
+            <line
+              x1={padding.left}
+              x2={width - padding.right}
+              y1={y(max * tick)}
+              y2={y(max * tick)}
+              stroke="var(--hairline)"
+              strokeWidth={tick === 0 ? 1.5 : 1}
+            />
+            <text x={padding.left - 10} y={y(max * tick) + 3} textAnchor="end" fill="var(--ink-faint)" fontSize="10">
+              {formatNumber(Math.round(max * tick))}
+            </text>
           </g>
         ))}
-        {completedArea && <path d={completedArea} fill="var(--badge-green-fg)" opacity="0.08" />}
-        <polyline points={line("workload")} fill="none" stroke="var(--primary)" strokeWidth="1.7" strokeOpacity="0.78" strokeLinecap="round" strokeLinejoin="round" />
+        {completedArea && <path d={completedArea} fill="url(#completedGradient)" />}
+        <polyline
+          points={line("workload")}
+          fill="none"
+          stroke="var(--primary)"
+          strokeWidth="1.7"
+          strokeOpacity="0.78"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
         <polyline points={line("overdue")} fill="none" stroke="var(--danger)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         <polyline points={line("completed")} fill="none" stroke="var(--badge-green-fg)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
         {data.map((point, index) => (
-          <g key={point.label}>
-            <circle cx={x(index)} cy={y(point.overdue)} r="2.5" fill="var(--danger)"><title>{`${point.label} · ${point.overdue} overdue`}</title></circle>
-            <circle cx={x(index)} cy={y(point.workload)} r="2.2" fill="var(--primary)"><title>{`${point.label} · ${point.workload} new workload`}</title></circle>
-            <circle cx={x(index)} cy={y(point.completed)} r="3" fill="var(--badge-green-fg)"><title>{`${point.label} · ${point.completed} completed`}</title></circle>
+          <g key={`trend-point-${point.bucketStart}`}>
+            <circle cx={x(index)} cy={y(point.overdue)} r="2.5" fill="var(--danger)">
+              <title>{`${point.label} · ${point.overdue} overdue`}</title>
+            </circle>
+            <circle cx={x(index)} cy={y(point.workload)} r="2.2" fill="var(--primary)">
+              <title>{`${point.label} · ${point.workload} new workload`}</title>
+            </circle>
+            <circle cx={x(index)} cy={y(point.completed)} r="3" fill="var(--badge-green-fg)">
+              <title>{`${point.label} · ${point.completed} completed`}</title>
+            </circle>
           </g>
         ))}
-        {data.map((point, index) => (
-          index % labelSkip === 0 ? <text key={point.label} x={x(index)} y={height - 11} textAnchor="middle" fill="var(--ink-faint)" fontSize="10">{point.label}</text> : null
-        ))}
+        {data.map(
+          (point, index) =>
+            index % labelSkip === 0 && (
+              <text key={`trend-label-${point.bucketStart}`} x={x(index)} y={height - 11} textAnchor="middle" fill="var(--ink-faint)" fontSize="10">
+                {point.label}
+              </text>
+            ),
+        )}
       </svg>
-      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-[var(--ink-muted)]">
-        <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[var(--badge-green-fg)]" />Completed</span>
-        <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[var(--danger)]" />Overdue</span>
-        <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[var(--primary)]" />New workload</span>
+      <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-[12px] text-[var(--ink-muted)]">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full bg-[var(--badge-green-fg)]" />Completed
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full bg-[var(--danger)]" />Overdue
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full bg-[var(--primary)]" />New workload
+        </span>
       </div>
     </div>
   );
@@ -550,12 +742,19 @@ function BarMeter({ value, max, tone = "accent" }: { value: number; max: number;
   const background = tone === "success" ? "var(--badge-green-fg)" : tone === "danger" ? "var(--danger)" : "var(--primary)";
   return (
     <span className="block h-1.5 overflow-hidden rounded-full bg-[var(--surface-muted)]">
-      <span className="block h-full rounded-full transition-[width] duration-200 ease-out" style={{ width: `${max > 0 ? Math.max(3, (value / max) * 100) : 0}%`, background }} />
+      <span
+        className="block h-full rounded-full transition-[width] duration-500 ease-out"
+        style={{ width: `${max > 0 ? Math.max(3, (value / max) * 100) : 0}%`, background }}
+      />
     </span>
   );
 }
 
-function PerformanceList({
+// ------------------------------------------------------------------
+// Performance
+// ------------------------------------------------------------------
+
+function PerformanceTable({
   rows,
   emptyTitle,
   emptyDescription,
@@ -570,21 +769,26 @@ function PerformanceList({
 }) {
   const maxAssigned = Math.max(1, ...rows.map((row) => row.assigned));
   if (!rows.length) return <EmptyPanel title={emptyTitle} description={emptyDescription} />;
+
   return (
     <div>
-      <div className="grid grid-cols-[minmax(0,1fr)_72px_54px] gap-3 border-b border-[var(--hairline)] px-4 py-2 text-[10.5px] font-medium uppercase tracking-[0.04em] text-[var(--ink-faint)]">
+      <div className="grid grid-cols-[minmax(0,1fr)_72px_54px] gap-3 border-b border-[var(--hairline)] px-5 py-2.5 text-[10.5px] font-semibold uppercase tracking-[0.04em] text-[var(--ink-faint)]">
         <span>Name</span>
         <span className="text-right">Done</span>
         <span className="text-right">Late</span>
       </div>
-      <div className="divide-y divide-[var(--hairline)]">
+      <div>
         {rows.map((row) => {
           const content = (
             <>
               <div className="min-w-0">
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="truncate text-[13px] font-medium text-[var(--ink)]">{row.name}</span>
-                  {row.role && <Badge className="shrink-0" tone="neutral">{row.role}</Badge>}
+                  {row.role && (
+                    <Badge className="shrink-0" tone="neutral">
+                      {row.role}
+                    </Badge>
+                  )}
                 </div>
                 <div className="mt-2 grid max-w-[340px] grid-cols-[1fr_auto] items-center gap-2">
                   <BarMeter value={row.assigned} max={maxAssigned} />
@@ -595,15 +799,31 @@ function PerformanceList({
                 <div className="text-[13px] font-semibold tabular-nums text-[var(--ink)]">{formatPercent(row.completionRate)}</div>
                 <div className="mt-0.5 text-[11.5px] tabular-nums text-[var(--ink-faint)]">{formatNumber(row.completed)} done</div>
               </div>
-              <div className={cn("text-right text-[13px] font-medium tabular-nums", row.overdue > 0 ? "text-[var(--danger)]" : "text-[var(--ink-muted)]")}>{formatNumber(row.overdue)}</div>
+              <div
+                className={cn(
+                  "text-right text-[13px] font-medium tabular-nums",
+                  row.overdue > 0 ? "text-[var(--danger)]" : "text-[var(--ink-muted)]",
+                )}
+              >
+                {formatNumber(row.overdue)}
+              </div>
             </>
           );
           return onSelect ? (
-            <button key={row.id} type="button" className="grid w-full grid-cols-[minmax(0,1fr)_72px_54px] items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--canvas-soft)] focus-visible:bg-[var(--canvas-soft)] focus-visible:outline-none" onClick={() => onSelect(row)} aria-label={`${selectLabel ?? "Filter by"} ${row.name}`}>
+            <button
+              key={row.id}
+              type="button"
+              className="grid w-full grid-cols-[minmax(0,1fr)_72px_54px] items-center gap-3 border-b border-[var(--hairline)] px-5 py-3 text-left transition-colors last:border-b-0 hover:bg-[var(--surface-muted)] focus-visible:bg-[var(--surface-muted)] focus-visible:outline-none"
+              onClick={() => onSelect(row)}
+              aria-label={`${selectLabel ?? "Filter by"} ${row.name}`}
+            >
               {content}
             </button>
           ) : (
-            <div key={row.id} className="grid grid-cols-[minmax(0,1fr)_72px_54px] items-center gap-3 px-4 py-3">
+            <div
+              key={row.id}
+              className="grid grid-cols-[minmax(0,1fr)_72px_54px] items-center gap-3 border-b border-[var(--hairline)] px-5 py-3 last:border-b-0"
+            >
               {content}
             </div>
           );
@@ -613,51 +833,79 @@ function PerformanceList({
   );
 }
 
+// ------------------------------------------------------------------
+// Feature panels
+// ------------------------------------------------------------------
+
 function AttentionPanel({ data }: { data: DashboardData }) {
   const items = [
-    { label: "Overdue tasks", value: data.metrics.overdueTasks, helper: "Past due or missed", tone: data.metrics.overdueTasks > 0 ? "danger" as const : "neutral" as const },
-    { label: "Due soon", value: data.metrics.dueSoonTasks, helper: "Due within 48h", tone: "accent" as const },
-    { label: "Missed JD cycles", value: data.jdCycleHealth.missedCycles, helper: `${formatNumber(data.jdCycleHealth.completedCycles)} completed cycles`, tone: data.jdCycleHealth.missedCycles > 0 ? "danger" as const : "neutral" as const },
-    { label: "Late completions", value: data.metrics.lateCompletions, helper: `${formatPercent(data.metrics.lateCompletionRate)} late rate`, tone: data.metrics.lateCompletions > 0 ? "danger" as const : "neutral" as const },
+    {
+      label: "Overdue tasks",
+      value: data.metrics.overdueTasks,
+      helper: "Past due or missed",
+      tone: data.metrics.overdueTasks > 0 ? ("danger" as const) : ("neutral" as const),
+    },
+    {
+      label: "Due soon",
+      value: data.metrics.dueSoonTasks,
+      helper: "Due within 48h",
+      tone: "accent" as const,
+    },
+    {
+      label: "Missed JD cycles",
+      value: data.jdCycleHealth.missedCycles,
+      helper: `${formatNumber(data.jdCycleHealth.completedCycles)} completed cycles`,
+      tone: data.jdCycleHealth.missedCycles > 0 ? ("danger" as const) : ("neutral" as const),
+    },
+    {
+      label: "Late completions",
+      value: data.metrics.lateCompletions,
+      helper: `${formatPercent(data.metrics.lateCompletionRate)} late rate`,
+      tone: data.metrics.lateCompletions > 0 ? ("danger" as const) : ("neutral" as const),
+    },
   ];
   const clean = data.metrics.overdueTasks === 0 && data.jdCycleHealth.missedCycles === 0 && data.metrics.lateCompletions === 0;
+
   return (
-    <Panel
-      title="Attention queue"
-      description={clean ? "No overdue or late work in this filtered view." : "Work that should be reviewed before the broader trend."}
-      icon={<AlertTriangle className="h-4 w-4" />}
-      className={cn(clean ? "border-[var(--hairline)]" : "border-[var(--danger-border)]")}
-    >
-      <div className="grid gap-px bg-[var(--hairline)] md:grid-cols-4">
+    <DashboardCard>
+      <PanelHeader
+        title="Attention queue"
+        description={clean ? "No overdue or late work in this filtered view." : "Work that should be reviewed before the broader trend."}
+        icon={<AlertTriangle className="h-4 w-4" />}
+      />
+      <div className="grid gap-3 px-5 pb-5 sm:grid-cols-2 md:grid-cols-4">
         {items.map((item) => (
-          <div key={item.label} className="bg-[var(--surface)] p-4">
-            <div className="text-[12px] font-medium text-[var(--ink-muted)]">{item.label}</div>
-            <div className={cn("mt-2 text-[26px] font-semibold leading-none tracking-[-0.03em] tabular-nums", item.tone === "danger" ? "text-[var(--danger)]" : item.tone === "accent" ? "text-[var(--primary)]" : "text-[var(--ink)]")}>{formatNumber(item.value)}</div>
-            <div className="mt-2 truncate text-[12px] text-[var(--ink-faint)]">{item.helper}</div>
-          </div>
+          <MiniMetric key={item.label} label={item.label} value={formatNumber(item.value)} helper={item.helper} tone={item.tone} />
         ))}
       </div>
       {data.role !== "Employee" && (
-        <div className="border-t border-[var(--hairline)] px-4 py-3">
+        <div className="border-t border-[var(--hairline)] px-5 py-4">
           <div className="mb-2 flex items-center justify-between gap-3">
-            <span className="text-[12px] font-medium text-[var(--ink-muted)]">People needing review</span>
+            <span className="text-[12px] font-semibold uppercase tracking-[0.04em] text-[var(--ink-muted)]">People needing review</span>
             <span className="text-[12px] tabular-nums text-[var(--ink-faint)]">{formatNumber(data.comparisons.needsAttention.length)} listed</span>
           </div>
           {data.comparisons.needsAttention.length === 0 ? (
-            <p className="text-[13px] text-[var(--ink-faint)]">No scoped employee has overdue work or a low completion rate in this view.</p>
+            <p className="py-1 text-[13px] text-[var(--ink-faint)]">
+              No scoped employee has overdue work or a low completion rate in this view.
+            </p>
           ) : (
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="space-y-1">
               {data.comparisons.needsAttention.slice(0, 6).map((person) => (
-                <div key={person.id} className="rounded-md border border-[var(--hairline)] px-3 py-2">
-                  <div className="truncate text-[13px] font-medium text-[var(--ink)]">{person.name}</div>
-                  <div className="mt-1 text-[12px] tabular-nums text-[var(--ink-faint)]">{formatPercent(person.completionRate)} done · {formatNumber(person.overdue)} overdue</div>
+                <div
+                  key={person.id}
+                  className="flex items-center justify-between gap-3 rounded-lg px-2 py-1.5 text-[13px] transition-colors hover:bg-[var(--surface-muted)]"
+                >
+                  <span className="min-w-0 truncate font-medium text-[var(--ink)]">{person.name}</span>
+                  <span className="shrink-0 text-[12px] tabular-nums text-[var(--ink-faint)]">
+                    {formatPercent(person.completionRate)} done · {formatNumber(person.overdue)} overdue
+                  </span>
                 </div>
               ))}
             </div>
           )}
         </div>
       )}
-    </Panel>
+    </DashboardCard>
   );
 }
 
@@ -669,167 +917,285 @@ function WorkloadPanel({ data }: { data: DashboardData }) {
     { label: "Not started", value: data.metrics.notStartedTasks, total: open },
     { label: "Completed", value: data.metrics.completedTasks, total: data.metrics.totalTasks, tone: "success" as const },
   ];
+
   return (
-    <Panel title="Workload composition" description="Current task load by state and type." icon={<ListChecks className="h-4 w-4" />}>
-      <div className="p-4">
+    <DashboardCard className="h-full">
+      <PanelHeader title="Workload composition" description="Current task load by state and type." icon={<ListChecks className="h-4 w-4" />} />
+      <div className="px-5 pb-5">
         <div className="mb-5 grid grid-cols-2 gap-3">
-          <div className="rounded-md border border-[var(--hairline)] p-3">
-            <div className="text-[12px] text-[var(--ink-faint)]">One-time</div>
-            <div className="mt-2 text-[22px] font-semibold tabular-nums text-[var(--ink)]">{formatNumber(data.metrics.oneTimeTasks)}</div>
-          </div>
-          <div className="rounded-md border border-[var(--hairline)] p-3">
-            <div className="text-[12px] text-[var(--ink-faint)]">Recurring</div>
-            <div className="mt-2 text-[22px] font-semibold tabular-nums text-[var(--ink)]">{formatNumber(data.metrics.recurringTasks)}</div>
-          </div>
+          <MiniMetric label="One-time" value={formatNumber(data.metrics.oneTimeTasks)} />
+          <MiniMetric label="Recurring" value={formatNumber(data.metrics.recurringTasks)} />
         </div>
-        <div className="space-y-3">
+        <div className="space-y-4">
           {rows.map((row) => (
             <div key={row.label}>
               <div className="mb-1.5 flex items-center justify-between gap-3 text-[12px]">
                 <span className="text-[var(--ink-muted)]">{row.label}</span>
-                <span className="tabular-nums text-[var(--ink)]">{formatNumber(row.value)} <span className="text-[var(--ink-faint)]">/ {formatNumber(row.total)}</span></span>
+                <span className="tabular-nums text-[var(--ink)]">
+                  {formatNumber(row.value)} <span className="text-[var(--ink-faint)]">/ {formatNumber(row.total)}</span>
+                </span>
               </div>
               <BarMeter value={row.value} max={Math.max(1, row.total)} tone={row.tone ?? "accent"} />
             </div>
           ))}
         </div>
       </div>
-    </Panel>
+    </DashboardCard>
   );
 }
 
 function OperatingHealthPanel({ data }: { data: DashboardData }) {
   return (
-    <Panel title="Operating health" description="Cycle reliability and completion timing." icon={<Timer className="h-4 w-4" />}>
-      <div className="grid gap-px bg-[var(--hairline)] sm:grid-cols-3">
-        <div className="bg-[var(--surface)] p-4">
-          <div className="text-[12px] text-[var(--ink-faint)]">JD cycle health</div>
-          <div className={cn("mt-2 text-[24px] font-semibold tabular-nums", data.jdCycleHealth.missedCycles > 0 ? "text-[var(--danger)]" : "text-[var(--ink)]")}>{formatPercent(data.jdCycleHealth.healthyRate)}</div>
-          <div className="mt-2 text-[12px] text-[var(--ink-faint)]">{formatNumber(data.jdCycleHealth.completedCycles)} done · {formatNumber(data.jdCycleHealth.missedCycles)} missed</div>
-        </div>
-        <div className="bg-[var(--surface)] p-4">
-          <div className="text-[12px] text-[var(--ink-faint)]">Avg completion time</div>
-          <div className="mt-2 text-[24px] font-semibold tabular-nums text-[var(--ink)]">{formatDuration(data.metrics.averageCompletionMs)}</div>
-          <div className="mt-2 text-[12px] text-[var(--ink-faint)]">Completed tasks with timestamps</div>
-        </div>
-        <div className="bg-[var(--surface)] p-4">
-          <div className="text-[12px] text-[var(--ink-faint)]">Late completion rate</div>
-          <div className={cn("mt-2 text-[24px] font-semibold tabular-nums", data.metrics.lateCompletionRate > 0 ? "text-[var(--danger)]" : "text-[var(--ink)]")}>{formatPercent(data.metrics.lateCompletionRate)}</div>
-          <div className="mt-2 text-[12px] text-[var(--ink-faint)]">{formatNumber(data.metrics.lateCompletions)} late one-time completions</div>
-        </div>
+    <DashboardCard className="h-full">
+      <PanelHeader title="Operating health" description="Cycle reliability and completion timing." icon={<Timer className="h-4 w-4" />} />
+      <div className="grid gap-3 px-5 pb-5 sm:grid-cols-3">
+        <MiniMetric
+          label="JD cycle health"
+          value={formatPercent(data.jdCycleHealth.healthyRate)}
+          helper={`${formatNumber(data.jdCycleHealth.completedCycles)} done · ${formatNumber(data.jdCycleHealth.missedCycles)} missed`}
+          tone={data.jdCycleHealth.missedCycles > 0 ? "danger" : "neutral"}
+        />
+        <MiniMetric label="Avg completion time" value={formatDuration(data.metrics.averageCompletionMs)} helper="Completed tasks with timestamps" />
+        <MiniMetric
+          label="Late completion rate"
+          value={formatPercent(data.metrics.lateCompletionRate)}
+          helper={`${formatNumber(data.metrics.lateCompletions)} late one-time completions`}
+          tone={data.metrics.lateCompletionRate > 0 ? "danger" : "neutral"}
+        />
       </div>
-    </Panel>
+    </DashboardCard>
   );
 }
 
-function AdminDashboard({ data, onBranch, onDepartment, onEmployee }: { data: DashboardData; onBranch: (id: string) => void; onDepartment: (id: string, branchId: string | null) => void; onEmployee: (id: string) => void }) {
+// ------------------------------------------------------------------
+// Role dashboards
+// ------------------------------------------------------------------
+
+function AdminDashboard({
+  data,
+  onBranch,
+  onDepartment,
+  onEmployee,
+}: {
+  data: DashboardData;
+  onBranch: (id: string) => void;
+  onDepartment: (id: string, branchId: string | null) => void;
+  onEmployee: (id: string) => void;
+}) {
   const open = openTaskCount(data);
   return (
     <>
-      <OverviewGrid>
-        <StatCard icon={<Users className="h-3.5 w-3.5" />} label="People in scope" value={formatNumber(data.scope.people)} helper={`${formatNumber(data.scope.branches)} branches · ${formatNumber(data.scope.departments)} departments`} />
-        <StatCard icon={<ListChecks className="h-3.5 w-3.5" />} label="Total tasks" value={formatNumber(data.metrics.totalTasks)} helper={`${formatNumber(open)} open · ${formatNumber(data.metrics.completedTasks)} complete`} />
-        <StatCard icon={<CheckCircle2 className="h-3.5 w-3.5" />} label="Completion rate" value={formatPercent(data.metrics.completionRate)} helper={`${formatNumber(data.metrics.completedTasks)} completed in range`} tone={data.metrics.completionRate >= 80 ? "success" : "neutral"} />
-        <StatCard icon={<AlertTriangle className="h-3.5 w-3.5" />} label="Overdue" value={formatNumber(data.metrics.overdueTasks)} helper={`${formatNumber(data.metrics.dueSoonTasks)} due soon`} tone={data.metrics.overdueTasks > 0 ? "danger" : "neutral"} />
-        <StatCard icon={<Clock className="h-3.5 w-3.5" />} label="Avg completion" value={formatDuration(data.metrics.averageCompletionMs)} helper="Based on completed tasks" />
-        <StatCard icon={<Timer className="h-3.5 w-3.5" />} label="JD cycle health" value={formatPercent(data.jdCycleHealth.healthyRate)} helper={`${formatNumber(data.jdCycleHealth.missedCycles)} missed cycles`} tone={data.jdCycleHealth.missedCycles > 0 ? "danger" : "neutral"} />
-        <StatCard icon={<FileText className="h-3.5 w-3.5" />} label="Visible SOPs" value={formatNumber(data.sopStats.visible)} helper="Procedures visible in scope" />
-        <StatCard icon={<Target className="h-3.5 w-3.5" />} label="Late completions" value={formatNumber(data.metrics.lateCompletions)} helper={`${formatPercent(data.metrics.lateCompletionRate)} late rate`} tone={data.metrics.lateCompletions > 0 ? "danger" : "neutral"} />
-      </OverviewGrid>
+      <Section title="Overview" description="High-level operating numbers for the selected scope.">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <MetricCard
+            icon={<Users className="h-3.5 w-3.5" />}
+            label="People in scope"
+            value={formatNumber(data.scope.people)}
+            helper={`${formatNumber(data.scope.branches)} branches · ${formatNumber(data.scope.departments)} departments`}
+          />
+          <MetricCard
+            icon={<ListChecks className="h-3.5 w-3.5" />}
+            label="Total tasks"
+            value={formatNumber(data.metrics.totalTasks)}
+            helper={`${formatNumber(open)} open · ${formatNumber(data.metrics.completedTasks)} complete`}
+          />
+          <MetricCard
+            icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+            label="Completion rate"
+            value={formatPercent(data.metrics.completionRate)}
+            helper={`${formatNumber(data.metrics.completedTasks)} completed in range`}
+            tone={toneForRate(data.metrics.completionRate)}
+          />
+          <MetricCard
+            icon={<AlertTriangle className="h-3.5 w-3.5" />}
+            label="Overdue"
+            value={formatNumber(data.metrics.overdueTasks)}
+            helper={`${formatNumber(data.metrics.dueSoonTasks)} due soon`}
+            tone={data.metrics.overdueTasks > 0 ? "danger" : "neutral"}
+          />
+        </div>
+      </Section>
 
-      <SectionBlock title="Attention">
+      <Section title="Attention" description="Risk signals that need a closer look.">
         <AttentionPanel data={data} />
-      </SectionBlock>
+      </Section>
 
-      <SectionBlock title="Trends">
-        <div className="grid gap-3 xl:grid-cols-[minmax(0,1.45fr)_380px]">
-          <Panel title="Performance trend" description="Completions, overdue work, and new workload over time." icon={<TrendingUp className="h-4 w-4" />}><TrendChart data={data.trends} /></Panel>
+      <Section title="Trends" description="How work is moving over time.">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.6fr)_400px]">
+          <DashboardCard>
+            <PanelHeader title="Performance trend" description="Completions, overdue work, and new workload." icon={<TrendingUp className="h-4 w-4" />} />
+            <TrendChart data={data.trends} />
+          </DashboardCard>
           <WorkloadPanel data={data} />
         </div>
-      </SectionBlock>
+      </Section>
 
-      <SectionBlock title="Breakdowns">
-        <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-4">
-          <BreakdownPanel title="Status" description="Where tasks stand now." icon={<Target className="h-4 w-4" />} items={data.breakdowns.status} />
-          <BreakdownPanel title="Task type" description="One-time vs recurring." icon={<ListChecks className="h-4 w-4" />} items={data.breakdowns.type} />
-          <BreakdownPanel title="Priority" description="Priority mix." icon={<AlertTriangle className="h-4 w-4" />} items={data.breakdowns.priority} />
-          <BreakdownPanel title="SOP scope" description="Procedure visibility." icon={<FileText className="h-4 w-4" />} items={data.sopStats.byScope} />
+      <Section title="Breakdowns" description="Distribution of work across key dimensions.">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <BreakdownCard title="Status" description="Where tasks stand now." icon={<Target className="h-4 w-4" />} items={data.breakdowns.status} />
+          <BreakdownCard title="Task type" description="One-time vs recurring." icon={<ListChecks className="h-4 w-4" />} items={data.breakdowns.type} />
+          <BreakdownCard title="Priority" description="Priority mix." icon={<AlertTriangle className="h-4 w-4" />} items={data.breakdowns.priority} />
+          <BreakdownCard title="SOP scope" description="Procedure visibility." icon={<FileText className="h-4 w-4" />} items={data.sopStats.byScope} />
         </div>
-      </SectionBlock>
+      </Section>
 
-      <SectionBlock title="Detailed performance">
-        <div className="grid gap-3 xl:grid-cols-3">
-          <Panel title="Branch performance" description="Click a branch to drill into its dashboard view." icon={<Building2 className="h-4 w-4" />}>
-            <PerformanceList rows={data.comparisons.branches} emptyTitle="No branch data" emptyDescription="Assign people to branches and tasks to see branch performance." onSelect={(row) => onBranch(row.id)} selectLabel="Drill into branch" />
-          </Panel>
-          <Panel title="Department performance" description="Compare departments inside the selected scope." icon={<Layers className="h-4 w-4" />}>
-            <PerformanceList rows={data.comparisons.departments} emptyTitle="No department data" emptyDescription="Department performance appears when scoped assignees have department assignments." onSelect={(row) => onDepartment(row.id, row.parentId ?? null)} selectLabel="Drill into department" />
-          </Panel>
-          <Panel title="Employee workload" description="Completion rate, assigned load, and overdue count." icon={<Users className="h-4 w-4" />}>
-            <PerformanceList rows={data.comparisons.employees} emptyTitle="No employee data" emptyDescription="Employee workload appears when tasks match the selected filters." onSelect={(row) => onEmployee(row.id)} selectLabel="Filter by employee" />
-          </Panel>
+      <Section title="Detailed performance" description="Drill into branches, departments, or people.">
+        <div className="grid gap-4 xl:grid-cols-3">
+          <DashboardCard>
+            <PanelHeader title="Branch performance" description="Click a branch to filter the dashboard." icon={<Building2 className="h-4 w-4" />} />
+            <PerformanceTable
+              rows={data.comparisons.branches}
+              emptyTitle="No branch data"
+              emptyDescription="Assign people to branches and tasks to see branch performance."
+              onSelect={(row) => onBranch(row.id)}
+              selectLabel="Drill into branch"
+            />
+          </DashboardCard>
+          <DashboardCard>
+            <PanelHeader title="Department performance" description="Compare departments inside the selected scope." icon={<Layers className="h-4 w-4" />} />
+            <PerformanceTable
+              rows={data.comparisons.departments}
+              emptyTitle="No department data"
+              emptyDescription="Department performance appears when scoped assignees have department assignments."
+              onSelect={(row) => onDepartment(row.id, row.parentId ?? null)}
+              selectLabel="Drill into department"
+            />
+          </DashboardCard>
+          <DashboardCard>
+            <PanelHeader title="Employee workload" description="Completion rate, assigned load, and overdue count." icon={<Users className="h-4 w-4" />} />
+            <PerformanceTable
+              rows={data.comparisons.employees}
+              emptyTitle="No employee data"
+              emptyDescription="Employee workload appears when tasks match the selected filters."
+              onSelect={(row) => onEmployee(row.id)}
+              selectLabel="Filter by employee"
+            />
+          </DashboardCard>
         </div>
-        <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <Panel title="Top performers" description="Highest completion rates for matching work." icon={<Trophy className="h-4 w-4" />}>
-            <PerformanceList rows={data.comparisons.topPerformers} emptyTitle="No performers yet" emptyDescription="Completed scoped work will populate this list." />
-          </Panel>
+        <div className="mt-4 grid gap-4 lg:grid-cols-2">
+          <DashboardCard>
+            <PanelHeader title="Top performers" description="Highest completion rates for matching work." icon={<Trophy className="h-4 w-4" />} />
+            <PerformanceTable
+              rows={data.comparisons.topPerformers}
+              emptyTitle="No performers yet"
+              emptyDescription="Completed scoped work will populate this list."
+            />
+          </DashboardCard>
           <OperatingHealthPanel data={data} />
         </div>
-      </SectionBlock>
+      </Section>
     </>
   );
 }
 
-function ManagerDashboard({ data, onBranch, onDepartment, onEmployee }: { data: DashboardData; onBranch: (id: string) => void; onDepartment: (id: string, branchId: string | null) => void; onEmployee: (id: string) => void }) {
+function ManagerDashboard({
+  data,
+  onBranch,
+  onDepartment,
+  onEmployee,
+}: {
+  data: DashboardData;
+  onBranch: (id: string) => void;
+  onDepartment: (id: string, branchId: string | null) => void;
+  onEmployee: (id: string) => void;
+}) {
   const open = openTaskCount(data);
   return (
     <>
-      <OverviewGrid>
-        <StatCard icon={<Users className="h-3.5 w-3.5" />} label="People in scope" value={formatNumber(data.scope.people)} helper={`${formatNumber(data.scope.branches)} branches · ${formatNumber(data.scope.departments)} departments`} />
-        <StatCard icon={<ListChecks className="h-3.5 w-3.5" />} label="Scoped tasks" value={formatNumber(data.metrics.totalTasks)} helper={`${formatNumber(open)} still open`} />
-        <StatCard icon={<CheckCircle2 className="h-3.5 w-3.5" />} label="Completion rate" value={formatPercent(data.metrics.completionRate)} helper={`${formatNumber(data.metrics.completedTasks)} completed`} tone={data.metrics.completionRate >= 80 ? "success" : "neutral"} />
-        <StatCard icon={<AlertTriangle className="h-3.5 w-3.5" />} label="Overdue" value={formatNumber(data.metrics.overdueTasks)} helper={`${formatNumber(data.metrics.dueSoonTasks)} due soon`} tone={data.metrics.overdueTasks > 0 ? "danger" : "neutral"} />
-      </OverviewGrid>
+      <Section title="Overview" description="High-level operating numbers for your managed scope.">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <MetricCard
+            icon={<Users className="h-3.5 w-3.5" />}
+            label="People in scope"
+            value={formatNumber(data.scope.people)}
+            helper={`${formatNumber(data.scope.branches)} branches · ${formatNumber(data.scope.departments)} departments`}
+          />
+          <MetricCard icon={<ListChecks className="h-3.5 w-3.5" />} label="Scoped tasks" value={formatNumber(data.metrics.totalTasks)} helper={`${formatNumber(open)} still open`} />
+          <MetricCard
+            icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+            label="Completion rate"
+            value={formatPercent(data.metrics.completionRate)}
+            helper={`${formatNumber(data.metrics.completedTasks)} completed`}
+            tone={toneForRate(data.metrics.completionRate)}
+          />
+          <MetricCard
+            icon={<AlertTriangle className="h-3.5 w-3.5" />}
+            label="Overdue"
+            value={formatNumber(data.metrics.overdueTasks)}
+            helper={`${formatNumber(data.metrics.dueSoonTasks)} due soon`}
+            tone={data.metrics.overdueTasks > 0 ? "danger" : "neutral"}
+          />
+        </div>
+      </Section>
 
-      <SectionBlock title="Attention">
+      <Section title="Attention" description="Risk signals that need a closer look.">
         <AttentionPanel data={data} />
-      </SectionBlock>
+      </Section>
 
-      <SectionBlock title="Trends">
-        <div className="grid gap-3 xl:grid-cols-[minmax(0,1.45fr)_380px]">
-          <Panel title="Managed trend" description="Completions, overdue work, and new workload over time." icon={<TrendingUp className="h-4 w-4" />}><TrendChart data={data.trends} /></Panel>
+      <Section title="Trends" description="How work is moving over time.">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.6fr)_400px]">
+          <DashboardCard>
+            <PanelHeader title="Managed trend" description="Completions, overdue work, and new workload." icon={<TrendingUp className="h-4 w-4" />} />
+            <TrendChart data={data.trends} />
+          </DashboardCard>
           <WorkloadPanel data={data} />
         </div>
-      </SectionBlock>
+      </Section>
 
-      <SectionBlock title="Breakdowns">
-        <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-4">
-          <BreakdownPanel title="Status" description="Where scoped tasks stand." icon={<Target className="h-4 w-4" />} items={data.breakdowns.status} />
-          <BreakdownPanel title="Task type" description="One-time vs recurring." icon={<ListChecks className="h-4 w-4" />} items={data.breakdowns.type} />
-          <BreakdownPanel title="Priority" description="Priority mix." icon={<AlertTriangle className="h-4 w-4" />} items={data.breakdowns.priority} />
-          <BreakdownPanel title="SOPs in scope" description="Procedure visibility." icon={<FileText className="h-4 w-4" />} items={data.sopStats.byScope} />
+      <Section title="Breakdowns" description="Distribution of work across key dimensions.">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <BreakdownCard title="Status" description="Where scoped tasks stand." icon={<Target className="h-4 w-4" />} items={data.breakdowns.status} />
+          <BreakdownCard title="Task type" description="One-time vs recurring." icon={<ListChecks className="h-4 w-4" />} items={data.breakdowns.type} />
+          <BreakdownCard title="Priority" description="Priority mix." icon={<AlertTriangle className="h-4 w-4" />} items={data.breakdowns.priority} />
+          <BreakdownCard title="SOPs in scope" description="Procedure visibility." icon={<FileText className="h-4 w-4" />} items={data.sopStats.byScope} />
         </div>
-      </SectionBlock>
+      </Section>
 
-      <SectionBlock title="Detailed performance">
-        <div className="grid gap-3 xl:grid-cols-3">
-          <Panel title="Branches you manage" icon={<Building2 className="h-4 w-4" />}>
-            <PerformanceList rows={data.comparisons.branches} emptyTitle="No branch data" emptyDescription="Your managed branches do not have matching task data yet." onSelect={(row) => onBranch(row.id)} selectLabel="Drill into branch" />
-          </Panel>
-          <Panel title="Departments you manage" icon={<Layers className="h-4 w-4" />}>
-            <PerformanceList rows={data.comparisons.departments} emptyTitle="No department data" emptyDescription="Your managed departments do not have matching task data yet." onSelect={(row) => onDepartment(row.id, row.parentId ?? null)} selectLabel="Drill into department" />
-          </Panel>
-          <Panel title="Team workload" icon={<Users className="h-4 w-4" />}>
-            <PerformanceList rows={data.comparisons.employees} emptyTitle="No team data" emptyDescription="People in your scope do not have matching tasks yet." onSelect={(row) => onEmployee(row.id)} selectLabel="Filter by employee" />
-          </Panel>
+      <Section title="Detailed performance" description="Drill into your branches, departments, or team.">
+        <div className="grid gap-4 xl:grid-cols-3">
+          <DashboardCard>
+            <PanelHeader title="Branches you manage" icon={<Building2 className="h-4 w-4" />} />
+            <PerformanceTable
+              rows={data.comparisons.branches}
+              emptyTitle="No branch data"
+              emptyDescription="Your managed branches do not have matching task data yet."
+              onSelect={(row) => onBranch(row.id)}
+              selectLabel="Drill into branch"
+            />
+          </DashboardCard>
+          <DashboardCard>
+            <PanelHeader title="Departments you manage" icon={<Layers className="h-4 w-4" />} />
+            <PerformanceTable
+              rows={data.comparisons.departments}
+              emptyTitle="No department data"
+              emptyDescription="Your managed departments do not have matching task data yet."
+              onSelect={(row) => onDepartment(row.id, row.parentId ?? null)}
+              selectLabel="Drill into department"
+            />
+          </DashboardCard>
+          <DashboardCard>
+            <PanelHeader title="Team workload" icon={<Users className="h-4 w-4" />} />
+            <PerformanceTable
+              rows={data.comparisons.employees}
+              emptyTitle="No team data"
+              emptyDescription="People in your scope do not have matching tasks yet."
+              onSelect={(row) => onEmployee(row.id)}
+              selectLabel="Filter by employee"
+            />
+          </DashboardCard>
         </div>
-        <div className="mt-3 grid gap-3 lg:grid-cols-2">
-          <Panel title="Strongest performers" icon={<Trophy className="h-4 w-4" />}>
-            <PerformanceList rows={data.comparisons.topPerformers} emptyTitle="No performers yet" emptyDescription="Completed scoped work will populate this list." />
-          </Panel>
+        <div className="mt-4 grid gap-4 lg:grid-cols-2">
+          <DashboardCard>
+            <PanelHeader title="Strongest performers" icon={<Trophy className="h-4 w-4" />} />
+            <PerformanceTable
+              rows={data.comparisons.topPerformers}
+              emptyTitle="No performers yet"
+              emptyDescription="Completed scoped work will populate this list."
+            />
+          </DashboardCard>
           <OperatingHealthPanel data={data} />
         </div>
-      </SectionBlock>
+      </Section>
     </>
   );
 }
@@ -838,42 +1204,73 @@ function EmployeeDashboard({ data }: { data: DashboardData }) {
   const currentWorkload = openTaskCount(data);
   return (
     <>
-      <OverviewGrid>
-        <StatCard icon={<ListChecks className="h-3.5 w-3.5" />} label="My tasks" value={formatNumber(data.metrics.totalTasks)} helper={`${formatNumber(currentWorkload)} still open`} />
-        <StatCard icon={<CheckCircle2 className="h-3.5 w-3.5" />} label="Completion rate" value={formatPercent(data.metrics.completionRate)} helper={`${formatNumber(data.metrics.completedTasks)} completed`} tone={data.metrics.completionRate >= 80 ? "success" : "neutral"} />
-        <StatCard icon={<Clock className="h-3.5 w-3.5" />} label="Due soon" value={formatNumber(data.metrics.dueSoonTasks)} helper={`${formatNumber(data.metrics.overdueTasks)} overdue`} tone={data.metrics.overdueTasks > 0 ? "danger" : "accent"} />
-        <StatCard icon={<FileText className="h-3.5 w-3.5" />} label="Visible SOPs" value={formatNumber(data.sopStats.visible)} helper="Assigned procedures visible to you" />
-      </OverviewGrid>
+      <Section title="Overview" description="Your workload at a glance.">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <MetricCard
+            icon={<ListChecks className="h-3.5 w-3.5" />}
+            label="My tasks"
+            value={formatNumber(data.metrics.totalTasks)}
+            helper={`${formatNumber(currentWorkload)} still open`}
+          />
+          <MetricCard
+            icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+            label="Completion rate"
+            value={formatPercent(data.metrics.completionRate)}
+            helper={`${formatNumber(data.metrics.completedTasks)} completed`}
+            tone={toneForRate(data.metrics.completionRate)}
+          />
+          <MetricCard
+            icon={<Clock className="h-3.5 w-3.5" />}
+            label="Due soon"
+            value={formatNumber(data.metrics.dueSoonTasks)}
+            helper={`${formatNumber(data.metrics.overdueTasks)} overdue`}
+            tone={data.metrics.overdueTasks > 0 ? "danger" : "accent"}
+          />
+          <MetricCard
+            icon={<FileText className="h-3.5 w-3.5" />}
+            label="Visible SOPs"
+            value={formatNumber(data.sopStats.visible)}
+            helper="Assigned procedures visible to you"
+          />
+        </div>
+      </Section>
 
-      <SectionBlock title="Attention">
+      <Section title="Attention" description="Your work that needs a closer look.">
         <AttentionPanel data={data} />
-      </SectionBlock>
+      </Section>
 
-      <SectionBlock title="Trends">
-        <div className="grid gap-3 xl:grid-cols-[minmax(0,1.45fr)_380px]">
-          <Panel title="My progress over time" description="Completions, overdue work, and new workload over time." icon={<TrendingUp className="h-4 w-4" />}><TrendChart data={data.trends} /></Panel>
+      <Section title="Trends" description="How your work is moving over time.">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.6fr)_400px]">
+          <DashboardCard>
+            <PanelHeader title="My progress over time" description="Completions, overdue work, and new workload." icon={<TrendingUp className="h-4 w-4" />} />
+            <TrendChart data={data.trends} />
+          </DashboardCard>
           <WorkloadPanel data={data} />
         </div>
-      </SectionBlock>
+      </Section>
 
-      <SectionBlock title="Breakdowns">
-        <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-4">
-          <BreakdownPanel title="My status" description="Where my tasks stand." icon={<Target className="h-4 w-4" />} items={data.breakdowns.status} />
-          <BreakdownPanel title="Task type" description="One-time vs recurring." icon={<ListChecks className="h-4 w-4" />} items={data.breakdowns.type} />
-          <BreakdownPanel title="Priority" description="Priority mix." icon={<AlertTriangle className="h-4 w-4" />} items={data.breakdowns.priority} />
-          <BreakdownPanel title="Recurring work" description="Frequency mix." icon={<Timer className="h-4 w-4" />} items={data.breakdowns.frequency} />
+      <Section title="Breakdowns" description="Distribution of your work across key dimensions.">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <BreakdownCard title="My status" description="Where my tasks stand." icon={<Target className="h-4 w-4" />} items={data.breakdowns.status} />
+          <BreakdownCard title="Task type" description="One-time vs recurring." icon={<ListChecks className="h-4 w-4" />} items={data.breakdowns.type} />
+          <BreakdownCard title="Priority" description="Priority mix." icon={<AlertTriangle className="h-4 w-4" />} items={data.breakdowns.priority} />
+          <BreakdownCard title="Recurring work" description="Frequency mix." icon={<Timer className="h-4 w-4" />} items={data.breakdowns.frequency} />
         </div>
-      </SectionBlock>
+      </Section>
 
-      <SectionBlock title="Performance details">
+      <Section title="Performance details" description="Cycle health and completion timing.">
         <OperatingHealthPanel data={data} />
-      </SectionBlock>
+      </Section>
     </>
   );
 }
 
+// ------------------------------------------------------------------
+// Loading & empty states
+// ------------------------------------------------------------------
+
 function SkeletonBlock({ className }: { className?: string }) {
-  return <div className={cn("rounded-md bg-[var(--surface-muted)]", className)} />;
+  return <div className={cn("rounded-lg bg-[var(--surface-muted)]", className)} />;
 }
 
 function DashboardSkeleton() {
@@ -888,32 +1285,31 @@ function DashboardSkeleton() {
         <SkeletonBlock className="h-6 w-24 rounded-sm" />
       </div>
 
-      <div className="mb-6 rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <SkeletonBlock className="h-8 w-[124px] rounded-[5px]" />
-          <SkeletonBlock className="h-8 w-[160px] rounded-[5px]" />
-          <SkeletonBlock className="h-8 w-[176px] rounded-[5px]" />
-          <SkeletonBlock className="h-8 w-[176px] rounded-[5px]" />
-          <div className="ml-auto flex items-center gap-2">
-            <SkeletonBlock className="h-8 w-8 rounded-[7px]" />
-            <SkeletonBlock className="h-8 w-20" />
-          </div>
-        </div>
+      <SkeletonBlock className="mb-6 h-[58px] rounded-2xl" />
+
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <SkeletonBlock key={i} className="h-[124px] rounded-2xl" />
+        ))}
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {Array.from({ length: 8 }).map((_, index) => <SkeletonBlock key={index} className="h-[122px]" />)}
+      <SkeletonBlock className="mt-8 h-[180px] rounded-2xl" />
+
+      <div className="mt-8 grid gap-4 xl:grid-cols-[minmax(0,1.6fr)_400px]">
+        <SkeletonBlock className="h-[340px] rounded-2xl" />
+        <SkeletonBlock className="h-[340px] rounded-2xl" />
       </div>
 
-      <SkeletonBlock className="mt-7 h-[210px]" />
-
-      <div className="mt-7 grid gap-3 xl:grid-cols-[minmax(0,1.45fr)_380px]">
-        <SkeletonBlock className="h-[344px]" />
-        <SkeletonBlock className="h-[344px]" />
+      <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <SkeletonBlock key={i} className="h-[220px] rounded-2xl" />
+        ))}
       </div>
 
-      <div className="mt-7 grid gap-3 xl:grid-cols-3">
-        {Array.from({ length: 3 }).map((_, index) => <SkeletonBlock key={index} className="h-[260px]" />)}
+      <div className="mt-8 grid gap-4 xl:grid-cols-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <SkeletonBlock key={i} className="h-[260px] rounded-2xl" />
+        ))}
       </div>
     </div>
   );
@@ -942,9 +1338,13 @@ function DashboardError({ message }: { message: string }) {
 function pageDescription(data: DashboardData | null) {
   if (!data) return "Role-aware analytics for your current company.";
   if (data.role === "Admin") return "A calm operating view across people, work, teams, SOPs, timing, and risk.";
-  if (data.role === "Manager") return "Performance analytics for only the branches, departments, and people inside your managed scope.";
+  if (data.role === "Manager") return "Performance analytics for the branches, departments, and people inside your managed scope.";
   return "Your workload, due work, recurring cycles, and SOP visibility in one focused view.";
 }
+
+// ------------------------------------------------------------------
+// Page
+// ------------------------------------------------------------------
 
 export function DashboardPage() {
   const { activeCompanyId, active } = useCompany();
@@ -958,6 +1358,7 @@ export function DashboardPage() {
   const [departmentId, setDepartmentId] = useState("all");
   const [membershipId, setMembershipId] = useState("all");
   const [scopeData, setScopeData] = useState<DashboardData | null>(null);
+  const reduceMotion = useReducedMotion();
 
   useEffect(() => {
     setDatePreset("30d");
@@ -971,24 +1372,45 @@ export function DashboardPage() {
   }, [activeCompanyId]);
 
   const scopeDataForActiveCompany = scopeData?.company._id === activeCompanyId ? scopeData : null;
-  const canUseScopeFilters = Boolean(active?.capabilities.some((capability) => capability === "analytics:view:company" || capability === "analytics:view:managed_scope"));
-  const validBranchId = canUseScopeFilters && scopeDataForActiveCompany && branchId !== "all" && scopeDataForActiveCompany.filterOptions.branches.some((branch) => branch._id === branchId) ? branchId as Id<"branches"> : undefined;
-  const validDepartmentId = canUseScopeFilters && scopeDataForActiveCompany && departmentId !== "all" && scopeDataForActiveCompany.filterOptions.departments.some((department) => department._id === departmentId && (!validBranchId || department.branchId === validBranchId)) ? departmentId as Id<"departments"> : undefined;
-  const validMembershipId = canUseScopeFilters && scopeDataForActiveCompany && membershipId !== "all" && scopeDataForActiveCompany.filterOptions.employees.some((employee) => employee._id === membershipId && (!validBranchId || employee.branchIds.includes(validBranchId)) && (!validDepartmentId || employee.departmentIds.includes(validDepartmentId))) ? membershipId as Id<"companyMemberships"> : undefined;
+  const canUseScopeFilters = Boolean(
+    active?.capabilities.some((capability) => capability === "analytics:view:company" || capability === "analytics:view:managed_scope"),
+  );
+  const validBranchId =
+    canUseScopeFilters && scopeDataForActiveCompany && branchId !== "all" && scopeDataForActiveCompany.filterOptions.branches.some((branch) => branch._id === branchId)
+      ? (branchId as Id<"branches">)
+      : undefined;
+  const validDepartmentId =
+    canUseScopeFilters && scopeDataForActiveCompany && departmentId !== "all" && scopeDataForActiveCompany.filterOptions.departments.some(
+      (department) => department._id === departmentId && (!validBranchId || department.branchId === validBranchId),
+    )
+      ? (departmentId as Id<"departments">)
+      : undefined;
+  const validMembershipId =
+    canUseScopeFilters && scopeDataForActiveCompany && membershipId !== "all" && scopeDataForActiveCompany.filterOptions.employees.some(
+      (employee) =>
+        employee._id === membershipId &&
+        (!validBranchId || employee.branchIds.includes(validBranchId)) &&
+        (!validDepartmentId || employee.departmentIds.includes(validDepartmentId)),
+    )
+      ? (membershipId as Id<"companyMemberships">)
+      : undefined;
 
-  const queryArgs = activeCompanyId && canViewActiveDashboard ? {
-    companyId: activeCompanyId,
-    datePreset,
-    taskType,
-    status,
-    priority,
-    frequency,
-    branchId: validBranchId,
-    departmentId: validDepartmentId,
-    membershipId: validMembershipId,
-  } : "skip";
+  const queryArgs =
+    activeCompanyId && canViewActiveDashboard
+      ? {
+          companyId: activeCompanyId,
+          datePreset,
+          taskType,
+          status,
+          priority,
+          frequency,
+          branchId: validBranchId,
+          departmentId: validDepartmentId,
+          membershipId: validMembershipId,
+        }
+      : "skip";
   const result = useQuery_experimental({ query: api.analytics.dashboard, args: queryArgs });
-  const data = result.status === "success" ? result.data as DashboardData : null;
+  const data = result.status === "success" ? (result.data as DashboardData) : null;
 
   useEffect(() => {
     if (data) setScopeData(data);
@@ -1017,9 +1439,19 @@ export function DashboardPage() {
   if (result.status === "pending" || !data) return <DashboardSkeleton />;
 
   return (
-    <div className="app-page">
+    <motion.div
+      className="app-page"
+      initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
+    >
       <PageHeader
-        eyebrow={<span className="inline-flex items-center gap-1.5"><CalendarDays className="h-3.5 w-3.5" />{data.range.label}</span>}
+        eyebrow={
+          <span className="inline-flex items-center gap-1.5">
+            <CalendarDays className="h-3.5 w-3.5" />
+            {data.range.label}
+          </span>
+        }
         title={data.role === "Admin" ? "Admin Dashboard" : data.role === "Manager" ? "Manager Dashboard" : "My Dashboard"}
         description={pageDescription(data)}
         actions={<Badge tone="neutral">{data.viewer.role}</Badge>}
@@ -1047,7 +1479,7 @@ export function DashboardPage() {
       />
 
       {data.metrics.totalTasks === 0 && (
-        <div className="mb-5 flex items-start gap-2.5 rounded-lg border border-[var(--hairline)] bg-[var(--canvas-soft)] px-4 py-3 text-[13px] text-[var(--ink-muted)]">
+        <div className="mb-6 flex items-start gap-2.5 rounded-xl border border-[var(--hairline)] bg-[var(--surface)] px-4 py-3 text-[13px] text-[var(--ink-muted)]">
           <Info className="mt-0.5 h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
           <span>No tasks match the selected filters. Charts and comparisons will populate as matching work is created, due, or completed.</span>
         </div>
@@ -1056,20 +1488,36 @@ export function DashboardPage() {
       {data.role === "Admin" && (
         <AdminDashboard
           data={data}
-          onBranch={(id) => { setBranchId(id); setDepartmentId("all"); setMembershipId("all"); }}
-          onDepartment={(id, parentId) => { if (parentId) setBranchId(parentId); setDepartmentId(id); setMembershipId("all"); }}
+          onBranch={(id) => {
+            setBranchId(id);
+            setDepartmentId("all");
+            setMembershipId("all");
+          }}
+          onDepartment={(id, parentId) => {
+            if (parentId) setBranchId(parentId);
+            setDepartmentId(id);
+            setMembershipId("all");
+          }}
           onEmployee={setMembershipId}
         />
       )}
       {data.role === "Manager" && (
         <ManagerDashboard
           data={data}
-          onBranch={(id) => { setBranchId(id); setDepartmentId("all"); setMembershipId("all"); }}
-          onDepartment={(id, parentId) => { if (parentId) setBranchId(parentId); setDepartmentId(id); setMembershipId("all"); }}
+          onBranch={(id) => {
+            setBranchId(id);
+            setDepartmentId("all");
+            setMembershipId("all");
+          }}
+          onDepartment={(id, parentId) => {
+            if (parentId) setBranchId(parentId);
+            setDepartmentId(id);
+            setMembershipId("all");
+          }}
           onEmployee={setMembershipId}
         />
       )}
       {data.role === "Employee" && <EmployeeDashboard data={data} />}
-    </div>
+    </motion.div>
   );
 }

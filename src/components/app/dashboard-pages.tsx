@@ -214,8 +214,6 @@ function DashboardCard({
 }
 
 function Section({
-  title,
-  description,
   actions,
   children,
   className,
@@ -228,13 +226,7 @@ function Section({
 }) {
   return (
     <section className={cn("mt-8", className)}>
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">{title}</h2>
-          {description && <p className="mt-1 text-[13px] text-[var(--ink-muted)]">{description}</p>}
-        </div>
-        {actions}
-      </div>
+      {actions && <div className="mb-4 flex justify-end">{actions}</div>}
       {children}
     </section>
   );
@@ -522,7 +514,7 @@ function FilterBar({
   ].filter(Boolean).length;
 
   return (
-    <DashboardCard className="mb-6 p-3">
+    <DashboardCard className="mb-6 border-0 p-3">
       <div className="flex flex-wrap items-center gap-2">
         <DashboardSelect label="Date range" value={datePreset} options={dateOptions} onChange={onDatePreset} className="w-[120px]" />
         {showScopeFilters && (

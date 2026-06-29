@@ -82,6 +82,20 @@ describe("production permission and validation fixes", () => {
     await expect(t.withIdentity(identity("admin")).mutation(api.tasks.updateOneTime, { companyId, taskId: oneTimeTaskId, title: "One-time task", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [], priority: "medium" })).rejects.toThrow("Task assignee is required");
   });
 
+  test("company timezone defaults to GMT+5 and can be changed", async () => {
+    const { t, companyId } = await seedCompany();
+
+    const initial = await t.withIdentity(identity("admin")).query(api.companyManagement.overview, { companyId });
+    expect(initial.company.timeZone).toBe("Etc/GMT-5");
+    expect(initial.company.hasTimeZone).toBe(false);
+
+    await expect(t.withIdentity(identity("admin")).mutation(api.companyManagement.updateCompanyTimeZone, { companyId, timeZone: "UTC" })).resolves.toBeNull();
+    const updated = await t.withIdentity(identity("admin")).query(api.companyManagement.overview, { companyId });
+    expect(updated.company.timeZone).toBe("UTC");
+    expect(updated.company.hasTimeZone).toBe(true);
+    await expect(t.withIdentity(identity("admin")).mutation(api.companyManagement.updateCompanyTimeZone, { companyId, timeZone: "Not/AZone" })).rejects.toThrow("valid time zone");
+  });
+
   test("task text updates use per-task update permissions", async () => {
     const { t, companyId, adminMembershipId, employeeMembershipId } = await seedCompany();
     const selfTaskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, { companyId, title: "Old title", description: "Old body", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [employeeMembershipId], priority: "medium" });

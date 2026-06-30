@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
-import { buildSopVisibilityContext, membershipCapabilities, requireMembership, scopedMembershipIds, visibleSop } from "./permissions";
+import { analyticsScopedMembershipIds, assertAnalyticsViewAccess, buildSopVisibilityContext, membershipCapabilities, requireMembership, taskHasVisibleAssignee, visibleAssigneeMembershipIds, visibleSop } from "./permissions";
 import { currentJdCycle } from "./taskCycles";
 import type { Doc, Id } from "./_generated/dataModel";
 
@@ -103,30 +103,10 @@ function dateWindow(preset: DatePreset | undefined, now: number) {
   return { preset: selected, start: now - days * dayMs, end: now, label: labels[selected] };
 }
 
-async function allActiveMembershipIds(ctx: QueryCtx, companyId: Id<"companies">) {
-  const rows = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(dashboardTakeLimit);
-  return new Set(rows.filter((m) => m.active).map((m) => m._id));
-}
-
-async function analyticsScopedMembershipIds(
-  ctx: QueryCtx,
-  companyId: Id<"companies">,
-  membership: Doc<"companyMemberships">,
-  caps: Awaited<ReturnType<typeof membershipCapabilities>>,
-) {
-  if (caps.has("analytics:view:company")) return await allActiveMembershipIds(ctx, companyId);
-  if (caps.has("analytics:view:managed_scope")) {
-    const scoped = await scopedMembershipIds(ctx, companyId, membership);
-    if (!caps.has("analytics:view:self")) scoped.delete(membership._id);
-    return scoped;
-  }
-  return caps.has("analytics:view:self") ? new Set<Id<"companyMemberships">>([membership._id]) : new Set<Id<"companyMemberships">>();
-}
-
 async function dashboardAccess(ctx: QueryCtx, companyId: Id<"companies">) {
   const { membership, company } = await requireMembership(ctx, companyId);
   const caps = await membershipCapabilities(ctx, membership);
-  if (!caps.has("analytics:view:company") && !caps.has("analytics:view:managed_scope") && !caps.has("analytics:view:self")) throw new ConvexError("You do not have access to analytics.");
+  assertAnalyticsViewAccess(caps);
 
   const dashboardRole: DashboardRole = caps.has("analytics:view:company") ? "Admin" : caps.has("analytics:view:managed_scope") ? "Manager" : "Employee";
   const scopedIds = await analyticsScopedMembershipIds(ctx, companyId, membership, caps);
@@ -265,7 +245,7 @@ async function buildTasks(
 
   const jdTasks = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(dashboardTakeLimit);
   for (const task of jdTasks) {
-    const scopedAssignees = task.assigneeMembershipIds.filter((id) => allowedMembershipIds.has(id));
+    const scopedAssignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, allowedMembershipIds);
     if (!scopedAssignees.length) continue;
 
     const cycle = currentJdCycle(task.recurrence, now, timeZone);
@@ -311,7 +291,7 @@ async function buildTasks(
 
   const oneTimeTasks = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(dashboardTakeLimit);
   for (const task of oneTimeTasks) {
-    const scopedAssignees = task.assigneeMembershipIds.filter((id) => allowedMembershipIds.has(id));
+    const scopedAssignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, allowedMembershipIds);
     if (!scopedAssignees.length) continue;
     const org = assigneeOrg(scopedAssignees, assignments);
     const status = currentOneTimeStatus(task, now);
@@ -678,12 +658,12 @@ export const dashboard = query({
 async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"> }) {
   const { membership } = await requireMembership(ctx, args.companyId);
   const caps = await membershipCapabilities(ctx, membership);
-  if (!caps.has("analytics:view:company") && !caps.has("analytics:view:managed_scope") && !caps.has("analytics:view:self")) throw new ConvexError("You do not have access to analytics.");
+  assertAnalyticsViewAccess(caps);
   const scoped = await analyticsScopedMembershipIds(ctx, args.companyId, membership, caps);
   const jd = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(dashboardTakeLimit);
   const one = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(dashboardTakeLimit);
-  const visibleJd = jd.filter((t) => t.assigneeMembershipIds.some((id) => scoped.has(id)));
-  const visibleOne = one.filter((t) => t.assigneeMembershipIds.some((id) => scoped.has(id)));
+  const visibleJd = jd.filter((task) => taskHasVisibleAssignee(task, scoped));
+  const visibleOne = one.filter((task) => taskHasVisibleAssignee(task, scoped));
   const overdueOne = visibleOne.filter((t) => t.status !== "completed" && (t.overdueAt || (t.dueDate && t.dueDate < Date.now()))).length;
   const completedOne = visibleOne.filter((t) => t.status === "completed").length;
   const sops = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(dashboardTakeLimit);

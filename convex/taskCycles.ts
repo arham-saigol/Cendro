@@ -79,7 +79,7 @@ export function nextJdCycleStart(start: number, recurrence: JdRecurrence, timeZo
     case "daily": return boundaryUtc(zone, localDateAdd(parts, 1));
     case "every_other_day": return boundaryUtc(zone, localDateAdd(parts, 2));
     case "weekly": return boundaryUtc(zone, localDateAdd(parts, 7));
-    case "semimonthly": return boundaryUtc(zone, parts.day === 1 ? { year: parts.year, month: parts.month, day: 16 } : localMonthAdd(parts, 1));
+    case "semimonthly": return boundaryUtc(zone, parts.day === 1 ? { year: parts.year, month: parts.month, day: 16 } : { ...localMonthAdd(parts, 1), day: 1 });
     case "monthly": return boundaryUtc(zone, localMonthAdd(parts, 1));
     case "semiannually": return boundaryUtc(zone, localMonthAdd(parts, 6));
     case "annually": return boundaryUtc(zone, localMonthAdd(parts, 12));

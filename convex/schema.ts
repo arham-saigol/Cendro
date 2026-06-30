@@ -3,7 +3,7 @@ import { v } from "convex/values";
 
 const role = v.union(v.literal("Admin"), v.literal("Manager"), v.literal("Employee"));
 const priority = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
-const rec = v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
+const rec = v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
 const taskStatus = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
 const scope = v.union(v.literal("company"), v.literal("branch"), v.literal("department"), v.literal("user"));
 const taskType = v.union(v.literal("jd"), v.literal("one_time"));

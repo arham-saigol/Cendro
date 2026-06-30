@@ -40,7 +40,7 @@ type DatePreset = "7d" | "30d" | "90d" | "365d";
 type TaskTypeFilter = "all" | "jd" | "one_time";
 type StatusFilter = "all" | "due" | "in_progress" | "completed" | "overdue";
 type PriorityFilter = "all" | "low" | "medium" | "high";
-type FrequencyFilter = "all" | "daily" | "every_other_day" | "weekly" | "monthly" | "semiannually" | "annually";
+type FrequencyFilter = "all" | "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "semiannually" | "annually";
 
 type BreakdownItem = { key: string; label: string; value: number };
 type TrendMetric = "completed" | "overdue" | "workload";
@@ -138,6 +138,7 @@ const frequencyOptions: { value: FrequencyFilter; label: string }[] = [
   { value: "daily", label: "Daily" },
   { value: "every_other_day", label: "Alternate days" },
   { value: "weekly", label: "Weekly" },
+  { value: "semimonthly", label: "Semi-monthly" },
   { value: "monthly", label: "Monthly" },
   { value: "semiannually", label: "Bi-yearly" },
   { value: "annually", label: "Yearly" },

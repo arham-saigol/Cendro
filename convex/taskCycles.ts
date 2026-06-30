@@ -1,4 +1,4 @@
-export const jdRecurrences = ["daily", "every_other_day", "weekly", "monthly", "semiannually", "annually"] as const;
+export const jdRecurrences = ["daily", "every_other_day", "weekly", "semimonthly", "monthly", "semiannually", "annually"] as const;
 export type JdRecurrence = (typeof jdRecurrences)[number];
 
 export type JdCycle = { start: number; end: number };
@@ -79,6 +79,7 @@ export function nextJdCycleStart(start: number, recurrence: JdRecurrence, timeZo
     case "daily": return boundaryUtc(zone, localDateAdd(parts, 1));
     case "every_other_day": return boundaryUtc(zone, localDateAdd(parts, 2));
     case "weekly": return boundaryUtc(zone, localDateAdd(parts, 7));
+    case "semimonthly": return boundaryUtc(zone, parts.day === 1 ? { year: parts.year, month: parts.month, day: 16 } : localMonthAdd(parts, 1));
     case "monthly": return boundaryUtc(zone, localMonthAdd(parts, 1));
     case "semiannually": return boundaryUtc(zone, localMonthAdd(parts, 6));
     case "annually": return boundaryUtc(zone, localMonthAdd(parts, 12));
@@ -92,6 +93,7 @@ export function previousJdCycleStart(start: number, recurrence: JdRecurrence, ti
     case "daily": return boundaryUtc(zone, localDateAdd(parts, -1));
     case "every_other_day": return boundaryUtc(zone, localDateAdd(parts, -2));
     case "weekly": return boundaryUtc(zone, localDateAdd(parts, -7));
+    case "semimonthly": return boundaryUtc(zone, parts.day === 1 ? { ...localMonthAdd(parts, -1), day: 16 } : { year: parts.year, month: parts.month, day: 1 });
     case "monthly": return boundaryUtc(zone, localMonthAdd(parts, -1));
     case "semiannually": return boundaryUtc(zone, localMonthAdd(parts, -6));
     case "annually": return boundaryUtc(zone, localMonthAdd(parts, -12));
@@ -116,6 +118,10 @@ export function currentJdCycle(recurrence: JdRecurrence, now = Date.now(), timeZ
       const dayIndex = localDayIndex(parts);
       const startParts = localDateFromDayIndex(mondayAnchorDay + floorDiv(dayIndex - mondayAnchorDay, 7) * 7);
       const start = boundaryUtc(zone, startParts);
+      return { start, end: nextJdCycleStart(start, recurrence, zone) };
+    }
+    case "semimonthly": {
+      const start = boundaryUtc(zone, { year: parts.year, month: parts.month, day: parts.day < 16 ? 1 : 16 });
       return { start, end: nextJdCycleStart(start, recurrence, zone) };
     }
     case "monthly": {

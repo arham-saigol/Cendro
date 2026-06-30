@@ -40,7 +40,7 @@ class AiToolDenied extends Error {}
 class AiToolNotFound extends Error {}
 
 const priority = z.enum(["low", "medium", "high"]);
-const recurrence = z.enum(["daily", "every_other_day", "weekly", "monthly", "semiannually", "annually"]);
+const recurrence = z.enum(["daily", "every_other_day", "weekly", "semimonthly", "monthly", "semiannually", "annually"]);
 const taskRef = z.string().regex(/^task_\d+$/);
 const memberRef = z.string().regex(/^member_\d+$/);
 const sopRef = z.string().regex(/^sop_\d+$/);

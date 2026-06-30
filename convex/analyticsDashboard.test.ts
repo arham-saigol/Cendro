@@ -57,7 +57,7 @@ async function seedDashboardCompany() {
 
 describe("dashboard analytics scoping", () => {
   test("admin, manager, and employee dashboards receive only their allowed analytics", async () => {
-    const { t, companyId, branchAId, branchBId, employeeMembershipId, hiddenMembershipId } = await seedDashboardCompany();
+    const { t, companyId, branchAId, branchBId, departmentBId, employeeMembershipId, hiddenMembershipId } = await seedDashboardCompany();
 
     const admin = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId });
     expect(admin.role).toBe("Admin");
@@ -73,6 +73,7 @@ describe("dashboard analytics scoping", () => {
     expect(manager.filterOptions.employees.map((employee) => employee._id)).not.toContain(hiddenMembershipId);
     await expect(t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId, membershipId: hiddenMembershipId })).rejects.toThrow("outside your analytics scope");
     await expect(t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId, branchId: branchBId })).rejects.toThrow("outside your analytics scope");
+    await expect(t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId, departmentId: departmentBId })).rejects.toThrow("outside your analytics scope");
 
     const employee = await t.withIdentity(identity("employee")).query(api.analytics.dashboard, { companyId });
     expect(employee.role).toBe("Employee");
@@ -127,7 +128,68 @@ describe("dashboard analytics scoping", () => {
 
     const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, datePreset: "30d", taskType: "jd" });
     expect(dashboard.jdCycleHealth.completedCycles).toBe(1);
+    expect(dashboard.metrics.periodCompletions).toBe(1);
     expect(dashboard.recent.completions.map((event) => event.title)).toContain("Historical JD cycle");
     expect(dashboard.trends.reduce((sum, point) => sum + point.completed, 0)).toBe(1);
+  });
+
+  test("current workload includes old open tasks outside the selected date window", async () => {
+    const { t, companyId, adminMembershipId, employeeMembershipId } = await seedDashboardCompany();
+    await t.run(async (ctx) => {
+      const old = Date.now() - 60 * 86_400_000;
+      await ctx.db.insert("oneTimeTasks", {
+        companyId,
+        title: "Old open task",
+        description: "",
+        dueDate: Date.now() + 86_400_000,
+        assigneeMembershipIds: [employeeMembershipId],
+        createdByMembershipId: adminMembershipId,
+        priority: "medium",
+        status: "due",
+        createdAt: old,
+        updatedAt: old,
+      });
+    });
+
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, datePreset: "30d" });
+    expect(dashboard.metrics.totalTasks).toBe(3);
+    expect(dashboard.metrics.openTasks).toBe(3);
+  });
+
+  test("manager branch filters do not expand through multi-branch employee assignments", async () => {
+    const { t, companyId, branchAId, branchBId, departmentAId, departmentBId, employeeMembershipId } = await seedDashboardCompany();
+    await t.run(async (ctx) => {
+      await ctx.db.insert("userBranchAssignments", { companyId, membershipId: employeeMembershipId, branchId: branchBId });
+      await ctx.db.insert("userDepartmentAssignments", { companyId, membershipId: employeeMembershipId, departmentId: departmentBId });
+    });
+
+    const dashboard = await t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId });
+    expect(dashboard.filterOptions.branches.map((branch) => branch._id)).toEqual([branchAId]);
+    expect(dashboard.filterOptions.departments.map((department) => department._id)).toEqual([departmentAId]);
+    expect(dashboard.comparisons.branches.map((branch) => branch.id)).toEqual([branchAId]);
+    await expect(t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId, branchId: branchBId })).rejects.toThrow("outside your analytics scope");
+  });
+
+  test("managed-scope analytics does not include self when self analytics is denied", async () => {
+    const { t, companyId, managerMembershipId } = await seedDashboardCompany();
+    await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, {
+      companyId,
+      title: "Manager self task",
+      description: "",
+      dueDate: Date.now() + 86_400_000,
+      assigneeMembershipIds: [managerMembershipId],
+      priority: "medium",
+    });
+    await t.run(async (ctx) => {
+      await ctx.db.insert("permissionOverrides", { companyId, membershipId: managerMembershipId, capability: "analytics:view:self", effect: "deny", updatedAt: Date.now() });
+    });
+
+    const dashboard = await t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId });
+    expect(dashboard.role).toBe("Manager");
+    expect(dashboard.metrics.totalTasks).toBe(1);
+    expect(dashboard.filterOptions.employees.map((employee) => employee._id)).not.toContain(managerMembershipId);
+    const summary = await t.withIdentity(identity("manager")).query(api.analytics.aiSummary, { companyId });
+    expect(summary.oneTimeTaskCount).toBe(1);
+    expect(summary.scopeSize).toBe(1);
   });
 });

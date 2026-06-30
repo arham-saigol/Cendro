@@ -10,8 +10,12 @@ async function scopedIdsForAnalytics(ctx: QueryCtx, companyId: Id<"companies">, 
     const rows = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(500);
     return new Set(rows.filter((row) => row.active).map((row) => row._id));
   }
-  if (caps.has("analytics:view:managed_scope")) return await scopedMembershipIds(ctx, companyId, membership);
-  return new Set<Id<"companyMemberships">>([membership._id]);
+  if (caps.has("analytics:view:managed_scope")) {
+    const scoped = await scopedMembershipIds(ctx, companyId, membership);
+    if (!caps.has("analytics:view:self")) scoped.delete(membership._id);
+    return scoped;
+  }
+  return caps.has("analytics:view:self") ? new Set<Id<"companyMemberships">>([membership._id]) : new Set<Id<"companyMemberships">>();
 }
 
 function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.email; }
@@ -62,12 +66,12 @@ export const performanceSummary = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const scoped = await scopedIdsForAnalytics(ctx, args.companyId, membership);
     const oneTime = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
-    const visibleOneTime = oneTime.filter((task) => scoped.has(task.createdByMembershipId) || task.assigneeMembershipIds.some((id) => scoped.has(id)));
+    const visibleOneTime = oneTime.filter((task) => task.assigneeMembershipIds.some((id) => scoped.has(id)));
     const completed = visibleOneTime.filter((task) => task.status === "completed").length;
     const overdue = visibleOneTime.filter((task) => task.status !== "completed" && (task.overdueAt || (task.dueDate && task.dueDate < Date.now()))).length;
     const people = await peopleRows(ctx, args.companyId, scoped, 50);
     const byPerson = people.map((person) => {
-      const assigned = visibleOneTime.filter((task) => task.assigneeMembershipIds.includes(person.membershipId) || (task.assigneeMembershipIds.length === 0 && task.createdByMembershipId === person.membershipId));
+      const assigned = visibleOneTime.filter((task) => task.assigneeMembershipIds.includes(person.membershipId));
       const personCompleted = assigned.filter((task) => task.status === "completed").length;
       const personOverdue = assigned.filter((task) => task.status !== "completed" && (task.overdueAt || (task.dueDate && task.dueDate < Date.now()))).length;
       return { name: person.name, role: person.role, assignedOneTimeTasks: assigned.length, completedOneTimeTasks: personCompleted, overdueOneTimeTasks: personOverdue };

@@ -9,7 +9,6 @@ import {
   Check,
   CheckCircle2,
   ChevronRight,
-  Clock,
   FileText,
   Inbox,
   Info,
@@ -55,7 +54,6 @@ type PerformanceRow = {
   assigned: number;
   completed: number;
   overdue: number;
-  dueSoon?: number;
   completionRate: number;
 };
 type DashboardData = {
@@ -83,13 +81,13 @@ type DashboardData = {
     totalTasks: number;
     completedTasks: number;
     completionRate: number;
+    openTasks: number;
+    periodCompletions: number;
     notStartedTasks: number;
     inProgressTasks: number;
     overdueTasks: number;
-    dueSoonTasks: number;
     oneTimeTasks: number;
     recurringTasks: number;
-    averageCompletionMs: number | null;
     lateCompletions: number;
     lateCompletionRate: number;
   };
@@ -153,20 +151,12 @@ function formatPercent(value: number) {
   return `${Math.round(value)}%`;
 }
 
-function formatDuration(ms: number | null) {
-  if (ms === null) return "—";
-  const hours = ms / 3_600_000;
-  if (hours < 1) return `${Math.max(1, Math.round(ms / 60_000))}m`;
-  if (hours < 24) return `${Math.round(hours)}h`;
-  return `${Math.round(hours / 24)}d`;
-}
-
 function safePercent(part: number, total: number) {
   return total > 0 ? Math.round((part / total) * 100) : 0;
 }
 
 function openTaskCount(data: DashboardData) {
-  return Math.max(0, data.metrics.totalTasks - data.metrics.completedTasks);
+  return Math.max(0, data.metrics.openTasks);
 }
 
 function cssColorFor(key: string) {
@@ -181,10 +171,6 @@ function toneClass(tone: "neutral" | "accent" | "success" | "danger") {
   if (tone === "danger") return "text-[var(--danger)]";
   if (tone === "accent") return "text-[var(--primary)]";
   return "text-[var(--ink)]";
-}
-
-function toneForRate(rate: number) {
-  return rate >= 80 ? "success" : rate >= 50 ? "neutral" : "danger";
 }
 
 // ------------------------------------------------------------------
@@ -834,14 +820,8 @@ function AttentionPanel({ data }: { data: DashboardData }) {
     {
       label: "Overdue tasks",
       value: data.metrics.overdueTasks,
-      helper: "Past due or missed",
+      helper: "Open one-time tasks past due",
       tone: data.metrics.overdueTasks > 0 ? ("danger" as const) : ("neutral" as const),
-    },
-    {
-      label: "Due soon",
-      value: data.metrics.dueSoonTasks,
-      helper: "Due within 48h",
-      tone: "accent" as const,
     },
     {
       label: "Missed JD cycles",
@@ -865,7 +845,7 @@ function AttentionPanel({ data }: { data: DashboardData }) {
         description={clean ? "No overdue or late work in this filtered view." : "Work that should be reviewed before the broader trend."}
         icon={<AlertTriangle className="h-4 w-4" />}
       />
-      <div className="grid gap-3 px-5 pb-5 sm:grid-cols-2 md:grid-cols-4">
+      <div className="grid gap-3 px-5 pb-5 sm:grid-cols-2 md:grid-cols-3">
         {items.map((item) => (
           <MiniMetric key={item.label} label={item.label} value={formatNumber(item.value)} helper={item.helper} tone={item.tone} />
         ))}
@@ -939,7 +919,7 @@ function WorkloadPanel({ data }: { data: DashboardData }) {
 function OperatingHealthPanel({ data }: { data: DashboardData }) {
   return (
     <DashboardCard className="h-full">
-      <PanelHeader title="Operating health" description="Cycle reliability and completion timing." icon={<Timer className="h-4 w-4" />} />
+      <PanelHeader title="Operating health" description="Current completion, cycle reliability, and late one-time work." icon={<Timer className="h-4 w-4" />} />
       <div className="grid gap-3 px-5 pb-5 sm:grid-cols-3">
         <MiniMetric
           label="JD cycle health"
@@ -947,7 +927,12 @@ function OperatingHealthPanel({ data }: { data: DashboardData }) {
           helper={`${formatNumber(data.jdCycleHealth.completedCycles)} done · ${formatNumber(data.jdCycleHealth.missedCycles)} missed`}
           tone={data.jdCycleHealth.missedCycles > 0 ? "danger" : "neutral"}
         />
-        <MiniMetric label="Avg completion time" value={formatDuration(data.metrics.averageCompletionMs)} helper="Completed tasks with timestamps" />
+        <MiniMetric
+          label="Current completion rate"
+          value={formatPercent(data.metrics.completionRate)}
+          helper={`${formatNumber(data.metrics.completedTasks)} completed current tasks`}
+          tone={data.metrics.completionRate >= 80 ? "success" : data.metrics.completionRate >= 50 ? "neutral" : "danger"}
+        />
         <MiniMetric
           label="Late completion rate"
           value={formatPercent(data.metrics.lateCompletionRate)}
@@ -987,22 +972,22 @@ function AdminDashboard({
           />
           <MetricCard
             icon={<ListChecks className="h-3.5 w-3.5" />}
-            label="Total tasks"
-            value={formatNumber(data.metrics.totalTasks)}
-            helper={`${formatNumber(open)} open · ${formatNumber(data.metrics.completedTasks)} complete`}
+            label="Open now"
+            value={formatNumber(open)}
+            helper={`${formatNumber(data.metrics.totalTasks)} current tasks`}
           />
           <MetricCard
             icon={<CheckCircle2 className="h-3.5 w-3.5" />}
-            label="Completion rate"
-            value={formatPercent(data.metrics.completionRate)}
-            helper={`${formatNumber(data.metrics.completedTasks)} completed in range`}
-            tone={toneForRate(data.metrics.completionRate)}
+            label="Completed in period"
+            value={formatNumber(data.metrics.periodCompletions)}
+            helper={data.range.label}
+            tone={data.metrics.periodCompletions > 0 ? "success" : "neutral"}
           />
           <MetricCard
             icon={<AlertTriangle className="h-3.5 w-3.5" />}
-            label="Overdue"
+            label="Overdue now"
             value={formatNumber(data.metrics.overdueTasks)}
-            helper={`${formatNumber(data.metrics.dueSoonTasks)} due soon`}
+            helper="Open one-time tasks past due"
             tone={data.metrics.overdueTasks > 0 ? "danger" : "neutral"}
           />
         </div>
@@ -1102,19 +1087,19 @@ function ManagerDashboard({
             value={formatNumber(data.scope.people)}
             helper={`${formatNumber(data.scope.branches)} branches · ${formatNumber(data.scope.departments)} departments`}
           />
-          <MetricCard icon={<ListChecks className="h-3.5 w-3.5" />} label="Scoped tasks" value={formatNumber(data.metrics.totalTasks)} helper={`${formatNumber(open)} still open`} />
+          <MetricCard icon={<ListChecks className="h-3.5 w-3.5" />} label="Open now" value={formatNumber(open)} helper={`${formatNumber(data.metrics.totalTasks)} current tasks`} />
           <MetricCard
             icon={<CheckCircle2 className="h-3.5 w-3.5" />}
-            label="Completion rate"
-            value={formatPercent(data.metrics.completionRate)}
-            helper={`${formatNumber(data.metrics.completedTasks)} completed`}
-            tone={toneForRate(data.metrics.completionRate)}
+            label="Completed in period"
+            value={formatNumber(data.metrics.periodCompletions)}
+            helper={data.range.label}
+            tone={data.metrics.periodCompletions > 0 ? "success" : "neutral"}
           />
           <MetricCard
             icon={<AlertTriangle className="h-3.5 w-3.5" />}
-            label="Overdue"
+            label="Overdue now"
             value={formatNumber(data.metrics.overdueTasks)}
-            helper={`${formatNumber(data.metrics.dueSoonTasks)} due soon`}
+            helper="Open one-time tasks past due"
             tone={data.metrics.overdueTasks > 0 ? "danger" : "neutral"}
           />
         </div>
@@ -1200,23 +1185,23 @@ function EmployeeDashboard({ data }: { data: DashboardData }) {
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard
             icon={<ListChecks className="h-3.5 w-3.5" />}
-            label="My tasks"
-            value={formatNumber(data.metrics.totalTasks)}
-            helper={`${formatNumber(currentWorkload)} still open`}
+            label="Open now"
+            value={formatNumber(currentWorkload)}
+            helper={`${formatNumber(data.metrics.totalTasks)} current tasks`}
           />
           <MetricCard
             icon={<CheckCircle2 className="h-3.5 w-3.5" />}
-            label="Completion rate"
-            value={formatPercent(data.metrics.completionRate)}
-            helper={`${formatNumber(data.metrics.completedTasks)} completed`}
-            tone={toneForRate(data.metrics.completionRate)}
+            label="Completed in period"
+            value={formatNumber(data.metrics.periodCompletions)}
+            helper={data.range.label}
+            tone={data.metrics.periodCompletions > 0 ? "success" : "neutral"}
           />
           <MetricCard
-            icon={<Clock className="h-3.5 w-3.5" />}
-            label="Due soon"
-            value={formatNumber(data.metrics.dueSoonTasks)}
-            helper={`${formatNumber(data.metrics.overdueTasks)} overdue`}
-            tone={data.metrics.overdueTasks > 0 ? "danger" : "accent"}
+            icon={<AlertTriangle className="h-3.5 w-3.5" />}
+            label="Overdue now"
+            value={formatNumber(data.metrics.overdueTasks)}
+            helper="Open one-time tasks past due"
+            tone={data.metrics.overdueTasks > 0 ? "danger" : "neutral"}
           />
           <MetricCard
             icon={<FileText className="h-3.5 w-3.5" />}

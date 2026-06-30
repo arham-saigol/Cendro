@@ -47,7 +47,6 @@ type DashboardTask = {
   dueAt: number | null;
   overdueAt: number | null;
   completedAt: number | null;
-  completionDurationMs: number | null;
   isLate: boolean;
   priority: Priority | null;
   frequency: Frequency | null;
@@ -62,7 +61,6 @@ type CompletionEvent = {
   title: string;
   at: number;
   byMembershipId: Id<"companyMemberships"> | null;
-  durationMs: number | null;
   isLate: boolean;
 };
 
@@ -73,7 +71,6 @@ type MissedEvent = {
 };
 
 const dayMs = 86_400_000;
-const dueSoonMs = 2 * dayMs;
 const dashboardTakeLimit = 500;
 
 const datePresetValidator = v.union(v.literal("7d"), v.literal("30d"), v.literal("90d"), v.literal("365d"));
@@ -94,11 +91,6 @@ function safeRate(part: number, total: number) {
   return total > 0 ? Math.round((part / total) * 100) : 0;
 }
 
-function average(values: number[]) {
-  if (!values.length) return null;
-  return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
-}
-
 function dateWindow(preset: DatePreset | undefined, now: number) {
   const selected = preset ?? "30d";
   const days = selected === "7d" ? 7 : selected === "90d" ? 90 : selected === "365d" ? 365 : 30;
@@ -116,13 +108,28 @@ async function allActiveMembershipIds(ctx: QueryCtx, companyId: Id<"companies">)
   return new Set(rows.filter((m) => m.active).map((m) => m._id));
 }
 
+async function analyticsScopedMembershipIds(
+  ctx: QueryCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  caps: Awaited<ReturnType<typeof membershipCapabilities>>,
+) {
+  if (caps.has("analytics:view:company")) return await allActiveMembershipIds(ctx, companyId);
+  if (caps.has("analytics:view:managed_scope")) {
+    const scoped = await scopedMembershipIds(ctx, companyId, membership);
+    if (!caps.has("analytics:view:self")) scoped.delete(membership._id);
+    return scoped;
+  }
+  return caps.has("analytics:view:self") ? new Set<Id<"companyMemberships">>([membership._id]) : new Set<Id<"companyMemberships">>();
+}
+
 async function dashboardAccess(ctx: QueryCtx, companyId: Id<"companies">) {
   const { membership, company } = await requireMembership(ctx, companyId);
   const caps = await membershipCapabilities(ctx, membership);
   if (!caps.has("analytics:view:company") && !caps.has("analytics:view:managed_scope") && !caps.has("analytics:view:self")) throw new ConvexError("You do not have access to analytics.");
 
   const dashboardRole: DashboardRole = caps.has("analytics:view:company") ? "Admin" : caps.has("analytics:view:managed_scope") ? "Manager" : "Employee";
-  const scopedIds = dashboardRole === "Admin" ? await allActiveMembershipIds(ctx, companyId) : dashboardRole === "Manager" ? await scopedMembershipIds(ctx, companyId, membership) : new Set([membership._id]);
+  const scopedIds = await analyticsScopedMembershipIds(ctx, companyId, membership, caps);
   return { membership, company, caps, dashboardRole, scopedIds };
 }
 
@@ -193,19 +200,22 @@ async function allowedOrgIds(
     };
   }
 
-  const branchIds = new Set(assignedBranchIds);
-  const departmentIds = new Set(assignedDepartmentIds);
   if (dashboardRole === "Manager") {
+    const branchIds = new Set<Id<"branches">>();
+    const departmentIds = new Set<Id<"departments">>();
     const managedBranches = await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", viewerMembershipId)).take(dashboardTakeLimit);
     const managedDepartments = await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", viewerMembershipId)).take(dashboardTakeLimit);
-    for (const row of managedBranches) branchIds.add(row.branchId);
-    for (const row of managedDepartments) departmentIds.add(row.departmentId);
+    for (const row of managedBranches) if (row.companyId === companyId) branchIds.add(row.branchId);
+    for (const row of managedDepartments) if (row.companyId === companyId) departmentIds.add(row.departmentId);
+    for (const department of org.departments) if (branchIds.has(department.branchId)) departmentIds.add(department._id);
+    for (const departmentId of departmentIds) {
+      const department = org.departmentById.get(departmentId);
+      if (department) branchIds.add(department.branchId);
+    }
+    return { branchIds, departmentIds };
   }
-  for (const departmentId of departmentIds) {
-    const department = org.departmentById.get(departmentId);
-    if (department) branchIds.add(department.branchId);
-  }
-  return { branchIds, departmentIds };
+
+  return { branchIds: new Set(assignedBranchIds), departmentIds: new Set(assignedDepartmentIds) };
 }
 
 function assigneeOrg(assigneeIds: Id<"companyMemberships">[], assignments: Map<Id<"companyMemberships">, OrgAssignments>) {
@@ -228,10 +238,6 @@ function currentJdStatus(task: Doc<"jdTasks">, completion: Doc<"jdTaskCompletion
 
 function currentOneTimeStatus(task: Doc<"oneTimeTasks">, now: number): DashboardStatus {
   return task.status !== "completed" && (Boolean(task.overdueAt) || Boolean(task.dueDate && task.dueDate < now)) ? "overdue" : task.status;
-}
-
-function touchesDateWindow(task: DashboardTask, start: number, end: number) {
-  return [task.createdAt, task.updatedAt, task.dueAt, task.overdueAt, task.completedAt].some((value) => typeof value === "number" && value >= start && value <= end);
 }
 
 function matchesDashboardFilters(task: DashboardTask, args: DashboardArgs) {
@@ -277,7 +283,6 @@ async function buildTasks(
       dueAt: state.cycle.end,
       overdueAt: null,
       completedAt,
-      completionDurationMs: completedAt ? Math.max(0, completedAt - state.cycle.start) : null,
       isLate: false,
       priority: null,
       frequency: task.recurrence,
@@ -296,7 +301,6 @@ async function buildTasks(
         title: task.title,
         at: completion.completedAt,
         byMembershipId: completion.completedByMembershipId,
-        durationMs: Math.max(0, completion.completedAt - completion.cycleStart),
         isLate: false,
       });
     }
@@ -323,7 +327,6 @@ async function buildTasks(
       dueAt: task.dueDate ?? null,
       overdueAt: task.overdueAt ?? (status === "overdue" ? task.dueDate ?? null : null),
       completedAt,
-      completionDurationMs: completedAt ? Math.max(0, completedAt - task.createdAt) : null,
       isLate: Boolean(completedAt && task.dueDate && completedAt > task.dueDate),
       priority: task.priority,
       frequency: null,
@@ -340,7 +343,6 @@ async function buildTasks(
         title: task.title,
         at: completedAt,
         byMembershipId: completedByMembershipId,
-        durationMs: Math.max(0, completedAt - task.createdAt),
         isLate: row.isLate,
       });
     }
@@ -390,12 +392,11 @@ function buildTrend(tasks: DashboardTask[], completionEvents: CompletionEvent[],
 }
 
 function buildPersonPerformance(tasks: DashboardTask[], people: Map<Id<"companyMemberships">, Person>, allowedIds: Set<Id<"companyMemberships">>) {
-  const rows = new Map<Id<"companyMemberships">, { person: Person; assigned: number; completed: number; overdue: number; dueSoon: number }>();
+  const rows = new Map<Id<"companyMemberships">, { person: Person; assigned: number; completed: number; overdue: number }>();
   for (const id of allowedIds) {
     const person = people.get(id);
-    if (person) rows.set(id, { person, assigned: 0, completed: 0, overdue: 0, dueSoon: 0 });
+    if (person) rows.set(id, { person, assigned: 0, completed: 0, overdue: 0 });
   }
-  const now = Date.now();
   for (const task of tasks) {
     for (const id of task.assigneeIds) {
       const row = rows.get(id);
@@ -403,7 +404,6 @@ function buildPersonPerformance(tasks: DashboardTask[], people: Map<Id<"companyM
       row.assigned += 1;
       if (task.status === "completed") row.completed += 1;
       if (task.status === "overdue") row.overdue += 1;
-      if (task.status !== "completed" && task.dueAt && task.dueAt >= now && task.dueAt <= now + dueSoonMs) row.dueSoon += 1;
     }
   }
   return Array.from(rows.values())
@@ -416,7 +416,6 @@ function buildPersonPerformance(tasks: DashboardTask[], people: Map<Id<"companyM
       assigned: row.assigned,
       completed: row.completed,
       overdue: row.overdue,
-      dueSoon: row.dueSoon,
       completionRate: safeRate(row.completed, row.assigned),
     }))
     .sort((a, b) => b.assigned - a.assigned || a.name.localeCompare(b.name));
@@ -501,11 +500,7 @@ export const dashboard = query({
     assertAllowedFilters(args, access.dashboardRole, access.scopedIds, allowedOrg.branchIds, allowedOrg.departmentIds, access.membership._id);
 
     const built = await buildTasks(ctx, args.companyId, access.scopedIds, assignments.byMembership, now, access.company.timeZone);
-    const taskIdsWithWindowHistory = new Set([
-      ...built.completionEvents.filter((event) => event.at >= range.start && event.at <= range.end).map((event) => event.taskId),
-      ...built.missedEvents.filter((event) => event.at >= range.start && event.at <= range.end).map((event) => event.taskId),
-    ]);
-    const filteredTasks = built.tasks.filter((task) => matchesDashboardFilters(task, args) && (touchesDateWindow(task, range.start, range.end) || taskIdsWithWindowHistory.has(task.id)));
+    const filteredTasks = built.tasks.filter((task) => matchesDashboardFilters(task, args));
     const filteredTaskIds = new Set(filteredTasks.map((task) => task.id));
     const completionEvents = built.completionEvents.filter((event) => filteredTaskIds.has(event.taskId) && event.at >= range.start && event.at <= range.end);
     const missedEvents = built.missedEvents.filter((event) => filteredTaskIds.has(event.taskId) && event.at >= range.start && event.at <= range.end);
@@ -524,11 +519,10 @@ export const dashboard = query({
     const totalTasks = filteredTasks.length;
     const completedTasks = statusCounts.get("completed") ?? 0;
     const overdueTasks = statusCounts.get("overdue") ?? 0;
-    const dueSoonTasks = filteredTasks.filter((task) => task.status !== "completed" && task.dueAt && task.dueAt >= now && task.dueAt <= now + dueSoonMs).length;
     const inProgressTasks = statusCounts.get("in_progress") ?? 0;
     const notStartedTasks = statusCounts.get("due") ?? 0;
+    const openTasks = totalTasks - completedTasks;
     const lateCompletions = completionEvents.filter((event) => event.isLate).length;
-    const completionDurations = completionEvents.flatMap((event) => event.durationMs === null ? [] : [event.durationMs]);
     const jdCompletions = completionEvents.filter((event) => event.kind === "jd").length;
     const jdMissedCycles = missedEvents.length;
     const personPerformance = access.dashboardRole === "Employee" ? [] : buildPersonPerformance(filteredTasks, people, access.scopedIds);
@@ -639,15 +633,15 @@ export const dashboard = query({
         totalTasks,
         completedTasks,
         completionRate: safeRate(completedTasks, totalTasks),
+        openTasks,
+        periodCompletions: completionEvents.length,
         notStartedTasks,
         inProgressTasks,
         overdueTasks,
-        dueSoonTasks,
         oneTimeTasks: typeCounts.get("one_time") ?? 0,
         recurringTasks: typeCounts.get("jd") ?? 0,
-        averageCompletionMs: average(completionDurations),
         lateCompletions,
-        lateCompletionRate: safeRate(lateCompletions, Math.max(1, completionEvents.filter((event) => event.kind === "one_time").length)),
+        lateCompletionRate: safeRate(lateCompletions, completionEvents.filter((event) => event.kind === "one_time").length),
       },
       breakdowns: {
         status: makeBreakdown(["due", "in_progress", "completed", "overdue"] as const, statusCounts, { due: "Not started", in_progress: "In progress", completed: "Completed", overdue: "Overdue" }),
@@ -685,11 +679,11 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
   const { membership } = await requireMembership(ctx, args.companyId);
   const caps = await membershipCapabilities(ctx, membership);
   if (!caps.has("analytics:view:company") && !caps.has("analytics:view:managed_scope") && !caps.has("analytics:view:self")) throw new ConvexError("You do not have access to analytics.");
-  const scoped = caps.has("analytics:view:company") ? await allActiveMembershipIds(ctx, args.companyId) : caps.has("analytics:view:managed_scope") ? await scopedMembershipIds(ctx, args.companyId, membership) : new Set([membership._id]);
+  const scoped = await analyticsScopedMembershipIds(ctx, args.companyId, membership, caps);
   const jd = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(dashboardTakeLimit);
   const one = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(dashboardTakeLimit);
-  const visibleJd = jd.filter((t) => scoped.has(t.createdByMembershipId) || t.assigneeMembershipIds.some((id) => scoped.has(id)));
-  const visibleOne = one.filter((t) => scoped.has(t.createdByMembershipId) || t.assigneeMembershipIds.some((id) => scoped.has(id)));
+  const visibleJd = jd.filter((t) => t.assigneeMembershipIds.some((id) => scoped.has(id)));
+  const visibleOne = one.filter((t) => t.assigneeMembershipIds.some((id) => scoped.has(id)));
   const overdueOne = visibleOne.filter((t) => t.status !== "completed" && (t.overdueAt || (t.dueDate && t.dueDate < Date.now()))).length;
   const completedOne = visibleOne.filter((t) => t.status === "completed").length;
   const sops = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(dashboardTakeLimit);

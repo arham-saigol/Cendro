@@ -17,6 +17,7 @@ const recurrenceValidator = v.union(v.literal("daily"), v.literal("every_other_d
 const priorityValidator = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
 const statusValidator = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
 const jdFrequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
+const jdFrequencyOrder: Record<Doc<"jdTasks">["recurrence"], number> = { daily: 0, every_other_day: 1, weekly: 2, semimonthly: 3, monthly: 4, semiannually: 5, annually: 6 };
 function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Pending" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
 function cleanOptionalText(value?: string) { const text = value?.trim(); return text ? text : undefined; }
 function cleanOptionalQuantity(value?: number) { return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined; }
@@ -149,7 +150,7 @@ export const listJdRows = query({
       if (await visible(ctx, args.companyId, membership, task, "jd", auth)) filtered.push(await enrichedJd(ctx, task));
       if (filtered.length >= 200) break;
     }
-    if (args.sort === "frequency") filtered.sort((a, b) => a.recurrence.localeCompare(b.recurrence));
+    if (args.sort === "frequency") filtered.sort((a, b) => jdFrequencyOrder[a.recurrence] - jdFrequencyOrder[b.recurrence] || b.createdAt - a.createdAt);
     return filtered;
   },
 });

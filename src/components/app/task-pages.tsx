@@ -45,6 +45,7 @@ type ManualStatus = "due" | "in_progress" | "completed";
 type StatusFilter = "all" | ManualStatus | "overdue";
 type TaskView = "all" | "my";
 type PriorityFilter = "all" | Priority;
+type FrequencyFilter = Frequency | "all";
 
 type TaskFormValues = {
   title: string;
@@ -67,6 +68,7 @@ const frequencies: { value: Frequency; label: string }[] = [
   { value: "semiannually", label: "Bi-yearly" },
   { value: "annually", label: "Yearly" },
 ];
+const frequencyRank = new Map<Frequency, number>(frequencies.map((frequency, index) => [frequency.value, index]));
 const priorities: Priority[] = ["low", "medium", "high"];
 const manualStatuses: { value: ManualStatus; label: string }[] = [
   { value: "due", label: "Pending" },
@@ -167,6 +169,7 @@ function fromDateInput(value: string) {
 }
 function quantityFromInput(value: string) { const parsed = Number(value); return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined; }
 function frequencyLabel(value?: Frequency) { return frequencies.find((frequency) => frequency.value === value)?.label ?? "—"; }
+function compareFrequency(a?: Frequency, b?: Frequency) { return (frequencyRank.get(a as Frequency) ?? Number.MAX_SAFE_INTEGER) - (frequencyRank.get(b as Frequency) ?? Number.MAX_SAFE_INTEGER); }
 function priorityLabel(value?: Priority) { return value ? value[0].toUpperCase() + value.slice(1) : "—"; }
 function statusText(task: any) { return typeof task.state === "string" ? task.state : task.state?.status ?? "Pending"; }
 function rawStatus(task: any): ManualStatus | "overdue" { return task.state?.rawStatus ?? (statusText(task) === "Completed" ? "completed" : statusText(task) === "In Progress" ? "in_progress" : statusText(task) === "Overdue" ? "overdue" : statusText(task) === "Pending" ? "due" : "due"); }
@@ -510,14 +513,14 @@ function TaskFilterMenu({
 }: {
   kind: Kind;
   statusFilter: StatusFilter;
-  frequency: Frequency | "all";
+  frequency: FrequencyFilter;
   priorityFilter: PriorityFilter;
   assigneeFilter: string;
   assignees: any[];
   showAssigneeFilter: boolean;
   activeCount: number;
   onStatusChange: (value: StatusFilter) => void;
-  onFrequencyChange: (value: Frequency | "all") => void;
+  onFrequencyChange: (value: FrequencyFilter) => void;
   onPriorityChange: (value: PriorityFilter) => void;
   onAssigneeChange: (value: string) => void;
 }) {
@@ -529,7 +532,7 @@ function TaskFilterMenu({
     { value: "overdue", label: "Overdue" },
   ];
   const priorityOptions: { value: PriorityFilter; label: string }[] = [{ value: "all", label: "All priorities" }, ...priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))];
-  const frequencyOptions: { value: Frequency | "all"; label: string }[] = [{ value: "all", label: "All frequencies" }, ...frequencies];
+  const frequencyOptions: { value: FrequencyFilter; label: string }[] = [{ value: "all", label: "All frequencies" }, ...frequencies];
 
   return (
     <DropdownMenu.Root>
@@ -1100,7 +1103,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [taskView, setTaskView] = useState<TaskView>("all");
-  const [frequency, setFrequency] = useState<Frequency | "all">("all");
+  const [frequency, setFrequency] = useState<FrequencyFilter>("all");
   const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [assigneeFilter, setAssigneeFilter] = useState("all");
@@ -1113,7 +1116,9 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const canUseAllTasks = active?.membership.role === "Admin" || active?.membership.role === "Manager";
   const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip") as any[] | undefined;
   const filterableAssignees = useQuery(api.tasks.filterableAssignees, activeCompanyId && canUseAllTasks ? { companyId: activeCompanyId } : "skip") as any[] | undefined;
-  const tasks = useQuery(kind === "jd" ? api.tasks.listJdRows : api.tasks.listOneTimeRows, activeCompanyId ? (kind === "jd" ? { companyId: activeCompanyId, search: search || undefined, frequency, sort: "newest" as const } : { companyId: activeCompanyId, search: search || undefined, sort: "newest" as const }) : "skip") as any[] | undefined;
+  const tasks = useQuery(kind === "jd" ? api.tasks.listJdRows : api.tasks.listOneTimeRows, activeCompanyId ? (kind === "jd" ? { companyId: activeCompanyId, search: search || undefined, sort: "frequency" as const } : { companyId: activeCompanyId, search: search || undefined, sort: "newest" as const }) : "skip") as any[] | undefined;
+  const jdFrequencySourceTasks = useQuery(api.tasks.listJdRows, activeCompanyId && kind === "jd" && search.trim() !== "" ? { companyId: activeCompanyId, sort: "frequency" as const } : "skip") as any[] | undefined;
+  const oneTimePrioritySourceTasks = useQuery(api.tasks.listOneTimeRows, activeCompanyId && kind === "one" && search.trim() !== "" ? { companyId: activeCompanyId, sort: "newest" as const } : "skip") as any[] | undefined;
   const updateJd = useMutation(api.tasks.updateJd);
   const updateOneTime = useMutation(api.tasks.updateOneTime);
   const deleteJd = useMutation(api.tasks.deleteJd);
@@ -1124,15 +1129,37 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const pageTitle = kind === "jd" ? "JD Tasks" : "One-Time Tasks";
   const description = kind === "jd" ? "Recurring role responsibilities with cycle-aware status and clear ownership." : "One-off work with priority, due dates, and clear completion status.";
   const canCreate = canCreateTasks(active, kind);
-  const effectiveTaskView: TaskView = canUseAllTasks ? taskView : "my";
+  const frequencyViewActive = kind === "jd" && frequency !== "all";
+  const priorityViewActive = kind === "one" && priorityFilter !== "all";
+  const effectiveTaskView: TaskView = frequencyViewActive || priorityViewActive ? "my" : canUseAllTasks ? taskView : "my";
   const currentMembershipId = active?.membership._id as string | undefined;
-  const visibleTasks = (tasks ?? []).filter((task) => {
-    if (effectiveTaskView === "my" && !taskHasAssignee(task, currentMembershipId)) return false;
-    if (!statusMatches(task, statusFilter)) return false;
-    if (kind === "one" && priorityFilter !== "all" && task.priority !== priorityFilter) return false;
-    if (assigneeFilter !== "all" && !taskHasAssignee(task, assigneeFilter)) return false;
-    return true;
-  });
+  const jdFrequencyPillTasks = search.trim() !== "" ? (jdFrequencySourceTasks ?? tasks) : tasks;
+  const oneTimePriorityPillTasks = search.trim() !== "" ? (oneTimePrioritySourceTasks ?? tasks) : tasks;
+  const ownFrequencyValues = useMemo(() => {
+    if (kind !== "jd" || !currentMembershipId) return [] as Frequency[];
+    const values = new Set<Frequency>();
+    for (const task of jdFrequencyPillTasks ?? []) if (taskHasAssignee(task, currentMembershipId)) values.add(task.recurrence as Frequency);
+    return frequencies.map((option) => option.value).filter((value) => values.has(value));
+  }, [currentMembershipId, jdFrequencyPillTasks, kind]);
+  const ownPriorityValues = useMemo(() => {
+    if (kind !== "one" || !currentMembershipId) return [] as Priority[];
+    const values = new Set<Priority>();
+    for (const task of oneTimePriorityPillTasks ?? []) if (taskHasAssignee(task, currentMembershipId)) values.add(task.priority as Priority);
+    return priorities.filter((priority) => values.has(priority));
+  }, [currentMembershipId, kind, oneTimePriorityPillTasks]);
+  const showAssigneeColumn = canUseAllTasks && effectiveTaskView === "all";
+  const showFrequencyColumn = kind === "jd" && !frequencyViewActive;
+  const showPriorityColumn = kind === "one" && !priorityViewActive;
+  const visibleTasks = (tasks ?? [])
+    .filter((task) => {
+      if (effectiveTaskView === "my" && !taskHasAssignee(task, currentMembershipId)) return false;
+      if (kind === "jd" && frequency !== "all" && task.recurrence !== frequency) return false;
+      if (!statusMatches(task, statusFilter)) return false;
+      if (kind === "one" && priorityFilter !== "all" && task.priority !== priorityFilter) return false;
+      if (assigneeFilter !== "all" && !taskHasAssignee(task, assigneeFilter)) return false;
+      return true;
+    })
+    .sort((a, b) => kind === "jd" ? compareFrequency(a.recurrence, b.recurrence) || (b.createdAt ?? 0) - (a.createdAt ?? 0) : 0);
   const visibleIds = visibleTasks.map((task) => task._id);
   const selectedVisibleCount = visibleIds.reduce((count, id) => count + (selectedIds.has(id) ? 1 : 0), 0);
   const allVisibleSelected = visibleTasks.length > 0 && selectedVisibleCount === visibleTasks.length;
@@ -1149,6 +1176,16 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   useEffect(() => {
     if (effectiveTaskView === "my" && assigneeFilter !== "all") setAssigneeFilter("all");
   }, [effectiveTaskView, assigneeFilter]);
+
+  useEffect(() => {
+    if (kind !== "jd" || frequency === "all" || !jdFrequencyPillTasks) return;
+    if (!ownFrequencyValues.includes(frequency)) setFrequency("all");
+  }, [frequency, jdFrequencyPillTasks, kind, ownFrequencyValues]);
+
+  useEffect(() => {
+    if (kind !== "one" || priorityFilter === "all" || !oneTimePriorityPillTasks) return;
+    if (!ownPriorityValues.includes(priorityFilter)) setPriorityFilter("all");
+  }, [kind, oneTimePriorityPillTasks, ownPriorityValues, priorityFilter]);
 
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus();
@@ -1245,8 +1282,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     }
   }
 
-  const jdColumns = 6; // title + frequency + assignee + status + time + quantity
-  const oneColumns = 6; // title + priority + assignee + status + date assigned + due
+  const jdColumns = 4 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // title + optional frequency + optional assignee + status + time + quantity
+  const oneColumns = 4 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // title + optional priority + optional assignee + status + date assigned + due
   const filterCount = [statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
   const hasActiveFilters = filterCount > 0 || search.trim() !== "";
 
@@ -1261,14 +1298,39 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="task-view-toggle" aria-label="Task view">
-          {canUseAllTasks && (
-            <button type="button" className="task-view-button" data-active={effectiveTaskView === "all"} onClick={() => setTaskView("all")}>
-              <StarIcon className="h-4 w-4" />All Tasks
-            </button>
+          {kind === "jd" ? (
+            <>
+              <button type="button" className="task-view-button" data-active={frequency === "all" && (!canUseAllTasks || effectiveTaskView === "all")} onClick={() => { setFrequency("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
+                <StarIcon className="h-4 w-4" />All Tasks
+              </button>
+              {canUseAllTasks && (
+                <button type="button" className="task-view-button" data-active={frequency === "all" && effectiveTaskView === "my"} onClick={() => { setFrequency("all"); setTaskView("my"); setAssigneeFilter("all"); }}>
+                  <User className="h-4 w-4" />My Tasks
+                </button>
+              )}
+              {ownFrequencyValues.map((option) => (
+                <button key={option} type="button" className="task-view-button" data-active={frequency === option} onClick={() => { setFrequency(option); setTaskView("my"); setAssigneeFilter("all"); }}>
+                  <FrequencyIcon className="h-4 w-4" />{frequencyLabel(option)}
+                </button>
+              ))}
+            </>
+          ) : (
+            <>
+              <button type="button" className="task-view-button" data-active={priorityFilter === "all" && (!canUseAllTasks || effectiveTaskView === "all")} onClick={() => { setPriorityFilter("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
+                <StarIcon className="h-4 w-4" />All Tasks
+              </button>
+              {canUseAllTasks && (
+                <button type="button" className="task-view-button" data-active={priorityFilter === "all" && effectiveTaskView === "my"} onClick={() => { setPriorityFilter("all"); setTaskView("my"); setAssigneeFilter("all"); }}>
+                  <User className="h-4 w-4" />My Tasks
+                </button>
+              )}
+              {ownPriorityValues.map((priority) => (
+                <button key={priority} type="button" className="task-view-button" data-active={priorityFilter === priority} onClick={() => { setPriorityFilter(priority); setTaskView("my"); setAssigneeFilter("all"); }}>
+                  <Flag className="h-4 w-4" />{priorityLabel(priority)}
+                </button>
+              ))}
+            </>
           )}
-          <button type="button" className="task-view-button" data-active={effectiveTaskView === "my"} disabled={!canUseAllTasks} onClick={() => setTaskView("my")}>
-            <User className="h-4 w-4" />My Tasks
-          </button>
         </div>
         <div className="ml-auto flex flex-1 items-center justify-end gap-2">
           <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
@@ -1284,7 +1346,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             priorityFilter={priorityFilter}
             assigneeFilter={assigneeFilter}
             assignees={filterableAssignees ?? []}
-            showAssigneeFilter={canUseAllTasks && effectiveTaskView === "all"}
+            showAssigneeFilter={showAssigneeColumn}
             activeCount={filterCount}
             onStatusChange={setStatusFilter}
             onFrequencyChange={setFrequency}
@@ -1353,8 +1415,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             {kind === "jd" ? (
               <tr className="group/head">
                 <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><FrequencyIcon className="h-3.5 w-3.5" />FREQUENCY</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>
+                {showFrequencyColumn && <th><span className="inline-flex items-center gap-1.5"><FrequencyIcon className="h-3.5 w-3.5" />FREQUENCY</span></th>}
+                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>}
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />TIME</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><QuantityIcon className="h-3.5 w-3.5" />QUANTITY</span></th>
@@ -1362,8 +1424,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             ) : (
               <tr className="group/head">
                 <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><Tag className="h-3.5 w-3.5" />PRIORITY</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>
+                {showPriorityColumn && <th><span className="inline-flex items-center gap-1.5"><Tag className="h-3.5 w-3.5" />PRIORITY</span></th>}
+                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>}
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><CalendarClock className="h-3.5 w-3.5" />DATE ASSIGNED</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><CalendarDays className="h-3.5 w-3.5" />DUE DATE</span></th>
@@ -1447,32 +1509,38 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                         </div>
                       </td>
                       {kind === "jd" ? (
-                        <td className="whitespace-nowrap text-[var(--ink-secondary)]">
-                          {rowCanEdit ? (
-                            <InlineSelectCell value={task.recurrence as Frequency} options={frequencies} ariaLabel="Change frequency" pending={pending("frequency")} onSave={(recurrence) => saveInline(task, { recurrence }, "frequency")} />
-                          ) : frequencyLabel(task.recurrence)}
-                        </td>
+                        showFrequencyColumn && (
+                          <td className="whitespace-nowrap text-[var(--ink-secondary)]">
+                            {rowCanEdit ? (
+                              <InlineSelectCell value={task.recurrence as Frequency} options={frequencies} ariaLabel="Change frequency" pending={pending("frequency")} onSave={(recurrence) => saveInline(task, { recurrence }, "frequency")} />
+                            ) : frequencyLabel(task.recurrence)}
+                          </td>
+                        )
                       ) : (
+                        showPriorityColumn && (
+                          <td>
+                            {rowCanEdit && canEditPriority(active) ? (
+                              <InlineSelectCell
+                                value={task.priority as Priority}
+                                options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))}
+                                ariaLabel="Change priority"
+                                pending={pending("priority")}
+                                onSave={(priority) => saveInline(task, { priority }, "priority")}
+                                renderValue={(option) => <span className={cn("priority-chip", priorityChipClasses((option?.value ?? task.priority) as Priority))}>{option?.label ?? priorityLabel(task.priority)}</span>}
+                              />
+                            ) : (
+                              <span className={cn("priority-chip", priorityChipClasses(task.priority))}>{priorityLabel(task.priority)}</span>
+                            )}
+                          </td>
+                        )
+                      )}
+                      {showAssigneeColumn && (
                         <td>
-                          {rowCanEdit && canEditPriority(active) ? (
-                            <InlineSelectCell
-                              value={task.priority as Priority}
-                              options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))}
-                              ariaLabel="Change priority"
-                              pending={pending("priority")}
-                              onSave={(priority) => saveInline(task, { priority }, "priority")}
-                              renderValue={(option) => <span className={cn("priority-chip", priorityChipClasses((option?.value ?? task.priority) as Priority))}>{option?.label ?? priorityLabel(task.priority)}</span>}
-                            />
-                          ) : (
-                            <span className={cn("priority-chip", priorityChipClasses(task.priority))}>{priorityLabel(task.priority)}</span>
-                          )}
+                          {rowCanEdit && assignable ? (
+                            <InlineAssigneeCell assignable={assignable} assignees={task.assignees} selected={task.assigneeMembershipIds ?? []} pending={pending("assignee")} onSave={(assigneeMembershipIds) => saveInline(task, { assigneeMembershipIds }, "assignee")} />
+                          ) : <AvatarStack assignees={task.assignees} showName />}
                         </td>
                       )}
-                      <td>
-                        {rowCanEdit && assignable ? (
-                          <InlineAssigneeCell assignable={assignable} assignees={task.assignees} selected={task.assigneeMembershipIds ?? []} pending={pending("assignee")} onSave={(assigneeMembershipIds) => saveInline(task, { assigneeMembershipIds }, "assignee")} />
-                        ) : <AvatarStack assignees={task.assignees} showName />}
-                      </td>
                       <td><StatusBadge kind={kind} task={task} canUpdateOverride={rowCanEdit} cellTrigger={rowCanEdit} /></td>
                       {kind === "one" && (
                         <td className="whitespace-nowrap text-[var(--ink-secondary)]">{formatDate(task.createdAt)}</td>

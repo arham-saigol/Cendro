@@ -32,10 +32,10 @@ import { cn, initials } from "@/lib/utils";
 
 const nav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, requiresDashboard: true },
-  { href: "/jd-tasks", label: "JD tasks", icon: Repeat },
-  { href: "/one-time-tasks", label: "One-time tasks", icon: Check },
+  { href: "/jd-tasks", label: "JD Tasks", icon: Repeat },
+  { href: "/one-time-tasks", label: "One-Time Tasks", icon: Check },
   { href: "/sops", label: "SOPs", icon: FileText },
-  { href: "/company", label: "Company management", icon: Building2, requiresCompanyManagement: true },
+  { href: "/company", label: "Company Management", icon: Building2, requiresCompanyManagement: true },
 ];
 
 const dropdownItemClass =
@@ -257,7 +257,7 @@ function AccountCompanyMenu({ searchItems = nav }: { searchItems?: typeof nav })
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm text-[var(--ink)]">{company.company.name}</div>
-                    <div className="text-xs text-[var(--ink-faint)]">{company.membership.role}</div>
+                    <div className="text-xs text-[var(--ink-faint)]">{company.membership.role}{!company.membership.active ? " · Inactive" : ""}</div>
                   </div>
                   {isActive && <Check className="h-4 w-4 text-[var(--ink)]" />}
                 </DropdownMenu.Item>
@@ -338,14 +338,14 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
     );
   }
 
-  if (accessStatus === "paused") {
+  if (accessStatus === "noCompanies") {
     return (
       <ShellCard>
         <div className="mb-4">
           <AccountCompanyMenu />
         </div>
-        <h1 className="text-xl font-semibold">Access paused</h1>
-        <p className="mt-2 text-sm text-[var(--ink-muted)]">Your access to the app has currently been paused. Please contact your administrator.</p>
+        <h1 className="text-xl font-semibold">No company access yet</h1>
+        <p className="mt-2 text-sm text-[var(--ink-muted)]">Accept an invitation or ask an admin to add you to a company.</p>
         {email && <p className="mt-3 text-xs text-[var(--ink-faint)]">Signed in as {email}</p>}
         {isPlatformAdmin && (
           <Button asChild className="mt-4" variant="primary">
@@ -356,14 +356,14 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
     );
   }
 
-  if (accessStatus === "noCompanies") {
+  if (active && !active.membership.active) {
     return (
       <ShellCard>
         <div className="mb-4">
           <AccountCompanyMenu />
         </div>
-        <h1 className="text-xl font-semibold">No company access yet</h1>
-        <p className="mt-2 text-sm text-[var(--ink-muted)]">Accept an invitation or ask an admin to add you to a company.</p>
+        <h1 className="text-xl font-semibold">User inactive</h1>
+        <p className="mt-2 text-sm text-[var(--ink-muted)]">Your user is currently inactive in this company. Please contact the administrator.</p>
         {email && <p className="mt-3 text-xs text-[var(--ink-faint)]">Signed in as {email}</p>}
         {isPlatformAdmin && (
           <Button asChild className="mt-4" variant="primary">

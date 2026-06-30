@@ -3,7 +3,7 @@ import { v } from "convex/values";
 
 const role = v.union(v.literal("Admin"), v.literal("Manager"), v.literal("Employee"));
 const priority = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
-const rec = v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
+const rec = v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
 const taskStatus = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
 const scope = v.union(v.literal("company"), v.literal("branch"), v.literal("department"), v.literal("user"));
 const taskType = v.union(v.literal("jd"), v.literal("one_time"));
@@ -26,6 +26,7 @@ export default defineSchema({
   jdTaskCycleRecords: defineTable({ companyId: v.id("companies"), jdTaskId: v.id("jdTasks"), cycleStart: v.number(), cycleEnd: v.number(), status: v.literal("missed"), recordedAt: v.number() }).index("by_company", ["companyId"]).index("by_task", ["jdTaskId"]).index("by_task_and_cycleStart", ["jdTaskId", "cycleStart"]),
   oneTimeTasks: defineTable({ companyId: v.id("companies"), title: v.string(), description: v.optional(v.string()), dueDate: v.optional(v.number()), time: v.optional(v.string()), quantity: v.optional(v.number()), assigneeMembershipIds: v.array(v.id("companyMemberships")), createdByMembershipId: v.id("companyMemberships"), priority, status: taskStatus, overdueAt: v.optional(v.number()), completedAt: v.optional(v.number()), completedByMembershipId: v.optional(v.id("companyMemberships")), createdAt: v.number(), updatedAt: v.number() }).index("by_company", ["companyId"]),
   taskComments: defineTable({ companyId: v.id("companies"), taskType, taskId: v.string(), authorMembershipId: v.id("companyMemberships"), body: v.string(), createdAt: v.number() }).index("by_task", ["taskType", "taskId"]).index("by_company", ["companyId"]),
+  taskActivityLogs: defineTable({ companyId: v.id("companies"), taskType, taskId: v.string(), actorMembershipId: v.id("companyMemberships"), event: v.union(v.literal("created"), v.literal("status_changed")), fromStatus: v.optional(taskStatus), toStatus: v.optional(taskStatus), createdAt: v.number() }).index("by_task", ["taskType", "taskId"]).index("by_company", ["companyId"]),
   taskAttachments: defineTable({ companyId: v.id("companies"), taskType, taskId: v.string(), fileName: v.string(), contentType: v.string(), size: v.number(), storageId: v.id("_storage"), createdByMembershipId: v.id("companyMemberships"), createdAt: v.number() }).index("by_task", ["taskType", "taskId"]).index("by_company", ["companyId"]),
   sops: defineTable({ companyId: v.id("companies"), title: v.string(), content: v.string(), scopeType: scope, creatorMembershipId: v.id("companyMemberships"), updatedByMembershipId: v.id("companyMemberships"), createdAt: v.number(), updatedAt: v.number() }).index("by_company", ["companyId"]),
   sopBranchScopes: defineTable({ companyId: v.id("companies"), sopId: v.id("sops"), branchId: v.id("branches") }).index("by_sop", ["sopId"]).index("by_branch", ["branchId"]).index("by_company", ["companyId"]),

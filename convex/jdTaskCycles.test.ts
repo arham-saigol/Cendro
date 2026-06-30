@@ -50,6 +50,20 @@ describe("JD task cycle behavior", () => {
     expect(detail.task.state.currentCycleEnd).toBe(utc(2026, 6, 29));
   });
 
+  test("semi-monthly JD task created after the 15th uses the second half of the month", async () => {
+    vi.setSystemTime(utc(2026, 6, 25, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Semi-monthly review", description: "", recurrence: "semimonthly", assigneeMembershipIds: [adminMembershipId] });
+    const detail = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
+    const rows = await t.withIdentity(identity("admin")).query(api.tasks.listJdRows, { companyId, frequency: "semimonthly" });
+
+    expect(detail.task.state.rawStatus).toBe("due");
+    expect(detail.task.state.currentCycleStart).toBe(utc(2026, 6, 16));
+    expect(detail.task.state.currentCycleEnd).toBe(utc(2026, 7, 1));
+    expect(rows.find((row) => row._id === taskId)?.recurrence).toBe("semimonthly");
+  });
+
   test("daily JD task uses the company time zone across local midnight", async () => {
     vi.setSystemTime(utc(2026, 6, 26, 3, 30));
     const { t, companyId, adminMembershipId } = await seedCompany("America/New_York");
@@ -66,7 +80,7 @@ describe("JD task cycle behavior", () => {
     expect(afterMidnight.task.state.currentCycleStart).toBe(utc(2026, 6, 26, 4));
   });
 
-  test("weekly JD task rolls into the next Monday cycle and resets to not started", async () => {
+  test("weekly JD task rolls into the next Monday cycle and resets to pending", async () => {
     vi.setSystemTime(utc(2026, 6, 25, 12));
     const { t, companyId, adminMembershipId } = await seedCompany();
     const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Weekly review", description: "", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
@@ -76,11 +90,11 @@ describe("JD task cycle behavior", () => {
     const detail = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
 
     expect(detail.task.state.rawStatus).toBe("due");
-    expect(detail.task.state.status).toBe("Not Started");
+    expect(detail.task.state.status).toBe("Pending");
     expect(detail.task.state.currentCycleStart).toBe(utc(2026, 6, 29));
   });
 
-  test("daily JD task rolls over at midnight and resets to not started", async () => {
+  test("daily JD task rolls over at midnight and resets to pending", async () => {
     vi.setSystemTime(utc(2026, 6, 26, 12));
     const { t, companyId, adminMembershipId } = await seedCompany();
     const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Daily check", description: "", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
@@ -133,7 +147,7 @@ describe("JD task cycle behavior", () => {
     expect(after?.statusCycleStart).toBe(before?.statusCycleStart);
   });
 
-  test("completed previous JD cycle starts the new current cycle as not started", async () => {
+  test("completed previous JD cycle starts the new current cycle as pending", async () => {
     vi.setSystemTime(utc(2026, 6, 25, 12));
     const { t, companyId, adminMembershipId } = await seedCompany();
     const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Weekly review", description: "", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
@@ -162,7 +176,9 @@ describe("JD task cycle behavior", () => {
 });
 
 describe("fixed JD calendar cycle boundaries", () => {
-  test("monthly, six-month, and yearly boundaries use the selected time zone", () => {
+  test("semi-monthly, monthly, six-month, and yearly boundaries use the selected time zone", () => {
+    expect(currentJdCycle("semimonthly", utc(2026, 6, 15, 9), "UTC")).toEqual({ start: utc(2026, 6, 1), end: utc(2026, 6, 16) });
+    expect(currentJdCycle("semimonthly", utc(2026, 6, 16), "UTC")).toEqual({ start: utc(2026, 6, 16), end: utc(2026, 7, 1) });
     expect(currentJdCycle("monthly", utc(2026, 6, 15, 9), "UTC")).toEqual({ start: utc(2026, 6, 1), end: utc(2026, 7, 1) });
     expect(currentJdCycle("semiannually", utc(2026, 6, 30, 23, 59), "UTC")).toEqual({ start: utc(2026, 1, 1), end: utc(2026, 7, 1) });
     expect(currentJdCycle("semiannually", utc(2026, 7, 1), "UTC")).toEqual({ start: utc(2026, 7, 1), end: utc(2027, 1, 1) });

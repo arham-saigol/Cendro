@@ -40,7 +40,7 @@ type DatePreset = "7d" | "30d" | "90d" | "365d";
 type TaskTypeFilter = "all" | "jd" | "one_time";
 type StatusFilter = "all" | "due" | "in_progress" | "completed" | "overdue";
 type PriorityFilter = "all" | "low" | "medium" | "high";
-type FrequencyFilter = "all" | "daily" | "every_other_day" | "weekly" | "monthly" | "semiannually" | "annually";
+type FrequencyFilter = "all" | "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "semiannually" | "annually";
 
 type BreakdownItem = { key: string; label: string; value: number };
 type TrendMetric = "completed" | "overdue" | "workload";
@@ -122,7 +122,7 @@ const taskTypeOptions: { value: TaskTypeFilter; label: string }[] = [
 ];
 const statusOptions: { value: StatusFilter; label: string }[] = [
   { value: "all", label: "All statuses" },
-  { value: "due", label: "Not started" },
+  { value: "due", label: "Pending" },
   { value: "in_progress", label: "In progress" },
   { value: "completed", label: "Completed" },
   { value: "overdue", label: "Overdue" },
@@ -138,6 +138,7 @@ const frequencyOptions: { value: FrequencyFilter; label: string }[] = [
   { value: "daily", label: "Daily" },
   { value: "every_other_day", label: "Alternate days" },
   { value: "weekly", label: "Weekly" },
+  { value: "semimonthly", label: "Semi-monthly" },
   { value: "monthly", label: "Monthly" },
   { value: "semiannually", label: "Bi-yearly" },
   { value: "annually", label: "Yearly" },
@@ -886,7 +887,7 @@ function WorkloadPanel({ data }: { data: DashboardData }) {
   const rows = [
     { label: "Open workload", value: open, total: data.metrics.totalTasks },
     { label: "In progress", value: data.metrics.inProgressTasks, total: open },
-    { label: "Not started", value: data.metrics.notStartedTasks, total: open },
+    { label: "Pending", value: data.metrics.notStartedTasks, total: open },
     { label: "Completed", value: data.metrics.completedTasks, total: data.metrics.totalTasks, tone: "success" as const },
   ];
 

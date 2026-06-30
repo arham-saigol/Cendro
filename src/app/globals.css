@@ -1021,6 +1021,7 @@ button:disabled { cursor: not-allowed; }
 
 .task-view-toggle {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
 }

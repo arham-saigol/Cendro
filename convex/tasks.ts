@@ -13,11 +13,12 @@ type TaskKind = "jd" | "one_time";
 type Ctx = QueryCtx | MutationCtx;
 type TaskVisibilityAuth = { caps: Set<Capability>; getScopedMembershipIds: () => Promise<Set<Id<"companyMemberships">>> };
 
-const recurrenceValidator = v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
+const recurrenceValidator = v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
 const priorityValidator = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
 const statusValidator = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
-const jdFrequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
-function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Not Started" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
+const jdFrequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
+const jdFrequencyOrder: Record<Doc<"jdTasks">["recurrence"], number> = { daily: 0, every_other_day: 1, weekly: 2, semimonthly: 3, monthly: 4, semiannually: 5, annually: 6 };
+function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Pending" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
 function cleanOptionalText(value?: string) { const text = value?.trim(); return text ? text : undefined; }
 function cleanOptionalQuantity(value?: number) { return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined; }
 function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.email; }
@@ -125,6 +126,10 @@ async function getVisibleTask(ctx: Ctx, companyId: Id<"companies">, membership: 
   return { normalized, task };
 }
 
+async function logTaskActivity(ctx: MutationCtx, args: { companyId: Id<"companies">; taskType: TaskKind; taskId: string; actorMembershipId: Id<"companyMemberships">; event: "created" | "status_changed"; fromStatus?: ManualStatus; toStatus?: ManualStatus; createdAt?: number }) {
+  await ctx.db.insert("taskActivityLogs", { companyId: args.companyId, taskType: args.taskType, taskId: args.taskId, actorMembershipId: args.actorMembershipId, event: args.event, ...(args.fromStatus ? { fromStatus: args.fromStatus } : {}), ...(args.toStatus ? { toStatus: args.toStatus } : {}), createdAt: args.createdAt ?? Date.now() });
+}
+
 async function enrichedJd(ctx: Ctx, task: Doc<"jdTasks">, timeZone?: string) { return { ...task, state: await jdState(ctx, task, Date.now(), timeZone), assignees: await enrich(ctx, task.assigneeMembershipIds) }; }
 async function enrichedOneTime(ctx: Ctx, task: Doc<"oneTimeTasks">) { return { ...task, state: oneState(task), assignees: await enrich(ctx, task.assigneeMembershipIds) }; }
 function matchesSearch(task: { title: string }, search?: string) {
@@ -145,7 +150,7 @@ export const listJdRows = query({
       if (await visible(ctx, args.companyId, membership, task, "jd", auth)) filtered.push(await enrichedJd(ctx, task));
       if (filtered.length >= 200) break;
     }
-    if (args.sort === "frequency") filtered.sort((a, b) => a.recurrence.localeCompare(b.recurrence));
+    if (args.sort === "frequency") filtered.sort((a, b) => jdFrequencyOrder[a.recurrence] - jdFrequencyOrder[b.recurrence] || b.createdAt - a.createdAt);
     return filtered;
   },
 });
@@ -198,6 +203,7 @@ export const createJd = mutation({
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
     const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    await logTaskActivity(ctx, { companyId: args.companyId, taskType: "jd", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now });
     return id;
   },
@@ -289,6 +295,7 @@ async function setJdStatus(ctx: MutationCtx, companyId: Id<"companies">, taskId:
   const timeZone = await companyTimeZone(ctx, companyId);
   await recordMissedJdCycles(ctx, task, now, timeZone);
   const state = await jdState(ctx, task, now, timeZone);
+  const previousStatus = state.rawStatus;
   const existing = await currentJdCompletion(ctx, taskId, state.currentCycleStart);
   if (status === "completed") {
     if (!existing) await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId: taskId, cycleStart: state.currentCycleStart, completedByMembershipId: membership._id, completedAt: now, note: cleanOptionalText(note) });
@@ -296,6 +303,7 @@ async function setJdStatus(ctx: MutationCtx, companyId: Id<"companies">, taskId:
     await ctx.db.delete(existing._id);
   }
   await ctx.db.patch(taskId, { status, statusCycleStart: state.currentCycleStart, updatedAt: now });
+  if (previousStatus !== status) await logTaskActivity(ctx, { companyId, taskType: "jd", taskId, actorMembershipId: membership._id, event: "status_changed", fromStatus: previousStatus, toStatus: status, createdAt: now });
 }
 
 export const updateJdStatus = mutation({
@@ -360,6 +368,7 @@ export const createOneTime = mutation({
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     const now = Date.now();
     const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), dueDate: args.dueDate, time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
+    await logTaskActivity(ctx, { companyId: args.companyId, taskType: "one_time", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "one_time_task.create", targetType: "oneTimeTask", targetId: id, createdAt: now });
     return id;
   },
@@ -449,7 +458,9 @@ async function setOneTimeStatus(ctx: MutationCtx, companyId: Id<"companies">, ta
     throw new ConvexError("Overdue tasks are locked and cannot be changed back.");
   }
   const now = Date.now();
+  const previousStatus = state.rawStatus as ManualStatus;
   await ctx.db.patch(taskId, { status, completedAt: status === "completed" ? now : undefined, completedByMembershipId: status === "completed" ? membership._id : undefined, updatedAt: now });
+  if (previousStatus !== status) await logTaskActivity(ctx, { companyId, taskType: "one_time", taskId, actorMembershipId: membership._id, event: "status_changed", fromStatus: previousStatus, toStatus: status, createdAt: now });
 }
 
 export const updateOneTimeStatus = mutation({
@@ -473,6 +484,8 @@ async function purgeJdTask(ctx: MutationCtx, companyId: Id<"companies">, taskId:
   for (const cycleRecord of cycleRecords) await ctx.db.delete(cycleRecord._id);
   const comments = await ctx.db.query("taskComments").withIndex("by_task", (q) => q.eq("taskType", "jd").eq("taskId", taskId)).collect();
   for (const comment of comments) await ctx.db.delete(comment._id);
+  const activityLogs = await ctx.db.query("taskActivityLogs").withIndex("by_task", (q) => q.eq("taskType", "jd").eq("taskId", taskId)).collect();
+  for (const activityLog of activityLogs) await ctx.db.delete(activityLog._id);
   const attachments = await ctx.db.query("taskAttachments").withIndex("by_task", (q) => q.eq("taskType", "jd").eq("taskId", taskId)).collect();
   for (const attachment of attachments) { await ctx.storage.delete(attachment.storageId); await ctx.db.delete(attachment._id); }
   await ctx.db.delete(taskId);
@@ -487,6 +500,8 @@ async function purgeOneTimeTask(ctx: MutationCtx, companyId: Id<"companies">, ta
   await assertCanUpdateTask(ctx, companyId, membership, updateAuthTargets(task), "one_time");
   const comments = await ctx.db.query("taskComments").withIndex("by_task", (q) => q.eq("taskType", "one_time").eq("taskId", taskId)).collect();
   for (const comment of comments) await ctx.db.delete(comment._id);
+  const activityLogs = await ctx.db.query("taskActivityLogs").withIndex("by_task", (q) => q.eq("taskType", "one_time").eq("taskId", taskId)).collect();
+  for (const activityLog of activityLogs) await ctx.db.delete(activityLog._id);
   const attachments = await ctx.db.query("taskAttachments").withIndex("by_task", (q) => q.eq("taskType", "one_time").eq("taskId", taskId)).collect();
   for (const attachment of attachments) { await ctx.storage.delete(attachment.storageId); await ctx.db.delete(attachment._id); }
   await ctx.db.delete(taskId);
@@ -523,6 +538,24 @@ export const listComments = query({
     const authors = await enrich(ctx, page.page.map((comment) => comment.authorMembershipId));
     const authorById = new Map(authors.map((author) => [author.membership._id, author]));
     return { ...page, page: page.page.map((comment) => ({ ...comment, author: authorById.get(comment.authorMembershipId) ?? null })) };
+  },
+});
+
+export const listActivity = query({
+  args: { companyId: v.id("companies"), taskType: v.union(v.literal("jd"), v.literal("one_time")), taskId: v.string(), limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const { normalized } = await getVisibleTask(ctx, args.companyId, membership, args.taskType, args.taskId);
+    const limit = Math.min(Math.max(Math.floor(args.limit ?? 50), 1), 100);
+    const comments = await ctx.db.query("taskComments").withIndex("by_task", (q) => q.eq("taskType", args.taskType).eq("taskId", normalized)).order("desc").take(limit + 1);
+    const logs = await ctx.db.query("taskActivityLogs").withIndex("by_task", (q) => q.eq("taskType", args.taskType).eq("taskId", normalized)).order("desc").take(limit + 1);
+    const actors = await enrich(ctx, [...comments.map((comment) => comment.authorMembershipId), ...logs.map((log) => log.actorMembershipId)]);
+    const actorById = new Map(actors.map((actor) => [actor.membership._id, actor]));
+    const items = [
+      ...comments.map((comment) => ({ kind: "comment" as const, _id: comment._id, body: comment.body, event: null, fromStatus: null, toStatus: null, actorMembershipId: comment.authorMembershipId, actor: actorById.get(comment.authorMembershipId) ?? null, createdAt: comment.createdAt })),
+      ...logs.map((log) => ({ kind: "log" as const, _id: log._id, body: null, event: log.event, fromStatus: log.fromStatus ?? null, toStatus: log.toStatus ?? null, actorMembershipId: log.actorMembershipId, actor: actorById.get(log.actorMembershipId) ?? null, createdAt: log.createdAt })),
+    ].sort((a, b) => b.createdAt - a.createdAt);
+    return { items: items.slice(0, limit), hasMore: items.length > limit };
   },
 });
 
@@ -704,6 +737,7 @@ export const aiCreateOneTime = mutation({
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     const now = Date.now();
     const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), dueDate: args.dueDate, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
+    await logTaskActivity(ctx, { companyId: args.companyId, taskType: "one_time", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "one_time_task.create", targetType: "oneTimeTask", targetId: id, createdAt: now });
     const task = await ctx.db.get(id);
     if (!task) throw new ConvexError("Task not found.");
@@ -721,6 +755,7 @@ export const aiCreateJd = mutation({
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
     const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    await logTaskActivity(ctx, { companyId: args.companyId, taskType: "jd", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now });
     const task = await ctx.db.get(id);
     if (!task) throw new ConvexError("Task not found.");

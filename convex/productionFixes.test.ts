@@ -201,11 +201,11 @@ describe("production permission and validation fixes", () => {
       const unmanagedUserMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: secondEmployeeUserId, role: "Employee", active: true, createdAt: now, updatedAt: now });
       const managedBranchId = await ctx.db.insert("branches", { companyId, name: "Warehouse", createdAt: now, updatedAt: now });
       const unmanagedBranchId = await ctx.db.insert("branches", { companyId, name: "Downtown", createdAt: now, updatedAt: now });
-      const managedDepartmentId = await ctx.db.insert("departments", { companyId, branchId: managedBranchId, name: "Bakery", createdAt: now, updatedAt: now });
+      const managedDepartmentId = await ctx.db.insert("departments", { companyId, branchId: unmanagedBranchId, name: "Bakery", createdAt: now, updatedAt: now });
       const unmanagedDepartmentId = await ctx.db.insert("departments", { companyId, branchId: unmanagedBranchId, name: "Deli", createdAt: now, updatedAt: now });
       await ctx.db.insert("userBranchAssignments", { companyId, membershipId: employeeMembershipId, branchId: managedBranchId });
-      await ctx.db.insert("userDepartmentAssignments", { companyId, membershipId: employeeMembershipId, departmentId: managedDepartmentId });
       await ctx.db.insert("managerBranchScopes", { companyId, managerMembershipId, branchId: managedBranchId, updatedAt: now });
+      await ctx.db.insert("managerDepartmentScopes", { companyId, managerMembershipId, departmentId: managedDepartmentId, updatedAt: now });
       await ctx.db.insert("managerUserScopes", { companyId, managerMembershipId, userMembershipId: employeeMembershipId, updatedAt: now });
       await ctx.db.insert("permissionOverrides", { companyId, membershipId: managerMembershipId, capability: "sops:manage:user", effect: "allow", updatedAt: now });
       return { managerMembershipId, managedBranchId, unmanagedBranchId, managedDepartmentId, unmanagedDepartmentId, unmanagedUserMembershipId };

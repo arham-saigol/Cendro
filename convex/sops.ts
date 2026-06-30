@@ -29,8 +29,8 @@ async function getManagedScopeTargets(ctx: MutationCtx | QueryCtx, companyId: Id
   const departmentIds = new Set<Id<"departments">>();
   const managedDepartments = await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(500);
   for (const row of managedDepartments) departmentIds.add(row.departmentId);
-  for (const branchId of branchIds) {
-    const departments = await ctx.db.query("departments").withIndex("by_branch", (q) => q.eq("branchId", branchId)).take(500);
+  const departmentLists = await Promise.all([...branchIds].map((branchId) => ctx.db.query("departments").withIndex("by_branch", (q) => q.eq("branchId", branchId)).take(500)));
+  for (const departments of departmentLists) {
     for (const department of departments) if (department.companyId === companyId) departmentIds.add(department._id);
   }
   return { branchIds, departmentIds, userIds };

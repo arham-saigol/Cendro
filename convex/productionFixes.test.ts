@@ -128,28 +128,34 @@ describe("production permission and validation fixes", () => {
     await expect(t.withIdentity(identity("admin2", "admin2@example.com")).mutation(api.sops.create, { companyId, title: "Policy", content: "Body", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] })).rejects.toThrow("access");
   });
 
-  test("SOP visibility follows selected company, branch, and user scopes", async () => {
+  test("SOP visibility follows selected company, branch, department, and user scopes", async () => {
     const { t, companyId, employeeMembershipId } = await seedCompany();
-    const branchId = await t.run(async (ctx) => {
+    const { branchId, departmentId } = await t.run(async (ctx) => {
       const now = Date.now();
       const branchId = await ctx.db.insert("branches", { companyId, name: "Downtown", createdAt: now, updatedAt: now });
+      const departmentId = await ctx.db.insert("departments", { companyId, branchId, name: "Bakery", createdAt: now, updatedAt: now });
       await ctx.db.insert("userBranchAssignments", { companyId, membershipId: employeeMembershipId, branchId });
-      return branchId;
+      await ctx.db.insert("userDepartmentAssignments", { companyId, membershipId: employeeMembershipId, departmentId });
+      return { branchId, departmentId };
     });
 
     const companySopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Company", content: "Everyone", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
     const branchSopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Branch", content: "Branch only", scopeType: "branch", branchIds: [branchId], departmentIds: [], userMembershipIds: [] });
+    const departmentSopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Department", content: "Department only", scopeType: "department", branchIds: [], departmentIds: [departmentId], userMembershipIds: [] });
     const userSopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "User", content: "User only", scopeType: "user", branchIds: [], departmentIds: [], userMembershipIds: [employeeMembershipId] });
 
     await expect(t.withIdentity(identity("employee")).query(api.sops.get, { companyId, sopId: companySopId })).resolves.toMatchObject({ title: "Company" });
     await expect(t.withIdentity(identity("employee")).query(api.sops.get, { companyId, sopId: branchSopId })).resolves.toMatchObject({ title: "Branch" });
+    await expect(t.withIdentity(identity("employee")).query(api.sops.get, { companyId, sopId: departmentSopId })).resolves.toMatchObject({ title: "Department" });
     await expect(t.withIdentity(identity("employee")).query(api.sops.get, { companyId, sopId: userSopId })).resolves.toMatchObject({ title: "User" });
     const list = await t.withIdentity(identity("employee")).query(api.sops.list, { companyId, paginationOpts: { numItems: 10, cursor: null } });
-    expect(Object.fromEntries(list.page.map((sop) => [sop.title, sop.scopeTargetName]))).toMatchObject({ Company: "Acme", Branch: "Downtown", User: "Employee" });
+    expect(Object.fromEntries(list.page.map((sop) => [sop.title, sop.scopeTargetName]))).toMatchObject({ Company: "Acme", Branch: "Downtown", Department: "Bakery", User: "Employee" });
     await expect(t.withIdentity(identity("admin2", "admin2@example.com")).query(api.sops.get, { companyId, sopId: branchSopId })).resolves.toMatchObject({ title: "Branch" });
     await expect(t.withIdentity(identity("admin")).query(api.sops.get, { companyId, sopId: userSopId })).resolves.toMatchObject({ title: "User" });
     const adminAll = await t.withIdentity(identity("admin")).query(api.sops.listRows, { companyId, view: "all" });
-    expect(adminAll.map((sop) => sop.title).sort()).toEqual(["Branch", "Company", "User"]);
+    expect(adminAll.map((sop) => sop.title).sort()).toEqual(["Branch", "Company", "Department", "User"]);
+    const branchFiltered = await t.withIdentity(identity("admin")).query(api.sops.listRows, { companyId, view: "all", branchId });
+    expect(branchFiltered.map((sop) => sop.title).sort()).toEqual(["Branch", "Department"]);
     const adminMy = await t.withIdentity(identity("admin")).query(api.sops.listRows, { companyId, view: "my" });
     expect(adminMy.map((sop) => sop.title)).toEqual(["Company"]);
   });
@@ -157,17 +163,20 @@ describe("production permission and validation fixes", () => {
   test("SOP scoped creation requires exactly one selected target", async () => {
     const { t, companyId } = await seedCompany();
     await expect(t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Branch", content: "Body", scopeType: "branch", branchIds: [], departmentIds: [], userMembershipIds: [] })).rejects.toThrow("Select one branch");
+    await expect(t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Department", content: "Body", scopeType: "department", branchIds: [], departmentIds: [], userMembershipIds: [] })).rejects.toThrow("Select one department");
     await expect(t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "User", content: "Body", scopeType: "user", branchIds: [], departmentIds: [], userMembershipIds: [] })).rejects.toThrow("Select one user");
   });
 
   test("SOP scope updates replace targets and require management permission", async () => {
     const { t, companyId, adminMembershipId, employeeMembershipId } = await seedCompany();
-    const branchId = await t.run(async (ctx) => {
+    const { branchId, departmentId } = await t.run(async (ctx) => {
       const now = Date.now();
       const branchId = await ctx.db.insert("branches", { companyId, name: "Warehouse", createdAt: now, updatedAt: now });
+      const departmentId = await ctx.db.insert("departments", { companyId, branchId, name: "Bakery", createdAt: now, updatedAt: now });
       await ctx.db.insert("userBranchAssignments", { companyId, membershipId: adminMembershipId, branchId });
       await ctx.db.insert("userBranchAssignments", { companyId, membershipId: employeeMembershipId, branchId });
-      return branchId;
+      await ctx.db.insert("userDepartmentAssignments", { companyId, membershipId: employeeMembershipId, departmentId });
+      return { branchId, departmentId };
     });
     const sopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Policy", content: "Body", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
 
@@ -175,13 +184,16 @@ describe("production permission and validation fixes", () => {
     await expect(t.withIdentity(identity("admin")).mutation(api.sops.updateScope, { companyId, sopId, scopeType: "branch", branchIds: [branchId], userMembershipIds: [] })).resolves.toBeNull();
     await expect(t.withIdentity(identity("employee")).query(api.sops.get, { companyId, sopId })).resolves.toMatchObject({ scopeType: "branch", scopeTargetName: "Warehouse", branchIds: [branchId], userMembershipIds: [] });
 
+    await expect(t.withIdentity(identity("admin")).mutation(api.sops.updateScope, { companyId, sopId, scopeType: "department", branchIds: [], departmentIds: [departmentId], userMembershipIds: [] })).resolves.toBeNull();
+    await expect(t.withIdentity(identity("employee")).query(api.sops.get, { companyId, sopId })).resolves.toMatchObject({ scopeType: "department", scopeTargetName: "Bakery", branchIds: [], departmentIds: [departmentId], userMembershipIds: [] });
+
     await expect(t.withIdentity(identity("admin")).mutation(api.sops.updateScope, { companyId, sopId, scopeType: "user", branchIds: [], userMembershipIds: [employeeMembershipId] })).resolves.toBeNull();
-    await expect(t.withIdentity(identity("employee")).query(api.sops.get, { companyId, sopId })).resolves.toMatchObject({ scopeType: "user", scopeTargetName: "Employee", branchIds: [], userMembershipIds: [employeeMembershipId] });
+    await expect(t.withIdentity(identity("employee")).query(api.sops.get, { companyId, sopId })).resolves.toMatchObject({ scopeType: "user", scopeTargetName: "Employee", branchIds: [], departmentIds: [], userMembershipIds: [employeeMembershipId] });
   });
 
-  test("SOP access is restricted to a manager's managed branches and users", async () => {
+  test("SOP access is restricted to a manager's managed branches, departments, and users", async () => {
     const { t, companyId, employeeMembershipId } = await seedCompany();
-    const { managerMembershipId, managedBranchId, unmanagedBranchId, unmanagedUserMembershipId } = await t.run(async (ctx) => {
+    const { managerMembershipId, managedBranchId, unmanagedBranchId, managedDepartmentId, unmanagedDepartmentId, unmanagedUserMembershipId } = await t.run(async (ctx) => {
       const now = Date.now();
       const managerUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|manager", email: "manager@example.com", firstName: "Manager", secondName: "", createdAt: now, updatedAt: now });
       const secondEmployeeUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|employee2", email: "employee2@example.com", firstName: "Employee 2", secondName: "", createdAt: now, updatedAt: now });
@@ -189,38 +201,49 @@ describe("production permission and validation fixes", () => {
       const unmanagedUserMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: secondEmployeeUserId, role: "Employee", active: true, createdAt: now, updatedAt: now });
       const managedBranchId = await ctx.db.insert("branches", { companyId, name: "Warehouse", createdAt: now, updatedAt: now });
       const unmanagedBranchId = await ctx.db.insert("branches", { companyId, name: "Downtown", createdAt: now, updatedAt: now });
+      const managedDepartmentId = await ctx.db.insert("departments", { companyId, branchId: managedBranchId, name: "Bakery", createdAt: now, updatedAt: now });
+      const unmanagedDepartmentId = await ctx.db.insert("departments", { companyId, branchId: unmanagedBranchId, name: "Deli", createdAt: now, updatedAt: now });
       await ctx.db.insert("userBranchAssignments", { companyId, membershipId: employeeMembershipId, branchId: managedBranchId });
+      await ctx.db.insert("userDepartmentAssignments", { companyId, membershipId: employeeMembershipId, departmentId: managedDepartmentId });
       await ctx.db.insert("managerBranchScopes", { companyId, managerMembershipId, branchId: managedBranchId, updatedAt: now });
       await ctx.db.insert("managerUserScopes", { companyId, managerMembershipId, userMembershipId: employeeMembershipId, updatedAt: now });
       await ctx.db.insert("permissionOverrides", { companyId, membershipId: managerMembershipId, capability: "sops:manage:user", effect: "allow", updatedAt: now });
-      return { managerMembershipId, managedBranchId, unmanagedBranchId, unmanagedUserMembershipId };
+      return { managerMembershipId, managedBranchId, unmanagedBranchId, managedDepartmentId, unmanagedDepartmentId, unmanagedUserMembershipId };
     });
 
     const managedBranchSopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Managed branch SOP", content: "Body", scopeType: "branch", branchIds: [managedBranchId], departmentIds: [], userMembershipIds: [] });
     const unmanagedBranchSopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Unmanaged branch SOP", content: "Body", scopeType: "branch", branchIds: [unmanagedBranchId], departmentIds: [], userMembershipIds: [] });
+    const managedDepartmentSopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Managed department SOP", content: "Body", scopeType: "department", branchIds: [], departmentIds: [managedDepartmentId], userMembershipIds: [] });
+    const unmanagedDepartmentSopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Unmanaged department SOP", content: "Body", scopeType: "department", branchIds: [], departmentIds: [unmanagedDepartmentId], userMembershipIds: [] });
     const managedUserSopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Managed user SOP", content: "Body", scopeType: "user", branchIds: [], departmentIds: [], userMembershipIds: [employeeMembershipId] });
     const unmanagedUserSopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Unmanaged user SOP", content: "Body", scopeType: "user", branchIds: [], departmentIds: [], userMembershipIds: [unmanagedUserMembershipId] });
 
     await expect(t.withIdentity(identity("manager")).query(api.sops.get, { companyId, sopId: managedBranchSopId })).resolves.toMatchObject({ title: "Managed branch SOP" });
+    await expect(t.withIdentity(identity("manager")).query(api.sops.get, { companyId, sopId: managedDepartmentSopId })).resolves.toMatchObject({ title: "Managed department SOP" });
     await expect(t.withIdentity(identity("manager")).query(api.sops.get, { companyId, sopId: managedUserSopId })).resolves.toMatchObject({ title: "Managed user SOP" });
     await expect(t.withIdentity(identity("manager")).query(api.sops.get, { companyId, sopId: unmanagedBranchSopId })).rejects.toThrow("SOP not found");
+    await expect(t.withIdentity(identity("manager")).query(api.sops.get, { companyId, sopId: unmanagedDepartmentSopId })).rejects.toThrow("SOP not found");
     await expect(t.withIdentity(identity("manager")).query(api.sops.get, { companyId, sopId: unmanagedUserSopId })).rejects.toThrow("SOP not found");
 
     const list = await t.withIdentity(identity("manager")).query(api.sops.listRows, { companyId, view: "all" });
-    expect(list.map((sop) => sop.title).sort()).toEqual(["Managed branch SOP", "Managed user SOP"]);
+    expect(list.map((sop) => sop.title).sort()).toEqual(["Managed branch SOP", "Managed department SOP", "Managed user SOP"]);
 
     const scopeOptions = await t.withIdentity(identity("manager")).query(api.sops.scopeOptions, { companyId });
     expect(scopeOptions.branches.map((branch) => branch._id)).toEqual([managedBranchId]);
+    expect(scopeOptions.departments.map((department) => department._id)).toEqual([managedDepartmentId]);
     expect(scopeOptions.users.map((user) => user.membership._id).sort()).toEqual([employeeMembershipId, managerMembershipId].sort());
 
     await expect(t.withIdentity(identity("manager")).mutation(api.sops.create, { companyId, title: "Out of scope branch", content: "Body", scopeType: "branch", branchIds: [unmanagedBranchId], departmentIds: [], userMembershipIds: [] })).rejects.toThrow("managed scope");
+    await expect(t.withIdentity(identity("manager")).mutation(api.sops.create, { companyId, title: "Out of scope department", content: "Body", scopeType: "department", branchIds: [], departmentIds: [unmanagedDepartmentId], userMembershipIds: [] })).rejects.toThrow("managed scope");
     await expect(t.withIdentity(identity("manager")).mutation(api.sops.create, { companyId, title: "Out of scope user", content: "Body", scopeType: "user", branchIds: [], departmentIds: [], userMembershipIds: [unmanagedUserMembershipId] })).rejects.toThrow("managed scope");
     await expect(t.withIdentity(identity("manager")).mutation(api.sops.create, { companyId, title: "In scope branch", content: "Body", scopeType: "branch", branchIds: [managedBranchId], departmentIds: [], userMembershipIds: [] })).resolves.toEqual(expect.any(String));
+    await expect(t.withIdentity(identity("manager")).mutation(api.sops.create, { companyId, title: "In scope department", content: "Body", scopeType: "department", branchIds: [], departmentIds: [managedDepartmentId], userMembershipIds: [] })).resolves.toEqual(expect.any(String));
 
     const inScopeSopId = await t.withIdentity(identity("manager")).mutation(api.sops.create, { companyId, title: "For update", content: "Body", scopeType: "branch", branchIds: [managedBranchId], departmentIds: [], userMembershipIds: [] });
     await expect(t.withIdentity(identity("manager")).mutation(api.sops.updateScope, { companyId, sopId: inScopeSopId, scopeType: "branch", branchIds: [unmanagedBranchId], userMembershipIds: [] })).rejects.toThrow("managed scope");
+    await expect(t.withIdentity(identity("manager")).mutation(api.sops.updateScope, { companyId, sopId: inScopeSopId, scopeType: "department", branchIds: [], departmentIds: [unmanagedDepartmentId], userMembershipIds: [] })).rejects.toThrow("managed scope");
     await expect(t.withIdentity(identity("manager")).mutation(api.sops.updateScope, { companyId, sopId: inScopeSopId, scopeType: "user", branchIds: [], userMembershipIds: [unmanagedUserMembershipId] })).rejects.toThrow("managed scope");
-    await expect(t.withIdentity(identity("manager")).mutation(api.sops.updateScope, { companyId, sopId: inScopeSopId, scopeType: "branch", branchIds: [managedBranchId], userMembershipIds: [] })).resolves.toBeNull();
+    await expect(t.withIdentity(identity("manager")).mutation(api.sops.updateScope, { companyId, sopId: inScopeSopId, scopeType: "department", branchIds: [], departmentIds: [managedDepartmentId], userMembershipIds: [] })).resolves.toBeNull();
   });
 
   test("structure reorders require complete sets and move departments atomically", async () => {

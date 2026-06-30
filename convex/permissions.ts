@@ -246,7 +246,12 @@ export async function visibleSop(ctx: Ctx, companyId: Id<"companies">, m: Doc<"c
     return sopBranches.some((row) => v.membershipBranchIds.has(row.branchId) || v.managerBranchScopes.has(row.branchId));
   }
   const sopDepartments = await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
-  return sopDepartments.some((row) => v.membershipDepartmentIds.has(row.departmentId) || v.managerDepartmentScopes.has(row.departmentId));
+  for (const row of sopDepartments) {
+    if (v.membershipDepartmentIds.has(row.departmentId) || v.managerDepartmentScopes.has(row.departmentId)) return true;
+    const department = await ctx.db.get(row.departmentId);
+    if (department?.companyId === companyId && v.managerBranchScopes.has(department.branchId)) return true;
+  }
+  return false;
 }
 
 export function assertPlatformAdminEmail(email?: string | null) {

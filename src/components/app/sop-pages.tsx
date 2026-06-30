@@ -36,14 +36,14 @@ import { SopRichTextEditor, SopRichTextViewer, richTextPlainText } from "./sop-r
 import { cn, formatDate, initials } from "@/lib/utils";
 
 type ScopeType = "company" | "branch" | "department" | "user";
-type EditableScopeType = "company" | "branch" | "user";
+type EditableScopeType = "company" | "branch" | "department" | "user";
 type CreateScopeType = EditableScopeType;
 type SopView = "all" | "my";
 type SopScopeFilter = "all" | ScopeType;
-type SopScopeOptions = { branches: { _id: Id<"branches">; name: string }[]; users: { membership: { _id: Id<"companyMemberships">; role: string }; user: { name: string; firstName?: string; imageUrl?: string | null } }[] };
+type SopScopeOptions = { branches: { _id: Id<"branches">; name: string }[]; departments: { _id: Id<"departments">; name: string; branchId: Id<"branches">; branchName?: string }[]; users: { membership: { _id: Id<"companyMemberships">; role: string }; user: { name: string; firstName?: string; imageUrl?: string | null } }[] };
 type SopTargetUser = { firstName?: string; name?: string; imageUrl?: string | null } | null | undefined;
 
-const editableScopeTypes: EditableScopeType[] = ["company", "branch", "user"];
+const editableScopeTypes: EditableScopeType[] = ["company", "branch", "department", "user"];
 
 const scopeLabels: Record<ScopeType, string> = {
   company: "Company",
@@ -74,7 +74,7 @@ function canCreateSops(active: { capabilities: string[] } | null | undefined) {
   return Boolean(active?.capabilities.includes("sops:create") && editableScopeTypes.some((scope) => active.capabilities.includes(`sops:manage:${scope}`)));
 }
 function canLoadSopScopeOptions(active: { capabilities: string[] } | null | undefined) {
-  return Boolean(active?.capabilities.some((capability) => capability === "sops:manage:branch" || capability === "sops:manage:user"));
+  return Boolean(active?.capabilities.some((capability) => capability === "sops:manage:branch" || capability === "sops:manage:department" || capability === "sops:manage:user"));
 }
 
 function relativeTime(ms?: number) {
@@ -287,6 +287,7 @@ function SopDialog({
   const [content, setContent] = useState("");
   const [scopeType, setScopeType] = useState<CreateScopeType>("company");
   const [branchId, setBranchId] = useState("");
+  const [departmentId, setDepartmentId] = useState("");
   const [userMembershipId, setUserMembershipId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -295,12 +296,13 @@ function SopDialog({
   const createScopes = useMemo<CreateScopeType[]>(() => active?.capabilities.includes("sops:create") ? [
     ...(active.capabilities.includes("sops:manage:company") ? ["company" as const] : []),
     ...(active.capabilities.includes("sops:manage:branch") ? ["branch" as const] : []),
+    ...(active.capabilities.includes("sops:manage:department") ? ["department" as const] : []),
     ...(active.capabilities.includes("sops:manage:user") ? ["user" as const] : []),
   ] : [], [active]);
   const defaultCreateScope = createScopes[0] ?? "company";
-  const canSelectCreateTarget = createScopes.includes("branch") || createScopes.includes("user");
+  const canSelectCreateTarget = createScopes.some((scope) => scope !== "company");
   const scopeOptions = useQuery(api.sops.scopeOptions, mode === "create" && open && activeCompanyId && canSelectCreateTarget ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
-  const scopeTargetValid = mode !== "create" || scopeType === "company" || (scopeType === "branch" ? Boolean(branchId) : Boolean(userMembershipId));
+  const scopeTargetValid = mode !== "create" || scopeType === "company" || (scopeType === "branch" ? Boolean(branchId) : scopeType === "department" ? Boolean(departmentId) : Boolean(userMembershipId));
 
   useEffect(() => {
     if (!open) return;
@@ -309,6 +311,7 @@ function SopDialog({
     if (mode === "create") {
       setScopeType(defaultCreateScope);
       setBranchId("");
+      setDepartmentId("");
       setUserMembershipId("");
     }
     setError(null);
@@ -323,8 +326,9 @@ function SopDialog({
   useEffect(() => {
     if (mode !== "create" || !open || !scopeOptions) return;
     if (scopeType === "branch" && !scopeOptions.branches.some((branch) => branch._id === branchId)) setBranchId(scopeOptions.branches[0]?._id ?? "");
+    if (scopeType === "department" && !scopeOptions.departments.some((department) => department._id === departmentId)) setDepartmentId(scopeOptions.departments[0]?._id ?? "");
     if (scopeType === "user" && !scopeOptions.users.some((user) => user.membership._id === userMembershipId)) setUserMembershipId(scopeOptions.users[0]?.membership._id ?? "");
-  }, [branchId, mode, open, scopeOptions, scopeType, userMembershipId]);
+  }, [branchId, departmentId, mode, open, scopeOptions, scopeType, userMembershipId]);
 
   useEffect(() => autoSize(titleRef), [title, open]);
 
@@ -337,6 +341,7 @@ function SopDialog({
     if (!trimmedTitle) { setError("Title is required."); return; }
     if (!richTextPlainText(trimmedContent)) { setError("SOP body is required."); return; }
     if (mode === "create" && scopeType === "branch" && !branchId) { setError("Select a branch for this SOP."); return; }
+    if (mode === "create" && scopeType === "department" && !departmentId) { setError("Select a department for this SOP."); return; }
     if (mode === "create" && scopeType === "user" && !userMembershipId) { setError("Select a user for this SOP."); return; }
     setSaving(true);
     setError(null);
@@ -348,7 +353,7 @@ function SopDialog({
           content: trimmedContent,
           scopeType,
           branchIds: scopeType === "branch" ? [branchId as Id<"branches">] : [],
-          departmentIds: [],
+          departmentIds: scopeType === "department" ? [departmentId as Id<"departments">] : [],
           userMembershipIds: scopeType === "user" ? [userMembershipId as Id<"companyMemberships">] : [],
         });
         if (scopeType === "company" || (scopeType === "user" && userMembershipId === active?.membership._id)) onCreated?.(id as unknown as string);
@@ -416,6 +421,15 @@ function SopDialog({
                           onChange={(value) => { setBranchId(value); setError(null); }}
                           placeholder={scopeOptions ? "No branches available" : "Loading branches..."}
                           disabled={!scopeOptions?.branches.length}
+                        />
+                      ) : scopeType === "department" ? (
+                        <DialogSelectPicker
+                          ariaLabel="Assign SOP to department"
+                          value={departmentId}
+                          options={scopeOptions?.departments.map((department) => ({ value: department._id as string, label: department.name, helper: department.branchName })) ?? []}
+                          onChange={(value) => { setDepartmentId(value); setError(null); }}
+                          placeholder={scopeOptions ? "No departments available" : "Loading departments..."}
+                          disabled={!scopeOptions?.departments.length}
                         />
                       ) : (
                         <DialogSelectPicker
@@ -616,9 +630,10 @@ function InlineScopeCell({ value, options, pending, onSave }: { value: EditableS
   );
 }
 
-function InlineSopTargetCell({ scopeType, targetName, targetUser, scopeOptions, branchIds, userMembershipIds, pending, onSave }: { scopeType: ScopeType; targetName: string; targetUser?: SopTargetUser; scopeOptions?: SopScopeOptions; branchIds: string[]; userMembershipIds: string[]; pending?: boolean; onSave: (patch: { branchId?: Id<"branches">; userMembershipId?: Id<"companyMemberships"> }) => Promise<boolean> }) {
+function InlineSopTargetCell({ scopeType, targetName, targetUser, scopeOptions, branchIds, departmentIds, userMembershipIds, pending, onSave }: { scopeType: ScopeType; targetName: string; targetUser?: SopTargetUser; scopeOptions?: SopScopeOptions; branchIds: string[]; departmentIds: string[]; userMembershipIds: string[]; pending?: boolean; onSave: (patch: { branchId?: Id<"branches">; departmentId?: Id<"departments">; userMembershipId?: Id<"companyMemberships"> }) => Promise<boolean> }) {
   const [open, setOpen] = useState(false);
   const selectedBranchId = branchIds[0];
+  const selectedDepartmentId = departmentIds[0];
   const selectedUserMembershipId = userMembershipIds[0];
   const header = <span className="min-w-0 flex-1 truncate"><SopTargetValue scopeType={scopeType} targetName={targetName} user={targetUser} /></span>;
 
@@ -632,7 +647,14 @@ function InlineSopTargetCell({ scopeType, targetName, targetUser, scopeOptions, 
         {branch._id === selectedBranchId && <Check className="h-3.5 w-3.5 text-[var(--ink-faint)]" />}
       </button>
     ));
-  } else if (scopeType === "user") {
+  } else if (scopeType === "department") {
+    body = !scopeOptions ? <div className="px-2.5 py-2 text-[13px] text-[var(--ink-muted)]">Loading departments...</div> : scopeOptions.departments.length === 0 ? <div className="px-2.5 py-2 text-[13px] text-[var(--ink-muted)]">No departments available.</div> : scopeOptions.departments.map((department) => (
+      <button key={department._id} type="button" onClick={() => { setOpen(false); if (department._id !== selectedDepartmentId) void onSave({ departmentId: department._id }); }} className="task-cell-popover-item">
+        <span className="min-w-0 flex-1"><span className="block truncate font-medium text-[var(--ink)]">{department.name}</span>{department.branchName && <span className="block truncate text-[11.5px] text-[var(--ink-muted)]">{department.branchName}</span>}</span>
+        {department._id === selectedDepartmentId && <Check className="h-3.5 w-3.5 text-[var(--ink-faint)]" />}
+      </button>
+    ));
+  } else {
     body = !scopeOptions ? <div className="px-2.5 py-2 text-[13px] text-[var(--ink-muted)]">Loading users...</div> : scopeOptions.users.length === 0 ? <div className="px-2.5 py-2 text-[13px] text-[var(--ink-muted)]">No users available.</div> : scopeOptions.users.map((user) => {
       const id = user.membership._id;
       return (
@@ -642,8 +664,6 @@ function InlineSopTargetCell({ scopeType, targetName, targetUser, scopeOptions, 
         </button>
       );
     });
-  } else {
-    body = <div className="px-2.5 py-2 text-[13px] text-[var(--ink-muted)]">Department SOPs are not editable from this list.</div>;
   }
 
   return <SopCellPopover open={open} onOpenChange={setOpen} disabled={pending} pending={pending} ariaLabel="Change SOP assignment" header={header} panelClassName="task-cell-popover-scroll">{body}</SopCellPopover>;
@@ -804,30 +824,35 @@ export function SopList({ selectedId }: { selectedId?: string }) {
     }
   }
 
-  async function saveScope(sop: any, patch: { scopeType?: EditableScopeType; branchId?: Id<"branches">; userMembershipId?: Id<"companyMemberships"> }, label: string) {
+  async function saveScope(sop: any, patch: { scopeType?: EditableScopeType; branchId?: Id<"branches">; departmentId?: Id<"departments">; userMembershipId?: Id<"companyMemberships"> }, label: string) {
     if (!activeCompanyId) return false;
     const nextScopeType = patch.scopeType ?? (sop.scopeType as EditableScopeType);
     let branchIds: Id<"branches">[] = [];
+    let departmentIds: Id<"departments">[] = [];
     let userMembershipIds: Id<"companyMemberships">[] = [];
     if (nextScopeType === "branch") {
       const branchId = patch.branchId ?? (sop.scopeType === "branch" ? sop.branchIds?.[0] : undefined) ?? scopeOptions?.branches[0]?._id;
       if (!branchId) { setInlineError(scopeOptions ? "No branches are available." : "Scope options are still loading."); return false; }
       branchIds = [branchId as Id<"branches">];
+    } else if (nextScopeType === "department") {
+      const departmentId = patch.departmentId ?? (sop.scopeType === "department" ? sop.departmentIds?.[0] : undefined) ?? scopeOptions?.departments[0]?._id;
+      if (!departmentId) { setInlineError(scopeOptions ? "No departments are available." : "Scope options are still loading."); return false; }
+      departmentIds = [departmentId as Id<"departments">];
     } else if (nextScopeType === "user") {
       const userMembershipId = patch.userMembershipId ?? (sop.scopeType === "user" ? sop.userMembershipIds?.[0] : undefined) ?? scopeOptions?.users[0]?.membership._id;
       if (!userMembershipId) { setInlineError(scopeOptions ? "No users are available." : "Scope options are still loading."); return false; }
       userMembershipIds = [userMembershipId as Id<"companyMemberships">];
     }
-    if (nextScopeType === sop.scopeType && (nextScopeType !== "branch" || branchIds[0] === sop.branchIds?.[0]) && (nextScopeType !== "user" || userMembershipIds[0] === sop.userMembershipIds?.[0])) return true;
+    if (nextScopeType === sop.scopeType && (nextScopeType !== "branch" || branchIds[0] === sop.branchIds?.[0]) && (nextScopeType !== "department" || departmentIds[0] === sop.departmentIds?.[0]) && (nextScopeType !== "user" || userMembershipIds[0] === sop.userMembershipIds?.[0])) return true;
     const scopeTargetUser = nextScopeType === "user" ? scopeOptions?.users.find((user) => user.membership._id === userMembershipIds[0])?.user ?? sop.scopeTargetUser : null;
-    const scopeTargetName = nextScopeType === "company" ? active?.company.name ?? "Company" : nextScopeType === "branch" ? scopeOptions?.branches.find((branch) => branch._id === branchIds[0])?.name ?? sop.scopeTargetName : scopeTargetUser?.name ?? sop.scopeTargetName;
-    const optimisticPatch = { scopeType: nextScopeType, branchIds, userMembershipIds, scopeTargetName, scopeTargetUser };
+    const scopeTargetName = nextScopeType === "company" ? active?.company.name ?? "Company" : nextScopeType === "branch" ? scopeOptions?.branches.find((branch) => branch._id === branchIds[0])?.name ?? sop.scopeTargetName : nextScopeType === "department" ? scopeOptions?.departments.find((department) => department._id === departmentIds[0])?.name ?? sop.scopeTargetName : scopeTargetUser?.name ?? sop.scopeTargetName;
+    const optimisticPatch = { scopeType: nextScopeType, branchIds, departmentIds, userMembershipIds, scopeTargetName, scopeTargetUser };
     const key = `${sop._id}:${label}`;
     setOptimisticRows((current) => ({ ...current, [sop._id]: { ...current[sop._id], ...optimisticPatch } }));
     setPendingCell(key);
     setInlineError(null);
     try {
-      await updateScope({ companyId: activeCompanyId, sopId: sop._id as Id<"sops">, scopeType: nextScopeType, branchIds, userMembershipIds });
+      await updateScope({ companyId: activeCompanyId, sopId: sop._id as Id<"sops">, scopeType: nextScopeType, branchIds, departmentIds, userMembershipIds });
       return true;
     } catch (err) {
       setOptimisticRows((current) => { const next = { ...current }; delete next[sop._id]; return next; });
@@ -1036,7 +1061,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                       </td>
                       <td className="max-w-[220px]">
                         {rowCanEdit && editableScope ? (
-                          <InlineSopTargetCell scopeType={editableScope} targetName={targetName} targetUser={sop.scopeTargetUser} scopeOptions={scopeOptions} branchIds={sop.branchIds ?? []} userMembershipIds={sop.userMembershipIds ?? []} pending={pending("assigned")} onSave={(patch) => saveScope(sop, patch, "assigned")} />
+                          <InlineSopTargetCell scopeType={editableScope} targetName={targetName} targetUser={sop.scopeTargetUser} scopeOptions={scopeOptions} branchIds={sop.branchIds ?? []} departmentIds={sop.departmentIds ?? []} userMembershipIds={sop.userMembershipIds ?? []} pending={pending("assigned")} onSave={(patch) => saveScope(sop, patch, "assigned")} />
                         ) : (
                           <SopTargetValue scopeType={sopScope} targetName={targetName} user={sop.scopeTargetUser} />
                         )}
@@ -1222,29 +1247,34 @@ export function SopDetail({ id }: { id: string }) {
     }
   }
 
-  async function saveScope(patch: { scopeType?: EditableScopeType; branchId?: Id<"branches">; userMembershipId?: Id<"companyMemberships"> }, label: string) {
+  async function saveScope(patch: { scopeType?: EditableScopeType; branchId?: Id<"branches">; departmentId?: Id<"departments">; userMembershipId?: Id<"companyMemberships"> }, label: string) {
     if (!activeCompanyId) return false;
     const nextScopeType = patch.scopeType ?? (sop.scopeType as EditableScopeType);
     let branchIds: Id<"branches">[] = [];
+    let departmentIds: Id<"departments">[] = [];
     let userMembershipIds: Id<"companyMemberships">[] = [];
     if (nextScopeType === "branch") {
       const branchId = patch.branchId ?? (sop.scopeType === "branch" ? sop.branchIds?.[0] : undefined) ?? scopeOptions?.branches[0]?._id;
       if (!branchId) { setFieldError(scopeOptions ? "No branches are available." : "Scope options are still loading."); return false; }
       branchIds = [branchId as Id<"branches">];
+    } else if (nextScopeType === "department") {
+      const departmentId = patch.departmentId ?? (sop.scopeType === "department" ? sop.departmentIds?.[0] : undefined) ?? scopeOptions?.departments[0]?._id;
+      if (!departmentId) { setFieldError(scopeOptions ? "No departments are available." : "Scope options are still loading."); return false; }
+      departmentIds = [departmentId as Id<"departments">];
     } else if (nextScopeType === "user") {
       const userMembershipId = patch.userMembershipId ?? (sop.scopeType === "user" ? sop.userMembershipIds?.[0] : undefined) ?? scopeOptions?.users[0]?.membership._id;
       if (!userMembershipId) { setFieldError(scopeOptions ? "No users are available." : "Scope options are still loading."); return false; }
       userMembershipIds = [userMembershipId as Id<"companyMemberships">];
     }
-    if (nextScopeType === sop.scopeType && (nextScopeType !== "branch" || branchIds[0] === sop.branchIds?.[0]) && (nextScopeType !== "user" || userMembershipIds[0] === sop.userMembershipIds?.[0])) return true;
+    if (nextScopeType === sop.scopeType && (nextScopeType !== "branch" || branchIds[0] === sop.branchIds?.[0]) && (nextScopeType !== "department" || departmentIds[0] === sop.departmentIds?.[0]) && (nextScopeType !== "user" || userMembershipIds[0] === sop.userMembershipIds?.[0])) return true;
     const scopeTargetUser = nextScopeType === "user" ? scopeOptions?.users.find((user) => user.membership._id === userMembershipIds[0])?.user ?? sop.scopeTargetUser : null;
-    const scopeTargetName = nextScopeType === "company" ? active?.company.name ?? "Company" : nextScopeType === "branch" ? scopeOptions?.branches.find((branch) => branch._id === branchIds[0])?.name ?? sop.scopeTargetName : scopeTargetUser?.name ?? sop.scopeTargetName;
-    const optimisticPatch = { scopeType: nextScopeType, branchIds, userMembershipIds, scopeTargetName, scopeTargetUser };
+    const scopeTargetName = nextScopeType === "company" ? active?.company.name ?? "Company" : nextScopeType === "branch" ? scopeOptions?.branches.find((branch) => branch._id === branchIds[0])?.name ?? sop.scopeTargetName : nextScopeType === "department" ? scopeOptions?.departments.find((department) => department._id === departmentIds[0])?.name ?? sop.scopeTargetName : scopeTargetUser?.name ?? sop.scopeTargetName;
+    const optimisticPatch = { scopeType: nextScopeType, branchIds, departmentIds, userMembershipIds, scopeTargetName, scopeTargetUser };
     setOptimisticSop((current) => ({ ...(current ?? {}), ...optimisticPatch }));
     setPendingProperty(label);
     setFieldError(null);
     try {
-      await updateScope({ companyId: activeCompanyId, sopId: id as Id<"sops">, scopeType: nextScopeType, branchIds, userMembershipIds });
+      await updateScope({ companyId: activeCompanyId, sopId: id as Id<"sops">, scopeType: nextScopeType, branchIds, departmentIds, userMembershipIds });
       return true;
     } catch (err) {
       setOptimisticSop(null);
@@ -1291,7 +1321,7 @@ export function SopDetail({ id }: { id: string }) {
           </PropertyRow>
           <PropertyRow icon={<Users className="h-3.5 w-3.5" />} label="Assigned To">
             {canEdit && editableScope ? (
-              <InlineSopTargetCell scopeType={editableScope} targetName={targetName} targetUser={sop.scopeTargetUser} scopeOptions={scopeOptions} branchIds={sop.branchIds ?? []} userMembershipIds={sop.userMembershipIds ?? []} pending={pendingProperty === "assigned"} onSave={(patch) => saveScope(patch, "assigned")} />
+              <InlineSopTargetCell scopeType={editableScope} targetName={targetName} targetUser={sop.scopeTargetUser} scopeOptions={scopeOptions} branchIds={sop.branchIds ?? []} departmentIds={sop.departmentIds ?? []} userMembershipIds={sop.userMembershipIds ?? []} pending={pendingProperty === "assigned"} onSave={(patch) => saveScope(patch, "assigned")} />
             ) : (
               <SopTargetValue scopeType={sopScope} targetName={targetName} user={sop.scopeTargetUser} />
             )}

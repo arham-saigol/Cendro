@@ -194,6 +194,19 @@ function statusMatches(task: any, filter: StatusFilter) {
 }
 function taskHasAssignee(task: any, membershipId?: string) { return Boolean(membershipId && Array.isArray(task.assigneeMembershipIds) && task.assigneeMembershipIds.includes(membershipId)); }
 function assigneeDisplayName(assignee: any) { return assignee?.user?.name || assignee?.user?.email || "Unknown user"; }
+function manualStatusLabel(status?: ManualStatus | null) { return manualStatuses.find((option) => option.value === status)?.label ?? "status"; }
+function activityActorName(item: any) { return item.actor?.user.name || item.actor?.user.email || "Someone"; }
+function activityLogText(item: any) {
+  const name = activityActorName(item);
+  if (item.event === "created") return `${name} created this task`;
+  if (item.event === "status_changed") {
+    if (item.toStatus === "completed") return `${name} marked this task complete`;
+    if (item.toStatus === "in_progress") return `${name} moved this task to in progress`;
+    if (item.toStatus === "due") return `${name} marked this task not started`;
+    if (item.fromStatus && item.toStatus) return `${name} changed status from ${manualStatusLabel(item.fromStatus)} to ${manualStatusLabel(item.toStatus)}`;
+  }
+  return `${name} updated this task`;
+}
 function relativeTime(ms?: number) {
   if (!ms) return "";
   const diff = Date.now() - ms;
@@ -1723,7 +1736,8 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const taskType = taskTypeFor(kind);
   const data = useQuery(kind === "jd" ? api.tasks.getJd : api.tasks.getOneTime, activeCompanyId ? { companyId: activeCompanyId, taskId: id as any } : "skip") as any;
   const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskType } : "skip") as any[] | undefined;
-  const commentsQuery = usePaginatedQuery(api.tasks.listComments, activeCompanyId ? { companyId: activeCompanyId, taskType, taskId: id } : "skip", { initialNumItems: 25 });
+  const [activityLimit, setActivityLimit] = useState(50);
+  const activity = useQuery(api.tasks.listActivity, activeCompanyId ? { companyId: activeCompanyId, taskType, taskId: id, limit: activityLimit } : "skip") as { items: any[]; hasMore: boolean } | undefined;
   const attachmentsQuery = usePaginatedQuery(api.tasks.listAttachments, activeCompanyId ? { companyId: activeCompanyId, taskType, taskId: id } : "skip", { initialNumItems: 25 });
   const attachments = attachmentsQuery.results as any[] | undefined;
   const comment = useMutation(api.tasks.addComment);
@@ -1752,10 +1766,14 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const editCommentTextareaRef = useRef<HTMLTextAreaElement>(null);
   const previousEditingCommentIdRef = useRef<Id<"taskComments"> | null>(null);
 
-  const comments = useMemo(() => [...(((commentsQuery.results as any[]) ?? []).slice().reverse()).filter((commentRow) => !optimisticDeletedCommentIds.includes(commentRow._id)).map((commentRow) => ({ ...commentRow, body: optimisticCommentBodies[commentRow._id] ?? commentRow.body })), ...optimisticComments], [commentsQuery.results, optimisticCommentBodies, optimisticComments, optimisticDeletedCommentIds]);
+  const activityItems = useMemo(() => [...((activity?.items ?? []).slice().reverse()).filter((activityRow) => activityRow.kind !== "comment" || !optimisticDeletedCommentIds.includes(activityRow._id)).map((activityRow) => activityRow.kind === "comment" ? { ...activityRow, body: optimisticCommentBodies[activityRow._id] ?? activityRow.body } : activityRow), ...optimisticComments], [activity?.items, optimisticCommentBodies, optimisticComments, optimisticDeletedCommentIds]);
   const canManageAttachments = active?.capabilities.includes("tasks:attachment:add") ?? false;
   const canComment = active?.capabilities.includes("tasks:comment") ?? false;
   const canEdit = Boolean(data?.canUpdate);
+
+  useEffect(() => {
+    setActivityLimit(50);
+  }, [id, taskType]);
 
   useLayoutEffect(() => {
     const textarea = commentTextareaRef.current;
@@ -1857,7 +1875,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
     if (!text || !activeCompanyId) return;
     const tempId = crypto.randomUUID();
     setActionError(null);
-    setOptimisticComments((current) => [{ _id: tempId, body: text, createdAt: Date.now(), optimistic: true }, ...current]);
+    setOptimisticComments((current) => [{ kind: "comment", _id: tempId, body: text, createdAt: Date.now(), actor: null, actorMembershipId: active?.membership._id, optimistic: true }, ...current]);
     setBody("");
     try {
       await comment({ companyId: activeCompanyId, taskType, taskId: id, body: text });
@@ -1883,7 +1901,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   async function saveEditedComment(commentId: Id<"taskComments">) {
     const text = editingCommentBody.trim();
     if (!text || !activeCompanyId) return;
-    const previousBody = comments.find((commentRow) => commentRow._id === commentId)?.body ?? "";
+    const previousBody = activityItems.find((activityRow) => activityRow.kind === "comment" && activityRow._id === commentId)?.body ?? "";
     setActionError(null);
     setOptimisticCommentBodies((current) => ({ ...current, [commentId]: text }));
     cancelEditingComment();
@@ -2006,57 +2024,73 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
 
       <section className="task-section">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-[13px] font-semibold text-[var(--ink-muted)]">Comments</h2>
-          {commentsQuery.status === "CanLoadMore" && <Button size="sm" variant="ghost" onClick={() => commentsQuery.loadMore(25)}>Load more</Button>}
+          <h2 className="text-[13px] font-semibold text-[var(--ink-muted)]">Activity</h2>
+          {activity?.hasMore && activityLimit < 100 && <Button size="sm" variant="ghost" onClick={() => setActivityLimit((current) => Math.min(current + 25, 100))}>Load more</Button>}
         </div>
-        {comments.length > 0 && (
+        {activityItems.length > 0 && (
           <div className="mb-5">
-            {comments.map((commentRow: any, index) => {
-              const name = commentRow.author?.user.name || commentRow.author?.user.email || "You";
-              const isLastComment = index === comments.length - 1;
-              const isEditing = editingCommentId === commentRow._id;
-              const canManageComment = canComment && !commentRow.optimistic && active?.membership._id === commentRow.authorMembershipId;
+            {activityItems.map((activityRow: any, index) => {
+              const isComment = activityRow.kind === "comment";
+              const name = activityRow.actor?.user.name || activityRow.actor?.user.email || (activityRow.optimistic ? "You" : "Someone");
+              const isLastActivity = index === activityItems.length - 1;
+              const isEditing = isComment && editingCommentId === activityRow._id;
+              const canManageComment = isComment && canComment && !activityRow.optimistic && active?.membership._id === activityRow.actorMembershipId;
               return (
-                <div key={commentRow._id} className={cn("comment-row relative flex gap-2.5", !isLastComment && "pb-4")} data-editing={isEditing ? "true" : undefined}>
+                <div key={`${activityRow.kind}-${activityRow._id}`} className={cn("comment-row relative flex gap-2.5", !isLastActivity && "pb-4")} data-editing={isEditing ? "true" : undefined}>
                   {canManageComment && (
                     <div className="comment-action-menu">
                       {isEditing ? (
                         <>
                           <button type="button" className="comment-action-btn" aria-label="Cancel editing comment" onClick={cancelEditingComment}><X className="h-3.5 w-3.5" /></button>
-                          <button type="button" className="comment-action-btn" aria-label="Save comment" disabled={!editingCommentBody.trim()} onClick={() => void saveEditedComment(commentRow._id)}><Check className="h-3.5 w-3.5" /></button>
+                          <button type="button" className="comment-action-btn" aria-label="Save comment" disabled={!editingCommentBody.trim()} onClick={() => void saveEditedComment(activityRow._id)}><Check className="h-3.5 w-3.5" /></button>
                         </>
                       ) : (
                         <>
-                          <button type="button" className="comment-action-btn" aria-label="Edit comment" onClick={() => startEditingComment(commentRow)}><Pencil className="h-3.5 w-3.5" /></button>
-                          <button type="button" className="comment-action-btn" aria-label="Delete comment" onClick={() => void removeComment(commentRow._id)}><Trash2 className="h-3.5 w-3.5" /></button>
+                          <button type="button" className="comment-action-btn" aria-label="Edit comment" onClick={() => startEditingComment(activityRow)}><Pencil className="h-3.5 w-3.5" /></button>
+                          <button type="button" className="comment-action-btn" aria-label="Delete comment" onClick={() => void removeComment(activityRow._id)}><Trash2 className="h-3.5 w-3.5" /></button>
                         </>
                       )}
                     </div>
                   )}
-                  {!isLastComment && <span className="absolute bottom-[6px] left-3 top-[30px] w-px -translate-x-1/2 bg-[color-mix(in_srgb,var(--hairline-strong)_72%,var(--ink-faint))]" aria-hidden />}
+                  {!isLastActivity && <span className="absolute bottom-[6px] left-3 top-[30px] w-px -translate-x-1/2 bg-[color-mix(in_srgb,var(--hairline-strong)_72%,var(--ink-faint))]" aria-hidden />}
                   <div className="relative z-[1] flex w-6 shrink-0 justify-center">
-                    <Avatar name={commentRow.author?.user.name ?? null} email={commentRow.author?.user.email ?? null} imageUrl={commentRow.author?.user.imageUrl ?? null} />
+                    {isComment ? (
+                      <Avatar name={activityRow.actor?.user.name ?? null} email={activityRow.actor?.user.email ?? null} imageUrl={activityRow.actor?.user.imageUrl ?? null} />
+                    ) : (
+                      <span className="grid h-6 w-6 place-items-center rounded-full border border-[var(--hairline)] bg-[var(--canvas)] text-[var(--ink-faint)]"><Check className="h-3.5 w-3.5" /></span>
+                    )}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-[13px] font-medium text-[var(--ink)]">{name}</span>
-                      {commentRow.createdAt && <span className="text-[12px] text-[var(--ink-faint)]">{relativeTime(commentRow.createdAt)}</span>}
-                    </div>
-                    {isEditing ? (
-                      <textarea
-                        ref={editCommentTextareaRef}
-                        rows={1}
-                        value={editingCommentBody}
-                        onChange={(event) => setEditingCommentBody(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Escape") cancelEditingComment();
-                          if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void saveEditedComment(commentRow._id); }
-                        }}
-                        className="mt-0.5 block min-h-6 w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-[13px] leading-6 text-[var(--ink-secondary)] outline-none"
-                        autoFocus
-                      />
+                    {isComment ? (
+                      <div className="rounded-lg border border-[var(--hairline)] bg-[var(--canvas-soft)] px-3 py-2 shadow-[0_1px_0_color-mix(in_srgb,var(--ink)_4%,transparent)]">
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-[13px] font-medium text-[var(--ink)]">{name}</span>
+                          {activityRow.createdAt && <span className="text-[12px] text-[var(--ink-faint)]">{relativeTime(activityRow.createdAt)}</span>}
+                        </div>
+                        {isEditing ? (
+                          <textarea
+                            ref={editCommentTextareaRef}
+                            rows={1}
+                            value={editingCommentBody}
+                            onChange={(event) => setEditingCommentBody(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Escape") cancelEditingComment();
+                              if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void saveEditedComment(activityRow._id); }
+                            }}
+                            className="mt-0.5 block min-h-6 w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-[13px] leading-6 text-[var(--ink-secondary)] outline-none"
+                            autoFocus
+                          />
+                        ) : (
+                          <p className="mt-0.5 whitespace-pre-wrap text-[13px] leading-6 text-[var(--ink-secondary)]">{activityRow.body}</p>
+                        )}
+                      </div>
                     ) : (
-                      <p className="mt-0.5 whitespace-pre-wrap text-[13px] leading-6 text-[var(--ink-secondary)]">{commentRow.body}</p>
+                      <div className="pt-0.5">
+                        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                          <span className="text-[13px] text-[var(--ink-secondary)]">{activityLogText(activityRow)}</span>
+                          {activityRow.createdAt && <span className="text-[12px] text-[var(--ink-faint)]">{relativeTime(activityRow.createdAt)}</span>}
+                        </div>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -2075,7 +2109,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
               value={body}
               onChange={(event) => setBody(event.target.value)}
               onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitComment(); } }}
-              placeholder="Add a comment..."
+              placeholder="Add a comment to the activity..."
               className="min-h-6 max-h-24 flex-1 resize-none overflow-y-auto border-0 bg-transparent p-0 text-[13px] leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]"
             />
             <button type="submit" disabled={!body.trim()} className={cn("hidden h-5 w-5 shrink-0 place-items-center rounded-full text-[var(--on-primary)] transition-colors group-focus-within:grid", body.trim() ? "bg-[var(--primary)] hover:bg-[var(--primary-hover)]" : "bg-[var(--ink-faint)] disabled:opacity-30")} aria-label="Add comment">

@@ -276,6 +276,18 @@ describe("production permission and validation fixes", () => {
     await expect(t.withIdentity(identity("employee")).mutation(api.tasks.addComment, { companyId, taskType: "one_time", taskId, body: "   " })).rejects.toThrow("Comment is required");
   });
 
+  test("task activity includes status logs and comments", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, { companyId, title: "Activity task", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [adminMembershipId], priority: "medium" });
+
+    await t.withIdentity(identity("admin")).mutation(api.tasks.completeOneTime, { companyId, taskId });
+    await t.withIdentity(identity("admin")).mutation(api.tasks.addComment, { companyId, taskType: "one_time", taskId, body: "Looks good." });
+
+    const activity = await t.withIdentity(identity("admin")).query(api.tasks.listActivity, { companyId, taskType: "one_time", taskId, limit: 10 });
+    expect(activity.items.find((row) => row.kind === "comment")).toMatchObject({ body: "Looks good.", actor: { user: { name: "Admin" } } });
+    expect(activity.items.find((row) => row.kind === "log" && row.event === "status_changed")).toMatchObject({ fromStatus: "due", toStatus: "completed", actor: { user: { name: "Admin" } } });
+  });
+
   test("accepting an invitation applies assignments, managed scope, and permission overrides", async () => {
     const { t, companyId, employeeMembershipId } = await seedCompany();
     const token = "invite-token";

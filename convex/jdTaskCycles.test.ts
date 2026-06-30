@@ -80,7 +80,7 @@ describe("JD task cycle behavior", () => {
     expect(afterMidnight.task.state.currentCycleStart).toBe(utc(2026, 6, 26, 4));
   });
 
-  test("weekly JD task rolls into the next Monday cycle and resets to not started", async () => {
+  test("weekly JD task rolls into the next Monday cycle and resets to pending", async () => {
     vi.setSystemTime(utc(2026, 6, 25, 12));
     const { t, companyId, adminMembershipId } = await seedCompany();
     const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Weekly review", description: "", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
@@ -90,11 +90,11 @@ describe("JD task cycle behavior", () => {
     const detail = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
 
     expect(detail.task.state.rawStatus).toBe("due");
-    expect(detail.task.state.status).toBe("Not Started");
+    expect(detail.task.state.status).toBe("Pending");
     expect(detail.task.state.currentCycleStart).toBe(utc(2026, 6, 29));
   });
 
-  test("daily JD task rolls over at midnight and resets to not started", async () => {
+  test("daily JD task rolls over at midnight and resets to pending", async () => {
     vi.setSystemTime(utc(2026, 6, 26, 12));
     const { t, companyId, adminMembershipId } = await seedCompany();
     const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Daily check", description: "", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
@@ -147,7 +147,7 @@ describe("JD task cycle behavior", () => {
     expect(after?.statusCycleStart).toBe(before?.statusCycleStart);
   });
 
-  test("completed previous JD cycle starts the new current cycle as not started", async () => {
+  test("completed previous JD cycle starts the new current cycle as pending", async () => {
     vi.setSystemTime(utc(2026, 6, 25, 12));
     const { t, companyId, adminMembershipId } = await seedCompany();
     const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Weekly review", description: "", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });

@@ -69,7 +69,7 @@ const frequencies: { value: Frequency; label: string }[] = [
 ];
 const priorities: Priority[] = ["low", "medium", "high"];
 const manualStatuses: { value: ManualStatus; label: string }[] = [
-  { value: "due", label: "Not Started" },
+  { value: "due", label: "Pending" },
   { value: "in_progress", label: "In Progress" },
   { value: "completed", label: "Completed" },
 ];
@@ -168,8 +168,8 @@ function fromDateInput(value: string) {
 function quantityFromInput(value: string) { const parsed = Number(value); return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined; }
 function frequencyLabel(value?: Frequency) { return frequencies.find((frequency) => frequency.value === value)?.label ?? "—"; }
 function priorityLabel(value?: Priority) { return value ? value[0].toUpperCase() + value.slice(1) : "—"; }
-function statusText(task: any) { return typeof task.state === "string" ? task.state : task.state?.status ?? "Not Started"; }
-function rawStatus(task: any): ManualStatus | "overdue" { return task.state?.rawStatus ?? (statusText(task) === "Completed" ? "completed" : statusText(task) === "In Progress" ? "in_progress" : statusText(task) === "Overdue" ? "overdue" : statusText(task) === "Not Started" ? "due" : "due"); }
+function statusText(task: any) { return typeof task.state === "string" ? task.state : task.state?.status ?? "Pending"; }
+function rawStatus(task: any): ManualStatus | "overdue" { return task.state?.rawStatus ?? (statusText(task) === "Completed" ? "completed" : statusText(task) === "In Progress" ? "in_progress" : statusText(task) === "Overdue" ? "overdue" : statusText(task) === "Pending" ? "due" : "due"); }
 function statusTone(status: string) { if (status === "Overdue") return "red"; if (status === "Completed") return "green"; if (status === "In Progress") return "blue"; return "neutral"; }
 function statusDotClass(status: ManualStatus | "overdue") { return status === "completed" ? "bg-[var(--badge-green-fg)]" : status === "in_progress" ? "bg-[var(--badge-blue-fg)]" : status === "overdue" ? "bg-[var(--badge-red-fg)]" : "bg-[var(--badge-neutral-fg)]"; }
 function taskTypeFor(kind: Kind) { return kind === "jd" ? "jd" : "one_time"; }
@@ -202,7 +202,7 @@ function activityLogText(item: any) {
   if (item.event === "status_changed") {
     if (item.toStatus === "completed") return `${name} marked this task complete`;
     if (item.toStatus === "in_progress") return `${name} moved this task to in progress`;
-    if (item.toStatus === "due") return `${name} marked this task not started`;
+    if (item.toStatus === "due") return `${name} marked this task pending`;
     if (item.fromStatus && item.toStatus) return `${name} changed status from ${manualStatusLabel(item.fromStatus)} to ${manualStatusLabel(item.toStatus)}`;
   }
   return `${name} updated this task`;
@@ -523,7 +523,7 @@ function TaskFilterMenu({
 }) {
   const statusOptions: { value: StatusFilter; label: string }[] = [
     { value: "all", label: "All statuses" },
-    { value: "due", label: "Not Started" },
+    { value: "due", label: "Pending" },
     { value: "in_progress", label: "In progress" },
     { value: "completed", label: "Completed" },
     { value: "overdue", label: "Overdue" },

@@ -17,7 +17,7 @@ const recurrenceValidator = v.union(v.literal("daily"), v.literal("every_other_d
 const priorityValidator = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
 const statusValidator = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
 const jdFrequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
-function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Not Started" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
+function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Pending" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
 function cleanOptionalText(value?: string) { const text = value?.trim(); return text ? text : undefined; }
 function cleanOptionalQuantity(value?: number) { return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined; }
 function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.email; }

@@ -122,7 +122,7 @@ const taskTypeOptions: { value: TaskTypeFilter; label: string }[] = [
 ];
 const statusOptions: { value: StatusFilter; label: string }[] = [
   { value: "all", label: "All statuses" },
-  { value: "due", label: "Not started" },
+  { value: "due", label: "Pending" },
   { value: "in_progress", label: "In progress" },
   { value: "completed", label: "Completed" },
   { value: "overdue", label: "Overdue" },
@@ -887,7 +887,7 @@ function WorkloadPanel({ data }: { data: DashboardData }) {
   const rows = [
     { label: "Open workload", value: open, total: data.metrics.totalTasks },
     { label: "In progress", value: data.metrics.inProgressTasks, total: open },
-    { label: "Not started", value: data.metrics.notStartedTasks, total: open },
+    { label: "Pending", value: data.metrics.notStartedTasks, total: open },
     { label: "Completed", value: data.metrics.completedTasks, total: data.metrics.totalTasks, tone: "success" as const },
   ];
 

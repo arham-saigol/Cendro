@@ -624,7 +624,7 @@ export const dashboard = query({
         lateCompletionRate: safeRate(lateCompletions, completionEvents.filter((event) => event.kind === "one_time").length),
       },
       breakdowns: {
-        status: makeBreakdown(["due", "in_progress", "completed", "overdue"] as const, statusCounts, { due: "Not started", in_progress: "In progress", completed: "Completed", overdue: "Overdue" }),
+        status: makeBreakdown(["due", "in_progress", "completed", "overdue"] as const, statusCounts, { due: "Pending", in_progress: "In progress", completed: "Completed", overdue: "Overdue" }),
         priority: makeBreakdown(["high", "medium", "low"] as const, priorityCounts, { high: "High", medium: "Medium", low: "Low" }),
         frequency: makeBreakdown(["daily", "every_other_day", "weekly", "semimonthly", "monthly", "semiannually", "annually"] as const, frequencyCounts, { daily: "Daily", every_other_day: "Alternate days", weekly: "Weekly", semimonthly: "Semi-monthly", monthly: "Monthly", semiannually: "Bi-yearly", annually: "Yearly" }),
         type: makeBreakdown(["one_time", "jd"] as const, typeCounts, { one_time: "One-time", jd: "JD / recurring" }),

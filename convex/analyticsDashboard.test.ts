@@ -1,0 +1,195 @@
+/// <reference types="vite/client" />
+
+import { convexTest } from "convex-test";
+import { describe, expect, test } from "vitest";
+import { api } from "./_generated/api";
+import schema from "./schema";
+
+const modules = import.meta.glob("./**/*.ts");
+
+function identity(key: string, email = `${key}@example.com`) {
+  return { tokenIdentifier: `clerk|${key}`, subject: key, issuer: "https://clerk.test", email, name: key };
+}
+
+async function seedDashboardCompany() {
+  const t = convexTest(schema, modules);
+  const ids = await t.run(async (ctx) => {
+    const now = Date.now();
+    const companyId = await ctx.db.insert("companies", { name: "Acme", createdAt: now });
+    const branchAId = await ctx.db.insert("branches", { companyId, name: "North", order: 0, createdAt: now, updatedAt: now });
+    const branchBId = await ctx.db.insert("branches", { companyId, name: "South", order: 1, createdAt: now, updatedAt: now });
+    const departmentAId = await ctx.db.insert("departments", { companyId, branchId: branchAId, name: "Ops", order: 0, createdAt: now, updatedAt: now });
+    const departmentBId = await ctx.db.insert("departments", { companyId, branchId: branchBId, name: "Finance", order: 0, createdAt: now, updatedAt: now });
+    const adminUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin", email: "admin@example.com", firstName: "Admin", secondName: "", createdAt: now, updatedAt: now });
+    const managerUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|manager", email: "manager@example.com", firstName: "Manager", secondName: "", createdAt: now, updatedAt: now });
+    const employeeUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|employee", email: "employee@example.com", firstName: "Employee", secondName: "", createdAt: now, updatedAt: now });
+    const hiddenUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|hidden", email: "hidden@example.com", firstName: "Hidden", secondName: "", createdAt: now, updatedAt: now });
+    const adminMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: adminUserId, role: "Admin", active: true, createdAt: now, updatedAt: now });
+    const managerMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: managerUserId, role: "Manager", active: true, createdAt: now, updatedAt: now });
+    const employeeMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: employeeUserId, role: "Employee", active: true, createdAt: now, updatedAt: now });
+    const hiddenMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: hiddenUserId, role: "Employee", active: true, createdAt: now, updatedAt: now });
+    await ctx.db.insert("userBranchAssignments", { companyId, membershipId: employeeMembershipId, branchId: branchAId });
+    await ctx.db.insert("userDepartmentAssignments", { companyId, membershipId: employeeMembershipId, departmentId: departmentAId });
+    await ctx.db.insert("userBranchAssignments", { companyId, membershipId: hiddenMembershipId, branchId: branchBId });
+    await ctx.db.insert("userDepartmentAssignments", { companyId, membershipId: hiddenMembershipId, departmentId: departmentBId });
+    await ctx.db.insert("managerBranchScopes", { companyId, managerMembershipId, branchId: branchAId, updatedAt: now });
+    return { companyId, branchAId, branchBId, departmentAId, departmentBId, adminUserId, employeeUserId, adminMembershipId, managerMembershipId, employeeMembershipId, hiddenMembershipId };
+  });
+
+  await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, {
+    companyId: ids.companyId,
+    title: "Visible employee task",
+    description: "",
+    dueDate: Date.now() + 86_400_000,
+    assigneeMembershipIds: [ids.employeeMembershipId],
+    priority: "high",
+  });
+  await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, {
+    companyId: ids.companyId,
+    title: "Hidden branch task",
+    description: "",
+    dueDate: Date.now() + 86_400_000,
+    assigneeMembershipIds: [ids.hiddenMembershipId],
+    priority: "medium",
+  });
+  return { t, ...ids };
+}
+
+describe("dashboard analytics scoping", () => {
+  test("admin, manager, and employee dashboards receive only their allowed analytics", async () => {
+    const { t, companyId, branchAId, branchBId, departmentBId, employeeMembershipId, hiddenMembershipId } = await seedDashboardCompany();
+
+    const admin = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId });
+    expect(admin.role).toBe("Admin");
+    expect(admin.metrics.totalTasks).toBe(2);
+    expect(admin.filterOptions.branches.map((branch) => branch._id).sort()).toEqual([branchAId, branchBId].sort());
+    await expect(t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, branchId: branchBId })).resolves.toMatchObject({ metrics: { totalTasks: 1 } });
+
+    const manager = await t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId });
+    expect(manager.role).toBe("Manager");
+    expect(manager.metrics.totalTasks).toBe(1);
+    expect(manager.filterOptions.branches.map((branch) => branch._id)).toEqual([branchAId]);
+    expect(manager.filterOptions.employees.map((employee) => employee._id)).toContain(employeeMembershipId);
+    expect(manager.filterOptions.employees.map((employee) => employee._id)).not.toContain(hiddenMembershipId);
+    await expect(t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId, membershipId: hiddenMembershipId })).rejects.toThrow("outside your analytics scope");
+    await expect(t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId, branchId: branchBId })).rejects.toThrow("outside your analytics scope");
+    await expect(t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId, departmentId: departmentBId })).rejects.toThrow("outside your analytics scope");
+
+    const employee = await t.withIdentity(identity("employee")).query(api.analytics.dashboard, { companyId });
+    expect(employee.role).toBe("Employee");
+    expect(employee.metrics.totalTasks).toBe(1);
+    expect(employee.filterOptions.employees).toEqual([]);
+    expect(employee.comparisons.employees).toEqual([]);
+    await expect(t.withIdentity(identity("employee")).query(api.analytics.dashboard, { companyId, membershipId: hiddenMembershipId })).rejects.toThrow("outside your analytics scope");
+    await expect(t.withIdentity(identity("employee")).query(api.analytics.dashboard, { companyId, branchId: branchAId })).rejects.toThrow("not available");
+  });
+
+  test("7-day trends use daily buckets with stable unique identifiers", async () => {
+    const { t, companyId } = await seedDashboardCompany();
+
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, datePreset: "7d" });
+    expect(dashboard.trends).toHaveLength(7);
+    expect(new Set(dashboard.trends.map((point) => point.bucketStart)).size).toBe(dashboard.trends.length);
+    expect(new Set(dashboard.trends.map((point) => point.label)).size).toBe(dashboard.trends.length);
+  });
+
+  test("dashboard person display fallbacks do not expose emails", async () => {
+    const { t, companyId, employeeUserId, employeeMembershipId } = await seedDashboardCompany();
+    await t.run(async (ctx) => {
+      await ctx.db.patch(employeeUserId, { firstName: "", secondName: "" });
+    });
+
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId });
+    const employee = dashboard.filterOptions.employees.find((row) => row._id === employeeMembershipId);
+    expect(employee).toMatchObject({ name: "Unknown", firstName: "Unknown" });
+    expect(JSON.stringify(dashboard)).not.toContain("employee@example.com");
+  });
+
+  test("recurring history inside the date window contributes even when the current task row is outside it", async () => {
+    const { t, companyId, adminMembershipId, employeeMembershipId } = await seedDashboardCompany();
+    const completedAt = Date.now() - 5 * 86_400_000;
+    await t.run(async (ctx) => {
+      const old = Date.now() - 60 * 86_400_000;
+      const taskId = await ctx.db.insert("jdTasks", {
+        companyId,
+        title: "Historical JD cycle",
+        description: "",
+        recurrence: "daily",
+        cycleStartedAt: old,
+        status: "due",
+        statusCycleStart: old,
+        assigneeMembershipIds: [employeeMembershipId],
+        createdByMembershipId: adminMembershipId,
+        createdAt: old,
+        updatedAt: old,
+      });
+      await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId: taskId, cycleStart: completedAt - 86_400_000, completedByMembershipId: employeeMembershipId, completedAt });
+    });
+
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, datePreset: "30d", taskType: "jd" });
+    expect(dashboard.jdCycleHealth.completedCycles).toBe(1);
+    expect(dashboard.metrics.periodCompletions).toBe(1);
+    expect(dashboard.recent.completions.map((event) => event.title)).toContain("Historical JD cycle");
+    expect(dashboard.trends.reduce((sum, point) => sum + point.completed, 0)).toBe(1);
+  });
+
+  test("current workload includes old open tasks outside the selected date window", async () => {
+    const { t, companyId, adminMembershipId, employeeMembershipId } = await seedDashboardCompany();
+    await t.run(async (ctx) => {
+      const old = Date.now() - 60 * 86_400_000;
+      await ctx.db.insert("oneTimeTasks", {
+        companyId,
+        title: "Old open task",
+        description: "",
+        dueDate: Date.now() + 86_400_000,
+        assigneeMembershipIds: [employeeMembershipId],
+        createdByMembershipId: adminMembershipId,
+        priority: "medium",
+        status: "due",
+        createdAt: old,
+        updatedAt: old,
+      });
+    });
+
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, datePreset: "30d" });
+    expect(dashboard.metrics.totalTasks).toBe(3);
+    expect(dashboard.metrics.openTasks).toBe(3);
+  });
+
+  test("manager branch filters do not expand through multi-branch employee assignments", async () => {
+    const { t, companyId, branchAId, branchBId, departmentAId, departmentBId, employeeMembershipId } = await seedDashboardCompany();
+    await t.run(async (ctx) => {
+      await ctx.db.insert("userBranchAssignments", { companyId, membershipId: employeeMembershipId, branchId: branchBId });
+      await ctx.db.insert("userDepartmentAssignments", { companyId, membershipId: employeeMembershipId, departmentId: departmentBId });
+    });
+
+    const dashboard = await t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId });
+    expect(dashboard.filterOptions.branches.map((branch) => branch._id)).toEqual([branchAId]);
+    expect(dashboard.filterOptions.departments.map((department) => department._id)).toEqual([departmentAId]);
+    expect(dashboard.comparisons.branches.map((branch) => branch.id)).toEqual([branchAId]);
+    await expect(t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId, branchId: branchBId })).rejects.toThrow("outside your analytics scope");
+  });
+
+  test("managed-scope analytics does not include self when self analytics is denied", async () => {
+    const { t, companyId, managerMembershipId } = await seedDashboardCompany();
+    await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, {
+      companyId,
+      title: "Manager self task",
+      description: "",
+      dueDate: Date.now() + 86_400_000,
+      assigneeMembershipIds: [managerMembershipId],
+      priority: "medium",
+    });
+    await t.run(async (ctx) => {
+      await ctx.db.insert("permissionOverrides", { companyId, membershipId: managerMembershipId, capability: "analytics:view:self", effect: "deny", updatedAt: Date.now() });
+    });
+
+    const dashboard = await t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId });
+    expect(dashboard.role).toBe("Manager");
+    expect(dashboard.metrics.totalTasks).toBe(1);
+    expect(dashboard.filterOptions.employees.map((employee) => employee._id)).not.toContain(managerMembershipId);
+    const summary = await t.withIdentity(identity("manager")).query(api.analytics.aiSummary, { companyId });
+    expect(summary.oneTimeTaskCount).toBe(1);
+    expect(summary.scopeSize).toBe(1);
+  });
+});

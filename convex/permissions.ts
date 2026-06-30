@@ -93,11 +93,13 @@ async function addActiveMembership(ctx: Ctx, ids: Set<Id<"companyMemberships">>,
   if (candidate?.companyId === companyId && candidate.active) ids.add(id);
 }
 
+async function activeCompanyMembershipIds(ctx: Ctx, companyId: Id<"companies">) {
+  const all = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(500);
+  return new Set(all.filter((x) => x.active).map((x) => x._id));
+}
+
 export async function scopedMembershipIds(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">) {
-  if (m.role === "Admin") {
-    const all = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(500);
-    return new Set(all.filter((x) => x.active).map((x) => x._id));
-  }
+  if (m.role === "Admin") return await activeCompanyMembershipIds(ctx, companyId);
   const ids = new Set<Id<"companyMemberships">>([m._id]);
   const userScopes = await ctx.db.query("managerUserScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", m._id)).take(500);
   for (const row of userScopes) await addActiveMembership(ctx, ids, companyId, row.userMembershipId);
@@ -112,6 +114,34 @@ export async function scopedMembershipIds(ctx: Ctx, companyId: Id<"companies">, 
     for (const assignment of assignments) await addActiveMembership(ctx, ids, companyId, assignment.membershipId);
   }
   return ids;
+}
+
+export function hasAnalyticsViewAccess(caps: Set<Capability>) {
+  return caps.has("analytics:view:company") || caps.has("analytics:view:managed_scope") || caps.has("analytics:view:self");
+}
+
+export function assertAnalyticsViewAccess(caps: Set<Capability>) {
+  if (!hasAnalyticsViewAccess(caps)) throw new ConvexError("You do not have access to analytics.");
+}
+
+export async function analyticsScopedMembershipIds(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, precomputedCaps?: Set<Capability>) {
+  const caps = precomputedCaps ?? await membershipCapabilities(ctx, m);
+  assertAnalyticsViewAccess(caps);
+  if (caps.has("analytics:view:company")) return await activeCompanyMembershipIds(ctx, companyId);
+  if (caps.has("analytics:view:managed_scope")) {
+    const scoped = await scopedMembershipIds(ctx, companyId, m);
+    if (!caps.has("analytics:view:self")) scoped.delete(m._id);
+    return scoped;
+  }
+  return new Set<Id<"companyMemberships">>([m._id]);
+}
+
+export function visibleAssigneeMembershipIds(assigneeMembershipIds: readonly Id<"companyMemberships">[], scopedIds: Set<Id<"companyMemberships">>) {
+  return assigneeMembershipIds.filter((id) => scopedIds.has(id));
+}
+
+export function taskHasVisibleAssignee(task: { assigneeMembershipIds: readonly Id<"companyMemberships">[] }, scopedIds: Set<Id<"companyMemberships">>) {
+  return task.assigneeMembershipIds.some((id) => scopedIds.has(id));
 }
 
 export async function assertCanAssign(ctx: Ctx, companyId: Id<"companies">, m: Doc<"companyMemberships">, assignees: Id<"companyMemberships">[], kind: "jd" | "one_time") {

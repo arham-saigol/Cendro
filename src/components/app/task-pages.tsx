@@ -1246,7 +1246,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   }
 
   const jdColumns = 6; // title + frequency + assignee + status + time + quantity
-  const oneColumns = 7; // title + priority + assignee + status + due + time + quantity
+  const oneColumns = 6; // title + priority + assignee + status + date assigned + due
   const filterCount = [statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
   const hasActiveFilters = filterCount > 0 || search.trim() !== "";
 
@@ -1365,9 +1365,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                 <th><span className="inline-flex items-center gap-1.5"><Tag className="h-3.5 w-3.5" />PRIORITY</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
+                <th><span className="inline-flex items-center gap-1.5"><CalendarClock className="h-3.5 w-3.5" />DATE ASSIGNED</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><CalendarDays className="h-3.5 w-3.5" />DUE DATE</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />TIME</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><QuantityIcon className="h-3.5 w-3.5" />QUANTITY</span></th>
               </tr>
             )}
           </thead>
@@ -1476,6 +1475,9 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                       </td>
                       <td><StatusBadge kind={kind} task={task} canUpdateOverride={rowCanEdit} cellTrigger={rowCanEdit} /></td>
                       {kind === "one" && (
+                        <td className="whitespace-nowrap text-[var(--ink-secondary)]">{formatDate(task.createdAt)}</td>
+                      )}
+                      {kind === "one" && (
                         <td className="whitespace-nowrap">
                           {rowCanEdit ? (
                             <DatePicker value={task.dueDate ? toDateField(task.dueDate, dateHasExplicitTime(task.dueDate)) : ""} displayValue={dueLabel(task)} compact onChange={(dueDate) => { void saveInline(task, { dueDate }, "due"); }} />
@@ -1484,12 +1486,16 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                           )}
                         </td>
                       )}
-                      <td>
-                        {rowCanEdit ? <InlineTextCell value={task.time ?? ""} ariaLabel="Edit time" pending={pending("time")} onSave={(time) => saveInline(task, { time }, "time")} /> : (task.time || "—")}
-                      </td>
-                      <td>
-                        {rowCanEdit ? <InlineTextCell value={task.quantity != null ? String(task.quantity) : ""} ariaLabel="Edit quantity" inputMode="decimal" pending={pending("quantity")} onSave={(quantity) => saveInline(task, { quantity }, "quantity")} /> : (task.quantity != null ? task.quantity : "—")}
-                      </td>
+                      {kind === "jd" && (
+                        <>
+                          <td>
+                            {rowCanEdit ? <InlineTextCell value={task.time ?? ""} ariaLabel="Edit time" pending={pending("time")} onSave={(time) => saveInline(task, { time }, "time")} /> : (task.time || "—")}
+                          </td>
+                          <td>
+                            {rowCanEdit ? <InlineTextCell value={task.quantity != null ? String(task.quantity) : ""} ariaLabel="Edit quantity" inputMode="decimal" pending={pending("quantity")} onSave={(quantity) => saveInline(task, { quantity }, "quantity")} /> : (task.quantity != null ? task.quantity : "—")}
+                          </td>
+                        </>
+                      )}
                     </tr>
                   );
                 })}

@@ -689,7 +689,6 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   const debouncedSearch = useDebouncedValue(search);
   const canUseAllSops = active?.membership.role === "Admin" || active?.membership.role === "Manager";
   const effectiveSopView: SopView = canUseAllSops ? sopView : "my";
-  const canLoadScopeOptions = canLoadSopScopeOptions(active);
   const sops = useQuery(api.sops.listRows, activeCompanyId ? {
     companyId: activeCompanyId,
     search: debouncedSearch || undefined,
@@ -698,17 +697,14 @@ export function SopList({ selectedId }: { selectedId?: string }) {
     branchId: branchFilter === "all" ? undefined : branchFilter as Id<"branches">,
     userMembershipId: personFilter === "all" || effectiveSopView === "my" ? undefined : personFilter as Id<"companyMemberships">,
   } : "skip") as any[] | undefined;
-  const scopeOptions = useQuery(api.sops.scopeOptions, activeCompanyId && canLoadScopeOptions ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const filterOptions = useQuery(api.sops.filterOptions, activeCompanyId && canUseAllSops ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const update = useMutation(api.sops.update);
-  const updateScope = useMutation(api.sops.updateScope);
   const remove = useMutation(api.sops.remove);
   const removeBulk = useMutation(api.sops.removeBulk);
   const isLoading = sops === undefined;
   const serverRows = useMemo(() => sops ?? [], [sops]);
   const rows = useMemo(() => serverRows.map((sop) => ({ ...sop, ...optimisticRows[sop._id] })), [optimisticRows, serverRows]);
   const canCreate = canCreateSops(active);
-  const editableScopes = useMemo(() => editableScopeTypes.filter((scope) => canManageSop(active, scope)), [active]);
   const filterCount = [scopeFilter !== "all", branchFilter !== "all", effectiveSopView === "all" && personFilter !== "all"].filter(Boolean).length;
   const hasActiveFilters = filterCount > 0 || search.trim() !== "";
   const visibleIds = rows.map((sop) => sop._id as string);
@@ -824,44 +820,6 @@ export function SopList({ selectedId }: { selectedId?: string }) {
     }
   }
 
-  async function saveScope(sop: any, patch: { scopeType?: EditableScopeType; branchId?: Id<"branches">; departmentId?: Id<"departments">; userMembershipId?: Id<"companyMemberships"> }, label: string) {
-    if (!activeCompanyId) return false;
-    const nextScopeType = patch.scopeType ?? (sop.scopeType as EditableScopeType);
-    let branchIds: Id<"branches">[] = [];
-    let departmentIds: Id<"departments">[] = [];
-    let userMembershipIds: Id<"companyMemberships">[] = [];
-    if (nextScopeType === "branch") {
-      const branchId = patch.branchId ?? (sop.scopeType === "branch" ? sop.branchIds?.[0] : undefined) ?? scopeOptions?.branches[0]?._id;
-      if (!branchId) { setInlineError(scopeOptions ? "No branches are available." : "Scope options are still loading."); return false; }
-      branchIds = [branchId as Id<"branches">];
-    } else if (nextScopeType === "department") {
-      const departmentId = patch.departmentId ?? (sop.scopeType === "department" ? sop.departmentIds?.[0] : undefined) ?? scopeOptions?.departments[0]?._id;
-      if (!departmentId) { setInlineError(scopeOptions ? "No departments are available." : "Scope options are still loading."); return false; }
-      departmentIds = [departmentId as Id<"departments">];
-    } else if (nextScopeType === "user") {
-      const userMembershipId = patch.userMembershipId ?? (sop.scopeType === "user" ? sop.userMembershipIds?.[0] : undefined) ?? scopeOptions?.users[0]?.membership._id;
-      if (!userMembershipId) { setInlineError(scopeOptions ? "No users are available." : "Scope options are still loading."); return false; }
-      userMembershipIds = [userMembershipId as Id<"companyMemberships">];
-    }
-    if (nextScopeType === sop.scopeType && (nextScopeType !== "branch" || branchIds[0] === sop.branchIds?.[0]) && (nextScopeType !== "department" || departmentIds[0] === sop.departmentIds?.[0]) && (nextScopeType !== "user" || userMembershipIds[0] === sop.userMembershipIds?.[0])) return true;
-    const scopeTargetUser = nextScopeType === "user" ? scopeOptions?.users.find((user) => user.membership._id === userMembershipIds[0])?.user ?? sop.scopeTargetUser : null;
-    const scopeTargetName = nextScopeType === "company" ? active?.company.name ?? "Company" : nextScopeType === "branch" ? scopeOptions?.branches.find((branch) => branch._id === branchIds[0])?.name ?? sop.scopeTargetName : nextScopeType === "department" ? scopeOptions?.departments.find((department) => department._id === departmentIds[0])?.name ?? sop.scopeTargetName : scopeTargetUser?.name ?? sop.scopeTargetName;
-    const optimisticPatch = { scopeType: nextScopeType, branchIds, departmentIds, userMembershipIds, scopeTargetName, scopeTargetUser };
-    const key = `${sop._id}:${label}`;
-    setOptimisticRows((current) => ({ ...current, [sop._id]: { ...current[sop._id], ...optimisticPatch } }));
-    setPendingCell(key);
-    setInlineError(null);
-    try {
-      await updateScope({ companyId: activeCompanyId, sopId: sop._id as Id<"sops">, scopeType: nextScopeType, branchIds, departmentIds, userMembershipIds });
-      return true;
-    } catch (err) {
-      setOptimisticRows((current) => { const next = { ...current }; delete next[sop._id]; return next; });
-      setInlineError(err instanceof Error ? err.message : "Could not update the SOP scope.");
-      return false;
-    } finally {
-      setPendingCell((current) => (current === key ? null : current));
-    }
-  }
 
   return (
     <div>
@@ -962,16 +920,15 @@ export function SopList({ selectedId }: { selectedId?: string }) {
           <thead>
             <tr className="group/head">
               <th className="min-w-[200px] max-w-[420px]"><span className="inline-flex items-center gap-1.5"><FileText className="h-3.5 w-3.5" />Title</span></th>
-              <th><span className="inline-flex items-center gap-1.5"><Layers className="h-3.5 w-3.5" />Scope</span></th>
-              <th><span className="inline-flex items-center gap-1.5"><Users className="h-3.5 w-3.5" />Assigned to</span></th>
               <th><span className="inline-flex items-center gap-1.5"><History className="h-3.5 w-3.5" />Updated</span></th>
+              <th><span className="inline-flex items-center gap-1.5"><Plus className="h-3.5 w-3.5" />Created at</span></th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
               Array.from({ length: 6 }).map((_, index) => (
                 <tr key={`skel-${index}`}>
-                  <td colSpan={4} className="pl-4">
+                  <td colSpan={3} className="pl-4">
                     <div className="flex items-center gap-3">
                       <div className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-[var(--surface-muted)]" />
                       <div className="h-3 w-2/5 animate-pulse rounded bg-[var(--surface-muted)]" />
@@ -981,7 +938,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
               ))
             ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={4} className="!h-auto py-2">
+                <td colSpan={3} className="!h-auto py-2">
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
                     <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{hasActiveFilters ? "No matching SOPs" : "No SOPs yet"}</div>
@@ -1000,9 +957,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                 {rows.map((sop) => {
                   const isChecked = selectedIds.has(sop._id);
                   const sopScope = sop.scopeType as ScopeType;
-                  const editableScope = editableScopeTypes.includes(sopScope as EditableScopeType) ? sopScope as EditableScopeType : null;
                   const rowCanEdit = canManageSop(active, sopScope);
-                  const targetName = sopTargetName(sop, active?.company.name);
                   const pending = (field: string) => pendingCell === `${sop._id}:${field}`;
                   const detailsHref = `/sops/${sop._id}`;
                   const prefetchDetails = () => router.prefetch(detailsHref);
@@ -1052,27 +1007,14 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                           )}
                         </div>
                       </td>
-                      <td>
-                        {rowCanEdit && editableScope ? (
-                          <InlineScopeCell value={editableScope} options={editableScopes} pending={pending("scope")} onSave={(scopeType) => saveScope(sop, { scopeType }, "scope")} />
-                        ) : (
-                          <ScopePill scopeType={sopScope} />
-                        )}
-                      </td>
-                      <td className="max-w-[220px]">
-                        {rowCanEdit && editableScope ? (
-                          <InlineSopTargetCell scopeType={editableScope} targetName={targetName} targetUser={sop.scopeTargetUser} scopeOptions={scopeOptions} branchIds={sop.branchIds ?? []} departmentIds={sop.departmentIds ?? []} userMembershipIds={sop.userMembershipIds ?? []} pending={pending("assigned")} onSave={(patch) => saveScope(sop, patch, "assigned")} />
-                        ) : (
-                          <SopTargetValue scopeType={sopScope} targetName={targetName} user={sop.scopeTargetUser} />
-                        )}
-                      </td>
-                      <td className="task-col-meta" title={`Updated ${formatDate(sop.updatedAt)} · Created ${formatDate(sop.createdAt)}`}>{relativeTime(sop.updatedAt)}</td>
+                      <td className="task-col-meta" title={`Updated ${formatDate(sop.updatedAt)}`}>{relativeTime(sop.updatedAt)}</td>
+                      <td className="task-col-meta" title={`Created ${formatDate(sop.createdAt)}`}>{relativeTime(sop.createdAt)}</td>
                     </tr>
                   );
                 })}
                 {canCreate && (
                   <tr className="task-add-row">
-                    <td colSpan={4}>
+                    <td colSpan={3}>
                       <button type="button" className="task-add-label inline-flex items-center gap-1.5" onClick={() => setCreateOpen(true)}>
                         <Plus className="h-3.5 w-3.5" />New SOP
                       </button>
@@ -1209,9 +1151,10 @@ function SopDetailNotFound({ onBack }: { onBack: () => void }) {
 export function SopDetail({ id }: { id: string }) {
   const router = useRouter();
   const { activeCompanyId, active } = useCompany();
+  const canShowScopeProperties = Boolean((active?.membership.role === "Admin" || active?.membership.role === "Manager") && canCreateSops(active));
   const serverSopResult = useQuery_experimental({ query: api.sops.get, args: activeCompanyId ? { companyId: activeCompanyId, sopId: id as Id<"sops"> } : "skip" });
   const serverSop = serverSopResult.status === "success" ? (serverSopResult.data as any) : undefined;
-  const scopeOptions = useQuery(api.sops.scopeOptions, activeCompanyId && canLoadSopScopeOptions(active) ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
+  const scopeOptions = useQuery(api.sops.scopeOptions, activeCompanyId && canShowScopeProperties && canLoadSopScopeOptions(active) ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const update = useMutation(api.sops.update);
   const updateScope = useMutation(api.sops.updateScope);
   const editableScopes = useMemo(() => editableScopeTypes.filter((scope) => canManageSop(active, scope)), [active]);
@@ -1312,21 +1255,26 @@ export function SopDetail({ id }: { id: string }) {
 
       <div className="task-section !mt-6">
         <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
-          <PropertyRow icon={<Layers className="h-3.5 w-3.5" />} label="Scope">
-            {canEdit && editableScope ? (
-              <InlineScopeCell value={editableScope} options={editableScopes} pending={pendingProperty === "scope"} onSave={(scopeType) => saveScope({ scopeType }, "scope")} />
-            ) : (
-              <ScopePill scopeType={sopScope} />
-            )}
-          </PropertyRow>
-          <PropertyRow icon={<Users className="h-3.5 w-3.5" />} label="Assigned To">
-            {canEdit && editableScope ? (
-              <InlineSopTargetCell scopeType={editableScope} targetName={targetName} targetUser={sop.scopeTargetUser} scopeOptions={scopeOptions} branchIds={sop.branchIds ?? []} departmentIds={sop.departmentIds ?? []} userMembershipIds={sop.userMembershipIds ?? []} pending={pendingProperty === "assigned"} onSave={(patch) => saveScope(patch, "assigned")} />
-            ) : (
-              <SopTargetValue scopeType={sopScope} targetName={targetName} user={sop.scopeTargetUser} />
-            )}
-          </PropertyRow>
-          <PropertyRow icon={<History className="h-3.5 w-3.5" />} label="Updated" muted={!sop.updatedAt}>{relativeTime(sop.updatedAt)}</PropertyRow>
+          {canShowScopeProperties && (
+            <>
+              <PropertyRow icon={<Layers className="h-3.5 w-3.5" />} label="Scope">
+                {canEdit && editableScope ? (
+                  <InlineScopeCell value={editableScope} options={editableScopes} pending={pendingProperty === "scope"} onSave={(scopeType) => saveScope({ scopeType }, "scope")} />
+                ) : (
+                  <ScopePill scopeType={sopScope} />
+                )}
+              </PropertyRow>
+              <PropertyRow icon={<Users className="h-3.5 w-3.5" />} label="Assigned To">
+                {canEdit && editableScope ? (
+                  <InlineSopTargetCell scopeType={editableScope} targetName={targetName} targetUser={sop.scopeTargetUser} scopeOptions={scopeOptions} branchIds={sop.branchIds ?? []} departmentIds={sop.departmentIds ?? []} userMembershipIds={sop.userMembershipIds ?? []} pending={pendingProperty === "assigned"} onSave={(patch) => saveScope(patch, "assigned")} />
+                ) : (
+                  <SopTargetValue scopeType={sopScope} targetName={targetName} user={sop.scopeTargetUser} />
+                )}
+              </PropertyRow>
+            </>
+          )}
+          <PropertyRow icon={<Plus className="h-3.5 w-3.5" />} label="Created at" muted={!sop.createdAt}>{relativeTime(sop.createdAt) || "—"}</PropertyRow>
+          <PropertyRow icon={<History className="h-3.5 w-3.5" />} label="Updated" muted={!sop.updatedAt}>{relativeTime(sop.updatedAt) || "—"}</PropertyRow>
         </div>
       </div>
 

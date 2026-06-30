@@ -32,10 +32,10 @@ import { cn, initials } from "@/lib/utils";
 
 const nav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, requiresDashboard: true },
-  { href: "/jd-tasks", label: "JD tasks", icon: Repeat },
-  { href: "/one-time-tasks", label: "One-time tasks", icon: Check },
+  { href: "/jd-tasks", label: "JD Tasks", icon: Repeat },
+  { href: "/one-time-tasks", label: "One-Time Tasks", icon: Check },
   { href: "/sops", label: "SOPs", icon: FileText },
-  { href: "/company", label: "Company management", icon: Building2, requiresCompanyManagement: true },
+  { href: "/company", label: "Company Management", icon: Building2, requiresCompanyManagement: true },
 ];
 
 const dropdownItemClass =

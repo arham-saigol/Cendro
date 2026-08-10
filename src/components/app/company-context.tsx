@@ -8,17 +8,16 @@ import type { Id } from "../../../convex/_generated/dataModel";
 
 export type CompanyAccess = {
   company: { _id: Id<"companies">; name: string; timeZone?: string };
-  membership: { _id: Id<"companyMemberships">; role: string };
+  membership: { _id: Id<"companyMemberships">; role: string; active: boolean };
   capabilities: string[];
 };
 
-type AccessStatus = "loading" | "signedOut" | "convexUnauthenticated" | "profileMissing" | "paused" | "noCompanies" | "ready";
+type AccessStatus = "loading" | "signedOut" | "convexUnauthenticated" | "profileMissing" | "noCompanies" | "ready";
 
 type AccessResult =
   | { status: "signedOut" }
   | { status: "convexUnauthenticated" }
   | { status: "profileMissing"; email: string | null }
-  | { status: "paused"; email: string }
   | { status: "noCompanies"; email: string }
   | { status: "ready"; email: string; companies: CompanyAccess[] };
 
@@ -45,7 +44,7 @@ export function CompanyProvider({ children }: { children: React.ReactNode }) {
     return localStorage.getItem("cendro.company") as Id<"companies"> | null;
   });
 
-  const active = companies.find((c) => c.company._id === selectedCompanyId) ?? companies[0] ?? null;
+  const active = companies.find((c) => c.company._id === selectedCompanyId) ?? companies.find((c) => c.membership.active) ?? companies[0] ?? null;
   const activeCompanyId = active?.company._id ?? null;
 
   const setActiveCompanyId = (id: Id<"companies">) => {

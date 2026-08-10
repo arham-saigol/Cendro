@@ -40,11 +40,12 @@ import { cn, formatDate, initials } from "@/lib/utils";
 
 type Kind = "jd" | "one";
 type Priority = "low" | "medium" | "high";
-type Frequency = "daily" | "every_other_day" | "weekly" | "monthly" | "semiannually" | "annually";
+type Frequency = "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "semiannually" | "annually";
 type ManualStatus = "due" | "in_progress" | "completed";
 type StatusFilter = "all" | ManualStatus | "overdue";
 type TaskView = "all" | "my";
 type PriorityFilter = "all" | Priority;
+type FrequencyFilter = Frequency | "all";
 
 type TaskFormValues = {
   title: string;
@@ -62,13 +63,15 @@ const frequencies: { value: Frequency; label: string }[] = [
   { value: "daily", label: "Daily" },
   { value: "every_other_day", label: "Alternate days" },
   { value: "weekly", label: "Weekly" },
+  { value: "semimonthly", label: "Semi-monthly" },
   { value: "monthly", label: "Monthly" },
   { value: "semiannually", label: "Bi-yearly" },
   { value: "annually", label: "Yearly" },
 ];
+const frequencyRank = new Map<Frequency, number>(frequencies.map((frequency, index) => [frequency.value, index]));
 const priorities: Priority[] = ["low", "medium", "high"];
 const manualStatuses: { value: ManualStatus; label: string }[] = [
-  { value: "due", label: "Not Started" },
+  { value: "due", label: "Pending" },
   { value: "in_progress", label: "In Progress" },
   { value: "completed", label: "Completed" },
 ];
@@ -166,9 +169,10 @@ function fromDateInput(value: string) {
 }
 function quantityFromInput(value: string) { const parsed = Number(value); return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined; }
 function frequencyLabel(value?: Frequency) { return frequencies.find((frequency) => frequency.value === value)?.label ?? "—"; }
+function compareFrequency(a?: Frequency, b?: Frequency) { return (frequencyRank.get(a as Frequency) ?? Number.MAX_SAFE_INTEGER) - (frequencyRank.get(b as Frequency) ?? Number.MAX_SAFE_INTEGER); }
 function priorityLabel(value?: Priority) { return value ? value[0].toUpperCase() + value.slice(1) : "—"; }
-function statusText(task: any) { return typeof task.state === "string" ? task.state : task.state?.status ?? "Not Started"; }
-function rawStatus(task: any): ManualStatus | "overdue" { return task.state?.rawStatus ?? (statusText(task) === "Completed" ? "completed" : statusText(task) === "In Progress" ? "in_progress" : statusText(task) === "Overdue" ? "overdue" : statusText(task) === "Not Started" ? "due" : "due"); }
+function statusText(task: any) { return typeof task.state === "string" ? task.state : task.state?.status ?? "Pending"; }
+function rawStatus(task: any): ManualStatus | "overdue" { return task.state?.rawStatus ?? (statusText(task) === "Completed" ? "completed" : statusText(task) === "In Progress" ? "in_progress" : statusText(task) === "Overdue" ? "overdue" : statusText(task) === "Pending" ? "due" : "due"); }
 function statusTone(status: string) { if (status === "Overdue") return "red"; if (status === "Completed") return "green"; if (status === "In Progress") return "blue"; return "neutral"; }
 function statusDotClass(status: ManualStatus | "overdue") { return status === "completed" ? "bg-[var(--badge-green-fg)]" : status === "in_progress" ? "bg-[var(--badge-blue-fg)]" : status === "overdue" ? "bg-[var(--badge-red-fg)]" : "bg-[var(--badge-neutral-fg)]"; }
 function taskTypeFor(kind: Kind) { return kind === "jd" ? "jd" : "one_time"; }
@@ -193,6 +197,19 @@ function statusMatches(task: any, filter: StatusFilter) {
 }
 function taskHasAssignee(task: any, membershipId?: string) { return Boolean(membershipId && Array.isArray(task.assigneeMembershipIds) && task.assigneeMembershipIds.includes(membershipId)); }
 function assigneeDisplayName(assignee: any) { return assignee?.user?.name || assignee?.user?.email || "Unknown user"; }
+function manualStatusLabel(status?: ManualStatus | null) { return manualStatuses.find((option) => option.value === status)?.label ?? "status"; }
+function activityActorName(item: any) { return item.actor?.user.name || item.actor?.user.email || "Someone"; }
+function activityLogText(item: any) {
+  const name = activityActorName(item);
+  if (item.event === "created") return `${name} created this task`;
+  if (item.event === "status_changed") {
+    if (item.toStatus === "completed") return `${name} marked this task complete`;
+    if (item.toStatus === "in_progress") return `${name} moved this task to in progress`;
+    if (item.toStatus === "due") return `${name} marked this task pending`;
+    if (item.fromStatus && item.toStatus) return `${name} changed status from ${manualStatusLabel(item.fromStatus)} to ${manualStatusLabel(item.toStatus)}`;
+  }
+  return `${name} updated this task`;
+}
 function relativeTime(ms?: number) {
   if (!ms) return "";
   const diff = Date.now() - ms;
@@ -496,26 +513,26 @@ function TaskFilterMenu({
 }: {
   kind: Kind;
   statusFilter: StatusFilter;
-  frequency: Frequency | "all";
+  frequency: FrequencyFilter;
   priorityFilter: PriorityFilter;
   assigneeFilter: string;
   assignees: any[];
   showAssigneeFilter: boolean;
   activeCount: number;
   onStatusChange: (value: StatusFilter) => void;
-  onFrequencyChange: (value: Frequency | "all") => void;
+  onFrequencyChange: (value: FrequencyFilter) => void;
   onPriorityChange: (value: PriorityFilter) => void;
   onAssigneeChange: (value: string) => void;
 }) {
   const statusOptions: { value: StatusFilter; label: string }[] = [
     { value: "all", label: "All statuses" },
-    { value: "due", label: "Not Started" },
+    { value: "due", label: "Pending" },
     { value: "in_progress", label: "In progress" },
     { value: "completed", label: "Completed" },
     { value: "overdue", label: "Overdue" },
   ];
   const priorityOptions: { value: PriorityFilter; label: string }[] = [{ value: "all", label: "All priorities" }, ...priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))];
-  const frequencyOptions: { value: Frequency | "all"; label: string }[] = [{ value: "all", label: "All frequencies" }, ...frequencies];
+  const frequencyOptions: { value: FrequencyFilter; label: string }[] = [{ value: "all", label: "All frequencies" }, ...frequencies];
 
   return (
     <DropdownMenu.Root>
@@ -1086,8 +1103,10 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [taskView, setTaskView] = useState<TaskView>("all");
-  const [frequency, setFrequency] = useState<Frequency | "all">("all");
+  const [frequency, setFrequency] = useState<FrequencyFilter>("all");
   const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>("all");
+  const [personalFrequencyView, setPersonalFrequencyView] = useState<FrequencyFilter>("all");
+  const [personalPriorityView, setPersonalPriorityView] = useState<PriorityFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [assigneeFilter, setAssigneeFilter] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
@@ -1099,7 +1118,9 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const canUseAllTasks = active?.membership.role === "Admin" || active?.membership.role === "Manager";
   const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip") as any[] | undefined;
   const filterableAssignees = useQuery(api.tasks.filterableAssignees, activeCompanyId && canUseAllTasks ? { companyId: activeCompanyId } : "skip") as any[] | undefined;
-  const tasks = useQuery(kind === "jd" ? api.tasks.listJdRows : api.tasks.listOneTimeRows, activeCompanyId ? (kind === "jd" ? { companyId: activeCompanyId, search: search || undefined, frequency, sort: "newest" as const } : { companyId: activeCompanyId, search: search || undefined, sort: "newest" as const }) : "skip") as any[] | undefined;
+  const tasks = useQuery(kind === "jd" ? api.tasks.listJdRows : api.tasks.listOneTimeRows, activeCompanyId ? (kind === "jd" ? { companyId: activeCompanyId, search: search || undefined, sort: "frequency" as const } : { companyId: activeCompanyId, search: search || undefined, sort: "newest" as const }) : "skip") as any[] | undefined;
+  const jdFrequencySourceTasks = useQuery(api.tasks.listJdRows, activeCompanyId && kind === "jd" && search.trim() !== "" ? { companyId: activeCompanyId, sort: "frequency" as const } : "skip") as any[] | undefined;
+  const oneTimePrioritySourceTasks = useQuery(api.tasks.listOneTimeRows, activeCompanyId && kind === "one" && search.trim() !== "" ? { companyId: activeCompanyId, sort: "newest" as const } : "skip") as any[] | undefined;
   const updateJd = useMutation(api.tasks.updateJd);
   const updateOneTime = useMutation(api.tasks.updateOneTime);
   const deleteJd = useMutation(api.tasks.deleteJd);
@@ -1110,15 +1131,39 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const pageTitle = kind === "jd" ? "JD Tasks" : "One-Time Tasks";
   const description = kind === "jd" ? "Recurring role responsibilities with cycle-aware status and clear ownership." : "One-off work with priority, due dates, and clear completion status.";
   const canCreate = canCreateTasks(active, kind);
+  const frequencyFilterActive = kind === "jd" && frequency !== "all";
+  const priorityFilterActive = kind === "one" && priorityFilter !== "all";
+  const frequencyViewActive = kind === "jd" && personalFrequencyView !== "all";
+  const priorityViewActive = kind === "one" && personalPriorityView !== "all";
   const effectiveTaskView: TaskView = canUseAllTasks ? taskView : "my";
   const currentMembershipId = active?.membership._id as string | undefined;
-  const visibleTasks = (tasks ?? []).filter((task) => {
-    if (effectiveTaskView === "my" && !taskHasAssignee(task, currentMembershipId)) return false;
-    if (!statusMatches(task, statusFilter)) return false;
-    if (kind === "one" && priorityFilter !== "all" && task.priority !== priorityFilter) return false;
-    if (assigneeFilter !== "all" && !taskHasAssignee(task, assigneeFilter)) return false;
-    return true;
-  });
+  const jdFrequencyPillTasks = search.trim() !== "" ? (jdFrequencySourceTasks ?? tasks) : tasks;
+  const oneTimePriorityPillTasks = search.trim() !== "" ? (oneTimePrioritySourceTasks ?? tasks) : tasks;
+  const ownFrequencyValues = useMemo(() => {
+    if (kind !== "jd" || !currentMembershipId) return [] as Frequency[];
+    const values = new Set<Frequency>();
+    for (const task of jdFrequencyPillTasks ?? []) if (taskHasAssignee(task, currentMembershipId)) values.add(task.recurrence as Frequency);
+    return frequencies.map((option) => option.value).filter((value) => values.has(value));
+  }, [currentMembershipId, jdFrequencyPillTasks, kind]);
+  const ownPriorityValues = useMemo(() => {
+    if (kind !== "one" || !currentMembershipId) return [] as Priority[];
+    const values = new Set<Priority>();
+    for (const task of oneTimePriorityPillTasks ?? []) if (taskHasAssignee(task, currentMembershipId)) values.add(task.priority as Priority);
+    return priorities.filter((priority) => values.has(priority));
+  }, [currentMembershipId, kind, oneTimePriorityPillTasks]);
+  const showAssigneeColumn = canUseAllTasks && effectiveTaskView === "all";
+  const showFrequencyColumn = kind === "jd" && !frequencyFilterActive;
+  const showPriorityColumn = kind === "one" && !priorityFilterActive;
+  const visibleTasks = (tasks ?? [])
+    .filter((task) => {
+      if (effectiveTaskView === "my" && !taskHasAssignee(task, currentMembershipId)) return false;
+      if (kind === "jd" && frequency !== "all" && task.recurrence !== frequency) return false;
+      if (!statusMatches(task, statusFilter)) return false;
+      if (kind === "one" && priorityFilter !== "all" && task.priority !== priorityFilter) return false;
+      if (assigneeFilter !== "all" && !taskHasAssignee(task, assigneeFilter)) return false;
+      return true;
+    })
+    .sort((a, b) => kind === "jd" ? compareFrequency(a.recurrence, b.recurrence) || (b.createdAt ?? 0) - (a.createdAt ?? 0) : 0);
   const visibleIds = visibleTasks.map((task) => task._id);
   const selectedVisibleCount = visibleIds.reduce((count, id) => count + (selectedIds.has(id) ? 1 : 0), 0);
   const allVisibleSelected = visibleTasks.length > 0 && selectedVisibleCount === visibleTasks.length;
@@ -1130,11 +1175,29 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     if (!activeCompanyId) return;
     setTaskView(canUseAllTasks ? "all" : "my");
     setAssigneeFilter("all");
+    setPersonalFrequencyView("all");
+    setPersonalPriorityView("all");
   }, [activeCompanyId, canUseAllTasks]);
 
   useEffect(() => {
     if (effectiveTaskView === "my" && assigneeFilter !== "all") setAssigneeFilter("all");
   }, [effectiveTaskView, assigneeFilter]);
+
+  useEffect(() => {
+    if (kind !== "jd" || personalFrequencyView === "all" || !jdFrequencyPillTasks) return;
+    if (!ownFrequencyValues.includes(personalFrequencyView)) {
+      setPersonalFrequencyView("all");
+      setFrequency((current) => current === personalFrequencyView ? "all" : current);
+    }
+  }, [jdFrequencyPillTasks, kind, ownFrequencyValues, personalFrequencyView]);
+
+  useEffect(() => {
+    if (kind !== "one" || personalPriorityView === "all" || !oneTimePriorityPillTasks) return;
+    if (!ownPriorityValues.includes(personalPriorityView)) {
+      setPersonalPriorityView("all");
+      setPriorityFilter((current) => current === personalPriorityView ? "all" : current);
+    }
+  }, [kind, oneTimePriorityPillTasks, ownPriorityValues, personalPriorityView]);
 
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus();
@@ -1231,8 +1294,18 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     }
   }
 
-  const jdColumns = 6; // task + frequency + assignee + status + time + quantity
-  const oneColumns = 7; // task + priority + assignee + status + due + time + quantity
+  function changeFrequencyFilter(value: FrequencyFilter) {
+    setFrequency(value);
+    setPersonalFrequencyView("all");
+  }
+
+  function changePriorityFilter(value: PriorityFilter) {
+    setPriorityFilter(value);
+    setPersonalPriorityView("all");
+  }
+
+  const jdColumns = 4 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // title + optional frequency + optional assignee + status + time + quantity
+  const oneColumns = 4 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // title + optional priority + optional assignee + status + date assigned + due
   const filterCount = [statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
   const hasActiveFilters = filterCount > 0 || search.trim() !== "";
 
@@ -1247,14 +1320,39 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="task-view-toggle" aria-label="Task view">
-          {canUseAllTasks && (
-            <button type="button" className="task-view-button" data-active={effectiveTaskView === "all"} onClick={() => setTaskView("all")}>
-              <StarIcon className="h-4 w-4" />All Tasks
-            </button>
+          {kind === "jd" ? (
+            <>
+              <button type="button" className="task-view-button" data-active={(!canUseAllTasks && !frequencyViewActive) || (canUseAllTasks && effectiveTaskView === "all")} onClick={() => { setFrequency("all"); setPersonalFrequencyView("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
+                <StarIcon className="h-4 w-4" />All Tasks
+              </button>
+              {canUseAllTasks && (
+                <button type="button" className="task-view-button" data-active={effectiveTaskView === "my" && !frequencyViewActive} onClick={() => { setFrequency("all"); setPersonalFrequencyView("all"); setTaskView("my"); setAssigneeFilter("all"); }}>
+                  <User className="h-4 w-4" />My Tasks
+                </button>
+              )}
+              {ownFrequencyValues.map((option) => (
+                <button key={option} type="button" className="task-view-button" data-active={personalFrequencyView === option} onClick={() => { setFrequency(option); setPersonalFrequencyView(option); setTaskView("my"); setAssigneeFilter("all"); }}>
+                  <FrequencyIcon className="h-4 w-4" />{frequencyLabel(option)}
+                </button>
+              ))}
+            </>
+          ) : (
+            <>
+              <button type="button" className="task-view-button" data-active={(!canUseAllTasks && !priorityViewActive) || (canUseAllTasks && effectiveTaskView === "all")} onClick={() => { setPriorityFilter("all"); setPersonalPriorityView("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
+                <StarIcon className="h-4 w-4" />All Tasks
+              </button>
+              {canUseAllTasks && (
+                <button type="button" className="task-view-button" data-active={effectiveTaskView === "my" && !priorityViewActive} onClick={() => { setPriorityFilter("all"); setPersonalPriorityView("all"); setTaskView("my"); setAssigneeFilter("all"); }}>
+                  <User className="h-4 w-4" />My Tasks
+                </button>
+              )}
+              {ownPriorityValues.map((priority) => (
+                <button key={priority} type="button" className="task-view-button" data-active={personalPriorityView === priority} onClick={() => { setPriorityFilter(priority); setPersonalPriorityView(priority); setTaskView("my"); setAssigneeFilter("all"); }}>
+                  <Flag className="h-4 w-4" />{priorityLabel(priority)}
+                </button>
+              ))}
+            </>
           )}
-          <button type="button" className="task-view-button" data-active={effectiveTaskView === "my"} disabled={!canUseAllTasks} onClick={() => setTaskView("my")}>
-            <User className="h-4 w-4" />My Tasks
-          </button>
         </div>
         <div className="ml-auto flex flex-1 items-center justify-end gap-2">
           <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
@@ -1270,11 +1368,11 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             priorityFilter={priorityFilter}
             assigneeFilter={assigneeFilter}
             assignees={filterableAssignees ?? []}
-            showAssigneeFilter={canUseAllTasks && effectiveTaskView === "all"}
+            showAssigneeFilter={showAssigneeColumn}
             activeCount={filterCount}
             onStatusChange={setStatusFilter}
-            onFrequencyChange={setFrequency}
-            onPriorityChange={setPriorityFilter}
+            onFrequencyChange={changeFrequencyFilter}
+            onPriorityChange={changePriorityFilter}
             onAssigneeChange={setAssigneeFilter}
           />
           {canCreate && <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />New task</Button>}
@@ -1338,22 +1436,21 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
           <thead>
             {kind === "jd" ? (
               <tr className="group/head">
-                <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />Task</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><FrequencyIcon className="h-3.5 w-3.5" />Frequency</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />Assignee</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />Status</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />Time</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><QuantityIcon className="h-3.5 w-3.5" />Quantity</span></th>
+                <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
+                {showFrequencyColumn && <th><span className="inline-flex items-center gap-1.5"><FrequencyIcon className="h-3.5 w-3.5" />FREQUENCY</span></th>}
+                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>}
+                <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
+                <th><span className="inline-flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />TIME</span></th>
+                <th><span className="inline-flex items-center gap-1.5"><QuantityIcon className="h-3.5 w-3.5" />QUANTITY</span></th>
               </tr>
             ) : (
               <tr className="group/head">
-                <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />Task</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><Tag className="h-3.5 w-3.5" />Priority</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />Assignee</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />Status</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><CalendarDays className="h-3.5 w-3.5" />Due Date</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />Time</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><QuantityIcon className="h-3.5 w-3.5" />Quantity</span></th>
+                <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
+                {showPriorityColumn && <th><span className="inline-flex items-center gap-1.5"><Tag className="h-3.5 w-3.5" />PRIORITY</span></th>}
+                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>}
+                <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
+                <th><span className="inline-flex items-center gap-1.5"><CalendarClock className="h-3.5 w-3.5" />DATE ASSIGNED</span></th>
+                <th><span className="inline-flex items-center gap-1.5"><CalendarDays className="h-3.5 w-3.5" />DUE DATE</span></th>
               </tr>
             )}
           </thead>
@@ -1382,7 +1479,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                       </Button>
                     )}
                     {hasActiveFilters && tasks.length > 0 && (
-                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); setStatusFilter("all"); setFrequency("all"); setPriorityFilter("all"); setAssigneeFilter("all"); }}>Clear filters</Button>
+                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); setStatusFilter("all"); setFrequency("all"); setPriorityFilter("all"); setPersonalFrequencyView("all"); setPersonalPriorityView("all"); setAssigneeFilter("all"); }}>Clear filters</Button>
                     )}
                   </div>
                 </td>
@@ -1434,33 +1531,42 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                         </div>
                       </td>
                       {kind === "jd" ? (
-                        <td className="whitespace-nowrap text-[var(--ink-secondary)]">
-                          {rowCanEdit ? (
-                            <InlineSelectCell value={task.recurrence as Frequency} options={frequencies} ariaLabel="Change frequency" pending={pending("frequency")} onSave={(recurrence) => saveInline(task, { recurrence }, "frequency")} />
-                          ) : frequencyLabel(task.recurrence)}
-                        </td>
+                        showFrequencyColumn && (
+                          <td className="whitespace-nowrap text-[var(--ink-secondary)]">
+                            {rowCanEdit ? (
+                              <InlineSelectCell value={task.recurrence as Frequency} options={frequencies} ariaLabel="Change frequency" pending={pending("frequency")} onSave={(recurrence) => saveInline(task, { recurrence }, "frequency")} />
+                            ) : frequencyLabel(task.recurrence)}
+                          </td>
+                        )
                       ) : (
+                        showPriorityColumn && (
+                          <td>
+                            {rowCanEdit && canEditPriority(active) ? (
+                              <InlineSelectCell
+                                value={task.priority as Priority}
+                                options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))}
+                                ariaLabel="Change priority"
+                                pending={pending("priority")}
+                                onSave={(priority) => saveInline(task, { priority }, "priority")}
+                                renderValue={(option) => <span className={cn("priority-chip", priorityChipClasses((option?.value ?? task.priority) as Priority))}>{option?.label ?? priorityLabel(task.priority)}</span>}
+                              />
+                            ) : (
+                              <span className={cn("priority-chip", priorityChipClasses(task.priority))}>{priorityLabel(task.priority)}</span>
+                            )}
+                          </td>
+                        )
+                      )}
+                      {showAssigneeColumn && (
                         <td>
-                          {rowCanEdit && canEditPriority(active) ? (
-                            <InlineSelectCell
-                              value={task.priority as Priority}
-                              options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))}
-                              ariaLabel="Change priority"
-                              pending={pending("priority")}
-                              onSave={(priority) => saveInline(task, { priority }, "priority")}
-                              renderValue={(option) => <span className={cn("priority-chip", priorityChipClasses((option?.value ?? task.priority) as Priority))}>{option?.label ?? priorityLabel(task.priority)}</span>}
-                            />
-                          ) : (
-                            <span className={cn("priority-chip", priorityChipClasses(task.priority))}>{priorityLabel(task.priority)}</span>
-                          )}
+                          {rowCanEdit && assignable ? (
+                            <InlineAssigneeCell assignable={assignable} assignees={task.assignees} selected={task.assigneeMembershipIds ?? []} pending={pending("assignee")} onSave={(assigneeMembershipIds) => saveInline(task, { assigneeMembershipIds }, "assignee")} />
+                          ) : <AvatarStack assignees={task.assignees} showName />}
                         </td>
                       )}
-                      <td>
-                        {rowCanEdit && assignable ? (
-                          <InlineAssigneeCell assignable={assignable} assignees={task.assignees} selected={task.assigneeMembershipIds ?? []} pending={pending("assignee")} onSave={(assigneeMembershipIds) => saveInline(task, { assigneeMembershipIds }, "assignee")} />
-                        ) : <AvatarStack assignees={task.assignees} showName />}
-                      </td>
                       <td><StatusBadge kind={kind} task={task} canUpdateOverride={rowCanEdit} cellTrigger={rowCanEdit} /></td>
+                      {kind === "one" && (
+                        <td className="whitespace-nowrap text-[var(--ink-secondary)]">{formatDate(task.createdAt)}</td>
+                      )}
                       {kind === "one" && (
                         <td className="whitespace-nowrap">
                           {rowCanEdit ? (
@@ -1470,12 +1576,16 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                           )}
                         </td>
                       )}
-                      <td>
-                        {rowCanEdit ? <InlineTextCell value={task.time ?? ""} ariaLabel="Edit time" pending={pending("time")} onSave={(time) => saveInline(task, { time }, "time")} /> : (task.time || "—")}
-                      </td>
-                      <td>
-                        {rowCanEdit ? <InlineTextCell value={task.quantity != null ? String(task.quantity) : ""} ariaLabel="Edit quantity" inputMode="decimal" pending={pending("quantity")} onSave={(quantity) => saveInline(task, { quantity }, "quantity")} /> : (task.quantity != null ? task.quantity : "—")}
-                      </td>
+                      {kind === "jd" && (
+                        <>
+                          <td>
+                            {rowCanEdit ? <InlineTextCell value={task.time ?? ""} ariaLabel="Edit time" pending={pending("time")} onSave={(time) => saveInline(task, { time }, "time")} /> : (task.time || "—")}
+                          </td>
+                          <td>
+                            {rowCanEdit ? <InlineTextCell value={task.quantity != null ? String(task.quantity) : ""} ariaLabel="Edit quantity" inputMode="decimal" pending={pending("quantity")} onSave={(quantity) => saveInline(task, { quantity }, "quantity")} /> : (task.quantity != null ? task.quantity : "—")}
+                          </td>
+                        </>
+                      )}
                     </tr>
                   );
                 })}
@@ -1722,7 +1832,8 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const taskType = taskTypeFor(kind);
   const data = useQuery(kind === "jd" ? api.tasks.getJd : api.tasks.getOneTime, activeCompanyId ? { companyId: activeCompanyId, taskId: id as any } : "skip") as any;
   const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskType } : "skip") as any[] | undefined;
-  const commentsQuery = usePaginatedQuery(api.tasks.listComments, activeCompanyId ? { companyId: activeCompanyId, taskType, taskId: id } : "skip", { initialNumItems: 25 });
+  const [activityLimit, setActivityLimit] = useState(50);
+  const activity = useQuery(api.tasks.listActivity, activeCompanyId ? { companyId: activeCompanyId, taskType, taskId: id, limit: activityLimit } : "skip") as { items: any[]; hasMore: boolean } | undefined;
   const attachmentsQuery = usePaginatedQuery(api.tasks.listAttachments, activeCompanyId ? { companyId: activeCompanyId, taskType, taskId: id } : "skip", { initialNumItems: 25 });
   const attachments = attachmentsQuery.results as any[] | undefined;
   const comment = useMutation(api.tasks.addComment);
@@ -1751,10 +1862,14 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const editCommentTextareaRef = useRef<HTMLTextAreaElement>(null);
   const previousEditingCommentIdRef = useRef<Id<"taskComments"> | null>(null);
 
-  const comments = useMemo(() => [...(((commentsQuery.results as any[]) ?? []).slice().reverse()).filter((commentRow) => !optimisticDeletedCommentIds.includes(commentRow._id)).map((commentRow) => ({ ...commentRow, body: optimisticCommentBodies[commentRow._id] ?? commentRow.body })), ...optimisticComments], [commentsQuery.results, optimisticCommentBodies, optimisticComments, optimisticDeletedCommentIds]);
+  const activityItems = useMemo(() => [...((activity?.items ?? []).slice().reverse()).filter((activityRow) => activityRow.kind !== "comment" || !optimisticDeletedCommentIds.includes(activityRow._id)).map((activityRow) => activityRow.kind === "comment" ? { ...activityRow, body: optimisticCommentBodies[activityRow._id] ?? activityRow.body } : activityRow), ...optimisticComments], [activity?.items, optimisticCommentBodies, optimisticComments, optimisticDeletedCommentIds]);
   const canManageAttachments = active?.capabilities.includes("tasks:attachment:add") ?? false;
   const canComment = active?.capabilities.includes("tasks:comment") ?? false;
   const canEdit = Boolean(data?.canUpdate);
+
+  useEffect(() => {
+    setActivityLimit(50);
+  }, [id, taskType]);
 
   useLayoutEffect(() => {
     const textarea = commentTextareaRef.current;
@@ -1856,7 +1971,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
     if (!text || !activeCompanyId) return;
     const tempId = crypto.randomUUID();
     setActionError(null);
-    setOptimisticComments((current) => [{ _id: tempId, body: text, createdAt: Date.now(), optimistic: true }, ...current]);
+    setOptimisticComments((current) => [{ kind: "comment", _id: tempId, body: text, createdAt: Date.now(), actor: null, actorMembershipId: active?.membership._id, optimistic: true }, ...current]);
     setBody("");
     try {
       await comment({ companyId: activeCompanyId, taskType, taskId: id, body: text });
@@ -1882,7 +1997,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   async function saveEditedComment(commentId: Id<"taskComments">) {
     const text = editingCommentBody.trim();
     if (!text || !activeCompanyId) return;
-    const previousBody = comments.find((commentRow) => commentRow._id === commentId)?.body ?? "";
+    const previousBody = activityItems.find((activityRow) => activityRow.kind === "comment" && activityRow._id === commentId)?.body ?? "";
     setActionError(null);
     setOptimisticCommentBodies((current) => ({ ...current, [commentId]: text }));
     cancelEditingComment();
@@ -2005,57 +2120,73 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
 
       <section className="task-section">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-[13px] font-semibold text-[var(--ink-muted)]">Comments</h2>
-          {commentsQuery.status === "CanLoadMore" && <Button size="sm" variant="ghost" onClick={() => commentsQuery.loadMore(25)}>Load more</Button>}
+          <h2 className="text-[13px] font-semibold text-[var(--ink-muted)]">Activity</h2>
+          {activity?.hasMore && activityLimit < 100 && <Button size="sm" variant="ghost" onClick={() => setActivityLimit((current) => Math.min(current + 25, 100))}>Load more</Button>}
         </div>
-        {comments.length > 0 && (
+        {activityItems.length > 0 && (
           <div className="mb-5">
-            {comments.map((commentRow: any, index) => {
-              const name = commentRow.author?.user.name || commentRow.author?.user.email || "You";
-              const isLastComment = index === comments.length - 1;
-              const isEditing = editingCommentId === commentRow._id;
-              const canManageComment = canComment && !commentRow.optimistic && active?.membership._id === commentRow.authorMembershipId;
+            {activityItems.map((activityRow: any, index) => {
+              const isComment = activityRow.kind === "comment";
+              const name = activityRow.actor?.user.name || activityRow.actor?.user.email || (activityRow.optimistic ? "You" : "Someone");
+              const isLastActivity = index === activityItems.length - 1;
+              const isEditing = isComment && editingCommentId === activityRow._id;
+              const canManageComment = isComment && canComment && !activityRow.optimistic && active?.membership._id === activityRow.actorMembershipId;
               return (
-                <div key={commentRow._id} className={cn("comment-row relative flex gap-2.5", !isLastComment && "pb-4")} data-editing={isEditing ? "true" : undefined}>
+                <div key={`${activityRow.kind}-${activityRow._id}`} className={cn("comment-row relative flex gap-2.5", !isLastActivity && "pb-4")} data-editing={isEditing ? "true" : undefined}>
                   {canManageComment && (
                     <div className="comment-action-menu">
                       {isEditing ? (
                         <>
                           <button type="button" className="comment-action-btn" aria-label="Cancel editing comment" onClick={cancelEditingComment}><X className="h-3.5 w-3.5" /></button>
-                          <button type="button" className="comment-action-btn" aria-label="Save comment" disabled={!editingCommentBody.trim()} onClick={() => void saveEditedComment(commentRow._id)}><Check className="h-3.5 w-3.5" /></button>
+                          <button type="button" className="comment-action-btn" aria-label="Save comment" disabled={!editingCommentBody.trim()} onClick={() => void saveEditedComment(activityRow._id)}><Check className="h-3.5 w-3.5" /></button>
                         </>
                       ) : (
                         <>
-                          <button type="button" className="comment-action-btn" aria-label="Edit comment" onClick={() => startEditingComment(commentRow)}><Pencil className="h-3.5 w-3.5" /></button>
-                          <button type="button" className="comment-action-btn" aria-label="Delete comment" onClick={() => void removeComment(commentRow._id)}><Trash2 className="h-3.5 w-3.5" /></button>
+                          <button type="button" className="comment-action-btn" aria-label="Edit comment" onClick={() => startEditingComment(activityRow)}><Pencil className="h-3.5 w-3.5" /></button>
+                          <button type="button" className="comment-action-btn" aria-label="Delete comment" onClick={() => void removeComment(activityRow._id)}><Trash2 className="h-3.5 w-3.5" /></button>
                         </>
                       )}
                     </div>
                   )}
-                  {!isLastComment && <span className="absolute bottom-[6px] left-3 top-[30px] w-px -translate-x-1/2 bg-[color-mix(in_srgb,var(--hairline-strong)_72%,var(--ink-faint))]" aria-hidden />}
+                  {!isLastActivity && <span className="absolute bottom-[6px] left-3 top-[30px] w-px -translate-x-1/2 bg-[color-mix(in_srgb,var(--hairline-strong)_72%,var(--ink-faint))]" aria-hidden />}
                   <div className="relative z-[1] flex w-6 shrink-0 justify-center">
-                    <Avatar name={commentRow.author?.user.name ?? null} email={commentRow.author?.user.email ?? null} imageUrl={commentRow.author?.user.imageUrl ?? null} />
+                    {isComment ? (
+                      <Avatar name={activityRow.actor?.user.name ?? null} email={activityRow.actor?.user.email ?? null} imageUrl={activityRow.actor?.user.imageUrl ?? null} />
+                    ) : (
+                      <span className="grid h-6 w-6 place-items-center rounded-full border border-[var(--hairline)] bg-[var(--canvas)] text-[var(--ink-faint)]"><Check className="h-3.5 w-3.5" /></span>
+                    )}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-[13px] font-medium text-[var(--ink)]">{name}</span>
-                      {commentRow.createdAt && <span className="text-[12px] text-[var(--ink-faint)]">{relativeTime(commentRow.createdAt)}</span>}
-                    </div>
-                    {isEditing ? (
-                      <textarea
-                        ref={editCommentTextareaRef}
-                        rows={1}
-                        value={editingCommentBody}
-                        onChange={(event) => setEditingCommentBody(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Escape") cancelEditingComment();
-                          if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void saveEditedComment(commentRow._id); }
-                        }}
-                        className="mt-0.5 block min-h-6 w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-[13px] leading-6 text-[var(--ink-secondary)] outline-none"
-                        autoFocus
-                      />
+                    {isComment ? (
+                      <div className="rounded-lg border border-[var(--hairline)] bg-[var(--canvas-soft)] px-3 py-2 shadow-[0_1px_0_color-mix(in_srgb,var(--ink)_4%,transparent)]">
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-[13px] font-medium text-[var(--ink)]">{name}</span>
+                          {activityRow.createdAt && <span className="text-[12px] text-[var(--ink-faint)]">{relativeTime(activityRow.createdAt)}</span>}
+                        </div>
+                        {isEditing ? (
+                          <textarea
+                            ref={editCommentTextareaRef}
+                            rows={1}
+                            value={editingCommentBody}
+                            onChange={(event) => setEditingCommentBody(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Escape") cancelEditingComment();
+                              if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void saveEditedComment(activityRow._id); }
+                            }}
+                            className="mt-0.5 block min-h-6 w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-[13px] leading-6 text-[var(--ink-secondary)] outline-none"
+                            autoFocus
+                          />
+                        ) : (
+                          <p className="mt-0.5 whitespace-pre-wrap text-[13px] leading-6 text-[var(--ink-secondary)]">{activityRow.body}</p>
+                        )}
+                      </div>
                     ) : (
-                      <p className="mt-0.5 whitespace-pre-wrap text-[13px] leading-6 text-[var(--ink-secondary)]">{commentRow.body}</p>
+                      <div className="pt-0.5">
+                        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                          <span className="text-[13px] text-[var(--ink-secondary)]">{activityLogText(activityRow)}</span>
+                          {activityRow.createdAt && <span className="text-[12px] text-[var(--ink-faint)]">{relativeTime(activityRow.createdAt)}</span>}
+                        </div>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -2074,7 +2205,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
               value={body}
               onChange={(event) => setBody(event.target.value)}
               onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitComment(); } }}
-              placeholder="Add a comment..."
+              placeholder="Add a comment to the activity..."
               className="min-h-6 max-h-24 flex-1 resize-none overflow-y-auto border-0 bg-transparent p-0 text-[13px] leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]"
             />
             <button type="submit" disabled={!body.trim()} className={cn("hidden h-5 w-5 shrink-0 place-items-center rounded-full text-[var(--on-primary)] transition-colors group-focus-within:grid", body.trim() ? "bg-[var(--primary)] hover:bg-[var(--primary-hover)]" : "bg-[var(--ink-faint)] disabled:opacity-30")} aria-label="Add comment">

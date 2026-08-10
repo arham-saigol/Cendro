@@ -1012,7 +1012,7 @@ function PeopleTab({
                       <td><PeopleCellMenu value={user.membership.role} options={roles.map((role) => ({ value: role, label: role }))} onChange={(role) => { if (role !== user.membership.role) void onRoleChange(user, role); }} ariaLabel={`Change role for ${user.user.name || user.user.email}`} disabled={!canManagePermissions} renderValue={(option) => <Badge tone={roleTone[(option?.value ?? user.membership.role) as Role]}>{option?.label ?? user.membership.role}</Badge>} /></td>
                       <td><PeopleCellMenu value={branchId} options={branchOptions} onChange={(nextBranchId) => { if (nextBranchId !== branchId) void onBranchChange(user, nextBranchId); }} ariaLabel={`Change branch for ${user.user.name || user.user.email}`} disabled={!canManageUsers} /></td>
                       <td><PeopleCellMenu value={departmentId} options={departmentOptions} onChange={(nextDepartmentId) => { if (nextDepartmentId !== departmentId) void onDepartmentChange(user, nextDepartmentId); }} ariaLabel={`Change department for ${user.user.name || user.user.email}`} disabled={!canManageUsers || !branchId} placeholder={branchId ? "—" : "Select branch first"} /></td>
-                      <td><PeopleCellMenu value={user.membership.active ? "active" : "paused"} options={[{ value: "active", label: "Active" }, { value: "paused", label: "Paused" }]} onChange={(status) => { const active = status === "active"; if (active !== user.membership.active) void onStatusChange(user, active); }} ariaLabel={`Change status for ${user.user.name || user.user.email}`} disabled={!canManageUsers} renderValue={(option) => <Badge tone={(option?.value ?? (user.membership.active ? "active" : "paused")) === "active" ? "green" : "neutral"}>{option?.label ?? (user.membership.active ? "Active" : "Paused")}</Badge>} /></td>
+                      <td><PeopleCellMenu value={user.membership.active ? "active" : "inactive"} options={[{ value: "active", label: "Active" }, { value: "inactive", label: "Inactive" }]} onChange={(status) => { const active = status === "active"; if (active !== user.membership.active) void onStatusChange(user, active); }} ariaLabel={`Change status for ${user.user.name || user.user.email}`} disabled={!canManageUsers} renderValue={(option) => <Badge tone={(option?.value ?? (user.membership.active ? "active" : "inactive")) === "active" ? "green" : "neutral"}>{option?.label ?? (user.membership.active ? "Active" : "Inactive")}</Badge>} /></td>
                       <td className="text-[12.5px] text-[var(--ink-secondary)]">{formatDate(user.membership.createdAt)}</td>
                     </tr>
                   );
@@ -1805,6 +1805,13 @@ export default function Company() {
       ...current,
       users: current.users.map((row) => row.membership._id === args.membershipId ? { ...row, membership: { ...row.membership, active: args.active } } : row),
     } as any);
+    const access = localStore.getQuery(api.companies.accessStatus, {}) as any;
+    if (access?.status === "ready") {
+      localStore.setQuery(api.companies.accessStatus, {}, {
+        ...access,
+        companies: access.companies.map((row: any) => row.membership._id === args.membershipId ? { ...row, membership: { ...row.membership, active: args.active }, capabilities: args.active ? row.capabilities : [] } : row),
+      });
+    }
   });
   const removeUsers = useMutation(api.companyManagement.removeUsers).withOptimisticUpdate((localStore, args) => {
     const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
@@ -1814,6 +1821,13 @@ export default function Company() {
       ...current,
       users: current.users.map((row) => removing.has(row.membership._id) ? { ...row, membership: { ...row.membership, active: false }, branchIds: [], departmentIds: [], scope: { branchIds: [], departmentIds: [], userMembershipIds: [] }, overrides: [] } : row),
     } as any);
+    const access = localStore.getQuery(api.companies.accessStatus, {}) as any;
+    if (access?.status === "ready") {
+      localStore.setQuery(api.companies.accessStatus, {}, {
+        ...access,
+        companies: access.companies.map((row: any) => removing.has(row.membership._id) ? { ...row, membership: { ...row.membership, active: false }, capabilities: [] } : row),
+      });
+    }
   });
   const setUserPermissions = useMutation(api.companyManagement.setUserPermissions).withOptimisticUpdate((localStore, args) => {
     const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;

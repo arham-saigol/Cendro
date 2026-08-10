@@ -29,6 +29,10 @@ async function getManagedScopeTargets(ctx: MutationCtx | QueryCtx, companyId: Id
   const departmentIds = new Set<Id<"departments">>();
   const managedDepartments = await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(500);
   for (const row of managedDepartments) departmentIds.add(row.departmentId);
+  const departmentLists = await Promise.all([...branchIds].map((branchId) => ctx.db.query("departments").withIndex("by_branch", (q) => q.eq("branchId", branchId)).take(500)));
+  for (const departments of departmentLists) {
+    for (const department of departments) if (department.companyId === companyId) departmentIds.add(department._id);
+  }
   return { branchIds, departmentIds, userIds };
 }
 async function assertManagedTargets(ctx: MutationCtx | QueryCtx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, args: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
@@ -39,7 +43,7 @@ async function assertManagedTargets(ctx: MutationCtx | QueryCtx, companyId: Id<"
   for (const userId of args.userMembershipIds) if (!managed.userIds.has(userId)) throw new ConvexError("You can only target users in your managed scope.");
 }
 function assertScopeSelection(args: { scopeType: "company" | "branch" | "department" | "user"; branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
-  if (args.scopeType === "company" && (args.branchIds.length || args.departmentIds.length || args.userMembershipIds.length)) throw new ConvexError("Company-wide SOPs cannot target a branch or user.");
+  if (args.scopeType === "company" && (args.branchIds.length || args.departmentIds.length || args.userMembershipIds.length)) throw new ConvexError("Company-wide SOPs cannot target a branch, department, or user.");
   if (args.scopeType === "branch" && (args.branchIds.length !== 1 || args.departmentIds.length || args.userMembershipIds.length)) throw new ConvexError("Select one branch for branch scope.");
   if (args.scopeType === "department" && (args.departmentIds.length !== 1 || args.branchIds.length || args.userMembershipIds.length)) throw new ConvexError("Select one department for department scope.");
   if (args.scopeType === "user" && (args.userMembershipIds.length !== 1 || args.branchIds.length || args.departmentIds.length)) throw new ConvexError("Select one user for user scope.");
@@ -104,8 +108,20 @@ async function withScopes(ctx: QueryCtx, sop: Doc<"sops">, companyName?: string)
 async function sopMatchesFilters(ctx: QueryCtx, sop: Doc<"sops">, args: { scope?: "all" | Doc<"sops">["scopeType"]; branchId?: Id<"branches">; userMembershipId?: Id<"companyMemberships"> }) {
   if (args.scope && args.scope !== "all" && sop.scopeType !== args.scope) return false;
   if (args.branchId) {
-    const rows = await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
-    if (!rows.some((row) => row.branchId === args.branchId)) return false;
+    if (sop.scopeType === "branch") {
+      const rows = await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
+      if (!rows.some((row) => row.branchId === args.branchId)) return false;
+    } else if (sop.scopeType === "department") {
+      const rows = await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
+      let matchesBranch = false;
+      for (const row of rows) {
+        const department = await ctx.db.get(row.departmentId);
+        if (department?.companyId === sop.companyId && department.branchId === args.branchId) matchesBranch = true;
+      }
+      if (!matchesBranch) return false;
+    } else {
+      return false;
+    }
   }
   if (args.userMembershipId) {
     const rows = await ctx.db.query("sopUserScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500);
@@ -166,7 +182,7 @@ export const listRows = query({
 
 export const get = query({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found."); const company = await ctx.db.get(args.companyId); return await withScopes(ctx, sop, company?.name); } });
 
-const scopeOptionCapabilities: Capability[] = ["sops:manage:branch", "sops:manage:user"];
+const scopeOptionCapabilities: Capability[] = ["sops:manage:branch", "sops:manage:department", "sops:manage:user"];
 
 export const scopeOptions = query({
   args: { companyId: v.id("companies") },
@@ -175,20 +191,28 @@ export const scopeOptions = query({
     const capabilities = await membershipCapabilities(ctx, membership);
     if (!scopeOptionCapabilities.some((capability) => capabilities.has(capability))) throw new ConvexError("You do not have access to do that.");
     const canUseBranch = capabilities.has("sops:manage:branch");
+    const canUseDepartment = capabilities.has("sops:manage:department");
     const canUseUser = capabilities.has("sops:manage:user");
-    const [branches, memberships] = await Promise.all([
-      canUseBranch ? ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500) : Promise.resolve([]),
+    const [branches, departments, memberships] = await Promise.all([
+      canUseBranch || canUseDepartment ? ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500) : Promise.resolve([]),
+      canUseDepartment ? ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500) : Promise.resolve([]),
       canUseUser ? ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500) : Promise.resolve([]),
     ]);
     const managed = await getManagedScopeTargets(ctx, args.companyId, membership);
-    const scopedBranches = managed ? branches.filter((branch) => managed.branchIds.has(branch._id)) : branches;
+    const scopedBranches = canUseBranch ? (managed ? branches.filter((branch) => managed.branchIds.has(branch._id)) : branches) : [];
+    const scopedDepartments = managed ? departments.filter((department) => managed.departmentIds.has(department._id)) : departments;
+    const branchNames = new Map(branches.map((branch) => [branch._id, branch.name]));
     const activeMemberships = memberships.filter((m) => m.active && (!managed || managed.userIds.has(m._id)));
     const userRows = await Promise.all(activeMemberships.map(async (membership) => ({ membership, user: await ctx.db.get(membership.userId) })));
     const users = [];
     for (const { membership, user } of userRows) {
       if (user) users.push({ membership: { _id: membership._id, role: membership.role }, user: { name: fullName(user), firstName: firstName(user), imageUrl: user.imageUrl ?? null } });
     }
-    return { branches: scopedBranches.map((branch) => ({ _id: branch._id, name: branch.name })), users };
+    return {
+      branches: scopedBranches.map((branch) => ({ _id: branch._id, name: branch.name })),
+      departments: scopedDepartments.map((department) => ({ _id: department._id, name: department.name, branchId: department.branchId, branchName: branchNames.get(department.branchId) ?? "Unknown branch" })),
+      users,
+    };
   },
 });
 
@@ -198,31 +222,37 @@ export const filterOptions = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const caps = await membershipCapabilities(ctx, membership);
     const canFilterManaged = membership.role === "Admin" || caps.has("sops:manage:company") || caps.has("sops:manage:branch") || caps.has("sops:manage:department") || caps.has("sops:manage:user") || caps.has("analytics:view:managed_scope") || caps.has("analytics:view:company");
-    if (!canFilterManaged) return { branches: [], users: [] };
+    if (!canFilterManaged) return { branches: [], departments: [], users: [] };
 
     const branchIds = new Set<Id<"branches">>();
+    const departmentIds = new Set<Id<"departments">>();
     let userIds: Set<Id<"companyMemberships">>;
     if (membership.role === "Admin" || caps.has("sops:manage:company") || caps.has("analytics:view:company")) {
-      const [branches, memberships] = await Promise.all([
+      const [branches, departments, memberships] = await Promise.all([
         ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500),
+        ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500),
         ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500),
       ]);
       for (const branch of branches) branchIds.add(branch._id);
+      for (const department of departments) departmentIds.add(department._id);
       userIds = new Set(memberships.filter((m) => m.active).map((m) => m._id));
     } else {
-      userIds = await scopedMembershipIds(ctx, args.companyId, membership);
-      const managedBranches = await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(500);
-      for (const row of managedBranches) branchIds.add(row.branchId);
-      for (const userId of userIds) {
-        const assignments = await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", userId)).take(500);
-        for (const assignment of assignments) branchIds.add(assignment.branchId);
-      }
+      const managed = await getManagedScopeTargets(ctx, args.companyId, membership);
+      userIds = managed?.userIds ?? await scopedMembershipIds(ctx, args.companyId, membership);
+      for (const branchId of managed?.branchIds ?? []) branchIds.add(branchId);
+      for (const departmentId of managed?.departmentIds ?? []) departmentIds.add(departmentId);
     }
 
     const branches = [];
     for (const branchId of branchIds) {
       const branch = await ctx.db.get(branchId);
       if (branch?.companyId === args.companyId) branches.push({ _id: branch._id, name: branch.name });
+    }
+    const branchNames = new Map(branches.map((branch) => [branch._id, branch.name]));
+    const departments = [];
+    for (const departmentId of departmentIds) {
+      const department = await ctx.db.get(departmentId);
+      if (department?.companyId === args.companyId) departments.push({ _id: department._id, name: department.name, branchId: department.branchId, branchName: branchNames.get(department.branchId) ?? "Unknown branch" });
     }
     const users = [];
     for (const membershipId of userIds) {
@@ -232,8 +262,9 @@ export const filterOptions = query({
       if (user) users.push({ membership: { _id: userMembership._id, role: userMembership.role }, user: { name: fullName(user), firstName: firstName(user), imageUrl: user.imageUrl ?? null } });
     }
     branches.sort((a, b) => a.name.localeCompare(b.name));
+    departments.sort((a, b) => a.name.localeCompare(b.name));
     users.sort((a, b) => a.user.name.localeCompare(b.user.name));
-    return { branches, users };
+    return { branches, departments, users };
   },
 });
 

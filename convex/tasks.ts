@@ -7,6 +7,7 @@ import { currentJdCycle, defaultTimeZone, elapsedJdCyclesSince } from "./taskCyc
 import { assertCanAssign, assertCanUpdateTask, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
+import { nextReference } from "./references";
 
 type ManualStatus = "due" | "in_progress" | "completed";
 type TaskKind = "jd" | "one_time";
@@ -132,10 +133,10 @@ async function logTaskActivity(ctx: MutationCtx, args: { companyId: Id<"companie
 
 async function enrichedJd(ctx: Ctx, task: Doc<"jdTasks">, timeZone?: string) { return { ...task, state: await jdState(ctx, task, Date.now(), timeZone), assignees: await enrich(ctx, task.assigneeMembershipIds) }; }
 async function enrichedOneTime(ctx: Ctx, task: Doc<"oneTimeTasks">) { return { ...task, state: oneState(task), assignees: await enrich(ctx, task.assigneeMembershipIds) }; }
-function matchesSearch(task: { title: string }, search?: string) {
+function matchesSearch(task: { title: string; reference: string }, search?: string) {
   const needle = search?.trim().toLowerCase();
   if (!needle) return true;
-  return task.title.toLowerCase().includes(needle);
+  return task.title.toLowerCase().includes(needle) || task.reference.toLowerCase().includes(needle);
 }
 
 export const listJdRows = query({
@@ -202,7 +203,8 @@ export const createJd = mutation({
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
-    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    const reference = await nextReference(ctx, args.companyId, "jd");
+    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
     await logTaskActivity(ctx, { companyId: args.companyId, taskType: "jd", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now });
     return id;
@@ -367,7 +369,8 @@ export const createOneTime = mutation({
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     const now = Date.now();
-    const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), dueDate: args.dueDate, time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
+    const reference = await nextReference(ctx, args.companyId, "one_time");
+    const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), dueDate: args.dueDate, time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
     await logTaskActivity(ctx, { companyId: args.companyId, taskType: "one_time", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "one_time_task.create", targetType: "oneTimeTask", targetId: id, createdAt: now });
     return id;
@@ -736,7 +739,8 @@ export const aiCreateOneTime = mutation({
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     const now = Date.now();
-    const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), dueDate: args.dueDate, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
+    const reference = await nextReference(ctx, args.companyId, "one_time");
+    const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), dueDate: args.dueDate, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
     await logTaskActivity(ctx, { companyId: args.companyId, taskType: "one_time", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "one_time_task.create", targetType: "oneTimeTask", targetId: id, createdAt: now });
     const task = await ctx.db.get(id);
@@ -754,7 +758,8 @@ export const aiCreateJd = mutation({
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
-    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, title, description: cleanOptionalText(args.description), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    const reference = await nextReference(ctx, args.companyId, "jd");
+    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
     await logTaskActivity(ctx, { companyId: args.companyId, taskType: "jd", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now });
     const task = await ctx.db.get(id);

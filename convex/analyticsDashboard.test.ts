@@ -112,6 +112,7 @@ describe("dashboard analytics scoping", () => {
       const old = Date.now() - 60 * 86_400_000;
       const taskId = await ctx.db.insert("jdTasks", {
         companyId,
+        reference: "JD-9001",
         title: "Historical JD cycle",
         description: "",
         recurrence: "daily",
@@ -139,6 +140,7 @@ describe("dashboard analytics scoping", () => {
       const old = Date.now() - 60 * 86_400_000;
       await ctx.db.insert("oneTimeTasks", {
         companyId,
+        reference: "OT-9001",
         title: "Old open task",
         description: "",
         dueDate: Date.now() + 86_400_000,

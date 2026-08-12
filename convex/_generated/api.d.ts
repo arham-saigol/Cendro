@@ -18,6 +18,7 @@ import type * as email from "../email.js";
 import type * as invitations from "../invitations.js";
 import type * as permissions from "../permissions.js";
 import type * as platform from "../platform.js";
+import type * as references from "../references.js";
 import type * as sops from "../sops.js";
 import type * as taskCycles from "../taskCycles.js";
 import type * as tasks from "../tasks.js";
@@ -41,6 +42,7 @@ declare const fullApi: ApiFromModules<{
   invitations: typeof invitations;
   permissions: typeof permissions;
   platform: typeof platform;
+  references: typeof references;
   sops: typeof sops;
   taskCycles: typeof taskCycles;
   tasks: typeof tasks;

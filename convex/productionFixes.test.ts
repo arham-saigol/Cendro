@@ -82,6 +82,27 @@ describe("production permission and validation fixes", () => {
     await expect(t.withIdentity(identity("admin")).mutation(api.tasks.updateOneTime, { companyId, taskId: oneTimeTaskId, title: "One-time task", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [], priority: "medium" })).rejects.toThrow("Task assignee is required");
   });
 
+  test("tasks and SOPs receive searchable, unique references", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const admin = t.withIdentity(identity("admin"));
+    const firstJdId = await admin.mutation(api.tasks.createJd, { companyId, title: "Opening checklist", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    const secondJdId = await admin.mutation(api.tasks.createJd, { companyId, title: "Closing checklist", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    const oneTimeId = await admin.mutation(api.tasks.createOneTime, { companyId, title: "Replace sign", assigneeMembershipIds: [adminMembershipId], priority: "medium" });
+    const sopId = await admin.mutation(api.sops.create, { companyId, title: "Cash handling", content: "Count the drawer.", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
+
+    const [firstJd, secondJd, oneTime, sop] = await Promise.all([
+      admin.query(api.tasks.getJd, { companyId, taskId: firstJdId }),
+      admin.query(api.tasks.getJd, { companyId, taskId: secondJdId }),
+      admin.query(api.tasks.getOneTime, { companyId, taskId: oneTimeId }),
+      admin.query(api.sops.get, { companyId, sopId }),
+    ]);
+    expect([firstJd.task.reference, secondJd.task.reference, oneTime.task.reference, sop.reference]).toEqual(["JD-0001", "JD-0002", "OT-0001", "SOP-0001"]);
+
+    await expect(admin.query(api.tasks.listJdRows, { companyId, search: "jd-0002" })).resolves.toMatchObject([{ _id: secondJdId }]);
+    await expect(admin.query(api.tasks.listOneTimeRows, { companyId, search: "OT-0001" })).resolves.toMatchObject([{ _id: oneTimeId }]);
+    await expect(admin.query(api.sops.listRows, { companyId, search: "sop-0001" })).resolves.toMatchObject([{ _id: sopId }]);
+  });
+
   test("company timezone defaults to GMT+5 and can be changed", async () => {
     const { t, companyId } = await seedCompany();
 

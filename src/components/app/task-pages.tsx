@@ -1304,8 +1304,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     setPersonalPriorityView("all");
   }
 
-  const jdColumns = 4 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // title + optional frequency + optional assignee + status + time + quantity
-  const oneColumns = 4 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // title + optional priority + optional assignee + status + date assigned + due
+  const jdColumns = 5 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional frequency + optional assignee + status + time + quantity
+  const oneColumns = 5 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional priority + optional assignee + status + date assigned + due
   const filterCount = [statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
   const hasActiveFilters = filterCount > 0 || search.trim() !== "";
 
@@ -1356,7 +1356,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
         </div>
         <div className="ml-auto flex flex-1 items-center justify-end gap-2">
           <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
-            <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search title" aria-label="Search tasks by title" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
+            <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search title or ref" aria-label="Search tasks by title or reference" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
             <button type="button" className="task-search-button" aria-label={search ? "Clear search" : "Search tasks"} onClick={() => { if (search) setSearch(""); else setSearchOpen((open) => !open); }}>
               {search ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
             </button>
@@ -1436,6 +1436,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
           <thead>
             {kind === "jd" ? (
               <tr className="group/head">
+                <th className="w-[92px] whitespace-nowrap">REF</th>
                 <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
                 {showFrequencyColumn && <th><span className="inline-flex items-center gap-1.5"><FrequencyIcon className="h-3.5 w-3.5" />FREQUENCY</span></th>}
                 {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>}
@@ -1445,6 +1446,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               </tr>
             ) : (
               <tr className="group/head">
+                <th className="w-[92px] whitespace-nowrap">REF</th>
                 <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
                 {showPriorityColumn && <th><span className="inline-flex items-center gap-1.5"><Tag className="h-3.5 w-3.5" />PRIORITY</span></th>}
                 {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>}
@@ -1509,6 +1511,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                       }}
                       className="group/row"
                     >
+                      <td className="w-[92px] whitespace-nowrap font-mono text-[12px] text-[var(--ink-muted)]">{task.reference}</td>
                       <td className="col-task max-w-[250px]">
                         <div className="task-title-cell">
                           {rowCanEdit ? (

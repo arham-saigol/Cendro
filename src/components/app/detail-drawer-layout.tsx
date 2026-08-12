@@ -1,0 +1,53 @@
+"use client";
+
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { useDetailDrawerClose } from "./detail-drawer-motion";
+import { cn } from "@/lib/utils";
+
+export function DetailDrawerLayout({
+  base,
+  children,
+  detailId,
+  drawerKey,
+  label,
+  list,
+}: {
+  base: string;
+  children: React.ReactNode;
+  detailId?: string;
+  drawerKey: string;
+  label: string;
+  list: React.ReactNode;
+}) {
+  const isDetail = Boolean(detailId);
+  const reduceMotion = useReducedMotion();
+  const { closing, close } = useDetailDrawerClose(base, isDetail, detailId ?? null);
+  const hidden = reduceMotion ? { opacity: 0 } : { x: 32, opacity: 0 };
+
+  return (
+    <div className="relative h-full overflow-hidden">
+      <div className="task-list-pane">
+        <div className={cn("mx-auto w-full max-w-[1120px] px-6 py-7 md:px-10 md:py-8", isDetail && "hidden lg:block")}>{list}</div>
+      </div>
+
+      {isDetail && <button type="button" aria-label={`Close ${label} details`} className="task-drawer-click-target hidden lg:block" onClick={() => close()} />}
+
+      <AnimatePresence>
+        {isDetail && (
+          <motion.div
+            key={drawerKey}
+            className="task-drawer"
+            initial={hidden}
+            animate={closing ? hidden : reduceMotion ? { opacity: 1 } : { x: 0, opacity: 1 }}
+            exit={hidden}
+            transition={reduceMotion ? { duration: 0.1 } : { duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+          >
+            <div className="task-drawer-inner">
+              <div className="mx-auto w-full max-w-[560px] px-6 py-7 md:px-9 md:py-8">{children}</div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}

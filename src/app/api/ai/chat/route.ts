@@ -9,6 +9,7 @@ import type { Id, TableNames } from "../../../../../convex/_generated/dataModel"
 import { AI_CHAT_MAX_REQUEST_BYTES, validateAiChatAttachments } from "@/lib/ai/attachments";
 import { buildCendroAiTools, createCendroAiContext } from "@/lib/ai/registry";
 import { consumeAiRateLimit } from "@/lib/ai/rate-limit";
+import { readJsonRequest } from "@/lib/ai/request-body";
 import { CENDRO_AI_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { safeAiChatServerEnv } from "@/lib/env";
 import { finalTextOfAssistantMessage, serializeAssistantMessage, textOf, toModelMessage } from "@/lib/message-utils";
@@ -66,16 +67,6 @@ export async function POST(req: Request) {
     const env = safeAiChatServerEnv();
     if (!env.success) return Response.json({ error: "AI chat is not configured" }, { status: 503 });
 
-    const contentLength = Number(req.headers.get("content-length") ?? 0);
-    if (Number.isFinite(contentLength) && contentLength > AI_CHAT_MAX_REQUEST_BYTES) return Response.json({ error: "Chat request is too large" }, { status: 413 });
-
-    const body = await req.json().catch(() => null);
-    const parsed = requestSchema.safeParse(body);
-    if (!parsed.success) return Response.json({ error: "Invalid request body" }, { status: 400 });
-    const attachments = validateAiChatAttachments(parsed.data.messages);
-    if (!attachments.ok) return Response.json({ error: attachments.error }, { status: 413 });
-
-    const { messages, companyId, sessionId } = parsed.data;
     const { getToken } = await auth();
     const token = await getToken({ template: "convex" });
     if (!token) return Response.json({ error: "Missing Convex auth token" }, { status: 401 });
@@ -84,6 +75,15 @@ export async function POST(req: Request) {
     client.setAuth(token);
     const rateLimit = await consumeAiRateLimit(client, "ai-chat");
     if (!rateLimit.ok) return Response.json({ error: "Too many AI chat requests" }, { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } });
+
+    const body = await readJsonRequest(req, AI_CHAT_MAX_REQUEST_BYTES);
+    if (!body.ok) return Response.json({ error: body.reason === "too_large" ? "Chat request is too large" : "Invalid request body" }, { status: body.reason === "too_large" ? 413 : 400 });
+    const parsed = requestSchema.safeParse(body.value);
+    if (!parsed.success) return Response.json({ error: "Invalid request body" }, { status: 400 });
+    const attachments = validateAiChatAttachments(parsed.data.messages);
+    if (!attachments.ok) return Response.json({ error: attachments.error }, { status: 413 });
+
+    const { messages, companyId, sessionId } = parsed.data;
 
     let agentContext;
     try {

@@ -21,10 +21,6 @@ async function companyAccessRows(ctx: Parameters<typeof currentUser>[0], activeO
   return rows;
 }
 
-async function accessibleCompanies(ctx: Parameters<typeof currentUser>[0]) {
-  return await companyAccessRows(ctx, true);
-}
-
 export const accessStatus = query({
   args: {},
   handler: async (ctx) => {
@@ -43,5 +39,5 @@ export const accessStatus = query({
 
 export const accessible = query({
   args: {},
-  handler: accessibleCompanies,
+  handler: async (ctx) => await companyAccessRows(ctx, true),
 });

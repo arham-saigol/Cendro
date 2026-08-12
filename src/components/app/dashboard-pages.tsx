@@ -201,6 +201,8 @@ function DashboardCard({
 }
 
 function Section({
+  title,
+  description,
   actions,
   children,
   className,
@@ -213,7 +215,13 @@ function Section({
 }) {
   return (
     <section className={cn("mt-8", className)}>
-      {actions && <div className="mb-4 flex justify-end">{actions}</div>}
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-[15px] font-semibold text-[var(--ink)]">{title}</h2>
+          {description && <p className="mt-1 text-[12px] text-[var(--ink-faint)]">{description}</p>}
+        </div>
+        {actions}
+      </div>
       {children}
     </section>
   );

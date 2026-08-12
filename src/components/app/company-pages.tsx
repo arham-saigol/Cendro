@@ -1491,6 +1491,7 @@ function PermissionsDialog({
   );
   const [error, setError] = useState<string | null>(null);
   const saveVersionRef = useRef(0);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     if (open && user) {
@@ -1553,7 +1554,9 @@ function PermissionsDialog({
     if (!canManagePermissions) return;
     const version = ++saveVersionRef.current;
     setError(null);
-    void onSave(user!, next).catch((err) => {
+    const save = saveQueueRef.current.catch(() => undefined).then(() => onSave(user!, next));
+    saveQueueRef.current = save;
+    void save.catch((err) => {
       if (version === saveVersionRef.current) setError(err instanceof Error ? err.message : "Could not save permissions.");
     });
   }

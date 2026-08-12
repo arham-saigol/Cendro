@@ -2,110 +2,58 @@
 
 Management workspace for tasks, SOPs, employees, and companies. Fast, collaborative operations tooling with clear ownership, real-time updates, and minimal administrative friction.
 
----
+## Development notice
 
-## 1. Think Before Coding
+Astreex is still in active development and has no production users or production data that must be preserved. Unless the user explicitly says otherwise, do not build migrations, backfills, compatibility layers, dual-write paths, legacy fallbacks, or transitional infrastructure for existing behavior.
 
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
+When a schema, data model, API, or workflow needs to change, prefer replacing the obsolete design cleanly and updating development data as needed. Optimize for the correct long-term implementation, not compatibility with an unreleased version of the product.
 
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
+## The lazy senior
 
-## 2. Simplicity First
+I want ambitious products built from simple systems and software that feels obvious. Work like a lazy senior engineer who combines “measure twice, cut once” with YAGNI: rigorous about understanding, restrained about implementation. Lazy means efficient, not careless. The best code is code we never have to own.
 
-**Minimum code that solves the problem. Nothing speculative.**
+Trace the real flow, callers, boundaries, and failure modes before choosing a fix. A small diff in the wrong place is a second bug. Fix the root cause at the narrowest shared boundary.
 
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
+For a consequential design choice, inspect local precedents and dependencies, then current official documentation and proven patterns in established products. Know the constraint, the invariant, and why a simpler alternative does not hold. Research in proportion to the decision.
 
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+Treat these instructions as strong defaults. The user’s explicit intent and the reality of the problem take precedence.
 
-## 3. Surgical Changes
+## Spend the complexity budget
 
-**Touch only what you must. Clean up only your own mess.**
+Climb this ladder in order:
 
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
+1. Remove the need or reduce the requirement.
+2. Reuse a capability already present when it solves the problem cleanly.
+3. Use the language, browser, framework, or platform primitive.
+4. Use an established, well-maintained library.
+5. Only then write the smallest custom implementation that fully solves the problem.
 
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
+Check the installed version’s documentation and types before judging a dependency. Prefer an existing dependency when it fits. Add a package when it removes more code and operational risk than it adds; weigh maintenance, adoption, security, API stability, and transitive cost. Use established libraries for solved, non-domain problems, with only the boundary code the application genuinely needs. Custom code is for the remaining project-specific gap.
 
-The test: Every changed line should trace directly to the user's request.
+Every new line is a liability. Prefer deletion, consolidation, boring control flow, good defaults, and one obvious path. Let abstractions emerge from stable repetition; predicted reuse is not reuse. Flexibility, configuration, fallbacks, and compatibility need a present product requirement.
 
-## 4. Goal-Driven Execution
+Smallest means the least system we can maintain, not the fewest characters. Preserve trust-boundary validation, accessibility, type safety, security, and error handling that prevents corrupt or lost data.
 
-**Define success criteria. Loop until verified.**
+## Build for the boring future
 
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
+A fix should remain the right design after real users and data arrive. On affected production paths, consider the relevant limits: tenant isolation, authoritative backend authorization, bounded data access, concurrency, idempotency, retries, stale work, time-based state, external contracts, and secret-safe failures. Scale the design to evidence, not imaginary infrastructure.
 
-For multi-step tasks, state a brief plan:
-```text
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
-```
+Choose a maintainable current design over “temporary” architecture. If simplicity creates a real ceiling, make the ceiling explicit. Legacy behavior earns its cost only when deployed data, clients, or the user require it; otherwise replace the obsolete path cleanly.
 
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+For Convex work, read the repository’s generated Convex AI guidelines at `packages/backend/convex/_generated/ai/guidelines.md` before editing. Its current API rules override model memory.
 
-## 5. Performance Above All Else
+## Tests are evidence
 
-**When in doubt, do the thing that makes the app feel the fastest to use.**
+Test count is not a goal. Test observable outcomes at public seams so the suite reads like a specification and survives internal refactors.
 
-This includes things like:
-- Optimistic updates everywhere (task status changes, SOP edits, employee assignments, company settings reflect instantly)
-- Leverage Convex real-time subscriptions — never poll, never show stale data
-- Avoid waterfalls: parallel data fetching, no sequential requests that could be concurrent
-- Prefetch where possible (task details, SOP content, employee profiles on hover)
-- Skeleton screens over loading spinners — the UI should never feel "stuck"
+- A bug fix gets the smallest regression test that fails for the defect.
+- Start new behavior with one high-value example. Add another only for a distinct behavior or risk, not a branch, function, or permutation.
+- Prefer the existing seam and harness. Add a fixture or test file only for a genuinely new boundary or setup.
+- Assert through public behavior. Private methods, internal call order, and mocks of code we own make brittle tests.
+- Derive expected values from an independent fact, never a copy of the implementation.
 
-## 6. Good Defaults, Minimal Friction
+Run the narrowest relevant tests and static checks while iterating. Before completion, verify each changed package and boundary. Use repository-wide checks for cross-cutting or release-critical work. A green suite proves only what it exercises.
 
-**Users should get value with zero configuration. Less config is best.**
+## Keep changes honest
 
-This means things like:
-- Onboarding does the thinking: company details in → workspace, roles, and starter workflows out. User just reviews.
-- Tasks appear ready to triage or complete. Editing is optional, not required.
-- SOP workflows "just work" — sensible ordering, ownership, and reminders are automatic where possible.
-- Getting from login to tasks should be one click (max two).
-
-## 7. Security
-
-**Convenient but never insecure.**
-
-This includes things like:
-- All Convex mutations/queries must verify the authenticated user owns or belongs to the company/resource they're accessing.
-- Employee and company data are sensitive — never expose private fields in client responses, never log.
-- Validate that users have the correct role/permissions before allowing task, SOP, employee, or company changes.
-- Public-facing API routes (webhooks, callbacks) must be validated and rate-limited.
-- Never trust client-submitted task IDs, SOP IDs, employee IDs, company IDs, or role names without validation.
-
-## 8. Development-stage codebase
-
-- This app is still in active development and has no production users. Do not optimize for backward compatibility, legacy data, or preserving old behavior unless explicitly requested.
-- Be willing to recommend large, clean changes when they improve the product or codebase, even if they touch many files or change existing flows.
-- Do not add data migrations, backfills, compatibility layers, dual-write paths, or transitional legacy handling. When a schema, model, or flow needs to change, update it directly to the desired clean state.
-
-<!-- nextjs-ai-start -->
-# This is NOT the Next.js you know
-
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
-<!-- nextjs-ai-start -->
-
-<!-- convex-ai-start -->
-This project uses [Convex](https://convex.dev) as its backend.
-
-When working on Convex code, **always read `convex/_generated/ai/guidelines.md` first** for important guidelines on how to correctly use Convex APIs and patterns. The file contains rules that override what you may have learned about Convex from training data.
-<!-- convex-ai-end -->
+Make every changed line trace to the requested outcome or its necessary root fix. Match local conventions, remove superseded paths and artifacts, and leave unrelated cleanup for separate work.

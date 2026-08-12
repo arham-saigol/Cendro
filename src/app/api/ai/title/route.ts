@@ -6,11 +6,13 @@ import { z } from "zod";
 import { api } from "../../../../../convex/_generated/api";
 import type { Id, TableNames } from "../../../../../convex/_generated/dataModel";
 import { consumeAiRateLimit } from "@/lib/ai/rate-limit";
+import { readJsonRequest } from "@/lib/ai/request-body";
 import { textOf } from "@/lib/message-utils";
 
 const idSchema = <Table extends TableNames>() => z.custom<Id<Table>>((value) => typeof value === "string");
 const requestSchema = z.object({ companyId: idSchema<"companies">(), sessionId: idSchema<"aiChatSessions">(), firstMessage: z.string().max(2000).optional() });
 const titleModel = "alibaba/qwen3.5-flash";
+const titleRequestMaxBytes = 16 * 1024;
 const uppercaseWords = new Set(["ai", "api", "auth", "crm", "csv", "hr", "id", "ids", "jd", "pdf", "qa", "seo", "sop", "sql", "ui", "ux"]);
 const fallbackStopWords = new Set(["a", "about", "add", "am", "an", "and", "are", "as", "at", "be", "build", "by", "can", "could", "create", "did", "do", "does", "for", "from", "get", "give", "had", "has", "have", "hello", "help", "hey", "hi", "how", "i", "in", "into", "is", "it", "just", "like", "make", "me", "my", "need", "of", "on", "or", "please", "show", "tell", "that", "the", "this", "to", "use", "using", "want", "what", "when", "where", "which", "who", "why", "with", "would", "write", "you", "your"]);
 
@@ -66,8 +68,6 @@ function authorizeErrorResponse(error: unknown) {
 }
 
 export async function POST(req: Request) {
-  const parsed = requestSchema.safeParse(await req.json().catch(() => null));
-  if (!parsed.success) return Response.json({ error: "Invalid request body" }, { status: 400 });
   const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
   if (!convexUrl) return Response.json({ error: "Convex is not configured" }, { status: 500 });
 
@@ -79,6 +79,11 @@ export async function POST(req: Request) {
   client.setAuth(token);
   const rateLimit = await consumeAiRateLimit(client, "ai-title");
   if (!rateLimit.ok) return Response.json({ error: "Too many title requests" }, { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } });
+
+  const body = await readJsonRequest(req, titleRequestMaxBytes);
+  if (!body.ok) return Response.json({ error: body.reason === "too_large" ? "Title request is too large" : "Invalid request body" }, { status: body.reason === "too_large" ? 413 : 400 });
+  const parsed = requestSchema.safeParse(body.value);
+  if (!parsed.success) return Response.json({ error: "Invalid request body" }, { status: 400 });
   const { companyId, sessionId } = parsed.data;
   try {
     await client.query(api.aiChat.authorizeSessionForAgent, { companyId, sessionId });

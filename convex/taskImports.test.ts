@@ -124,6 +124,15 @@ describe("task import backend", () => {
     expect(preview.rows[0]).toMatchObject({ operation: "blocked", errors: ["Quantity must be a positive number."] });
   });
 
+  test("unrecognized status is rejected during preview and validation", async () => {
+    const { t, companyId } = await seed();
+    const preview = await t.withIdentity(identity("admin")).query(api.taskImports.previewTaskImport, {
+      companyId, kind: "jd", drafts: [draft({ status: null, presentFields: ["title", "recurrence", "assignees", "status"], warnings: ['Status "Typo" is not recognized (use Pending, In Progress, or Completed).'] })],
+    });
+    expect(preview.rows[0].operation).toBe("blocked");
+    expect(preview.rows[0].errors).toContain("Status is not recognized.");
+  });
+
   test("an employee without create permission cannot preview blank-reference creates", async () => {
     const { t, companyId } = await seed();
     await expect(t.withIdentity(identity("employee")).query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [draft({ assigneeEmails: ["employee@example.com"], rawAssigneeText: "employee@example.com" })] })).resolves.toMatchObject({ rows: [{ operation: "blocked" }] });

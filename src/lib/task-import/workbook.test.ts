@@ -29,7 +29,9 @@ describe("task workbook pure helpers", () => {
 
   test("rejects ambiguous dates and accepts unambiguous dates", () => {
     expect(parseStrictDate("01/02/2026").error).toMatch(/Ambiguous/);
-    expect(new Date(parseStrictDate("2026-02-01").value!).toISOString()).toContain("2026-02-01");
+    const parsed = new Date(parseStrictDate("2026-02-01").value!);
+    expect([parsed.getFullYear(), parsed.getMonth(), parsed.getDate()]).toEqual([2026, 1, 1]);
+    expect([parsed.getHours(), parsed.getMinutes(), parsed.getSeconds()]).toEqual([23, 59, 59]);
     expect(parseStrictDate("2026-02-01 25:00").error).toBe("Invalid due date.");
   });
 

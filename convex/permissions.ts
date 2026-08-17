@@ -56,11 +56,12 @@ export async function effectiveCapsAfter(ctx: Ctx, membership: Doc<"companyMembe
   return allowed;
 }
 
-export async function assertPermissionManagerRemains(ctx: Ctx, companyId: Id<"companies">, changedMembershipId: Id<"companyMemberships">, nextRole?: Role, override?: OverrideChange | OverrideChange[]) {
+export async function assertPermissionManagerRemains(ctx: Ctx, companyId: Id<"companies">, changedMembershipId: Id<"companyMemberships">, nextRole?: Role, override?: OverrideChange | OverrideChange[], nextActive?: boolean) {
   const overrides = override ? (Array.isArray(override) ? override : [override]) : [];
   const memberships = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(500);
   for (const membership of memberships) {
-    if (!membership.active) continue;
+    const isActive = membership._id === changedMembershipId ? (nextActive ?? true) : membership.active;
+    if (!isActive) continue;
     const caps = await effectiveCapsAfter(ctx, membership, membership._id === changedMembershipId ? nextRole : undefined, overrides);
     if (caps.has("company:manage_permissions")) return;
   }

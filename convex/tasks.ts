@@ -102,7 +102,11 @@ export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks"
     const recorded = await currentJdCycleRecord(ctx, task._id, cycle.start);
     if (!done && !recorded) await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.end, status: "missed", recordedAt: now });
   }
-  if (cycles.length > 0) await ctx.db.patch(task._id, { cycleStartedAt: nextActiveAt });
+  if (cycles.length > 0) {
+    await ctx.db.patch(task._id, { cycleStartedAt: nextActiveAt });
+    task.cycleStartedAt = nextActiveAt;
+  }
+  return { cycles, nextActiveAt };
 }
 
 async function jdState(ctx: Ctx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string) {

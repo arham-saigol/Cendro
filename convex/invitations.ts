@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { internalMutation, mutation, query } from "./_generated/server";
-import { assertPermissionManagerRemains, currentOrCreateUser } from "./permissions";
+import { assertPermissionManagerRemains, currentOrCreateUser, type OverrideChange } from "./permissions";
 import { capabilities, type Capability } from "../src/lib/permissions";
 
 export const preview = query({
@@ -27,12 +27,16 @@ export const accept = mutation({
     const now = Date.now();
     const existing = await ctx.db.query("companyMemberships").withIndex("by_company_user", (q) => q.eq("companyId", invitation.companyId).eq("userId", user._id)).unique();
     if (existing) {
-      const overrides = (invitation.permissionOverrides ?? []).map((o) => ({
-        membershipId: existing._id,
-        capability: o.capability as Capability,
-        effect: o.effect,
-      }));
-      await assertPermissionManagerRemains(ctx, invitation.companyId, existing._id, invitation.role, overrides);
+      const invited = (invitation.permissionOverrides ?? []).filter((o) => capabilities.includes(o.capability as Capability));
+      const invitedCapabilities = new Set(invited.map((o) => o.capability));
+      const persisted = await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", existing._id)).take(500);
+      const overrides: OverrideChange[] = [
+        ...invited.map((o) => ({ membershipId: existing._id, capability: o.capability as Capability, effect: o.effect })),
+        ...persisted
+          .filter((row) => !invitedCapabilities.has(row.capability as Capability))
+          .map((row) => ({ membershipId: existing._id, capability: row.capability as Capability, effect: "inherit" as const })),
+      ];
+      await assertPermissionManagerRemains(ctx, invitation.companyId, existing._id, invitation.role, overrides, true);
     }
     const membershipId = existing
       ? existing._id

@@ -673,10 +673,22 @@ function NotionDatabaseTable({
               {rows.map((row) => (
                 <tr
                   key={row.id}
+                  tabIndex={onSelectRow ? 0 : undefined}
+                  role={onSelectRow ? "button" : undefined}
                   onClick={() => onSelectRow?.(row)}
+                  onKeyDown={
+                    onSelectRow
+                      ? (e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            onSelectRow(row);
+                          }
+                        }
+                      : undefined
+                  }
                   className={cn(
                     "border-b border-[var(--hairline)]/50 transition-colors hover:bg-[var(--surface-muted)]/50",
-                    onSelectRow && "cursor-pointer"
+                    onSelectRow && "cursor-pointer focus-visible:outline-none focus-visible:bg-[var(--surface-muted)]"
                   )}
                 >
                   <td className="px-4 py-2.5 font-medium text-[var(--ink)]">
@@ -1014,10 +1026,11 @@ export function DashboardPage() {
 
             <div className="mt-3 grid gap-2 sm:grid-cols-2 md:grid-cols-3">
               {data.comparisons.topPerformers.map((person, idx) => (
-                <div
+                <button
+                  type="button"
                   key={person.id}
                   onClick={() => setMembershipId(person.id)}
-                  className="flex cursor-pointer items-center justify-between rounded border border-[var(--hairline)] bg-[var(--surface-muted)]/30 p-2 text-left transition-colors hover:bg-[var(--surface-muted)]"
+                  className="flex cursor-pointer items-center justify-between rounded border border-[var(--hairline)] bg-[var(--surface-muted)]/30 p-2 text-left transition-colors hover:bg-[var(--surface-muted)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--ink)]"
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     <span className="grid h-4.5 w-4.5 place-items-center rounded bg-[var(--surface)] text-[10px] font-semibold text-[var(--ink-muted)]">
@@ -1031,7 +1044,7 @@ export function DashboardPage() {
                   <span className="text-[12px] font-semibold text-[#10b981] tabular-nums">
                     {formatPercent(person.completionRate)}
                   </span>
-                </div>
+                </button>
               ))}
             </div>
           </div>

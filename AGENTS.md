@@ -4,7 +4,7 @@ Management workspace for tasks, SOPs, employees, and companies. Fast, collaborat
 
 ## Development notice
 
-Astreex is still in active development and has no production users or production data that must be preserved. Unless the user explicitly says otherwise, do not build migrations, backfills, compatibility layers, dual-write paths, legacy fallbacks, or transitional infrastructure for existing behavior.
+Cendro is still in active development and has no production users or production data that must be preserved. Unless the user explicitly says otherwise, do not build migrations, backfills, compatibility layers, dual-write paths, legacy fallbacks, or transitional infrastructure for existing behavior.
 
 When a schema, data model, API, or workflow needs to change, prefer replacing the obsolete design cleanly and updating development data as needed. Optimize for the correct long-term implementation, not compatibility with an unreleased version of the product.
 
@@ -40,7 +40,7 @@ A fix should remain the right design after real users and data arrive. On affect
 
 Choose a maintainable current design over “temporary” architecture. If simplicity creates a real ceiling, make the ceiling explicit. Legacy behavior earns its cost only when deployed data, clients, or the user require it; otherwise replace the obsolete path cleanly.
 
-For Convex work, read the repository’s generated Convex AI guidelines at `packages/backend/convex/_generated/ai/guidelines.md` before editing. Its current API rules override model memory.
+For Convex work, read the repository’s generated Convex AI guidelines at `convex/_generated/ai/guidelines.md` before editing. Its current API rules override model memory.
 
 ## Tests are evidence
 

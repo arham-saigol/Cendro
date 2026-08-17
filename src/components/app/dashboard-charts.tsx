@@ -40,7 +40,7 @@ export function TanStackTrendChart({
           x: "label",
           y: "completed",
           fill: "url(#trend-green-grad)",
-          opacity: 0.85,
+          fillOpacity: 0.85,
         }),
         lineY(data, {
           x: "label",
@@ -59,7 +59,7 @@ export function TanStackTrendChart({
             x: "label",
             y: "workload",
             fill: "url(#trend-blue-grad)",
-            opacity: 0.75,
+            fillOpacity: 0.75,
           })
         );
       }
@@ -81,7 +81,7 @@ export function TanStackTrendChart({
             x: "label",
             y: "overdue",
             fill: "url(#trend-red-grad)",
-            opacity: 0.75,
+            fillOpacity: 0.75,
           })
         );
       }

@@ -24,7 +24,7 @@ type ReviewRow = {
   operation: "create" | "update" | "blocked";
   reference: string | null;
   draft: TaskImportDraft;
-  current: any;
+  current: { updatedAt?: number } | null;
   proposedAssigneeMembershipIds: string[];
   unresolvedAssigneeHints: string[];
   errors: string[];
@@ -61,7 +61,7 @@ export function TaskImportButton({
   const assignable = useQuery(
     api.tasks.assignableUsers,
     activeCompanyId ? { companyId: activeCompanyId, kind: taskKind(kind) } : "skip"
-  ) as any[] | undefined;
+  );
 
   async function handleFile(file: File) {
     if (!activeCompanyId) return;
@@ -78,7 +78,7 @@ export function TaskImportButton({
       const preview = await convex.query(api.taskImports.previewTaskImport, {
         companyId: activeCompanyId,
         kind: taskKind(kind),
-        drafts: parsed.rows as any,
+        drafts: parsed.rows,
       });
 
       const nextRows = preview.rows as ReviewRow[];
@@ -118,24 +118,33 @@ export function TaskImportButton({
       let updated = 0;
       for (let i = 0; i < included.length; i += MAX_BATCH_ROWS) {
         const batch = included.slice(i, i + MAX_BATCH_ROWS);
-        const result = await commit({
-          companyId: activeCompanyId,
-          kind: taskKind(kind),
-          importKey: keyToUse,
-          batchKey: crypto.randomUUID(),
-          source: "cendro",
-          rows: batch.map((row) => ({
-            draft: row.draft as any,
-            include: true,
-            expectedUpdatedAt: row.current?.updatedAt,
-            selectedAssigneeMembershipIds:
-              row.draft.assigneeEmails.length || row.draft.rawAssigneeText.trim()
-                ? (row.proposedAssigneeMembershipIds as Id<"companyMemberships">[])
-                : null,
-          })),
-        });
-        created += result.created;
-        updated += result.updated;
+        const batchIndex = Math.floor(i / MAX_BATCH_ROWS);
+        try {
+          const result = await commit({
+            companyId: activeCompanyId,
+            kind: taskKind(kind),
+            importKey: keyToUse,
+            batchKey: `${keyToUse}:${batchIndex}`,
+            source: "cendro",
+            rows: batch.map((row) => ({
+              draft: row.draft,
+              include: true,
+              expectedUpdatedAt: row.current?.updatedAt,
+              selectedAssigneeMembershipIds:
+                row.draft.assigneeEmails.length || row.draft.rawAssigneeText.trim()
+                  ? (row.proposedAssigneeMembershipIds as Id<"companyMemberships">[])
+                  : null,
+            })),
+          });
+          created += result.created;
+          updated += result.updated;
+        } catch (err) {
+          onNotification?.({
+            type: "error",
+            message: `Imported ${created} created and ${updated} updated before the import stopped. ${err instanceof Error ? err.message : ""}`.trim(),
+          });
+          return;
+        }
       }
 
       setIssuesOpen(false);
@@ -155,9 +164,9 @@ export function TaskImportButton({
 
   function changeAssignees(rowKey: string, membershipIds: string[]) {
     const people = membershipIds
-      .map((id) => (assignable ?? []).find((c: any) => c.membership._id === id))
+      .map((id) => (assignable ?? []).find((c) => c.membership._id === id))
       .filter(Boolean);
-    const emails = people.map((p: any) => p.user.email as string);
+    const emails = people.map((p) => p!.user.email);
     setRows((current) =>
       current.map((row) => {
         if (row.rowKey !== rowKey) return row;
@@ -184,7 +193,7 @@ export function TaskImportButton({
       const preview = await convex.query(api.taskImports.previewTaskImport, {
         companyId: activeCompanyId,
         kind: taskKind(kind),
-        drafts: rows.map((r) => r.draft) as any,
+        drafts: rows.map((r) => r.draft),
       });
       const nextRows = preview.rows as ReviewRow[];
       setRows(nextRows);
@@ -312,16 +321,17 @@ export function TaskImportButton({
                     {/* Inline resolution tools */}
                     <div className="mt-3 grid gap-2 border-t border-[var(--hairline)] pt-3 sm:grid-cols-2">
                       <div>
-                        <label className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]">
+                        <label htmlFor={`assignee-${row.rowKey}`} className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]">
                           Assignee
                         </label>
                         <select
+                          id={`assignee-${row.rowKey}`}
                           className="h-8 w-full rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2 text-[12px]"
                           value={row.proposedAssigneeMembershipIds[0] ?? ""}
                           onChange={(e) => changeAssignees(row.rowKey, e.target.value ? [e.target.value] : [])}
                         >
                           <option value="">Select an active member</option>
-                          {(assignable ?? []).map((person: any) => (
+                          {(assignable ?? []).map((person) => (
                             <option key={person.membership._id} value={person.membership._id}>
                               {person.user.name || person.user.email} ({person.user.email})
                             </option>
@@ -331,14 +341,15 @@ export function TaskImportButton({
 
                       {kind === "jd" ? (
                         <div>
-                          <label className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]">
+                          <label htmlFor={`frequency-${row.rowKey}`} className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]">
                             Frequency
                           </label>
                           <select
+                            id={`frequency-${row.rowKey}`}
                             className="h-8 w-full rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2 text-[12px]"
                             value={row.draft.recurrence ?? ""}
                             onChange={(e) =>
-                              patchRow(row.rowKey, { recurrence: (e.target.value || null) as any })
+                              patchRow(row.rowKey, { recurrence: (e.target.value || null) as TaskImportDraft["recurrence"] })
                             }
                           >
                             <option value="">Select frequency</option>
@@ -351,14 +362,15 @@ export function TaskImportButton({
                         </div>
                       ) : (
                         <div>
-                          <label className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]">
+                          <label htmlFor={`priority-${row.rowKey}`} className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]">
                             Priority
                           </label>
                           <select
+                            id={`priority-${row.rowKey}`}
                             className="h-8 w-full rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2 text-[12px]"
                             value={row.draft.priority ?? ""}
                             onChange={(e) =>
-                              patchRow(row.rowKey, { priority: (e.target.value || null) as any })
+                              patchRow(row.rowKey, { priority: (e.target.value || null) as TaskImportDraft["priority"] })
                             }
                           >
                             <option value="">Select priority</option>
@@ -406,32 +418,41 @@ export function TaskImportButton({
 
 export function TaskExportButton({ kind }: { kind: PageKind }) {
   const { activeCompanyId, active } = useCompany();
-  const pages = usePaginatedQuery(
-    api.tasks.exportRows,
-    activeCompanyId ? { companyId: activeCompanyId, kind: taskKind(kind) } : "skip",
-    { initialNumItems: 200 }
-  );
+  const [requested, setRequested] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const loading = pages.status === "LoadingFirstPage" || pages.status === "LoadingMore";
+
+  const pages = usePaginatedQuery(
+    api.tasks.exportRows,
+    activeCompanyId && requested ? { companyId: activeCompanyId, kind: taskKind(kind) } : "skip",
+    { initialNumItems: 200 }
+  );
+
+  const loading = requested && (pages.status === "LoadingFirstPage" || pages.status === "LoadingMore");
 
   useEffect(() => {
-    if (pages.status === "CanLoadMore" && !busy) pages.loadMore(200);
-  }, [busy, pages]);
-
-  async function exportNow() {
-    if (!activeCompanyId || !active || busy || loading || pages.status !== "Exhausted") return;
-    setBusy(true);
-    setError(null);
-    try {
-      const workbook = await exportTaskWorkbook(taskKind(kind), activeCompanyId, active.company.name, pages.results as any);
-      downloadBlob(await workbook.toBlob(), `${kind === "jd" ? "jd-tasks" : "one-time-tasks"}.xlsx`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not export tasks.");
-    } finally {
-      setBusy(false);
+    if (requested && pages.status === "CanLoadMore" && !busy) {
+      pages.loadMore(200);
     }
-  }
+  }, [busy, pages, requested]);
+
+  useEffect(() => {
+    if (requested && pages.status === "Exhausted" && !busy && activeCompanyId && active) {
+      setBusy(true);
+      setError(null);
+      void (async () => {
+        try {
+          const workbook = await exportTaskWorkbook(taskKind(kind), activeCompanyId, active.company.name, pages.results);
+          downloadBlob(await workbook.toBlob(), `${kind === "jd" ? "jd-tasks" : "one-time-tasks"}.xlsx`);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Could not export tasks.");
+        } finally {
+          setBusy(false);
+          setRequested(false);
+        }
+      })();
+    }
+  }, [active, activeCompanyId, busy, kind, pages.results, pages.status, requested]);
 
   return (
     <>
@@ -439,8 +460,11 @@ export function TaskExportButton({ kind }: { kind: PageKind }) {
       <Button
         variant="secondary"
         size="sm"
-        disabled={!activeCompanyId || loading || pages.status !== "Exhausted" || busy}
-        onClick={() => void exportNow()}
+        disabled={!activeCompanyId || loading || busy}
+        onClick={() => {
+          setError(null);
+          setRequested(true);
+        }}
       >
         <Download className="h-4 w-4" />
         {loading ? "Loading..." : busy ? "Exporting..." : "Export"}

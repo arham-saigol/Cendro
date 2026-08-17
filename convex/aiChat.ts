@@ -13,7 +13,6 @@ function safeTitle(value: string) {
 const aiRateLimitConfigs = {
   "ai-chat": { limit: 20, windowMs: 60_000 },
   "ai-title": { limit: 10, windowMs: 60_000 },
-  "ai-task-import": { limit: 3, windowMs: 60 * 60_000 },
 } as const;
 
 const modelTier = v.union(v.literal("flash"), v.literal("pro"));
@@ -36,7 +35,7 @@ async function deleteMessageBatch(ctx: MutationCtx, sessionId: Id<"aiChatSession
 }
 
 export const consumeRateLimit = mutation({
-  args: { kind: v.union(v.literal("ai-chat"), v.literal("ai-title"), v.literal("ai-task-import")) },
+  args: { kind: v.union(v.literal("ai-chat"), v.literal("ai-title")) },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new ConvexError("Authentication required.");

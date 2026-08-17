@@ -1,16 +1,16 @@
 import { z } from "zod";
 
 export const taskKinds = ["jd", "one_time"] as const;
-export const extractionSources = ["cendro", "ai"] as const;
+export const extractionSources = ["cendro"] as const;
 export const frequencies = ["daily", "every_other_day", "weekly", "semimonthly", "monthly", "semiannually", "annually"] as const;
 export const priorities = ["low", "medium", "high"] as const;
-export const confidenceLevels = ["high", "medium", "low"] as const;
+export const taskStatuses = ["due", "in_progress", "completed"] as const;
 
 export type TaskImportKind = (typeof taskKinds)[number];
 export type ExtractionSource = (typeof extractionSources)[number];
 export type Frequency = (typeof frequencies)[number];
 export type Priority = (typeof priorities)[number];
-export type Confidence = (typeof confidenceLevels)[number];
+export type TaskImportStatus = (typeof taskStatuses)[number];
 
 export const taskImportFieldNames = [
   "reference",
@@ -22,6 +22,7 @@ export const taskImportFieldNames = [
   "time",
   "quantity",
   "assignees",
+  "status",
 ] as const;
 
 export type TaskImportField = (typeof taskImportFieldNames)[number];
@@ -31,12 +32,12 @@ const taskKindSchema = z.enum(taskKinds);
 const extractionSourceSchema = z.enum(extractionSources);
 const frequencySchema = z.enum(frequencies);
 const prioritySchema = z.enum(priorities);
-const confidenceSchema = z.enum(confidenceLevels);
+const statusSchema = z.enum(taskStatuses);
 
 /**
- * The browser and the AI route share this deliberately boring, JSON-safe row.
+ * Clean, JSON-safe row representation for Cendro task workbook import.
  * Missing scalar values are represented by null so the same object can cross
- * the browser/Convex/AI boundaries without relying on undefined semantics.
+ * the browser/Convex boundaries without relying on undefined semantics.
  */
 export const taskImportDraftSchema = z.object({
   rowKey: z.string().trim().min(1).max(200),
@@ -54,8 +55,8 @@ export const taskImportDraftSchema = z.object({
   quantity: z.number().finite().nullable(),
   rawAssigneeText: z.string().max(2_000),
   assigneeEmails: z.array(z.string().max(320)).max(50),
+  status: statusSchema.nullable(),
   presentFields: z.array(presentFieldSchema).max(taskImportFieldNames.length),
-  confidence: confidenceSchema.nullable(),
   warnings: z.array(z.string().max(500)).max(20),
 }).strict().superRefine((row, context) => {
   const uniqueFields = new Set(row.presentFields);
@@ -74,10 +75,6 @@ export const taskImportDraftSchema = z.object({
 });
 
 export type TaskImportDraft = z.infer<typeof taskImportDraftSchema>;
-
-export const aiTaskImportResponseSchema = z.object({
-  rows: z.array(taskImportDraftSchema).max(200),
-}).strict();
 
 export function referenceForKind(value: unknown, kind: TaskImportKind) {
   const reference = typeof value === "string" ? value.trim().toUpperCase() : value == null ? "" : String(value).trim().toUpperCase();

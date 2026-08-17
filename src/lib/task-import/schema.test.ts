@@ -7,7 +7,7 @@ describe("task import schema", () => {
       rowKey: "Tasks:2",
       sourceSheet: "Tasks",
       sourceRow: 2,
-      source: "ai",
+      source: "cendro",
       kind: "jd",
       reference: null,
       title: "Task",
@@ -20,7 +20,6 @@ describe("task import schema", () => {
       rawAssigneeText: "",
       assigneeEmails: [],
       presentFields: [],
-      confidence: "low",
       warnings: [],
     })).toThrow();
   });

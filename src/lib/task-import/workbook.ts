@@ -8,6 +8,7 @@ import {
   type Priority,
   type TaskImportDraft,
   type TaskImportKind,
+  type TaskImportStatus,
 } from "./schema";
 
 export const TASK_IMPORT_SCHEMA_VERSION = 1;
@@ -32,6 +33,12 @@ export const priorityLabels: Record<Priority, string> = {
   low: "Low",
   medium: "Medium",
   high: "High",
+};
+
+export const statusLabels: Record<TaskImportStatus, string> = {
+  due: "Pending",
+  in_progress: "In Progress",
+  completed: "Completed",
 };
 
 export type WorkbookTaskRow = {
@@ -60,8 +67,6 @@ export type WorkbookMetadata = {
 
 export type ParsedWorkbook = {
   rows: TaskImportDraft[];
-  sheetData: { sheet: string; data: SheetData }[];
-  legacy: boolean;
 };
 
 const jdHeaders = ["Reference", "Title", "Description", "Frequency", "Time", "Quantity", "Assignee Emails", "Status"] as const;
@@ -154,6 +159,24 @@ export function normalizePriority(value: unknown): Priority | null {
   return aliases[normalized] ?? null;
 }
 
+export function normalizeStatus(value: unknown): TaskImportStatus | null {
+  const normalized = normalizeEnumToken(value);
+  const aliases: Record<string, TaskImportStatus> = {
+    pending: "due",
+    due: "due",
+    todo: "due",
+    inprogress: "in_progress",
+    in_progress: "in_progress",
+    progress: "in_progress",
+    doing: "in_progress",
+    completed: "completed",
+    complete: "completed",
+    done: "completed",
+    overdue: "due",
+  };
+  return aliases[normalized] ?? null;
+}
+
 function normalizeEnumToken(value: unknown) {
   return scalarText(value).toLowerCase().replace(/[\s_\-/]+/g, "");
 }
@@ -165,8 +188,6 @@ export function parseStrictDate(value: unknown): { value: number | null; error?:
     return Number.isNaN(time) ? { value: null, error: "Invalid spreadsheet date." } : { value: time };
   }
   if (typeof value === "number" && Number.isFinite(value)) {
-    // read-excel-file normally converts real Excel date cells to Date. A bare
-    // number is retained as an error rather than guessed as a serial/date.
     return { value: null, error: "Numeric due dates must be stored as real Excel dates." };
   }
   const text = scalarText(value);
@@ -212,6 +233,7 @@ export function buildExportMetadata(kind: TaskImportKind, companyId: string, com
 function metadataFromRows(rows: SheetData): WorkbookMetadata | null {
   const metadata: Partial<WorkbookMetadata> = {};
   for (const row of rows) {
+    if (!row || !row[0]) continue;
     const key = metadataKeyAliases[normalizeHeader(row[0])];
     if (!key) continue;
     const value = row[1];
@@ -245,12 +267,16 @@ function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number,
   const parsedDate = kind === "one_time" ? parseStrictDate(valueAt(row, 3)) : { value: null };
   const recurrence = kind === "jd" ? normalizeFrequency(valueAt(row, 3)) : null;
   const priority = kind === "one_time" ? normalizePriority(valueAt(row, 4)) : null;
+  const rawStatus = sourceText(valueAt(row, kind === "jd" ? 7 : 8));
+  const parsedStatus = rawStatus ? normalizeStatus(rawStatus) : null;
+  const statusWarning = rawStatus && !parsedStatus ? [`Status "${rawStatus}" is not recognized (use Pending, In Progress, or Completed).`] : [];
   const warnings = [
     ...(referenceResult.error ? [referenceResult.error] : []),
     ...(parsedDate.error ? [parsedDate.error] : []),
     ...(quantityText && (validQuantity === null) ? ["Quantity must be a positive number."] : []),
     ...(kind === "jd" && sourceText(valueAt(row, 3)) && !recurrence ? ["Frequency is not a supported canonical value."] : []),
     ...(kind === "one_time" && sourceText(valueAt(row, 4)) && !priority ? ["Priority is not a supported canonical value."] : []),
+    ...statusWarning,
     ...(isFormulaLikeValue(valueAt(row, 0)) || isFormulaLikeValue(valueAt(row, 1)) ? ["Formula-like text was rejected as an input value."] : []),
   ];
   const presentFields = [
@@ -261,6 +287,7 @@ function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number,
     "time",
     "quantity",
     "assignees",
+    ...(rawStatus ? ["status"] : []),
   ] as TaskImportDraft["presentFields"];
   return taskImportDraftSchema.parse({
     rowKey: `${sourceSheet}:${sourceRow}`,
@@ -278,8 +305,8 @@ function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number,
     quantity: validQuantity,
     rawAssigneeText: assignees.raw,
     assigneeEmails: assignees.emails,
+    status: parsedStatus,
     presentFields,
-    confidence: null,
     warnings,
   });
 }
@@ -292,14 +319,11 @@ function parseTaskSheet(rows: SheetData, kind: TaskImportKind, sheetName: string
 }
 
 export function parseCendroWorkbookSheets(sheets: readonly { sheet: string; data: SheetData }[], activeCompanyId: string, kind: TaskImportKind): ParsedWorkbook {
-  const sheetData = sheets.map((sheet) => ({ sheet: sheet.sheet, data: sheet.data }));
   const metadataSheet = sheets.find((sheet) => sheet.sheet === "Cendro Metadata");
   const taskSheet = sheets.find((sheet) => sheet.sheet === taskSheetName(kind));
   const metadata = metadataSheet ? metadataFromRows(metadataSheet.data) : null;
-  const declaredFormat = metadataSheet?.data.find((row) => metadataKeyAliases[normalizeHeader(row[0])] === "format")?.[1];
   if (!metadata || metadata.format !== TASK_IMPORT_FORMAT) {
-    if (scalarText(declaredFormat) === TASK_IMPORT_FORMAT) throw new Error("This Cendro workbook has invalid or incomplete metadata.");
-    return { rows: [], sheetData, legacy: true };
+    throw new Error("This file is not a valid Cendro task workbook. Export a Cendro workbook first to get the correct template.");
   }
   if (!taskSheet) throw new Error(`This workbook does not contain the ${taskSheetName(kind)} sheet for the selected task page.`);
   if (metadata.version !== TASK_IMPORT_SCHEMA_VERSION) throw new Error("This Cendro workbook uses an unsupported schema version.");
@@ -307,20 +331,15 @@ export function parseCendroWorkbookSheets(sheets: readonly { sheet: string; data
   if (metadata.companyId !== activeCompanyId) throw new Error("This workbook belongs to another company.");
   const parsed = parseTaskSheet(taskSheet.data, kind, taskSheet.sheet);
   if (parsed.headerIndex < 0) throw new Error("The Cendro task sheet headers do not match this version.");
+  if (parsed.rows.length === 0) throw new Error("The Cendro task sheet contains no task rows to import.");
   if (parsed.rows.length > TASK_IMPORT_MAX_ROWS) throw new Error(`A standard import may contain at most ${TASK_IMPORT_MAX_ROWS} task rows.`);
   const duplicateRefs = duplicateReferences(parsed.rows);
   const rows = parsed.rows.map((row) => duplicateRefs.has(row.reference?.toUpperCase() ?? "") ? { ...row, warnings: [...row.warnings, "Duplicate reference in workbook."] } : row);
-  return { rows, sheetData, legacy: false };
+  return { rows };
 }
 
 export function formulaCellsInXml(xml: string) {
   return /<f(?:\s|>)/i.test(xml);
-}
-
-function columnNumber(column: string) {
-  let value = 0;
-  for (const character of column) value = value * 26 + character.charCodeAt(0) - 64;
-  return value;
 }
 
 export async function preflightWorkbook(file: Blob) {
@@ -339,10 +358,6 @@ export async function preflightWorkbook(file: Blob) {
     if (!/^xl\/worksheets\/sheet\d+\.xml$/i.test(path)) continue;
     const xml = strFromU8(bytes);
     if (formulaCellsInXml(xml)) throw new Error("This workbook contains formula cells. Replace formulas with pasted literal values before importing.");
-    const rowCount = (xml.match(/<row\b/gi) ?? []).length;
-    if (rowCount > TASK_IMPORT_MAX_ROWS + 10) throw new Error("Workbook dimensions are too large. Remove unrelated rows and try again.");
-    const columns = [...xml.matchAll(/\br="([A-Z]+)\d+"/g)].map((match) => columnNumber(match[1]));
-    if (columns.some((column) => column > TASK_IMPORT_MAX_COLUMNS)) throw new Error("Workbook dimensions are too large. Remove unrelated columns and try again.");
   }
   return entries;
 }
@@ -359,7 +374,6 @@ export function validateWorkbookFile(file: Pick<File, "name" | "size" | "type">)
   const name = file.name.toLowerCase();
   if (name.endsWith(".xls") || name.endsWith(".xlsm")) throw new Error("Legacy .xls and macro-enabled .xlsm files are not supported. Save a copy as .xlsx first.");
   if (!name.endsWith(".xlsx")) throw new Error("Choose an .xlsx workbook.");
-  if (file.type && file.type !== "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" && file.type !== "application/octet-stream") throw new Error("The selected file is not an .xlsx workbook.");
 }
 
 function textCell(value: unknown) {
@@ -391,7 +405,7 @@ function metadataRows(metadata: WorkbookMetadata): WriteSheetData {
     [textCell("Source company name"), textCell(metadata.companyName)],
     [textCell("Export timestamp"), textCell(metadata.exportedAt)],
     [],
-    [textCell("Instructions"), textCell("Edit task fields only. Status is informational and ignored on import. Blank references create tasks. Blank assignee cells preserve existing assignees; new tasks need an assignee.")],
+    [textCell("Instructions"), textCell("Edit task fields. Blank references create tasks. Blank assignee cells preserve existing assignees; new tasks need an assignee. Status can be Pending, In Progress, or Completed.")],
     [textCell("Frequency values"), textCell(Object.entries(recurrenceLabels).map(([key, label]) => `${key} = ${label}`).join("; "))],
     [textCell("Priority values"), textCell(Object.entries(priorityLabels).map(([key, label]) => `${key} = ${label}`).join("; "))],
   ];
@@ -412,8 +426,4 @@ export function downloadBlob(blob: Blob, fileName: string) {
   anchor.download = fileName;
   anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
-}
-
-export function candidateCellRows(sheets: readonly { sheet: string; data: SheetData }[]) {
-  return sheets.flatMap((sheet) => sheet.data.map((row, index) => ({ row, index })).filter(({ row }) => rowHasValues(row)).map(({ row, index }) => ({ sheet: sheet.sheet, row: index + 1, cells: row.slice(0, TASK_IMPORT_MAX_COLUMNS).map((cell) => scalarText(cell)) })));
 }

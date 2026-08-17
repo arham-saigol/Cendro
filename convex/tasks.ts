@@ -167,7 +167,7 @@ export const exportRows = query({
       for (const task of page.page) if (await visible(ctx, args.companyId, membership, task, "jd", auth)) {
         const assignees = await enrich(ctx, task.assigneeMembershipIds);
         const state = await jdState(ctx, task, Date.now(), company.timeZone);
-        rows.push({ reference: task.reference, title: task.title, description: task.description ?? null, recurrence: task.recurrence, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: assignees.map((row) => row.user.email).join("; "), status: state.rawStatus });
+        rows.push({ reference: task.reference, title: task.title, description: task.description ?? null, recurrence: task.recurrence, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: assignees.map((row) => row.user.email).join("; "), status: state.status });
       }
       return { ...page, page: rows };
     }
@@ -176,7 +176,7 @@ export const exportRows = query({
     for (const task of page.page) if (await visible(ctx, args.companyId, membership, task, "one_time", auth)) {
       const assignees = await enrich(ctx, task.assigneeMembershipIds);
       const state = oneState(task);
-      rows.push({ reference: task.reference, title: task.title, description: task.description ?? null, dueDate: task.dueDate ?? null, priority: task.priority, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: assignees.map((row) => row.user.email).join("; "), status: state.rawStatus });
+      rows.push({ reference: task.reference, title: task.title, description: task.description ?? null, dueDate: task.dueDate ?? null, priority: task.priority, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: assignees.map((row) => row.user.email).join("; "), status: state.status });
     }
     return { ...page, page: rows };
   },

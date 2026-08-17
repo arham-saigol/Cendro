@@ -12,6 +12,7 @@ import {
   ChevronRight,
   ChevronsRight,
   Clock,
+  Download,
   Flag,
   Inbox,
   PanelRight,
@@ -33,7 +34,8 @@ import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
 import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
-import { TaskExportButton, TaskImportDialog } from "./task-import-dialog";
+import { TaskExportButton, TaskImportButton } from "./task-import-dialog";
+import { downloadBlob, exportTaskWorkbook } from "@/lib/task-import/workbook";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -1111,9 +1113,10 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [assigneeFilter, setAssigneeFilter] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
+  const [importBanner, setImportBanner] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
+  const [exportingSelection, setExportingSelection] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [pendingCell, setPendingCell] = useState<string | null>(null);
@@ -1271,6 +1274,40 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     }
   }
 
+  async function handleExportSelection() {
+    if (!activeCompanyId || !active || selectedIds.size === 0 || !tasks || exportingSelection) return;
+    setExportingSelection(true);
+    try {
+      const selectedTasks = tasks.filter((t: any) => selectedIds.has(t._id));
+      const exportTasks = selectedTasks.map((t: any) => ({
+        reference: t.reference,
+        title: t.title,
+        description: t.description ?? null,
+        recurrence: kind === "jd" ? t.recurrence : undefined,
+        dueDate: kind === "one" ? (t.dueDate ?? null) : undefined,
+        priority: kind === "one" ? t.priority : undefined,
+        time: t.time ?? null,
+        quantity: t.quantity ?? null,
+        assigneeEmails: t.assignees?.map((a: any) => a.user.email).join("; ") ?? "",
+        status: t.state?.status ?? "Pending",
+      }));
+      const workbook = await exportTaskWorkbook(
+        kind === "jd" ? "jd" : "one_time",
+        activeCompanyId,
+        active.company.name,
+        exportTasks as any
+      );
+      downloadBlob(
+        await workbook.toBlob(),
+        `${kind === "jd" ? "jd-tasks" : "one-time-tasks"}-selected.xlsx`
+      );
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Could not export selected tasks.");
+    } finally {
+      setExportingSelection(false);
+    }
+  }
+
   async function saveInline(task: any, patch: Partial<TaskFormValues>, label: string) {
     if (!activeCompanyId) return false;
     const key = `${task._id}:${label}`;
@@ -1319,7 +1356,6 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       />
 
       <TaskDialog kind={kind} mode="create" open={createOpen} onOpenChange={setCreateOpen} assignable={assignable ?? []} />
-      <TaskImportDialog kind={kind} open={importOpen} onOpenChange={setImportOpen} />
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="task-view-toggle" aria-label="Task view">
@@ -1379,10 +1415,34 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             onAssigneeChange={setAssigneeFilter}
           />
           <TaskExportButton kind={kind} />
-          {(canCreate || canEditTasks(active, kind)) && <Button variant="secondary" size="sm" onClick={() => setImportOpen(true)}>Import</Button>}
+          {(canCreate || canEditTasks(active, kind)) && (
+            <TaskImportButton kind={kind} onNotification={(notif) => setImportBanner(notif)} />
+          )}
           {canCreate && <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />New task</Button>}
         </div>
       </div>
+
+      {importBanner && (
+        <div
+          className={cn(
+            "mb-3 flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-[13px]",
+            importBanner.type === "success"
+              ? "bg-[var(--badge-green-bg)] text-[var(--badge-green-fg)] border border-[var(--badge-green-fg)]/20"
+              : "alert-error"
+          )}
+          role="alert"
+        >
+          <span>{importBanner.message}</span>
+          <button
+            type="button"
+            className="task-icon-btn h-6 w-6"
+            onClick={() => setImportBanner(null)}
+            aria-label="Dismiss import message"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {inlineError && (
         <div className="alert-error mb-3 flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-[13px]" role="alert">
@@ -1397,11 +1457,15 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             <div className="task-selection-pill" role="status" aria-live="polite">
               <span className="task-selection-pill-count">{selectionCount} selected</span>
               <span className="task-selection-pill-divider" aria-hidden="true" />
-              <button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={deleting} aria-label="Cancel selection">
+              <button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={deleting || exportingSelection} aria-label="Cancel selection" title="Cancel selection">
                 <X className="h-4 w-4" />
               </button>
               <span className="task-selection-pill-divider" aria-hidden="true" />
-              <button type="button" className="task-selection-pill-btn" data-danger="true" onClick={handleDeleteSelection} disabled={!canDeleteSelection} aria-label={selectionCount === 1 ? "Delete selected task" : `Delete ${selectionCount} selected tasks`}>
+              <button type="button" className="task-selection-pill-btn" onClick={() => void handleExportSelection()} disabled={exportingSelection || deleting} aria-label={selectionCount === 1 ? "Export selected task" : `Export ${selectionCount} selected tasks`} title="Export selected">
+                <Download className="h-4 w-4" />
+              </button>
+              <span className="task-selection-pill-divider" aria-hidden="true" />
+              <button type="button" className="task-selection-pill-btn" data-danger="true" onClick={handleDeleteSelection} disabled={!canDeleteSelection || deleting || exportingSelection} aria-label={selectionCount === 1 ? "Delete selected task" : `Delete ${selectionCount} selected tasks`} title="Delete selected">
                 <Trash2 className="h-4 w-4" />
               </button>
             </div>

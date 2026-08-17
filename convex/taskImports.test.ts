@@ -29,8 +29,8 @@ function draft(overrides: Record<string, unknown> = {}) {
   return {
     rowKey: "JD Tasks:2", sourceSheet: "JD Tasks", sourceRow: 2, source: "cendro" as const, kind: "jd" as const,
     reference: null, title: "Opening checklist", description: null, recurrence: "daily" as const, dueDate: null, priority: null,
-    time: null, quantity: null, rawAssigneeText: "admin@example.com", assigneeEmails: ["admin@example.com"], presentFields: ["title", "recurrence", "assignees"] as ("title" | "recurrence" | "assignees")[],
-    confidence: null, warnings: [], ...overrides,
+    time: null, quantity: null, rawAssigneeText: "admin@example.com", assigneeEmails: ["admin@example.com"], status: null, presentFields: ["title", "recurrence", "assignees"] as ("title" | "recurrence" | "assignees" | "status")[],
+    warnings: [], ...overrides,
   };
 }
 
@@ -49,20 +49,20 @@ describe("task import backend", () => {
     expect(tasks).toHaveLength(1);
   });
 
-  test("status is not an import field and blank assignees preserve updates", async () => {
+  test("status can be imported and blank assignees preserve updates", async () => {
     const { t, companyId, adminMembershipId } = await seed();
     const admin = t.withIdentity(identity("admin"));
     const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Old", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
     const task = await admin.query(api.tasks.getJd, { companyId, taskId });
     const result = await admin.mutation(api.taskImports.commitTaskImportBatch, {
       companyId, kind: "jd", importKey: "import-2", batchKey: "batch-1", source: "cendro",
-      rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: draft({ rowKey: "JD Tasks:2", reference: task.task.reference, title: "New", presentFields: ["reference", "title", "assignees"] }) }],
+      rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: draft({ rowKey: "JD Tasks:2", reference: task.task.reference, title: "New", status: "completed", presentFields: ["reference", "title", "assignees", "status"] }) }],
     });
     expect(result.updated).toBe(1);
     const updated = await admin.query(api.tasks.getJd, { companyId, taskId });
     expect(updated.task.title).toBe("New");
     expect(updated.task.assigneeMembershipIds).toEqual([adminMembershipId]);
-    expect(updated.task.status).toBe("due");
+    expect(updated.task.status).toBe("completed");
   });
 
   test("requires the preview version and rejects duplicate update references", async () => {
@@ -84,14 +84,14 @@ describe("task import backend", () => {
     })).rejects.toThrow(/duplicate task references/);
   });
 
-  test("AI updates preserve fields that were absent from the source", async () => {
+  test("updates preserve fields that were absent from the source", async () => {
     const { t, companyId, adminMembershipId } = await seed();
     const admin = t.withIdentity(identity("admin"));
     const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Keep", description: "Keep description", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
     const task = await admin.query(api.tasks.getJd, { companyId, taskId });
     await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-ai", batchKey: "batch-1", source: "ai",
-      rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: draft({ source: "ai", reference: task.task.reference, title: "Ignored", description: "Ignored", recurrence: null, presentFields: ["reference"], confidence: "high", rawAssigneeText: "", assigneeEmails: [] }) }],
+      companyId, kind: "jd", importKey: "import-partial", batchKey: "batch-1", source: "cendro",
+      rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: draft({ source: "cendro", reference: task.task.reference, title: "Ignored", description: "Ignored", recurrence: null, presentFields: ["reference"], rawAssigneeText: "", assigneeEmails: [] }) }],
     });
     const updated = await admin.query(api.tasks.getJd, { companyId, taskId });
     expect(updated.task).toMatchObject({ title: "Keep", description: "Keep description", recurrence: "weekly" });
@@ -103,7 +103,7 @@ describe("task import backend", () => {
     const taskId = await admin.mutation(api.tasks.createOneTime, { companyId, title: "Filed", dueDate: Date.now() + 86_400_000, priority: "medium", assigneeMembershipIds: [adminMembershipId] });
     await admin.mutation(api.tasks.completeOneTime, { companyId, taskId });
     const task = await admin.query(api.tasks.getOneTime, { companyId, taskId });
-    const oneTimeDraft = { ...draft(), rowKey: "One-Time Tasks:2", sourceSheet: "One-Time Tasks", kind: "one_time" as const, reference: task.task.reference, title: "Filed", recurrence: null, dueDate: Date.now() - 86_400_000, priority: "high" as const, presentFields: ["reference", "dueDate", "priority"] as ("reference" | "dueDate" | "priority")[], rawAssigneeText: "", assigneeEmails: [] };
+    const oneTimeDraft = { ...draft(), rowKey: "One-Time Tasks:2", sourceSheet: "One-Time Tasks", kind: "one_time" as const, reference: task.task.reference, title: "Filed", recurrence: null, dueDate: Date.now() - 86_400_000, priority: "high" as const, status: "completed" as const, presentFields: ["reference", "dueDate", "priority", "status"] as ("reference" | "dueDate" | "priority" | "status")[], rawAssigneeText: "", assigneeEmails: [] };
     await admin.mutation(api.taskImports.commitTaskImportBatch, {
       companyId, kind: "one_time", importKey: "import-completed", batchKey: "batch-1", source: "cendro",
       rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: oneTimeDraft }],

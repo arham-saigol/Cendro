@@ -10,4 +10,10 @@ const aiChatServerSchema = z.object({
   AI_MODEL: aiModelSchema,
 });
 
+const taskImportServerSchema = z.object({
+  NEXT_PUBLIC_CONVEX_URL: z.string().url(),
+  DEEPSEEK_API_KEY: z.string().min(1),
+});
+
 export function safeAiChatServerEnv() { return aiChatServerSchema.safeParse(process.env); }
+export function safeTaskImportServerEnv() { return taskImportServerSchema.safeParse(process.env); }

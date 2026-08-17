@@ -21,6 +21,7 @@ import type * as platform from "../platform.js";
 import type * as references from "../references.js";
 import type * as sops from "../sops.js";
 import type * as taskCycles from "../taskCycles.js";
+import type * as taskImports from "../taskImports.js";
 import type * as tasks from "../tasks.js";
 import type * as users from "../users.js";
 import type * as validation from "../validation.js";
@@ -45,6 +46,7 @@ declare const fullApi: ApiFromModules<{
   references: typeof references;
   sops: typeof sops;
   taskCycles: typeof taskCycles;
+  taskImports: typeof taskImports;
   tasks: typeof tasks;
   users: typeof users;
   validation: typeof validation;

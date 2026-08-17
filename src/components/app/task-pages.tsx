@@ -33,6 +33,7 @@ import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
 import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
+import { TaskExportButton, TaskImportDialog } from "./task-import-dialog";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -1110,6 +1111,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [assigneeFilter, setAssigneeFilter] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -1317,6 +1319,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       />
 
       <TaskDialog kind={kind} mode="create" open={createOpen} onOpenChange={setCreateOpen} assignable={assignable ?? []} />
+      <TaskImportDialog kind={kind} open={importOpen} onOpenChange={setImportOpen} />
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="task-view-toggle" aria-label="Task view">
@@ -1375,6 +1378,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             onPriorityChange={changePriorityFilter}
             onAssigneeChange={setAssigneeFilter}
           />
+          <TaskExportButton kind={kind} />
+          {(canCreate || canEditTasks(active, kind)) && <Button variant="secondary" size="sm" onClick={() => setImportOpen(true)}>Import</Button>}
           {canCreate && <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />New task</Button>}
         </div>
       </div>

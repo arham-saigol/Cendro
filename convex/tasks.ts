@@ -95,7 +95,7 @@ async function currentJdCycleRecord(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart:
   return await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).unique();
 }
 
-async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string) {
+export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string) {
   const { cycles, nextActiveAt } = elapsedJdCyclesSince(task.recurrence, task.cycleStartedAt, now, 200, timeZone ?? await companyTimeZone(ctx, task.companyId));
   for (const cycle of cycles) {
     const done = await currentJdCompletion(ctx, task._id, cycle.start);
@@ -153,6 +153,32 @@ export const listJdRows = query({
     }
     if (args.sort === "frequency") filtered.sort((a, b) => jdFrequencyOrder[a.recurrence] - jdFrequencyOrder[b.recurrence] || b.createdAt - a.createdAt);
     return filtered;
+  },
+});
+
+export const exportRows = query({
+  args: { companyId: v.id("companies"), kind: v.union(v.literal("jd"), v.literal("one_time")), paginationOpts: paginationOptsValidator },
+  handler: async (ctx, args) => {
+    const { membership, company } = await requireMembership(ctx, args.companyId);
+    const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
+    if (args.kind === "jd") {
+      const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("asc").paginate(args.paginationOpts);
+      const rows = [];
+      for (const task of page.page) if (await visible(ctx, args.companyId, membership, task, "jd", auth)) {
+        const assignees = await enrich(ctx, task.assigneeMembershipIds);
+        const state = await jdState(ctx, task, Date.now(), company.timeZone);
+        rows.push({ reference: task.reference, title: task.title, description: task.description ?? null, recurrence: task.recurrence, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: assignees.map((row) => row.user.email).join("; "), status: state.rawStatus });
+      }
+      return { ...page, page: rows };
+    }
+    const page = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("asc").paginate(args.paginationOpts);
+    const rows = [];
+    for (const task of page.page) if (await visible(ctx, args.companyId, membership, task, "one_time", auth)) {
+      const assignees = await enrich(ctx, task.assigneeMembershipIds);
+      const state = oneState(task);
+      rows.push({ reference: task.reference, title: task.title, description: task.description ?? null, dueDate: task.dueDate ?? null, priority: task.priority, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: assignees.map((row) => row.user.email).join("; "), status: state.rawStatus });
+    }
+    return { ...page, page: rows };
   },
 });
 
@@ -599,8 +625,8 @@ export const assignableUsers = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const caps = await membershipCapabilities(ctx, membership);
     const prefix = args.kind === "jd" ? "tasks:jd" : "tasks:one_time";
-    const canCreateOrUpdateSelf = caps.has(`${prefix}:create` as any) || caps.has(`${prefix}:update:self` as any);
-    if (!canCreateOrUpdateSelf) return [];
+    const canCreateOrUpdate = caps.has(`${prefix}:create` as any) || caps.has(`${prefix}:update:any` as any) || caps.has(`${prefix}:update:managed` as any) || caps.has(`${prefix}:update:self` as any);
+    if (!canCreateOrUpdate) return [];
     let ids: Set<Id<"companyMemberships">>;
     if (caps.has(`${prefix}:assign:any` as any)) {
       const all = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);

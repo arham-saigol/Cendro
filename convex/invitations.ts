@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { internalMutation, mutation, query } from "./_generated/server";
-import { currentOrCreateUser } from "./permissions";
+import { assertPermissionManagerRemains, currentOrCreateUser } from "./permissions";
 import { capabilities, type Capability } from "../src/lib/permissions";
 
 export const preview = query({
@@ -26,6 +26,14 @@ export const accept = mutation({
     if (!company || company.deletedAt) throw new ConvexError("Company not found.");
     const now = Date.now();
     const existing = await ctx.db.query("companyMemberships").withIndex("by_company_user", (q) => q.eq("companyId", invitation.companyId).eq("userId", user._id)).unique();
+    if (existing) {
+      const overrides = (invitation.permissionOverrides ?? []).map((o) => ({
+        membershipId: existing._id,
+        capability: o.capability as Capability,
+        effect: o.effect,
+      }));
+      await assertPermissionManagerRemains(ctx, invitation.companyId, existing._id, invitation.role, overrides);
+    }
     const membershipId = existing
       ? existing._id
       : await ctx.db.insert("companyMemberships", { companyId: invitation.companyId, userId: user._id, role: invitation.role, active: true, createdAt: now, updatedAt: now });

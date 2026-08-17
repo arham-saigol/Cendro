@@ -2,8 +2,14 @@ import { ConvexError, v } from "convex/values";
 import { action, internalMutation, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { membershipCapabilities, requireCapability, requireMembership } from "./permissions";
-import { capabilities, companyManagementCapabilities, defaultRoleCapabilities, type Capability, type Role } from "../src/lib/permissions";
+import {
+  assertPermissionManagerRemains,
+  assertPermissionManagerRemainsAfterActiveChanges,
+  membershipCapabilities,
+  requireCapability,
+  requireMembership,
+} from "./permissions";
+import { capabilities, companyManagementCapabilities, type Capability } from "../src/lib/permissions";
 import { defaultTimeZone } from "./taskCycles";
 import { nonEmpty, normalizeEmail } from "./validation";
 
@@ -60,41 +66,6 @@ async function managerScope(ctx: any, managerMembershipId: Id<"companyMembership
   const departmentIds = (await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", managerMembershipId)).take(500)).map((row: any) => row.departmentId);
   const userMembershipIds = (await ctx.db.query("managerUserScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", managerMembershipId)).take(500)).map((row: any) => row.userMembershipId);
   return { branchIds, departmentIds, userMembershipIds };
-}
-
-type OverrideChange = { membershipId: Id<"companyMemberships">; capability: Capability; effect: "allow" | "deny" | "inherit" };
-async function effectiveCapsAfter(ctx: any, membership: Doc<"companyMemberships">, nextRole?: Role, overrides: OverrideChange[] = []) {
-  const allowed = new Set<Capability>(defaultRoleCapabilities[nextRole ?? membership.role]);
-  const changes = overrides.filter((override) => override.membershipId === membership._id);
-  const rows = await ctx.db.query("permissionOverrides").withIndex("by_membership", (q: any) => q.eq("membershipId", membership._id)).take(500);
-  for (const row of rows) {
-    if (!capabilities.includes(row.capability as Capability)) continue;
-    if (changes.some((override) => override.capability === row.capability)) continue;
-    row.effect === "allow" ? allowed.add(row.capability as Capability) : allowed.delete(row.capability as Capability);
-  }
-  for (const override of changes) if (override.effect !== "inherit") override.effect === "allow" ? allowed.add(override.capability) : allowed.delete(override.capability);
-  return allowed;
-}
-async function assertPermissionManagerRemains(ctx: any, companyId: Id<"companies">, changedMembershipId: Id<"companyMemberships">, nextRole?: Role, override?: OverrideChange | OverrideChange[]) {
-  const overrides = override ? Array.isArray(override) ? override : [override] : [];
-  const memberships = await ctx.db.query("companyMemberships").withIndex("by_company", (q: any) => q.eq("companyId", companyId)).take(500);
-  for (const membership of memberships) {
-    if (!membership.active) continue;
-    const caps = await effectiveCapsAfter(ctx, membership, membership._id === changedMembershipId ? nextRole : undefined, overrides);
-    if (caps.has("company:manage_permissions")) return;
-  }
-  throw new ConvexError("At least one active member must be able to manage permissions.");
-}
-
-async function assertPermissionManagerRemainsAfterActiveChanges(ctx: any, companyId: Id<"companies">, activeChanges: Map<Id<"companyMemberships">, boolean>) {
-  const memberships = await ctx.db.query("companyMemberships").withIndex("by_company", (q: any) => q.eq("companyId", companyId)).take(500);
-  for (const membership of memberships) {
-    const active = activeChanges.get(membership._id) ?? membership.active;
-    if (!active) continue;
-    const caps = await membershipCapabilities(ctx, membership);
-    if (caps.has("company:manage_permissions")) return;
-  }
-  throw new ConvexError("At least one active member must be able to manage permissions.");
 }
 
 async function clearUserManagementRows(ctx: any, membershipId: Id<"companyMemberships">) {

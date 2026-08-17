@@ -3,7 +3,7 @@ import readXlsxFile, { type SheetData } from "read-excel-file/browser";
 import writeXlsxFile, { type Cell, type SheetData as WriteSheetData } from "write-excel-file/browser";
 import {
   taskImportDraftSchema,
-  referenceForKind as schemaReferenceForKind,
+  referenceForKind,
   type Frequency,
   type Priority,
   type TaskImportDraft,
@@ -223,8 +223,6 @@ export function duplicateReferences(rows: readonly Pick<TaskImportDraft, "refere
   }
   return new Set([...counts.entries()].filter(([, count]) => count > 1).map(([reference]) => reference));
 }
-
-export const referenceForKind = schemaReferenceForKind;
 
 export function buildExportMetadata(kind: TaskImportKind, companyId: string, companyName: string, exportedAt: string): WorkbookMetadata {
   return { format: TASK_IMPORT_FORMAT, version: TASK_IMPORT_SCHEMA_VERSION, kind, companyId, companyName, exportedAt };

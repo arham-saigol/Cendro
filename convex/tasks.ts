@@ -251,7 +251,26 @@ export const updateJd = mutation({
     const timeZone = await companyTimeZone(ctx, args.companyId);
     await recordMissedJdCycles(ctx, task, now, timeZone);
     const nextCycleStart = currentJdCycle(args.recurrence, now, timeZone).start;
-    await ctx.db.patch(args.taskId, { title: nonEmpty(args.title, "Task title"), description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, assigneeMembershipIds: args.assigneeMembershipIds, ...(args.recurrence !== task.recurrence ? { cycleStartedAt: nextCycleStart, status: "due" as const, statusCycleStart: nextCycleStart } : {}), updatedAt: now });
+    const nextTask = { ...task };
+    nextTask.title = nonEmpty(args.title, "Task title");
+    const desc = cleanOptionalText(args.description);
+    if (desc === undefined) delete nextTask.description;
+    else nextTask.description = desc;
+    const t = cleanOptionalText(args.time);
+    if (t === undefined) delete nextTask.time;
+    else nextTask.time = t;
+    const q = cleanOptionalQuantity(args.quantity);
+    if (q === undefined) delete nextTask.quantity;
+    else nextTask.quantity = q;
+    nextTask.recurrence = args.recurrence;
+    nextTask.assigneeMembershipIds = args.assigneeMembershipIds;
+    if (args.recurrence !== task.recurrence) {
+      nextTask.cycleStartedAt = nextCycleStart;
+      nextTask.status = "due";
+      nextTask.statusCycleStart = nextCycleStart;
+    }
+    nextTask.updatedAt = now;
+    await ctx.db.replace(args.taskId, nextTask);
     return null;
   },
 });
@@ -264,11 +283,15 @@ export const updateJdText = mutation({
     const task = await ctx.db.get(args.taskId);
     if (!task || task.companyId !== args.companyId) throw new ConvexError("Task not found.");
     await assertCanUpdateTask(ctx, args.companyId, membership, updateAuthTargets(task), "jd");
-    await ctx.db.patch(args.taskId, {
-      ...(args.title !== undefined ? { title: nonEmpty(args.title, "Task title") } : {}),
-      ...(args.description !== undefined ? { description: cleanOptionalText(args.description) } : {}),
-      updatedAt: Date.now(),
-    });
+    const nextTask = { ...task };
+    if (args.title !== undefined) nextTask.title = nonEmpty(args.title, "Task title");
+    if (args.description !== undefined) {
+      const desc = cleanOptionalText(args.description);
+      if (desc === undefined) delete nextTask.description;
+      else nextTask.description = desc;
+    }
+    nextTask.updatedAt = Date.now();
+    await ctx.db.replace(args.taskId, nextTask);
     return null;
   },
 });
@@ -300,16 +323,34 @@ export const updateJdFields = mutation({
     const timeZone = await companyTimeZone(ctx, args.companyId);
     await recordMissedJdCycles(ctx, task, now, timeZone);
     const nextCycleStart = args.recurrence !== undefined ? currentJdCycle(args.recurrence, now, timeZone).start : undefined;
-    await ctx.db.patch(args.taskId, {
-      ...(args.title !== undefined ? { title: nonEmpty(args.title, "Task title") } : {}),
-      ...(args.description !== undefined ? { description: cleanOptionalText(args.description) } : {}),
-      ...(args.time !== undefined ? { time: cleanOptionalText(args.time) } : {}),
-      ...(args.quantity !== undefined ? { quantity: args.quantity === null ? undefined : cleanOptionalQuantity(args.quantity) } : {}),
-      ...(args.recurrence !== undefined ? { recurrence: args.recurrence } : {}),
-      ...(args.recurrence !== undefined && args.recurrence !== task.recurrence ? { cycleStartedAt: nextCycleStart, status: "due" as const, statusCycleStart: nextCycleStart } : {}),
-      ...(args.assigneeMembershipIds !== undefined ? { assigneeMembershipIds: args.assigneeMembershipIds } : {}),
-      updatedAt: now,
-    });
+    const nextTask = { ...task };
+    if (args.title !== undefined) nextTask.title = nonEmpty(args.title, "Task title");
+    if (args.description !== undefined) {
+      const desc = cleanOptionalText(args.description);
+      if (desc === undefined) delete nextTask.description;
+      else nextTask.description = desc;
+    }
+    if (args.time !== undefined) {
+      const t = cleanOptionalText(args.time);
+      if (t === undefined) delete nextTask.time;
+      else nextTask.time = t;
+    }
+    if (args.quantity !== undefined) {
+      const q = args.quantity === null ? undefined : cleanOptionalQuantity(args.quantity);
+      if (q === undefined) delete nextTask.quantity;
+      else nextTask.quantity = q;
+    }
+    if (args.recurrence !== undefined) {
+      nextTask.recurrence = args.recurrence;
+      if (args.recurrence !== task.recurrence) {
+        nextTask.cycleStartedAt = nextCycleStart!;
+        nextTask.status = "due";
+        nextTask.statusCycleStart = nextCycleStart;
+      }
+    }
+    if (args.assigneeMembershipIds !== undefined) nextTask.assigneeMembershipIds = args.assigneeMembershipIds;
+    nextTask.updatedAt = now;
+    await ctx.db.replace(args.taskId, nextTask);
     return null;
   },
 });
@@ -414,7 +455,24 @@ export const updateOneTime = mutation({
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
     if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     const state = oneState(task);
-    await ctx.db.patch(args.taskId, { title: nonEmpty(args.title, "Task title"), description: cleanOptionalText(args.description), dueDate: args.dueDate, time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), assigneeMembershipIds: args.assigneeMembershipIds, priority: args.priority, overdueAt: state.isOverdue ? task.overdueAt ?? Date.now() : task.overdueAt, updatedAt: Date.now() });
+    const nextTask = { ...task };
+    nextTask.title = nonEmpty(args.title, "Task title");
+    const desc = cleanOptionalText(args.description);
+    if (desc === undefined) delete nextTask.description;
+    else nextTask.description = desc;
+    if (args.dueDate === undefined) delete nextTask.dueDate;
+    else nextTask.dueDate = args.dueDate;
+    const t = cleanOptionalText(args.time);
+    if (t === undefined) delete nextTask.time;
+    else nextTask.time = t;
+    const q = cleanOptionalQuantity(args.quantity);
+    if (q === undefined) delete nextTask.quantity;
+    else nextTask.quantity = q;
+    nextTask.assigneeMembershipIds = args.assigneeMembershipIds;
+    nextTask.priority = args.priority;
+    if (state.isOverdue && !nextTask.overdueAt) nextTask.overdueAt = Date.now();
+    nextTask.updatedAt = Date.now();
+    await ctx.db.replace(args.taskId, nextTask);
     return null;
   },
 });
@@ -427,11 +485,15 @@ export const updateOneTimeText = mutation({
     const task = await ctx.db.get(args.taskId);
     if (!task || task.companyId !== args.companyId) throw new ConvexError("Task not found.");
     await assertCanUpdateTask(ctx, args.companyId, membership, updateAuthTargets(task), "one_time");
-    await ctx.db.patch(args.taskId, {
-      ...(args.title !== undefined ? { title: nonEmpty(args.title, "Task title") } : {}),
-      ...(args.description !== undefined ? { description: cleanOptionalText(args.description) } : {}),
-      updatedAt: Date.now(),
-    });
+    const nextTask = { ...task };
+    if (args.title !== undefined) nextTask.title = nonEmpty(args.title, "Task title");
+    if (args.description !== undefined) {
+      const desc = cleanOptionalText(args.description);
+      if (desc === undefined) delete nextTask.description;
+      else nextTask.description = desc;
+    }
+    nextTask.updatedAt = Date.now();
+    await ctx.db.replace(args.taskId, nextTask);
     return null;
   },
 });
@@ -461,17 +523,32 @@ export const updateOneTimeFields = mutation({
       await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     }
     const state = oneState(task);
-    await ctx.db.patch(args.taskId, {
-      ...(args.title !== undefined ? { title: nonEmpty(args.title, "Task title") } : {}),
-      ...(args.description !== undefined ? { description: cleanOptionalText(args.description) } : {}),
-      ...(args.dueDate !== undefined ? { dueDate: args.dueDate === null ? undefined : args.dueDate } : {}),
-      ...(args.time !== undefined ? { time: cleanOptionalText(args.time) } : {}),
-      ...(args.quantity !== undefined ? { quantity: args.quantity === null ? undefined : cleanOptionalQuantity(args.quantity) } : {}),
-      ...(args.assigneeMembershipIds !== undefined ? { assigneeMembershipIds: args.assigneeMembershipIds } : {}),
-      ...(args.priority !== undefined ? { priority: args.priority } : {}),
-      overdueAt: state.isOverdue ? task.overdueAt ?? Date.now() : task.overdueAt,
-      updatedAt: Date.now(),
-    });
+    const nextTask = { ...task };
+    if (args.title !== undefined) nextTask.title = nonEmpty(args.title, "Task title");
+    if (args.description !== undefined) {
+      const desc = cleanOptionalText(args.description);
+      if (desc === undefined) delete nextTask.description;
+      else nextTask.description = desc;
+    }
+    if (args.dueDate !== undefined) {
+      if (args.dueDate === null) delete nextTask.dueDate;
+      else nextTask.dueDate = args.dueDate;
+    }
+    if (args.time !== undefined) {
+      const t = cleanOptionalText(args.time);
+      if (t === undefined) delete nextTask.time;
+      else nextTask.time = t;
+    }
+    if (args.quantity !== undefined) {
+      const q = args.quantity === null ? undefined : cleanOptionalQuantity(args.quantity);
+      if (q === undefined) delete nextTask.quantity;
+      else nextTask.quantity = q;
+    }
+    if (args.assigneeMembershipIds !== undefined) nextTask.assigneeMembershipIds = args.assigneeMembershipIds;
+    if (args.priority !== undefined) nextTask.priority = args.priority;
+    if (state.isOverdue && !nextTask.overdueAt) nextTask.overdueAt = Date.now();
+    nextTask.updatedAt = Date.now();
+    await ctx.db.replace(args.taskId, nextTask);
     return null;
   },
 });
@@ -488,7 +565,15 @@ async function setOneTimeStatus(ctx: MutationCtx, companyId: Id<"companies">, ta
   }
   const now = Date.now();
   const previousStatus = state.rawStatus as ManualStatus;
-  await ctx.db.patch(taskId, { status, completedAt: status === "completed" ? now : undefined, completedByMembershipId: status === "completed" ? membership._id : undefined, updatedAt: now });
+  const nextTask = { ...task, status, updatedAt: now };
+  if (status === "completed") {
+    nextTask.completedAt = now;
+    nextTask.completedByMembershipId = membership._id;
+  } else {
+    delete nextTask.completedAt;
+    delete nextTask.completedByMembershipId;
+  }
+  await ctx.db.replace(taskId, nextTask);
   if (previousStatus !== status) await logTaskActivity(ctx, { companyId, taskType: "one_time", taskId, actorMembershipId: membership._id, event: "status_changed", fromStatus: previousStatus, toStatus: status, createdAt: now });
 }
 
@@ -653,29 +738,6 @@ export const filterableAssignees = query({
   },
 });
 
-export const accessibleTasksForAi = query({
-  args: { companyId: v.id("companies"), overdueOnly: v.optional(v.boolean()) },
-  handler: async (ctx, args) => {
-    const { membership } = await requireMembership(ctx, args.companyId);
-    const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
-    const out: any[] = [];
-    for await (const task of ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc")) {
-      if (out.length >= 100) break;
-      if (await visible(ctx, args.companyId, membership, task, "jd", auth)) {
-        const state = await jdState(ctx, task);
-        if (!args.overdueOnly || state.status === "Overdue") out.push({ type: "JD", id: task._id, title: task.title, state: state.status, dueAt: state.dueAt });
-      }
-    }
-    for await (const task of ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc")) {
-      if (out.length >= 100) break;
-      if (await visible(ctx, args.companyId, membership, task, "one_time", auth)) {
-        const state = oneState(task);
-        if (!args.overdueOnly || state.status === "Overdue") out.push({ type: "One-time", id: task._id, title: task.title, state: state.status, dueAt: task.dueDate });
-      }
-    }
-    return out;
-  },
-});
 
 async function aiAssignees(ctx: Ctx, ids: Id<"companyMemberships">[]) {
   const rows = await enrich(ctx, ids);

@@ -395,4 +395,66 @@ describe("production permission and validation fixes", () => {
     const embeddings = await t.run(async (ctx) => await ctx.db.query("sopEmbeddings").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(10));
     expect(embeddings).toEqual([]);
   });
+
+  test("clearing optional fields on one-time tasks removes them from storage", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, {
+      companyId,
+      title: "Task to clear",
+      description: "Initial description",
+      dueDate: Date.now() + 86_400_000,
+      time: "10:00 AM",
+      quantity: 5,
+      assigneeMembershipIds: [adminMembershipId],
+      priority: "medium",
+    });
+
+    await t.withIdentity(identity("admin")).mutation(api.tasks.updateOneTimeFields, {
+      companyId,
+      taskId,
+      dueDate: null,
+      quantity: null,
+      description: "",
+      time: "",
+    });
+
+    const task = await t.run(async (ctx) => await ctx.db.get(taskId));
+    expect(task?.dueDate).toBeUndefined();
+    expect(task?.quantity).toBeUndefined();
+    expect(task?.description).toBeUndefined();
+    expect(task?.time).toBeUndefined();
+
+    // Completing and then uncompleting clears completedAt and completedByMembershipId
+    await t.withIdentity(identity("admin")).mutation(api.tasks.completeOneTime, { companyId, taskId });
+    const completedTask = await t.run(async (ctx) => await ctx.db.get(taskId));
+    expect(completedTask?.completedAt).toBeTypeOf("number");
+    expect(completedTask?.completedByMembershipId).toBeDefined();
+
+    await t.withIdentity(identity("admin")).mutation(api.tasks.updateOneTimeStatus, { companyId, taskId, status: "due" });
+    const revertedTask = await t.run(async (ctx) => await ctx.db.get(taskId));
+    expect(revertedTask?.completedAt).toBeUndefined();
+    expect(revertedTask?.completedByMembershipId).toBeUndefined();
+  });
+
+  test("invitation acceptance cannot downgrade the sole permission manager", async () => {
+    const t = convexTest(schema, modules);
+    const { token } = await t.run(async (ctx) => {
+      const now = Date.now();
+      const companyId = await ctx.db.insert("companies", { name: "Acme", createdAt: now });
+      const adminUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|sole_admin", email: "sole_admin@example.com", firstName: "Sole", secondName: "Admin", createdAt: now, updatedAt: now });
+      await ctx.db.insert("companyMemberships", { companyId, userId: adminUserId, role: "Admin", active: true, createdAt: now, updatedAt: now });
+      await ctx.db.insert("invitations", {
+        companyId,
+        email: "sole_admin@example.com",
+        role: "Employee",
+        token: "demote-token",
+        status: "pending",
+        createdAt: now,
+        expiresAt: now + 86_400_000,
+      });
+      return { token: "demote-token" };
+    });
+
+    await expect(t.withIdentity(identity("sole_admin", "sole_admin@example.com")).mutation(api.invitations.accept, { token })).rejects.toThrow("At least one active member must be able to manage permissions");
+  });
 });

@@ -308,7 +308,7 @@ export const commitTaskImportBatch = mutation({
           await recordMissedJdCycles(ctx, task, now, company.timeZone);
           const activeCycleStart = nextCycleStart ?? task.statusCycleStart ?? currentCycle.start;
           const targetStatus = hasField(item.draft, "status") && item.draft.status ? item.draft.status : undefined;
-          if (targetStatus && targetStatus !== task.status) {
+          if (targetStatus) {
             const currentDone = await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", activeCycleStart)).unique();
             if (targetStatus === "completed" && !currentDone) {
               await ctx.db.insert("jdTaskCompletions", { companyId: args.companyId, jdTaskId: task._id, cycleStart: activeCycleStart, completedByMembershipId: membership._id, completedAt: now });
@@ -316,34 +316,76 @@ export const commitTaskImportBatch = mutation({
               await ctx.db.delete(currentDone._id);
             }
           }
-          await ctx.db.patch(task._id, {
-            ...(hasField(item.draft, "title") ? { title: nonEmpty(item.draft.title ?? "", "Task title") } : {}),
-            ...(hasField(item.draft, "description") ? { description: cleanText(item.draft.description) } : {}),
-            ...(hasField(item.draft, "time") ? { time: cleanText(item.draft.time) } : {}),
-            ...(hasField(item.draft, "quantity") ? { quantity: item.draft.quantity ?? undefined } : {}),
-            ...(hasField(item.draft, "recurrence") && item.draft.recurrence ? { recurrence: item.draft.recurrence } : {}),
-            ...(item.assigneePatchRequested ? { assigneeMembershipIds: item.assigneeMembershipIds } : {}),
-            ...(targetStatus ? { status: targetStatus, statusCycleStart: activeCycleStart } : {}),
-            ...(nextCycleStart !== undefined && !targetStatus ? { cycleStartedAt: nextCycleStart, status: "due" as const, statusCycleStart: nextCycleStart } : {}),
-            ...(nextCycleStart !== undefined && targetStatus ? { cycleStartedAt: nextCycleStart } : {}),
-            updatedAt: now,
-          });
+          const nextTask = { ...task };
+          if (hasField(item.draft, "title")) nextTask.title = nonEmpty(item.draft.title ?? "", "Task title");
+          if (hasField(item.draft, "description")) {
+            const desc = cleanText(item.draft.description);
+            if (desc === undefined) delete nextTask.description;
+            else nextTask.description = desc;
+          }
+          if (hasField(item.draft, "time")) {
+            const t = cleanText(item.draft.time);
+            if (t === undefined) delete nextTask.time;
+            else nextTask.time = t;
+          }
+          if (hasField(item.draft, "quantity")) {
+            if (item.draft.quantity === null || item.draft.quantity === undefined) delete nextTask.quantity;
+            else nextTask.quantity = item.draft.quantity;
+          }
+          if (hasField(item.draft, "recurrence") && item.draft.recurrence) nextTask.recurrence = item.draft.recurrence;
+          if (item.assigneePatchRequested) nextTask.assigneeMembershipIds = item.assigneeMembershipIds;
+          if (targetStatus) {
+            nextTask.status = targetStatus;
+            nextTask.statusCycleStart = activeCycleStart;
+          }
+          if (nextCycleStart !== undefined) {
+            nextTask.cycleStartedAt = nextCycleStart;
+            if (!targetStatus) {
+              nextTask.status = "due";
+              nextTask.statusCycleStart = nextCycleStart;
+            }
+          }
+          nextTask.updatedAt = now;
+          await ctx.db.replace(task._id, nextTask);
         } else {
           const task = item.task as Doc<"oneTimeTasks">;
           const wasOverdue = Boolean(task.overdueAt) || Boolean(task.dueDate && task.status !== "completed" && task.dueDate < now);
           const targetStatus = hasField(item.draft, "status") && item.draft.status && !wasOverdue ? item.draft.status : undefined;
-          await ctx.db.patch(task._id, {
-            ...(hasField(item.draft, "title") ? { title: nonEmpty(item.draft.title ?? "", "Task title") } : {}),
-            ...(hasField(item.draft, "description") ? { description: cleanText(item.draft.description) } : {}),
-            ...(hasField(item.draft, "dueDate") ? { dueDate: item.draft.dueDate ?? undefined } : {}),
-            ...(hasField(item.draft, "priority") && item.draft.priority ? { priority: item.draft.priority } : {}),
-            ...(hasField(item.draft, "time") ? { time: cleanText(item.draft.time) } : {}),
-            ...(hasField(item.draft, "quantity") ? { quantity: item.draft.quantity ?? undefined } : {}),
-            ...(item.assigneePatchRequested ? { assigneeMembershipIds: item.assigneeMembershipIds } : {}),
-            ...(targetStatus ? { status: targetStatus, completedAt: targetStatus === "completed" ? (task.completedAt ?? now) : undefined, completedByMembershipId: targetStatus === "completed" ? (task.completedByMembershipId ?? membership._id) : undefined } : {}),
-            overdueAt: wasOverdue ? task.overdueAt ?? now : task.overdueAt,
-            updatedAt: now,
-          });
+          const nextTask = { ...task };
+          if (hasField(item.draft, "title")) nextTask.title = nonEmpty(item.draft.title ?? "", "Task title");
+          if (hasField(item.draft, "description")) {
+            const desc = cleanText(item.draft.description);
+            if (desc === undefined) delete nextTask.description;
+            else nextTask.description = desc;
+          }
+          if (hasField(item.draft, "dueDate")) {
+            if (item.draft.dueDate === null || item.draft.dueDate === undefined) delete nextTask.dueDate;
+            else nextTask.dueDate = item.draft.dueDate;
+          }
+          if (hasField(item.draft, "priority") && item.draft.priority) nextTask.priority = item.draft.priority;
+          if (hasField(item.draft, "time")) {
+            const t = cleanText(item.draft.time);
+            if (t === undefined) delete nextTask.time;
+            else nextTask.time = t;
+          }
+          if (hasField(item.draft, "quantity")) {
+            if (item.draft.quantity === null || item.draft.quantity === undefined) delete nextTask.quantity;
+            else nextTask.quantity = item.draft.quantity;
+          }
+          if (item.assigneePatchRequested) nextTask.assigneeMembershipIds = item.assigneeMembershipIds;
+          if (targetStatus) {
+            nextTask.status = targetStatus;
+            if (targetStatus === "completed") {
+              nextTask.completedAt = task.completedAt ?? now;
+              nextTask.completedByMembershipId = task.completedByMembershipId ?? membership._id;
+            } else {
+              delete nextTask.completedAt;
+              delete nextTask.completedByMembershipId;
+            }
+          }
+          if (wasOverdue) nextTask.overdueAt = task.overdueAt ?? now;
+          nextTask.updatedAt = now;
+          await ctx.db.replace(task._id, nextTask);
         }
         updated += 1;
         taskReferences.push(item.task.reference);

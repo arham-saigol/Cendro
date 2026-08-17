@@ -73,7 +73,7 @@ export async function POST(req: Request) {
 
   const { getToken } = await auth();
   const token = await getToken({ template: "convex" });
-  if (!token) return new Response("Missing Convex auth token", { status: 401 });
+  if (!token) return Response.json({ error: "Missing Convex auth token" }, { status: 401 });
 
   const client = new ConvexHttpClient(convexUrl);
   client.setAuth(token);

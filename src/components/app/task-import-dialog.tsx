@@ -67,6 +67,8 @@ export function TaskImportButton({
     if (!activeCompanyId) return;
     setBusy(true);
     setFileName(file.name);
+    const currentImportKey = crypto.randomUUID();
+    setImportKey(currentImportKey);
     try {
       const parsed = await parseWorkbook(file, activeCompanyId, taskKind(kind));
       if (parsed.rows.length === 0) {
@@ -84,11 +86,10 @@ export function TaskImportButton({
 
       if (blocked.length === 0) {
         // Direct seamless import!
-        await executeImport(nextRows);
+        await executeImport(nextRows, currentImportKey);
       } else {
         // Problematic rows found — open issues dialog
         setRows(nextRows);
-        setImportKey(crypto.randomUUID());
         setIssuesOpen(true);
       }
     } catch (err) {
@@ -101,9 +102,10 @@ export function TaskImportButton({
     }
   }
 
-  async function executeImport(rowsToImport: ReviewRow[]) {
+  async function executeImport(rowsToImport: ReviewRow[], keyOverride?: string) {
     if (!activeCompanyId) return;
     setBusy(true);
+    const keyToUse = keyOverride ?? importKey;
     const included = rowsToImport.filter((r) => r.include && r.operation !== "blocked" && r.errors.length === 0);
     if (included.length === 0) {
       onNotification?.({ type: "error", message: "No valid tasks to import." });
@@ -119,7 +121,7 @@ export function TaskImportButton({
         const result = await commit({
           companyId: activeCompanyId,
           kind: taskKind(kind),
-          importKey,
+          importKey: keyToUse,
           batchKey: crypto.randomUUID(),
           source: "cendro",
           rows: batch.map((row) => ({

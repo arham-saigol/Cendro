@@ -20,24 +20,62 @@ export async function currentUser(ctx: Ctx) {
   return { identity, user };
 }
 
-function cleanNamePart(value: unknown) {
+export type Role = "Admin" | "Manager" | "Employee";
+export type OverrideChange = { membershipId: Id<"companyMemberships">; capability: Capability; effect: "allow" | "deny" | "inherit" };
+
+export function cleanNamePart(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function nameFields(firstName: string, secondName: string) {
+export function nameFields(firstName: string, secondName: string) {
   const cleanSecondName = secondName.trim();
   return cleanSecondName ? { firstName, secondName: cleanSecondName } : { firstName };
 }
 
-function namesFromIdentity(identity: UserIdentity, email: string) {
+export function namesFromIdentity(identity: UserIdentity, email: string) {
   return nameFields(cleanNamePart(identity.givenName) || cleanNamePart(identity.name) || email, cleanNamePart(identity.familyName));
 }
 
-function namesForExistingUser(existing: { firstName?: unknown; secondName?: unknown }, identity: UserIdentity, email: string) {
+export function namesForExistingUser(existing: { firstName?: unknown; secondName?: unknown }, identity: UserIdentity, email: string) {
   const names = namesFromIdentity(identity, email);
   const firstName = typeof existing.firstName === "string" ? cleanNamePart(existing.firstName) || email : names.firstName;
   const secondName = typeof existing.secondName === "string" ? cleanNamePart(existing.secondName) : names.secondName ?? "";
   return nameFields(firstName, secondName);
+}
+
+export async function effectiveCapsAfter(ctx: Ctx, membership: Doc<"companyMemberships">, nextRole?: Role, overrides: OverrideChange[] = []) {
+  const allowed = new Set<Capability>(defaultRoleCapabilities[nextRole ?? membership.role]);
+  const changes = overrides.filter((override) => override.membershipId === membership._id);
+  const rows = await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", membership._id)).take(500);
+  for (const row of rows) {
+    if (!capabilities.includes(row.capability as Capability)) continue;
+    if (changes.some((override) => override.capability === row.capability)) continue;
+    row.effect === "allow" ? allowed.add(row.capability as Capability) : allowed.delete(row.capability as Capability);
+  }
+  for (const override of changes) if (override.effect !== "inherit") override.effect === "allow" ? allowed.add(override.capability) : allowed.delete(override.capability);
+  return allowed;
+}
+
+export async function assertPermissionManagerRemains(ctx: Ctx, companyId: Id<"companies">, changedMembershipId: Id<"companyMemberships">, nextRole?: Role, override?: OverrideChange | OverrideChange[]) {
+  const overrides = override ? (Array.isArray(override) ? override : [override]) : [];
+  const memberships = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(500);
+  for (const membership of memberships) {
+    if (!membership.active) continue;
+    const caps = await effectiveCapsAfter(ctx, membership, membership._id === changedMembershipId ? nextRole : undefined, overrides);
+    if (caps.has("company:manage_permissions")) return;
+  }
+  throw new ConvexError("At least one active member must be able to manage permissions.");
+}
+
+export async function assertPermissionManagerRemainsAfterActiveChanges(ctx: Ctx, companyId: Id<"companies">, activeChanges: Map<Id<"companyMemberships">, boolean>) {
+  const memberships = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(500);
+  for (const membership of memberships) {
+    const active = activeChanges.get(membership._id) ?? membership.active;
+    if (!active) continue;
+    const caps = await membershipCapabilities(ctx, membership);
+    if (caps.has("company:manage_permissions")) return;
+  }
+  throw new ConvexError("At least one active member must be able to manage permissions.");
 }
 
 export async function currentOrCreateUser(ctx: MutationCtx) {

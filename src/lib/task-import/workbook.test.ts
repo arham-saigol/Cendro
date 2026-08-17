@@ -12,8 +12,8 @@ import {
   parseStrictDate,
   parseAssigneeEmails,
   protectFormulaText,
-  referenceForKind,
 } from "./workbook";
+import { referenceForKind } from "./schema";
 
 describe("task workbook pure helpers", () => {
   test("normalizes canonical enum aliases and statuses", () => {

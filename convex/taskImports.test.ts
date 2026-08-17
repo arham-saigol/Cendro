@@ -63,6 +63,8 @@ describe("task import backend", () => {
     expect(updated.task.title).toBe("New");
     expect(updated.task.assigneeMembershipIds).toEqual([adminMembershipId]);
     expect(updated.task.status).toBe("completed");
+    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
+    expect(completions).toHaveLength(1);
   });
 
   test("requires the preview version and rejects duplicate update references", async () => {

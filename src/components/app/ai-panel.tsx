@@ -52,9 +52,7 @@ type AssistantBlock =
 
 type ActivityPanelPreference = { open: boolean; manual: boolean };
 
-type ModelTier = "flash" | "pro";
-type ProProvider = "deepseek" | "kimi";
-type ChatSession = { _id: Id<"aiChatSessions">; title?: string; modelTier?: ModelTier; proProvider?: ProProvider; createdAt: number; updatedAt: number };
+type ChatSession = { _id: Id<"aiChatSessions">; title?: string; createdAt: number; updatedAt: number };
 type PendingAttachment = { id: string; file: File; previewUrl?: string; part?: FileUIPart; status: "loading" | "ready" | "error" };
 
 const AI_SESSION_RESTORE_TTL_MS = 5 * 60 * 60 * 1000;
@@ -549,12 +547,10 @@ function AssistantOrbMark() {
 
 export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; onClose: () => void }) {
   const [input, setInput] = useState("");
-  const [selectedModel, setSelectedModel] = useState<ModelTier>("pro");
   const [selectedAttachments, setSelectedAttachments] = useState<PendingAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<Id<"aiChatSessions"> | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [sessionActionsOpen, setSessionActionsOpen] = useState<Id<"aiChatSessions"> | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState<Id<"aiChatSessions"> | null>(null);
   const [renameTitle, setRenameTitle] = useState("");
@@ -565,7 +561,6 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
   const titleRequested = useRef(new Set<string>());
   const localMessageSession = useRef<Id<"aiChatSessions"> | null>(null);
   const sessionMenuRef = useRef<HTMLDivElement | null>(null);
-  const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const selectedAttachmentsRef = useRef<PendingAttachment[]>([]);
@@ -634,26 +629,6 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     };
   }, [menuOpen]);
 
-  useEffect(() => {
-    if (!modelMenuOpen) return;
-
-    function closeOnOutsidePointer(event: PointerEvent) {
-      const target = event.target;
-      if (target instanceof Node && modelMenuRef.current?.contains(target)) return;
-      setModelMenuOpen(false);
-    }
-
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setModelMenuOpen(false);
-    }
-
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointer);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [modelMenuOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -674,8 +649,6 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     transport,
   });
   const isSending = status !== "ready" && !String(status).includes("error");
-  const hasStartedSession = messages.length > 0 || (persisted?.length ?? 0) > 0;
-  const attachmentsMuted = currentSession?.modelTier === "pro" && currentSession.proProvider === "deepseek";
   const attachmentPending = selectedAttachments.some((attachment) => attachment.status === "loading");
   const attachmentErrored = selectedAttachments.some((attachment) => attachment.status === "error");
   const canSubmit = !!sessionId && !isSending && !attachmentPending && !attachmentErrored && (!!input.trim() || selectedAttachments.length > 0);
@@ -691,25 +664,12 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
   }, [persisted, sessionId, setMessages, isSending, messages]);
 
   useEffect(() => {
-    if (currentSession?.modelTier) setSelectedModel(currentSession.modelTier);
-  }, [currentSession?.modelTier]);
-
-  useEffect(() => {
     selectedAttachmentsRef.current = selectedAttachments;
   }, [selectedAttachments]);
 
   useEffect(() => () => {
     for (const attachment of selectedAttachmentsRef.current) revokeAttachmentPreview(attachment);
   }, []);
-
-  useEffect(() => {
-    if (!attachmentsMuted) return;
-    setAttachmentError(null);
-    setSelectedAttachments((current) => {
-      for (const attachment of current) revokeAttachmentPreview(attachment);
-      return [];
-    });
-  }, [attachmentsMuted]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -833,7 +793,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
   }
 
   function addSelectedFiles(files: FileList | File[] | null) {
-    if (!files || attachmentsMuted) return;
+    if (!files) return;
     let totalBytes = selectedAttachmentsRef.current.reduce((sum, attachment) => sum + attachment.file.size, 0);
     const accepted: File[] = [];
     let rejectedError: string | null = null;
@@ -887,7 +847,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     try {
       const fileParts = submittedAttachments.flatMap((attachment) => attachment.part ? [attachment.part] : []);
       const message = submittedText.trim() ? { text: submittedText, ...(fileParts.length ? { files: fileParts } : {}) } : { files: fileParts };
-      const sendPromise = sendMessage(message as any, { body: { modelTier: selectedModel } });
+      const sendPromise = sendMessage(message as any);
       if (shouldTitle) {
         titleRequested.current.add(sessionId);
         const fileTitle = submittedAttachments.map((attachment) => attachment.file.name || "attachment").join(", ");
@@ -1118,45 +1078,13 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
             <input ref={fileInputRef} type="file" multiple accept={DOCUMENT_ACCEPT} className="hidden" onChange={(event) => addSelectedFiles(event.target.files)} />
             <button
               type="button"
-              onClick={(event) => { event.stopPropagation(); if (!attachmentsMuted) fileInputRef.current?.click(); }}
-              aria-disabled={attachmentsMuted}
-              title={attachmentsMuted ? "Create a new session to add images." : "Add photos or documents"}
-              className={`grid h-7 w-7 shrink-0 place-items-center rounded-md text-[var(--ink-muted)] outline-none transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] ${attachmentsMuted ? "cursor-not-allowed opacity-45" : ""}`}
+              onClick={(event) => { event.stopPropagation(); fileInputRef.current?.click(); }}
+              title="Add photos or documents"
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-[var(--ink-muted)] outline-none transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
             >
               <Plus className="h-4 w-4" />
             </button>
             <div className="ml-auto flex items-center gap-1.5">
-              <div ref={modelMenuRef} className="relative" onClick={(event) => event.stopPropagation()}>
-                <button
-                  type="button"
-                  onClick={() => { if (!hasStartedSession && !isSending) setModelMenuOpen((open) => !open); }}
-                  disabled={hasStartedSession || isSending}
-                  title={hasStartedSession ? "Create a new session to change models." : "Choose AI model"}
-                  aria-haspopup="listbox"
-                  aria-expanded={modelMenuOpen}
-                  className="h-7 rounded-full px-2.5 text-sm font-medium text-[var(--ink-secondary)] outline-none transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:opacity-60"
-                  aria-label="Select AI model"
-                >
-                  {selectedModel === "flash" ? "Flash" : "Pro"}
-                </button>
-                {modelMenuOpen && (
-                  <div className="absolute bottom-9 right-0 z-20 w-48 rounded-xl border border-[var(--hairline)] bg-[var(--surface)] p-1 shadow-[var(--shadow-popover)]" role="listbox" aria-label="AI model">
-                    {(["flash", "pro"] as const).map((model) => (
-                      <button
-                        key={model}
-                        type="button"
-                        role="option"
-                        aria-selected={selectedModel === model}
-                        onClick={() => { setSelectedModel(model); setModelMenuOpen(false); }}
-                        className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--ink-secondary)] outline-none hover:bg-[var(--surface-hover)] hover:text-[var(--ink)] focus-visible:bg-[var(--surface-hover)]"
-                      >
-                        <span className="flex-1">{model === "flash" ? "Flash" : "Pro"}</span>
-                        {selectedModel === model && <Check className="h-4 w-4 text-[var(--ink)]" />}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
               <Button type="submit" variant="primary" size="icon" disabled={!canSubmit} aria-label="Send message" className="rounded-full disabled:bg-[var(--surface-muted)] disabled:text-[var(--ink-muted)]"><ArrowUp className="h-4 w-4" /></Button>
             </div>
           </div>

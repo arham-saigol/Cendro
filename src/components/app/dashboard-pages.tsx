@@ -1,54 +1,34 @@
 "use client";
 
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useQuery_experimental } from "convex/react";
 import {
   AlertCircle,
   AlertTriangle,
-  ArrowUpRight,
   BarChart3,
   Building2,
   Calendar,
   Check,
   CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  Clock,
-  FileText,
-  Filter,
   Inbox,
-  Info,
   Layers,
-  ListFilter,
   ListTodo,
-  MoreHorizontal,
-  Plus,
-  RefreshCw,
   RotateCcw,
-  ShieldAlert,
-  ShieldCheck,
-  Sparkles,
   Timer,
-  TrendingUp,
   Trophy,
-  User,
   Users,
 } from "lucide-react";
-import { motion, useReducedMotion } from "motion/react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { PageHeader } from "./page-header";
 import { useCompany } from "./company-context";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { canViewDashboard } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import {
   TanStackTrendChart,
   type TrendMetricMode,
-  type BreakdownItemData,
 } from "./dashboard-charts";
 
 type DashboardRole = "Admin" | "Manager" | "Employee";

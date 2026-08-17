@@ -1,10 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
-import { defineChart, lineY, areaY, barX, barY } from "@tanstack/charts";
+import { defineChart, lineY, areaY } from "@tanstack/charts";
 import { scaleLinear } from "@tanstack/charts/scales/linear";
 import { scalePoint } from "@tanstack/charts/scales/point";
-import { scaleBand } from "@tanstack/charts/scales/band";
 import { tooltip } from "@tanstack/charts/tooltip";
 import { Chart } from "@tanstack/charts/react";
 
@@ -16,13 +15,6 @@ export type TrendPointData = {
   completed: number;
   overdue: number;
   workload: number;
-};
-
-export type BreakdownItemData = {
-  key: string;
-  label: string;
-  value: number;
-  color?: string;
 };
 
 /**
@@ -170,94 +162,6 @@ export function TanStackTrendChart({
   return (
     <div className="dash-chart-container w-full">
       <Chart definition={chartDefinition} height={height} ariaLabel="Performance trend chart" />
-    </div>
-  );
-}
-
-/**
- * Horizontal categorical bar chart powered by TanStack Charts for distributions.
- */
-export function TanStackHorizontalBarChart({
-  data,
-  height = 140,
-}: {
-  data: BreakdownItemData[];
-  height?: number;
-}) {
-  const chartDefinition = useMemo(() => {
-    if (!data || data.length === 0) return null;
-
-    const filtered = data.filter((d) => d.value >= 0);
-
-    return defineChart({
-      marks: [
-        barX(filtered, {
-          y: "label",
-          x: "value",
-          fill: (row) => row.color || "var(--primary, #3b82f6)",
-          inset: 2,
-        }),
-      ],
-      y: {
-        scale: () => scaleBand<string>().domain(filtered.map((d) => d.label)).padding(0.24),
-      },
-      x: {
-        scale: scaleLinear,
-        nice: true,
-        grid: true,
-      },
-      tooltip,
-    });
-  }, [data]);
-
-  if (!chartDefinition) return null;
-
-  return (
-    <div className="dash-chart-container w-full">
-      <Chart definition={chartDefinition} height={height} ariaLabel="Distribution bar chart" />
-    </div>
-  );
-}
-
-/**
- * Vertical categorical bar chart powered by TanStack Charts.
- */
-export function TanStackVerticalBarChart({
-  data,
-  height = 160,
-}: {
-  data: BreakdownItemData[];
-  height?: number;
-}) {
-  const chartDefinition = useMemo(() => {
-    if (!data || data.length === 0) return null;
-
-    return defineChart({
-      marks: [
-        barY(data, {
-          x: "label",
-          y: "value",
-          fill: (row) => row.color || "var(--primary, #3b82f6)",
-          inset: 3,
-        }),
-      ],
-      x: {
-        scale: () => scaleBand<string>().domain(data.map((d) => d.label)).padding(0.2),
-      },
-      y: {
-        scale: scaleLinear,
-        nice: true,
-        grid: true,
-      },
-      tooltip,
-    });
-  }, [data]);
-
-  if (!chartDefinition) return null;
-
-  return (
-    <div className="dash-chart-container w-full">
-      <Chart definition={chartDefinition} height={height} ariaLabel="Categorical column chart" />
     </div>
   );
 }

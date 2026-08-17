@@ -1,14 +1,13 @@
 "use client";
 
 import * as Dialog from "@radix-ui/react-dialog";
-import { AlertCircle, CheckCircle2, Download, FileSpreadsheet, LoaderCircle, Upload, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, Download, LoaderCircle, Upload, X } from "lucide-react";
 import { useConvex, useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import {
   downloadBlob,
@@ -36,11 +35,6 @@ type ReviewRow = {
 const MAX_BATCH_ROWS = 25;
 const recurrenceOptions = ["daily", "every_other_day", "weekly", "semimonthly", "monthly", "semiannually", "annually"] as const;
 const priorityOptions = ["low", "medium", "high"] as const;
-const statusOptions = [
-  { value: "due", label: "Pending" },
-  { value: "in_progress", label: "In Progress" },
-  { value: "completed", label: "Completed" },
-] as const;
 
 function taskKind(kind: PageKind): TaskImportKind {
   return kind === "jd" ? "jd" : "one_time";

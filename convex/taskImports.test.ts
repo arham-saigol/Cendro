@@ -162,9 +162,68 @@ describe("task import backend", () => {
     expect(preview.rows[0].errors).toContain("Status is not recognized.");
   });
 
-  test("an employee without create permission cannot preview blank-reference creates", async () => {
+  test("an employee without create permission cannot call preview, commit, or export", async () => {
     const { t, companyId } = await seed();
-    await expect(t.withIdentity(identity("employee")).query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [draft({ assigneeEmails: ["employee@example.com"], rawAssigneeText: "employee@example.com" })] })).resolves.toMatchObject({ rows: [{ operation: "blocked" }] });
+    const employee = t.withIdentity(identity("employee"));
+    await expect(employee.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [draft()] })).rejects.toThrow(/You do not have access/);
+    await expect(employee.mutation(api.taskImports.commitTaskImportBatch, { companyId, kind: "jd", importKey: "k", batchKey: "b", source: "cendro", rows: [] })).rejects.toThrow();
+    await expect(employee.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts: { cursor: null, numItems: 50 } })).rejects.toThrow(/You do not have access/);
+  });
+
+  test("manager exportRows and imports are scoped to their managed branch", async () => {
+    const t = convexTest(schema, modules);
+    const { companyId, managerMembershipId, empAMembershipId, empBMembershipId } = await t.run(async (ctx) => {
+      const now = Date.now();
+      const companyId = await ctx.db.insert("companies", { name: "Scoped Corp", createdAt: now });
+      const adminUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin", email: "admin@example.com", firstName: "Admin", createdAt: now, updatedAt: now });
+      const managerUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|manager", email: "manager@example.com", firstName: "Manager", createdAt: now, updatedAt: now });
+      const empAUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|empa", email: "empa@example.com", firstName: "EmpA", createdAt: now, updatedAt: now });
+      const empBUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|empb", email: "empb@example.com", firstName: "EmpB", createdAt: now, updatedAt: now });
+
+      const adminMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: adminUserId, role: "Admin", active: true, createdAt: now, updatedAt: now });
+      const managerMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: managerUserId, role: "Manager", active: true, createdAt: now, updatedAt: now });
+      const empAMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: empAUserId, role: "Employee", active: true, createdAt: now, updatedAt: now });
+      const empBMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: empBUserId, role: "Employee", active: true, createdAt: now, updatedAt: now });
+
+      const branchA = await ctx.db.insert("branches", { companyId, name: "Branch A", createdAt: now, updatedAt: now });
+      const branchB = await ctx.db.insert("branches", { companyId, name: "Branch B", createdAt: now, updatedAt: now });
+
+      await ctx.db.insert("managerBranchScopes", { companyId, managerMembershipId, branchId: branchA, updatedAt: now });
+      await ctx.db.insert("userBranchAssignments", { companyId, membershipId: empAMembershipId, branchId: branchA });
+      await ctx.db.insert("userBranchAssignments", { companyId, membershipId: empBMembershipId, branchId: branchB });
+
+      return { companyId, adminMembershipId, managerMembershipId, empAMembershipId, empBMembershipId };
+    });
+
+    const admin = t.withIdentity(identity("admin"));
+    const manager = t.withIdentity(identity("manager"));
+
+    // Admin creates 2 JD tasks: one for Branch A employee, one for Branch B employee
+    await admin.mutation(api.tasks.createJd, { companyId, title: "Branch A Task", recurrence: "daily", assigneeMembershipIds: [empAMembershipId] });
+    await admin.mutation(api.tasks.createJd, { companyId, title: "Branch B Task", recurrence: "daily", assigneeMembershipIds: [empBMembershipId] });
+
+    // Admin export gets all 2 tasks
+    const adminExport = await admin.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts: { cursor: null, numItems: 50 } });
+    expect(adminExport.page).toHaveLength(2);
+
+    // Manager export only gets the task in Branch A (their managed branch)
+    const managerExport = await manager.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts: { cursor: null, numItems: 50 } });
+    expect(managerExport.page).toHaveLength(1);
+    expect(managerExport.page[0].title).toBe("Branch A Task");
+
+    // Manager preview with Branch A employee is valid
+    const validPreview = await manager.query(api.taskImports.previewTaskImport, {
+      companyId, kind: "jd", drafts: [draft({ rawAssigneeText: "empa@example.com", assigneeEmails: ["empa@example.com"] })],
+    });
+    expect(validPreview.rows[0].operation).toBe("create");
+    expect(validPreview.rows[0].proposedAssigneeMembershipIds).toEqual([empAMembershipId]);
+
+    // Manager preview with Branch B employee (outside scope) fails to resolve assignee
+    const outOfScopePreview = await manager.query(api.taskImports.previewTaskImport, {
+      companyId, kind: "jd", drafts: [draft({ rawAssigneeText: "empb@example.com", assigneeEmails: ["empb@example.com"] })],
+    });
+    expect(outOfScopePreview.rows[0].operation).toBe("blocked");
+    expect(outOfScopePreview.rows[0].errors).toContain("New tasks need at least one resolved assignee.");
   });
 
   test("preserves exported overdue status but rejects changing an overdue one-time task", async () => {

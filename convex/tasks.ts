@@ -163,7 +163,8 @@ export const listJdRows = query({
 export const exportRows = query({
   args: { companyId: v.id("companies"), kind: v.union(v.literal("jd"), v.literal("one_time")), paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
-    const { membership, company } = await requireMembership(ctx, args.companyId);
+    const capability: Capability = args.kind === "jd" ? "tasks:jd:create" : "tasks:one_time:create";
+    const { membership, company } = await requireCapability(ctx, args.companyId, capability);
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
     if (args.kind === "jd") {
       const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("asc").paginate(args.paginationOpts);

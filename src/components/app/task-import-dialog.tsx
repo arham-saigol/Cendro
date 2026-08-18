@@ -440,17 +440,26 @@ export function TaskExportButton({ kind }: { kind: PageKind }) {
     if (requested && pages.status === "Exhausted" && !busy && activeCompanyId && active) {
       setBusy(true);
       setError(null);
+      let cancelled = false;
+      const capturedActiveCompanyId = activeCompanyId;
+      const capturedKind = kind;
       void (async () => {
         try {
-          const workbook = await exportTaskWorkbook(taskKind(kind), activeCompanyId, active.company.name, pages.results);
-          downloadBlob(await workbook.toBlob(), `${kind === "jd" ? "jd-tasks" : "one-time-tasks"}.xlsx`);
+          const workbook = await exportTaskWorkbook(taskKind(capturedKind), capturedActiveCompanyId, active.company.name, pages.results);
+          if (cancelled) return;
+          downloadBlob(await workbook.toBlob(), `${capturedKind === "jd" ? "jd-tasks" : "one-time-tasks"}.xlsx`);
         } catch (err) {
+          if (cancelled) return;
           setError(err instanceof Error ? err.message : "Could not export tasks.");
         } finally {
+          if (cancelled) return;
           setBusy(false);
           setRequested(false);
         }
       })();
+      return () => {
+        cancelled = true;
+      };
     }
   }, [active, activeCompanyId, busy, kind, pages.results, pages.status, requested]);
 

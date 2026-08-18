@@ -65,6 +65,8 @@ describe("task import backend", () => {
     expect(updated.task.status).toBe("completed");
     const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
     expect(completions).toHaveLength(1);
+    const logs = await t.run(async (ctx) => await ctx.db.query("taskActivityLogs").withIndex("by_task", (q) => q.eq("taskType", "jd").eq("taskId", taskId)).collect());
+    expect(logs.some((l) => l.event === "status_changed" && l.fromStatus === "due" && l.toStatus === "completed")).toBe(true);
   });
 
   test("requires the preview version and rejects duplicate update references", async () => {
@@ -136,5 +138,44 @@ describe("task import backend", () => {
   test("an employee without create permission cannot preview blank-reference creates", async () => {
     const { t, companyId } = await seed();
     await expect(t.withIdentity(identity("employee")).query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [draft({ assigneeEmails: ["employee@example.com"], rawAssigneeText: "employee@example.com" })] })).resolves.toMatchObject({ rows: [{ operation: "blocked" }] });
+  });
+
+  test("rejects status imports for overdue one-time tasks during preview and commit", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+    const pastDueDate = Date.now() - 3600_000;
+    const taskId = await admin.mutation(api.tasks.createOneTime, { companyId, title: "Past Task", dueDate: pastDueDate, priority: "medium", assigneeMembershipIds: [adminMembershipId] });
+    const task = await admin.query(api.tasks.getOneTime, { companyId, taskId });
+    const statusDraft = { ...draft(), rowKey: "One-Time Tasks:2", sourceSheet: "One-Time Tasks", kind: "one_time" as const, reference: task.task.reference, title: "Past Task", recurrence: null, dueDate: pastDueDate, priority: "medium" as const, status: "completed" as const, presentFields: ["reference", "status"] as ("reference" | "status")[], rawAssigneeText: "", assigneeEmails: [] };
+
+    const preview = await admin.query(api.taskImports.previewTaskImport, {
+      companyId, kind: "one_time", drafts: [statusDraft],
+    });
+    expect(preview.rows[0].operation).toBe("blocked");
+    expect(preview.rows[0].errors).toContain("Overdue tasks are locked and cannot be changed back.");
+
+    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "one_time", importKey: "import-overdue", batchKey: "batch-1", source: "cendro",
+      rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: statusDraft }],
+    })).rejects.toThrow(/Overdue tasks are locked/);
+  });
+
+  test("records status_changed activity logs for one-time task imports", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+    const futureDueDate = Date.now() + 86_400_000;
+    const taskId = await admin.mutation(api.tasks.createOneTime, { companyId, title: "Future Task", dueDate: futureDueDate, priority: "medium", assigneeMembershipIds: [adminMembershipId] });
+    const task = await admin.query(api.tasks.getOneTime, { companyId, taskId });
+    const statusDraft = { ...draft(), rowKey: "One-Time Tasks:2", sourceSheet: "One-Time Tasks", kind: "one_time" as const, reference: task.task.reference, title: "Future Task", recurrence: null, dueDate: futureDueDate, priority: "medium" as const, status: "completed" as const, presentFields: ["reference", "status"] as ("reference" | "status")[], rawAssigneeText: "", assigneeEmails: [] };
+
+    await admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "one_time", importKey: "import-ot-status", batchKey: "batch-1", source: "cendro",
+      rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: statusDraft }],
+    });
+
+    const updated = await admin.query(api.tasks.getOneTime, { companyId, taskId });
+    expect(updated.task.status).toBe("completed");
+    const logs = await t.run(async (ctx) => await ctx.db.query("taskActivityLogs").withIndex("by_task", (q) => q.eq("taskType", "one_time").eq("taskId", taskId)).collect());
+    expect(logs.some((l) => l.event === "status_changed" && l.fromStatus === "due" && l.toStatus === "completed")).toBe(true);
   });
 });

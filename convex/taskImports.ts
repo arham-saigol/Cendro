@@ -225,7 +225,15 @@ export const previewTaskImport = query({
       if (reference) {
         const candidateTask = await taskByReference(ctx, args.companyId, args.kind, reference);
         if (!candidateTask || !taskCanUpdate(auth, candidateTask, args.kind)) errors.push("Reference is unavailable or not updatable.");
-        else { task = candidateTask; operation = "update"; }
+        else {
+          task = candidateTask;
+          operation = "update";
+          if (args.kind === "one_time") {
+            const oneTime = task as Doc<"oneTimeTasks">;
+            const isOverdue = Boolean(oneTime.overdueAt) || Boolean(oneTime.dueDate && oneTime.status !== "completed" && oneTime.dueDate < Date.now());
+            if (isOverdue && hasField(draft, "status")) errors.push("Overdue tasks are locked and cannot be changed back.");
+          }
+        }
       } else if (auth.canCreate) operation = "create";
       else errors.push("You do not have create permission for this task kind.");
       const assignees = resolveAssignees(auth, draft, null, task);
@@ -258,6 +266,11 @@ async function validateCommitRow(ctx: MutationCtx, companyId: Id<"companies">, k
   if (!reference && !auth.canCreate) fail("Create permission changed. Re-preview and try again.");
   const errors = validateDraftValues(draft, kind);
   if (errors.length) fail(errors[0]);
+  if (kind === "one_time" && task && hasField(draft, "status")) {
+    const oneTime = task as Doc<"oneTimeTasks">;
+    const isOverdue = Boolean(oneTime.overdueAt) || Boolean(oneTime.dueDate && oneTime.status !== "completed" && oneTime.dueDate < Date.now());
+    if (isOverdue) fail("Overdue tasks are locked and cannot be changed back.");
+  }
   const resolved = resolveAssignees(auth, draft, row.selectedAssigneeMembershipIds, task);
   if (resolved.errors.length) fail(resolved.errors[0]);
   if (!task && !draft.title?.trim()) fail("New tasks need a title.");
@@ -310,9 +323,11 @@ export const commitTaskImportBatch = mutation({
           const rolled = await ctx.db.get(task._id);
           if (!rolled) fail("One or more import rows became unavailable. Re-preview and try again.");
           const activeCycleStart = nextCycleStart ?? rolled.statusCycleStart ?? currentCycle.start;
+          const previousDone = await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", activeCycleStart)).unique();
+          const previousStatus = previousDone || (rolled.statusCycleStart === activeCycleStart && rolled.status === "completed") ? "completed" : rolled.statusCycleStart === activeCycleStart ? rolled.status : "due";
           const targetStatus = hasField(item.draft, "status") && item.draft.status ? item.draft.status : undefined;
           if (targetStatus) {
-            const currentDone = await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", activeCycleStart)).unique();
+            const currentDone = previousDone;
             if (targetStatus === "completed" && !currentDone) {
               await ctx.db.insert("jdTaskCompletions", { companyId: args.companyId, jdTaskId: task._id, cycleStart: activeCycleStart, completedByMembershipId: membership._id, completedAt: now });
             } else if (targetStatus !== "completed" && currentDone) {
@@ -350,10 +365,14 @@ export const commitTaskImportBatch = mutation({
           }
           nextTask.updatedAt = now;
           await ctx.db.replace(task._id, nextTask);
+          if (previousStatus !== nextTask.status) {
+            await ctx.db.insert("taskActivityLogs", { companyId: args.companyId, taskType: "jd", taskId: task._id, actorMembershipId: membership._id, event: "status_changed", fromStatus: previousStatus, toStatus: nextTask.status, createdAt: now });
+          }
         } else {
           const task = item.task as Doc<"oneTimeTasks">;
           const wasOverdue = Boolean(task.overdueAt) || Boolean(task.dueDate && task.status !== "completed" && task.dueDate < now);
           const targetStatus = hasField(item.draft, "status") && item.draft.status && !wasOverdue ? item.draft.status : undefined;
+          const previousStatus = task.status;
           const nextTask = { ...task };
           if (hasField(item.draft, "title")) nextTask.title = nonEmpty(item.draft.title ?? "", "Task title");
           if (hasField(item.draft, "description")) {
@@ -389,6 +408,9 @@ export const commitTaskImportBatch = mutation({
           if (wasOverdue) nextTask.overdueAt = task.overdueAt ?? now;
           nextTask.updatedAt = now;
           await ctx.db.replace(task._id, nextTask);
+          if (targetStatus && previousStatus !== targetStatus) {
+            await ctx.db.insert("taskActivityLogs", { companyId: args.companyId, taskType: "one_time", taskId: task._id, actorMembershipId: membership._id, event: "status_changed", fromStatus: previousStatus, toStatus: targetStatus, createdAt: now });
+          }
         }
         updated += 1;
         taskReferences.push(item.task.reference);

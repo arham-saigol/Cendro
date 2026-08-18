@@ -1,7 +1,17 @@
 "use client";
 
 import * as Dialog from "@radix-ui/react-dialog";
-import { AlertCircle, CheckCircle2, Download, LoaderCircle, Upload, X } from "lucide-react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import {
+  AlertCircle,
+  ArrowUpDown,
+  CheckCircle2,
+  ChevronDown,
+  Download,
+  LoaderCircle,
+  Upload,
+  X,
+} from "lucide-react";
 import { useConvex, useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../../convex/_generated/api";
@@ -33,39 +43,94 @@ type ReviewRow = {
 };
 
 const MAX_BATCH_ROWS = 25;
-const recurrenceOptions = ["daily", "every_other_day", "weekly", "semimonthly", "monthly", "semiannually", "annually"] as const;
+const recurrenceOptions = [
+  "daily",
+  "every_other_day",
+  "weekly",
+  "semimonthly",
+  "monthly",
+  "semiannually",
+  "annually",
+] as const;
 const priorityOptions = ["low", "medium", "high"] as const;
 
 function taskKind(kind: PageKind): TaskImportKind {
   return kind === "jd" ? "jd" : "one_time";
 }
 
-export function TaskImportButton({
+export function TaskImportExportMenu({
   kind,
   onNotification,
 }: {
   kind: PageKind;
   onNotification?: (notification: { type: "success" | "error"; message: string }) => void;
 }) {
-  const { activeCompanyId } = useCompany();
+  const { activeCompanyId, active } = useCompany();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const convex = useConvex();
   const commit = useMutation(api.taskImports.commitTaskImportBatch);
 
-  const [busy, setBusy] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [fileName, setFileName] = useState("");
   const [rows, setRows] = useState<ReviewRow[]>([]);
   const [importKey, setImportKey] = useState(() => crypto.randomUUID());
+
+  const [exportRequested, setExportRequested] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
 
   const assignable = useQuery(
     api.tasks.assignableUsers,
     activeCompanyId ? { companyId: activeCompanyId, kind: taskKind(kind) } : "skip"
   );
 
+  const pages = usePaginatedQuery(
+    api.tasks.exportRows,
+    activeCompanyId && exportRequested ? { companyId: activeCompanyId, kind: taskKind(kind) } : "skip",
+    { initialNumItems: 200 }
+  );
+
+  const exportLoading = exportRequested && (pages.status === "LoadingFirstPage" || pages.status === "LoadingMore");
+  const isBusy = importBusy || exportBusy || exportLoading;
+
+  useEffect(() => {
+    if (exportRequested && pages.status === "CanLoadMore" && !exportBusy) {
+      pages.loadMore(200);
+    }
+  }, [exportBusy, exportRequested, pages]);
+
+  useEffect(() => {
+    if (exportRequested && pages.status === "Exhausted" && !exportBusy && activeCompanyId && active) {
+      setExportBusy(true);
+      void (async () => {
+        try {
+          const workbook = await exportTaskWorkbook(
+            taskKind(kind),
+            activeCompanyId,
+            active.company.name,
+            pages.results
+          );
+          downloadBlob(await workbook.toBlob(), `${kind === "jd" ? "jd-tasks" : "one-time-tasks"}.xlsx`);
+          onNotification?.({
+            type: "success",
+            message: `Successfully exported ${pages.results.length} task${pages.results.length === 1 ? "" : "s"}.`,
+          });
+        } catch (err) {
+          onNotification?.({
+            type: "error",
+            message: err instanceof Error ? err.message : "Could not export tasks.",
+          });
+        } finally {
+          setExportBusy(false);
+          setExportRequested(false);
+        }
+      })();
+    }
+  }, [active, activeCompanyId, exportBusy, exportRequested, kind, onNotification, pages.results, pages.status]);
+
   async function handleFile(file: File) {
     if (!activeCompanyId) return;
-    setBusy(true);
+    setImportBusy(true);
     setFileName(file.name);
     const currentImportKey = crypto.randomUUID();
     setImportKey(currentImportKey);
@@ -85,10 +150,8 @@ export function TaskImportButton({
       const blocked = nextRows.filter((r) => r.operation === "blocked" || r.errors.length > 0);
 
       if (blocked.length === 0) {
-        // Direct seamless import!
         await executeImport(nextRows, currentImportKey);
       } else {
-        // Problematic rows found — open issues dialog
         setRows(nextRows);
         setIssuesOpen(true);
       }
@@ -98,18 +161,18 @@ export function TaskImportButton({
         message: err instanceof Error ? err.message : "Could not import workbook.",
       });
     } finally {
-      setBusy(false);
+      setImportBusy(false);
     }
   }
 
   async function executeImport(rowsToImport: ReviewRow[], keyOverride?: string) {
     if (!activeCompanyId) return;
-    setBusy(true);
+    setImportBusy(true);
     const keyToUse = keyOverride ?? importKey;
     const included = rowsToImport.filter((r) => r.include && r.operation !== "blocked" && r.errors.length === 0);
     if (included.length === 0) {
       onNotification?.({ type: "error", message: "No valid tasks to import." });
-      setBusy(false);
+      setImportBusy(false);
       return;
     }
 
@@ -158,7 +221,7 @@ export function TaskImportButton({
         message: err instanceof Error ? err.message : "Failed to import tasks.",
       });
     } finally {
-      setBusy(false);
+      setImportBusy(false);
     }
   }
 
@@ -188,7 +251,7 @@ export function TaskImportButton({
 
   async function revalidateAndImport() {
     if (!activeCompanyId) return;
-    setBusy(true);
+    setImportBusy(true);
     try {
       const preview = await convex.query(api.taskImports.previewTaskImport, {
         companyId: activeCompanyId,
@@ -207,7 +270,7 @@ export function TaskImportButton({
         message: err instanceof Error ? err.message : "Validation failed.",
       });
     } finally {
-      setBusy(false);
+      setImportBusy(false);
     }
   }
 
@@ -216,15 +279,52 @@ export function TaskImportButton({
 
   return (
     <>
-      <Button
-        variant="secondary"
-        size="sm"
-        disabled={busy || !activeCompanyId}
-        onClick={() => fileInputRef.current?.click()}
-      >
-        {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-        {busy ? "Importing..." : "Import"}
-      </Button>
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger asChild>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={isBusy || !activeCompanyId}
+            aria-label="Import or export tasks"
+          >
+            {isBusy ? (
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : (
+              <ArrowUpDown className="h-4 w-4" />
+            )}
+            <span>
+              {exportBusy
+                ? "Exporting..."
+                : exportLoading
+                ? "Loading..."
+                : importBusy
+                ? "Importing..."
+                : "Import / Export"}
+            </span>
+            <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+          </Button>
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content align="end" sideOffset={6} className="task-menu min-w-44">
+            <DropdownMenu.Item
+              className="task-menu-item"
+              disabled={isBusy}
+              onSelect={() => fileInputRef.current?.click()}
+            >
+              <Upload className="h-4 w-4" />
+              <span>Import tasks</span>
+            </DropdownMenu.Item>
+            <DropdownMenu.Item
+              className="task-menu-item"
+              disabled={isBusy}
+              onSelect={() => setExportRequested(true)}
+            >
+              <Download className="h-4 w-4" />
+              <span>Export tasks</span>
+            </DropdownMenu.Item>
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
 
       <input
         ref={fileInputRef}
@@ -238,7 +338,7 @@ export function TaskImportButton({
         }}
       />
 
-      <Dialog.Root open={issuesOpen} onOpenChange={(open) => !busy && setIssuesOpen(open)}>
+      <Dialog.Root open={issuesOpen} onOpenChange={(open) => !importBusy && setIssuesOpen(open)}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]" />
           <Dialog.Content className="fixed inset-3 z-50 flex max-w-3xl flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] text-[var(--ink)] shadow-[var(--shadow-elevated)] md:inset-y-12 md:left-1/2 md:w-full md:-translate-x-1/2">
@@ -321,7 +421,10 @@ export function TaskImportButton({
                     {/* Inline resolution tools */}
                     <div className="mt-3 grid gap-2 border-t border-[var(--hairline)] pt-3 sm:grid-cols-2">
                       <div>
-                        <label htmlFor={`assignee-${row.rowKey}`} className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]">
+                        <label
+                          htmlFor={`assignee-${row.rowKey}`}
+                          className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]"
+                        >
                           Assignee
                         </label>
                         <select
@@ -341,7 +444,10 @@ export function TaskImportButton({
 
                       {kind === "jd" ? (
                         <div>
-                          <label htmlFor={`frequency-${row.rowKey}`} className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]">
+                          <label
+                            htmlFor={`frequency-${row.rowKey}`}
+                            className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]"
+                          >
                             Frequency
                           </label>
                           <select
@@ -349,7 +455,9 @@ export function TaskImportButton({
                             className="h-8 w-full rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2 text-[12px]"
                             value={row.draft.recurrence ?? ""}
                             onChange={(e) =>
-                              patchRow(row.rowKey, { recurrence: (e.target.value || null) as TaskImportDraft["recurrence"] })
+                              patchRow(row.rowKey, {
+                                recurrence: (e.target.value || null) as TaskImportDraft["recurrence"],
+                              })
                             }
                           >
                             <option value="">Select frequency</option>
@@ -362,7 +470,10 @@ export function TaskImportButton({
                         </div>
                       ) : (
                         <div>
-                          <label htmlFor={`priority-${row.rowKey}`} className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]">
+                          <label
+                            htmlFor={`priority-${row.rowKey}`}
+                            className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]"
+                          >
                             Priority
                           </label>
                           <select
@@ -370,7 +481,9 @@ export function TaskImportButton({
                             className="h-8 w-full rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2 text-[12px]"
                             value={row.draft.priority ?? ""}
                             onChange={(e) =>
-                              patchRow(row.rowKey, { priority: (e.target.value || null) as TaskImportDraft["priority"] })
+                              patchRow(row.rowKey, {
+                                priority: (e.target.value || null) as TaskImportDraft["priority"],
+                              })
                             }
                           >
                             <option value="">Select priority</option>
@@ -397,14 +510,21 @@ export function TaskImportButton({
                   <Button
                     variant="secondary"
                     size="sm"
-                    disabled={busy}
-                    onClick={() => executeImport(rows.filter((r) => r.operation !== "blocked" && r.errors.length === 0))}
+                    disabled={importBusy}
+                    onClick={() =>
+                      executeImport(rows.filter((r) => r.operation !== "blocked" && r.errors.length === 0))
+                    }
                   >
                     Import only {validCount} valid tasks
                   </Button>
                 )}
-                <Button variant="primary" size="sm" disabled={busy} onClick={() => void revalidateAndImport()}>
-                  {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={importBusy}
+                  onClick={() => void revalidateAndImport()}
+                >
+                  {importBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
                   Revalidate & Import
                 </Button>
               </div>
@@ -412,63 +532,6 @@ export function TaskImportButton({
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
-    </>
-  );
-}
-
-export function TaskExportButton({ kind }: { kind: PageKind }) {
-  const { activeCompanyId, active } = useCompany();
-  const [requested, setRequested] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const pages = usePaginatedQuery(
-    api.tasks.exportRows,
-    activeCompanyId && requested ? { companyId: activeCompanyId, kind: taskKind(kind) } : "skip",
-    { initialNumItems: 200 }
-  );
-
-  const loading = requested && (pages.status === "LoadingFirstPage" || pages.status === "LoadingMore");
-
-  useEffect(() => {
-    if (requested && pages.status === "CanLoadMore" && !busy) {
-      pages.loadMore(200);
-    }
-  }, [busy, pages, requested]);
-
-  useEffect(() => {
-    if (requested && pages.status === "Exhausted" && !busy && activeCompanyId && active) {
-      setBusy(true);
-      setError(null);
-      void (async () => {
-        try {
-          const workbook = await exportTaskWorkbook(taskKind(kind), activeCompanyId, active.company.name, pages.results);
-          downloadBlob(await workbook.toBlob(), `${kind === "jd" ? "jd-tasks" : "one-time-tasks"}.xlsx`);
-        } catch (err) {
-          setError(err instanceof Error ? err.message : "Could not export tasks.");
-        } finally {
-          setBusy(false);
-          setRequested(false);
-        }
-      })();
-    }
-  }, [active, activeCompanyId, busy, kind, pages.results, pages.status, requested]);
-
-  return (
-    <>
-      {error && <span className="text-[12px] text-[var(--danger)]">{error}</span>}
-      <Button
-        variant="secondary"
-        size="sm"
-        disabled={!activeCompanyId || loading || busy}
-        onClick={() => {
-          setError(null);
-          setRequested(true);
-        }}
-      >
-        <Download className="h-4 w-4" />
-        {loading ? "Loading..." : busy ? "Exporting..." : "Export"}
-      </Button>
     </>
   );
 }

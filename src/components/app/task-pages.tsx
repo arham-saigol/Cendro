@@ -34,7 +34,7 @@ import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
 import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
-import { TaskExportButton, TaskImportButton } from "./task-import-dialog";
+import { TaskImportExportMenu } from "./task-import-dialog";
 import { downloadBlob, exportTaskWorkbook } from "@/lib/task-import/workbook";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -1414,9 +1414,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             onPriorityChange={changePriorityFilter}
             onAssigneeChange={setAssigneeFilter}
           />
-          <TaskExportButton kind={kind} />
-          {(canCreate || canEditTasks(active, kind)) && (
-            <TaskImportButton kind={kind} onNotification={(notif) => setImportBanner(notif)} />
+          {canCreate && (
+            <TaskImportExportMenu kind={kind} onNotification={(notif) => setImportBanner(notif)} />
           )}
           {canCreate && <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />New task</Button>}
         </div>
@@ -1460,10 +1459,14 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               <button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={deleting || exportingSelection} aria-label="Cancel selection" title="Cancel selection">
                 <X className="h-4 w-4" />
               </button>
-              <span className="task-selection-pill-divider" aria-hidden="true" />
-              <button type="button" className="task-selection-pill-btn" onClick={() => void handleExportSelection()} disabled={exportingSelection || deleting} aria-label={selectionCount === 1 ? "Export selected task" : `Export ${selectionCount} selected tasks`} title="Export selected">
-                <Download className="h-4 w-4" />
-              </button>
+              {canCreate && (
+                <>
+                  <span className="task-selection-pill-divider" aria-hidden="true" />
+                  <button type="button" className="task-selection-pill-btn" onClick={() => void handleExportSelection()} disabled={exportingSelection || deleting} aria-label={selectionCount === 1 ? "Export selected task" : `Export ${selectionCount} selected tasks`} title="Export selected">
+                    <Download className="h-4 w-4" />
+                  </button>
+                </>
+              )}
               <span className="task-selection-pill-divider" aria-hidden="true" />
               <button type="button" className="task-selection-pill-btn" data-danger="true" onClick={handleDeleteSelection} disabled={!canDeleteSelection || deleting || exportingSelection} aria-label={selectionCount === 1 ? "Delete selected task" : `Delete ${selectionCount} selected tasks`} title="Delete selected">
                 <Trash2 className="h-4 w-4" />

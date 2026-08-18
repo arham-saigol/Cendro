@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { membershipCapabilities, requireMembership, scopedMembershipIds } from "./permissions";
+import { membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { currentJdCycle } from "./taskCycles";
 import { recordMissedJdCycles } from "./tasks";
@@ -203,7 +203,8 @@ export const previewTaskImport = query({
   args: { companyId: v.id("companies"), kind: kindValidator, drafts: v.array(draftValidator) },
   handler: async (ctx, args) => {
     if (args.drafts.length > MAX_PREVIEW_ROWS) fail(`Imports may contain at most ${MAX_PREVIEW_ROWS} task rows.`);
-    const { membership } = await requireMembership(ctx, args.companyId);
+    const capability: Capability = args.kind === "jd" ? "tasks:jd:create" : "tasks:one_time:create";
+    const { membership } = await requireCapability(ctx, args.companyId, capability);
     const auth = await buildImportAuth(ctx, args.companyId, membership, args.kind);
     const duplicateRefs = new Set<string>();
     const seenRefs = new Set<string>();
@@ -292,7 +293,8 @@ export const commitTaskImportBatch = mutation({
   handler: async (ctx, args) => {
     if (args.rows.length === 0 || args.rows.length > MAX_COMMIT_ROWS) fail(`Import batches must contain 1-${MAX_COMMIT_ROWS} rows.`);
     if (!args.importKey.trim() || !args.batchKey.trim() || args.importKey.length > 200 || args.batchKey.length > 200) fail("Import keys are invalid.");
-    const { membership, user, company } = await requireMembership(ctx, args.companyId);
+    const capability: Capability = args.kind === "jd" ? "tasks:jd:create" : "tasks:one_time:create";
+    const { membership, user, company } = await requireCapability(ctx, args.companyId, capability);
     const requestFingerprint = await fingerprintRows(args.rows);
     const existingReceipt = await ctx.db.query("taskImportBatches").withIndex("by_companyId_and_importKey_and_batchKey", (q) => q.eq("companyId", args.companyId).eq("importKey", args.importKey).eq("batchKey", args.batchKey)).unique();
     if (existingReceipt) {

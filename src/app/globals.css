@@ -52,6 +52,18 @@
   --assistant-orb-hover: #fbfbfb;
   --assistant-orb-border: rgba(31, 32, 32, 0.14);
   --assistant-orb-shadow: 0 3px 10px rgba(30, 28, 24, 0.10), 0 1px 2px rgba(30, 28, 24, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  /* TanStack Charts Palette Tokens */
+  --ts-chart-1: #2563eb;
+  --ts-chart-2: #10b981;
+  --ts-chart-3: #f59e0b;
+  --ts-chart-4: #ef4444;
+  --ts-chart-5: #8b5cf6;
+  --ts-chart-6: #06b6d4;
+  --ts-chart-tooltip-background: rgba(255, 255, 255, 0.95);
+  --ts-chart-tooltip-color: #1f2020;
+  --ts-chart-tooltip-border: 1px solid #e3e5e6;
+  --ts-chart-tooltip-border-radius: 0.75rem;
+  --ts-chart-tooltip-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
 }
 
 [data-theme="dark"] {
@@ -105,6 +117,18 @@
   --assistant-orb-hover: #e1e1e1;
   --assistant-orb-border: rgba(9, 9, 11, 0.35);
   --assistant-orb-shadow: 0 10px 28px rgba(0, 0, 0, 0.20), inset 0 1px 0 rgba(255, 255, 255, 0.85);
+  /* TanStack Charts Palette Tokens */
+  --ts-chart-1: #7fa2f4;
+  --ts-chart-2: #a0ddb6;
+  --ts-chart-3: #efd08a;
+  --ts-chart-4: #fb7d77;
+  --ts-chart-5: #c084fc;
+  --ts-chart-6: #38bdf8;
+  --ts-chart-tooltip-background: rgba(43, 45, 48, 0.95);
+  --ts-chart-tooltip-color: #efefec;
+  --ts-chart-tooltip-border: 1px solid #39393c;
+  --ts-chart-tooltip-border-radius: 0.75rem;
+  --ts-chart-tooltip-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
 }
 
 * { box-sizing: border-box; }
@@ -1515,3 +1539,75 @@ button:disabled { cursor: not-allowed; }
   .company-stat-row { grid-template-columns: 1fr; gap: 8px; }
   .company-settings-control { justify-content: flex-start; }
 }
+
+/* ==========================================================================
+   Executive Dashboard & Double-Bezel Architecture
+   ========================================================================== */
+.dash-bezel-card {
+  position: relative;
+  border-radius: 1.25rem;
+  padding: 1px;
+  background: linear-gradient(180deg, var(--hairline-strong) 0%, var(--hairline) 100%);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.02);
+  transition: transform 0.2s cubic-bezier(0.23, 1, 0.32, 1), box-shadow 0.2s cubic-bezier(0.23, 1, 0.32, 1), border-color 0.2s ease;
+}
+
+.dash-bezel-card-inner {
+  position: relative;
+  border-radius: calc(1.25rem - 1px);
+  background: var(--surface);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  height: 100%;
+}
+
+[data-theme="dark"] .dash-bezel-card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.09) 0%, rgba(255, 255, 255, 0.03) 100%);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+}
+
+[data-theme="dark"] .dash-bezel-card-inner {
+  background: var(--surface);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.dash-kpi-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.dash-kpi-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.06), 0 2px 6px -1px rgba(0, 0, 0, 0.04);
+}
+
+[data-theme="dark"] .dash-kpi-card:hover {
+  box-shadow: 0 12px 30px -4px rgba(0, 0, 0, 0.5);
+}
+
+.dash-chart-container {
+  position: relative;
+  width: 100%;
+}
+
+/* TanStack Charts Host Sizing & Axis Polish */
+.dash-chart-container svg {
+  display: block;
+  overflow: visible;
+}
+
+.dash-filter-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding-inline: 12px;
+  border-radius: 9999px;
+  font-size: 12.5px;
+  font-weight: 500;
+  transition: all 0.16s cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.dash-filter-pill-btn:active {
+  transform: scale(0.97);
+}
+

@@ -1,28 +1,7 @@
 import { mutation, query } from "./_generated/server";
-import type { UserIdentity } from "convex/server";
 import { ConvexError, v } from "convex/values";
-import { currentUser } from "./permissions";
+import { currentUser, nameFields, namesForExistingUser, namesFromIdentity } from "./permissions";
 import { normalizeEmail } from "./validation";
-
-function cleanNamePart(value: unknown) {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function nameFields(firstName: string, secondName: string) {
-  const cleanSecondName = secondName.trim();
-  return cleanSecondName ? { firstName, secondName: cleanSecondName } : { firstName };
-}
-
-function namesFromIdentity(identity: UserIdentity, email: string) {
-  return nameFields(cleanNamePart(identity.givenName) || cleanNamePart(identity.name) || email, cleanNamePart(identity.familyName));
-}
-
-function namesForExistingUser(existing: { firstName?: unknown; secondName?: unknown }, identity: UserIdentity, email: string) {
-  const names = namesFromIdentity(identity, email);
-  const firstName = typeof existing.firstName === "string" ? cleanNamePart(existing.firstName) || email : names.firstName;
-  const secondName = typeof existing.secondName === "string" ? cleanNamePart(existing.secondName) : names.secondName ?? "";
-  return nameFields(firstName, secondName);
-}
 
 export const syncCurrentUser = mutation({
   args: {},

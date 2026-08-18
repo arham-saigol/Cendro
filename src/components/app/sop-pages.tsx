@@ -840,7 +840,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
         </div>
         <div className="ml-auto flex flex-1 items-center justify-end gap-2">
           <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
-            <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search SOPs" aria-label="Search SOPs by title or body" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
+            <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search SOPs or ref" aria-label="Search SOPs by reference, title, or body" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
             <button type="button" className="task-search-button" aria-label={search ? "Clear search" : "Search SOPs"} onClick={() => { if (search) setSearch(""); else setSearchOpen((open) => !open); }}>
               {search ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
             </button>
@@ -919,6 +919,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
         <table className="task-table">
           <thead>
             <tr className="group/head">
+              <th className="w-[96px] whitespace-nowrap">REF</th>
               <th className="min-w-[200px] max-w-[420px]"><span className="inline-flex items-center gap-1.5"><FileText className="h-3.5 w-3.5" />Title</span></th>
               <th><span className="inline-flex items-center gap-1.5"><History className="h-3.5 w-3.5" />Updated</span></th>
               <th><span className="inline-flex items-center gap-1.5"><Plus className="h-3.5 w-3.5" />Created at</span></th>
@@ -928,7 +929,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
             {isLoading ? (
               Array.from({ length: 6 }).map((_, index) => (
                 <tr key={`skel-${index}`}>
-                  <td colSpan={3} className="pl-4">
+                  <td colSpan={4} className="pl-4">
                     <div className="flex items-center gap-3">
                       <div className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-[var(--surface-muted)]" />
                       <div className="h-3 w-2/5 animate-pulse rounded bg-[var(--surface-muted)]" />
@@ -938,7 +939,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
               ))
             ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={3} className="!h-auto py-2">
+                <td colSpan={4} className="!h-auto py-2">
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
                     <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{hasActiveFilters ? "No matching SOPs" : "No SOPs yet"}</div>
@@ -982,6 +983,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                       }}
                       className="group/row"
                     >
+                      <td className="w-[96px] whitespace-nowrap font-mono text-[12px] text-[var(--ink-muted)]">{sop.reference}</td>
                       <td className="col-task max-w-[420px]">
                         <div className="task-title-cell">
                           {rowCanEdit ? (
@@ -1014,7 +1016,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                 })}
                 {canCreate && (
                   <tr className="task-add-row">
-                    <td colSpan={3}>
+                    <td colSpan={4}>
                       <button type="button" className="task-add-label inline-flex items-center gap-1.5" onClick={() => setCreateOpen(true)}>
                         <Plus className="h-3.5 w-3.5" />New SOP
                       </button>

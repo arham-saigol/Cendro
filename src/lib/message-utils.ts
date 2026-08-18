@@ -2,8 +2,6 @@ const STORED_ASSISTANT_MESSAGE_KIND = "cendro-ai-message";
 const STORED_ASSISTANT_MESSAGE_VERSION = 1;
 const MAX_STORED_THINKING_CHARS = 20_000;
 const MAX_STORED_PARTS = 80;
-export const EMPTY_ASSISTANT_FALLBACK_TEXT = "I checked the requested workspace data, but couldn't generate a final response. Please try again.";
-
 type StoredAssistantMessage = {
   kind: typeof STORED_ASSISTANT_MESSAGE_KIND;
   version: typeof STORED_ASSISTANT_MESSAGE_VERSION;
@@ -106,10 +104,6 @@ export function finalTextOfAssistantMessage(message: any) {
   const lastToolIndex = parts.reduce((last: number, part: any, index: number) => toolNameOfPart(part) ? index : last, -1);
   if (lastToolIndex < 0) return textOf(message);
   return parts.slice(lastToolIndex + 1).map(partText).join("");
-}
-
-export function hasAssistantMessageContent(message: any) {
-  return !!finalTextOfAssistantMessage(message).trim();
 }
 
 export function serializeAssistantMessage(message: any) {

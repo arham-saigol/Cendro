@@ -755,6 +755,7 @@ export function DashboardPage() {
   const [scopeData, setScopeData] = useState<DashboardData | null>(null);
 
   useEffect(() => {
+    setActiveTab("overview");
     setDatePreset("30d");
     setTaskType("all");
     setStatus("all");
@@ -810,6 +811,10 @@ export function DashboardPage() {
   useEffect(() => {
     if (data) setScopeData(data);
   }, [data]);
+
+  useEffect(() => {
+    if (data?.role === "Employee" && (activeTab === "organization" || activeTab === "team")) setActiveTab("overview");
+  }, [activeTab, data?.role]);
 
   function resetFilters() {
     setDatePreset("30d");

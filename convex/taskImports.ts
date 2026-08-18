@@ -90,6 +90,11 @@ function hasField(draft: Draft, field: string) { return draft.presentFields.incl
 function hasAssigneeValue(draft: Draft) { return draft.assigneeEmails.length > 0 || draft.rawAssigneeText.trim().length > 0; }
 function fail(message: string): never { throw new ConvexError(message); }
 
+async function fingerprintRows(rows: ReviewedRow[]) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(rows)));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function parseReference(reference: string | null, kind: TaskKind) {
   const normalized = normalizedReference(reference);
   if (!normalized) return { value: null as string | null };
@@ -231,7 +236,7 @@ export const previewTaskImport = query({
           if (args.kind === "one_time") {
             const oneTime = task as Doc<"oneTimeTasks">;
             const isOverdue = Boolean(oneTime.overdueAt) || Boolean(oneTime.dueDate && oneTime.status !== "completed" && oneTime.dueDate < Date.now());
-            if (isOverdue && hasField(draft, "status")) errors.push("Overdue tasks are locked and cannot be changed back.");
+            if (isOverdue && hasField(draft, "status") && draft.status !== "due") errors.push("Overdue tasks are locked and cannot be changed back.");
           }
         }
       } else if (auth.canCreate) operation = "create";
@@ -266,7 +271,7 @@ async function validateCommitRow(ctx: MutationCtx, companyId: Id<"companies">, k
   if (!reference && !auth.canCreate) fail("Create permission changed. Re-preview and try again.");
   const errors = validateDraftValues(draft, kind);
   if (errors.length) fail(errors[0]);
-  if (kind === "one_time" && task && hasField(draft, "status")) {
+  if (kind === "one_time" && task && hasField(draft, "status") && draft.status !== "due") {
     const oneTime = task as Doc<"oneTimeTasks">;
     const isOverdue = Boolean(oneTime.overdueAt) || Boolean(oneTime.dueDate && oneTime.status !== "completed" && oneTime.dueDate < Date.now());
     if (isOverdue) fail("Overdue tasks are locked and cannot be changed back.");
@@ -288,9 +293,11 @@ export const commitTaskImportBatch = mutation({
     if (args.rows.length === 0 || args.rows.length > MAX_COMMIT_ROWS) fail(`Import batches must contain 1-${MAX_COMMIT_ROWS} rows.`);
     if (!args.importKey.trim() || !args.batchKey.trim() || args.importKey.length > 200 || args.batchKey.length > 200) fail("Import keys are invalid.");
     const { membership, user, company } = await requireMembership(ctx, args.companyId);
+    const requestFingerprint = await fingerprintRows(args.rows);
     const existingReceipt = await ctx.db.query("taskImportBatches").withIndex("by_companyId_and_importKey_and_batchKey", (q) => q.eq("companyId", args.companyId).eq("importKey", args.importKey).eq("batchKey", args.batchKey)).unique();
     if (existingReceipt) {
       if (existingReceipt.actorMembershipId !== membership._id || existingReceipt.kind !== args.kind || existingReceipt.source !== args.source) fail("Import receipt is not available.");
+      if (existingReceipt.requestFingerprint !== requestFingerprint) fail("Import batch key was already used for different rows. Re-preview and try again.");
       return existingReceipt.result;
     }
     if (args.rows.some((row) => row.draft.source !== args.source || row.draft.kind !== args.kind)) fail("Import source or task kind changed. Re-preview and try again.");
@@ -322,7 +329,7 @@ export const commitTaskImportBatch = mutation({
           await recordMissedJdCycles(ctx, task, now, company.timeZone);
           const rolled = await ctx.db.get(task._id);
           if (!rolled) fail("One or more import rows became unavailable. Re-preview and try again.");
-          const activeCycleStart = nextCycleStart ?? rolled.statusCycleStart ?? currentCycle.start;
+          const activeCycleStart = nextCycleStart ?? currentCycle.start;
           const previousDone = await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", activeCycleStart)).unique();
           const previousStatus = previousDone || (rolled.statusCycleStart === activeCycleStart && rolled.status === "completed") ? "completed" : rolled.statusCycleStart === activeCycleStart ? rolled.status : "due";
           const targetStatus = hasField(item.draft, "status") && item.draft.status ? item.draft.status : undefined;
@@ -434,7 +441,7 @@ export const commitTaskImportBatch = mutation({
       }
     }
     const result = { created, updated, skipped: args.rows.length - includedRows.length, failed: 0, taskReferences };
-    await ctx.db.insert("taskImportBatches", { companyId: args.companyId, actorMembershipId: membership._id, kind: args.kind, importKey: args.importKey, batchKey: args.batchKey, source: args.source, result, createdAt: Date.now() });
+    await ctx.db.insert("taskImportBatches", { companyId: args.companyId, actorMembershipId: membership._id, kind: args.kind, importKey: args.importKey, batchKey: args.batchKey, source: args.source, requestFingerprint, result, createdAt: Date.now() });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "task_import.batch", targetType: "taskImportBatch", metadata: { importKey: args.importKey, source: args.source, kind: args.kind, createCount: created, updateCount: updated, taskReferences }, createdAt: Date.now() });
     return result;
   },

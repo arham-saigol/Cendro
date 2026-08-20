@@ -1,5 +1,5 @@
 import { query } from "./_generated/server";
-import { currentUser, membershipCapabilities } from "./permissions";
+import { currentUser, memberFullName, membershipCapabilities } from "./permissions";
 
 async function companyAccessRows(ctx: Parameters<typeof currentUser>[0], activeOnly: boolean) {
   const { user } = await currentUser(ctx);
@@ -13,7 +13,8 @@ async function companyAccessRows(ctx: Parameters<typeof currentUser>[0], activeO
       const caps = membership.active ? await membershipCapabilities(ctx, membership) : new Set();
       rows.push({
         company: { _id: company._id, name: company.name, timeZone: company.timeZone },
-        membership: { _id: membership._id, role: membership.role, active: membership.active },
+        membership: { _id: membership._id, role: membership.role, active: membership.active, firstName: membership.firstName, secondName: membership.secondName },
+        displayName: memberFullName(membership, user),
         capabilities: Array.from(caps),
       });
     }

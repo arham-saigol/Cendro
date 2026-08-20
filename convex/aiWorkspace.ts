@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { analyticsScopedMembershipIds, membershipCapabilities, requireMembership, scopedMembershipIds, taskHasVisibleAssignee } from "./permissions";
+import { analyticsScopedMembershipIds, memberFullName, membershipCapabilities, requireMembership, scopedMembershipIds, taskHasVisibleAssignee } from "./permissions";
 
 function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.email; }
 function fullName(user: Doc<"appUsers">) { return [firstName(user), user.secondName?.trim()].filter(Boolean).join(" ") || user.email; }
@@ -13,7 +13,7 @@ async function peopleRows(ctx: QueryCtx, companyId: Id<"companies">, ids: Set<Id
     if (!membership || membership.companyId !== companyId || !membership.active) continue;
     const user = await ctx.db.get(membership.userId);
     if (!user) continue;
-    out.push({ membershipId: membership._id, name: fullName(user), email: user.email, role: membership.role });
+    out.push({ membershipId: membership._id, name: memberFullName(membership, user), email: user.email, role: membership.role });
   }
   return out;
 }

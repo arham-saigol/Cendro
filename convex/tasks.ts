@@ -1,10 +1,10 @@
-import { paginationOptsValidator } from "convex/server";
+import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { currentJdCycle, defaultTimeZone, elapsedJdCyclesSince } from "./taskCycles";
-import { assertCanAssign, assertCanUpdateTask, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds } from "./permissions";
+import { assertCanAssign, assertCanUpdateTask, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
 import { nextReference } from "./references";
@@ -18,7 +18,6 @@ const recurrenceValidator = v.union(v.literal("daily"), v.literal("every_other_d
 const priorityValidator = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
 const statusValidator = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
 const jdFrequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
-const jdFrequencyOrder: Record<Doc<"jdTasks">["recurrence"], number> = { daily: 0, every_other_day: 1, weekly: 2, semimonthly: 3, monthly: 4, semiannually: 5, annually: 6 };
 function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Pending" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
 function cleanOptionalText(value?: string) { const text = value?.trim(); return text ? text : undefined; }
 function cleanOptionalQuantity(value?: number) { return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined; }
@@ -31,7 +30,11 @@ async function enrich(ctx: Ctx, ids: Id<"companyMemberships">[]) {
   const userById = new Map(users.map((user) => [user._id, user]));
   return memberships.flatMap((membership) => {
     const user = userById.get(membership.userId);
-    return user ? [{ membership: { _id: membership._id, role: membership.role }, user: { name: firstName(user), firstName: firstName(user), secondName: user.secondName ?? "", fullName: fullName(user), email: user.email, imageUrl: user.imageUrl } }] : [];
+    if (!user) return [];
+    const fName = memberFirstName(membership, user);
+    const sName = membership.secondName !== undefined ? membership.secondName.trim() : (user.secondName?.trim() ?? "");
+    const full = memberFullName(membership, user);
+    return [{ membership: { _id: membership._id, role: membership.role }, user: { name: fName, firstName: fName, secondName: sName, fullName: full, email: user.email, imageUrl: user.imageUrl } }];
   });
 }
 
@@ -144,19 +147,19 @@ function matchesSearch(task: { title: string; reference: string }, search?: stri
 }
 
 export const listJdRows = query({
-  args: { companyId: v.id("companies"), search: v.optional(v.string()), frequency: v.optional(jdFrequencyFilterValidator), sort: v.optional(v.union(v.literal("newest"), v.literal("frequency"))) },
+  args: { companyId: v.id("companies"), search: v.optional(v.string()), frequency: v.optional(jdFrequencyFilterValidator), paginationOpts: paginationOptsValidator },
+  returns: paginationResultValidator(v.any()),
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
-    const filtered = [];
-    for await (const task of ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc")) {
+    const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
+    const rows = [];
+    for (const task of page.page) {
       if (args.frequency && args.frequency !== "all" && task.recurrence !== args.frequency) continue;
       if (!matchesSearch(task, args.search)) continue;
-      if (await visible(ctx, args.companyId, membership, task, "jd", auth)) filtered.push(await enrichedJd(ctx, task));
-      if (filtered.length >= 200) break;
+      if (await visible(ctx, args.companyId, membership, task, "jd", auth)) rows.push(await enrichedJd(ctx, task));
     }
-    if (args.sort === "frequency") filtered.sort((a, b) => jdFrequencyOrder[a.recurrence] - jdFrequencyOrder[b.recurrence] || b.createdAt - a.createdAt);
-    return filtered;
+    return { ...page, page: rows };
   },
 });
 
@@ -188,30 +191,41 @@ export const exportRows = query({
 });
 
 export const listOneTimeRows = query({
-  args: { companyId: v.id("companies"), search: v.optional(v.string()), sort: v.optional(v.union(v.literal("newest"), v.literal("dueDate"))) },
+  args: { companyId: v.id("companies"), search: v.optional(v.string()), priority: v.optional(v.union(v.literal("all"), priorityValidator)), paginationOpts: paginationOptsValidator },
+  returns: paginationResultValidator(v.any()),
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
-    const filtered = [];
-    for await (const task of ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc")) {
+    const page = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
+    const rows = [];
+    for (const task of page.page) {
+      if (args.priority && args.priority !== "all" && task.priority !== args.priority) continue;
       if (!matchesSearch(task, args.search)) continue;
-      if (await visible(ctx, args.companyId, membership, task, "one_time", auth)) filtered.push(await enrichedOneTime(ctx, task));
-      if (filtered.length >= 200) break;
+      if (await visible(ctx, args.companyId, membership, task, "one_time", auth)) rows.push(await enrichedOneTime(ctx, task));
     }
-    if (args.sort === "dueDate") filtered.sort((a, b) => (a.dueDate ?? Number.MAX_SAFE_INTEGER) - (b.dueDate ?? Number.MAX_SAFE_INTEGER));
-    return filtered;
+    return { ...page, page: rows };
   },
 });
 
-export const listJd = query({
-  args: { companyId: v.id("companies"), paginationOpts: paginationOptsValidator },
+export const personalFilterOptions = query({
+  args: { companyId: v.id("companies"), kind: v.union(v.literal("jd"), v.literal("one_time")) },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
-    const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
-    const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
-    const rows = [];
-    for (const task of page.page) if (await visible(ctx, args.companyId, membership, task, "jd", auth)) rows.push(await enrichedJd(ctx, task));
-    return { ...page, page: rows };
+    if (args.kind === "jd") {
+      const tasks = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
+      const values = new Set<string>();
+      for (const t of tasks) {
+        if (t.assigneeMembershipIds.includes(membership._id)) values.add(t.recurrence);
+      }
+      return { values: Array.from(values) };
+    } else {
+      const tasks = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
+      const values = new Set<string>();
+      for (const t of tasks) {
+        if (t.assigneeMembershipIds.includes(membership._id)) values.add(t.priority);
+      }
+      return { values: Array.from(values) };
+    }
   },
 });
 
@@ -407,18 +421,6 @@ export const recordMissedJdCyclesBatch = internalMutation({
     for (const task of page.page) await recordMissedJdCycles(ctx, task);
     if (!page.isDone) await ctx.scheduler.runAfter(0, internal.tasks.recordMissedJdCyclesBatch, { cursor: page.continueCursor });
     return page.page.length;
-  },
-});
-
-export const listOneTime = query({
-  args: { companyId: v.id("companies"), paginationOpts: paginationOptsValidator },
-  handler: async (ctx, args) => {
-    const { membership } = await requireMembership(ctx, args.companyId);
-    const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
-    const page = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
-    const rows = [];
-    for (const task of page.page) if (await visible(ctx, args.companyId, membership, task, "one_time", auth)) rows.push(await enrichedOneTime(ctx, task));
-    return { ...page, page: rows };
   },
 });
 

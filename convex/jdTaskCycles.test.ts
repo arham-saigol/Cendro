@@ -56,12 +56,12 @@ describe("JD task cycle behavior", () => {
 
     const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Semi-monthly review", description: "", recurrence: "semimonthly", assigneeMembershipIds: [adminMembershipId] });
     const detail = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
-    const rows = await t.withIdentity(identity("admin")).query(api.tasks.listJdRows, { companyId, frequency: "semimonthly" });
+    const rows = await t.withIdentity(identity("admin")).query(api.tasks.listJdRows, { companyId, frequency: "semimonthly", paginationOpts: { numItems: 10, cursor: null } });
 
     expect(detail.task.state.rawStatus).toBe("due");
     expect(detail.task.state.currentCycleStart).toBe(utc(2026, 6, 16));
     expect(detail.task.state.currentCycleEnd).toBe(utc(2026, 7, 1));
-    expect(rows.find((row) => row._id === taskId)?.recurrence).toBe("semimonthly");
+    expect(rows.page.find((row) => row._id === taskId)?.recurrence).toBe("semimonthly");
   });
 
   test("daily JD task uses the company time zone across local midnight", async () => {
@@ -116,12 +116,12 @@ describe("JD task cycle behavior", () => {
     vi.setSystemTime(utc(2026, 6, 29));
     await t.withIdentity(identity("admin")).mutation(api.tasks.updateJd, { companyId, taskId, title: "Weekly review", description: "", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
     const detail = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
-    const rows = await t.withIdentity(identity("admin")).query(api.tasks.listJdRows, { companyId, frequency: "weekly" });
+    const rows = await t.withIdentity(identity("admin")).query(api.tasks.listJdRows, { companyId, frequency: "weekly", paginationOpts: { numItems: 10, cursor: null } });
     const records = await t.withIdentity(identity("admin")).query(api.tasks.listJdCycleRecords, { companyId, taskId });
 
     expect(detail.task.state.rawStatus).toBe("due");
     expect(detail.task.state.isOverdue).toBe(false);
-    expect(rows.find((row) => row._id === taskId)?.state.rawStatus).toBe("due");
+    expect(rows.page.find((row) => row._id === taskId)?.state.rawStatus).toBe("due");
     expect(records).toMatchObject([{ cycleStart: utc(2026, 6, 22), cycleEnd: utc(2026, 6, 29), status: "missed" }]);
   });
 

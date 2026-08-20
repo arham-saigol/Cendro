@@ -43,6 +43,16 @@ export function namesForExistingUser(existing: { firstName?: unknown; secondName
   return nameFields(firstName, secondName);
 }
 
+export function memberFirstName(membership: { firstName?: string } | null | undefined, user: { firstName: string; email: string }) {
+  return membership?.firstName?.trim() || user.firstName.trim() || user.email;
+}
+
+export function memberFullName(membership: { firstName?: string; secondName?: string } | null | undefined, user: { firstName: string; secondName?: string; email: string }) {
+  const first = memberFirstName(membership, user);
+  const second = membership?.secondName !== undefined ? membership.secondName.trim() : (user.secondName?.trim() ?? "");
+  return [first, second].filter(Boolean).join(" ") || user.email;
+}
+
 export async function effectiveCapsAfter(ctx: Ctx, membership: Doc<"companyMemberships">, nextRole?: Role, overrides: OverrideChange[] = []) {
   const allowed = new Set<Capability>(defaultRoleCapabilities[nextRole ?? membership.role]);
   const changes = overrides.filter((override) => override.membershipId === membership._id);

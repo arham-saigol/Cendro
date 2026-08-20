@@ -8,7 +8,8 @@ import type { Id } from "../../../convex/_generated/dataModel";
 
 export type CompanyAccess = {
   company: { _id: Id<"companies">; name: string; timeZone?: string };
-  membership: { _id: Id<"companyMemberships">; role: string; active: boolean };
+  membership: { _id: Id<"companyMemberships">; role: string; active: boolean; firstName?: string; secondName?: string };
+  displayName?: string;
   capabilities: string[];
 };
 

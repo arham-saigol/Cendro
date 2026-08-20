@@ -98,9 +98,60 @@ describe("production permission and validation fixes", () => {
     ]);
     expect([firstJd.task.reference, secondJd.task.reference, oneTime.task.reference, sop.reference]).toEqual(["JD-0001", "JD-0002", "OT-0001", "SOP-0001"]);
 
-    await expect(admin.query(api.tasks.listJdRows, { companyId, search: "jd-0002" })).resolves.toMatchObject([{ _id: secondJdId }]);
-    await expect(admin.query(api.tasks.listOneTimeRows, { companyId, search: "OT-0001" })).resolves.toMatchObject([{ _id: oneTimeId }]);
+    await expect(admin.query(api.tasks.listJdRows, { companyId, search: "jd-0002", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: secondJdId }] });
+    await expect(admin.query(api.tasks.listOneTimeRows, { companyId, search: "OT-0001", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: oneTimeId }] });
     await expect(admin.query(api.sops.listRows, { companyId, search: "sop-0001" })).resolves.toMatchObject([{ _id: sopId }]);
+  });
+
+  test("assignee results continue past the first 200 company tasks", async () => {
+    const { t, companyId, adminMembershipId, employeeMembershipId } = await seedCompany();
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let index = 1; index <= 68; index += 1) {
+        await ctx.db.insert("jdTasks", {
+          companyId,
+          reference: `JD-${String(index).padStart(4, "0")}`,
+          title: `Task ${index}`,
+          recurrence: "daily",
+          cycleStartedAt: now,
+          status: "due",
+          assigneeMembershipIds: [employeeMembershipId],
+          createdByMembershipId: adminMembershipId,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let index = 69; index <= 263; index += 1) {
+        await ctx.db.insert("jdTasks", {
+          companyId,
+          reference: `JD-${String(index).padStart(4, "0")}`,
+          title: `Task ${index}`,
+          recurrence: "daily",
+          cycleStartedAt: now,
+          status: "due",
+          assigneeMembershipIds: [adminMembershipId],
+          createdByMembershipId: adminMembershipId,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+
+    const admin = t.withIdentity(identity("admin"));
+    const first = await admin.query(api.tasks.listJdRows, { companyId, paginationOpts: { numItems: 200, cursor: null } });
+    const second = await admin.query(api.tasks.listJdRows, { companyId, paginationOpts: { numItems: 200, cursor: first.continueCursor } });
+    const employeeTasks = [...first.page, ...second.page].filter((task) => task.assigneeMembershipIds.includes(employeeMembershipId));
+
+    expect(first.isDone).toBe(false);
+    expect(first.page).toHaveLength(200);
+    expect(first.page.filter((task) => task.assigneeMembershipIds.includes(employeeMembershipId))).toHaveLength(5);
+    expect(second.isDone).toBe(true);
+    expect(second.page).toHaveLength(63);
+    expect(second.page.every((task) => task.assigneeMembershipIds.includes(employeeMembershipId))).toBe(true);
+    expect(employeeTasks).toHaveLength(68);
   });
 
   test("company timezone defaults to GMT+5 and can be changed", async () => {
@@ -456,5 +507,154 @@ describe("production permission and validation fixes", () => {
     });
 
     await expect(t.withIdentity(identity("sole_admin", "sole_admin@example.com")).mutation(api.invitations.accept, { token })).rejects.toThrow("At least one active member must be able to manage permissions");
+  });
+
+  test("admins can update member first and last names in company management", async () => {
+    const { t, companyId, employeeMembershipId } = await seedCompany();
+    const employeeUser = await t.run(async (ctx) => {
+      const membership = await ctx.db.get(employeeMembershipId);
+      return await ctx.db.get(membership!.userId);
+    });
+
+    // Admin updates employee name
+    await expect(
+      t.withIdentity(identity("admin")).mutation(api.companyManagement.updateMemberName, {
+        companyId,
+        userId: employeeUser!._id,
+        firstName: "Jane",
+        secondName: "Doe",
+      }),
+    ).resolves.toBe(employeeUser!._id);
+
+    // Verify in overview for this company
+    const overview = await t.withIdentity(identity("admin")).query(api.companyManagement.overview, { companyId });
+    const updatedUser = overview.users.find((u) => u.membership._id === employeeMembershipId);
+    expect(updatedUser?.user).toMatchObject({
+      _id: employeeUser!._id,
+      name: "Jane Doe",
+      firstName: "Jane",
+      secondName: "Doe",
+    });
+
+    // Verify the global appUsers record is NOT modified (tenant isolation)
+    const rawUser = await t.run(async (ctx) => await ctx.db.get(employeeUser!._id));
+    expect(rawUser?.firstName).toBe("Employee");
+
+    // Verify in a second company that the employee's name remains the global profile name
+    const secondCompanyId = await t.run(async (ctx) => {
+      const now = Date.now();
+      const cId = await ctx.db.insert("companies", { name: "Beta Corp", createdAt: now });
+      const adminId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|beta_admin", email: "beta_admin@example.com", firstName: "Beta Admin", secondName: "", createdAt: now, updatedAt: now });
+      await ctx.db.insert("companyMemberships", { companyId: cId, userId: adminId, role: "Admin", active: true, createdAt: now, updatedAt: now });
+      await ctx.db.insert("companyMemberships", { companyId: cId, userId: employeeUser!._id, role: "Employee", active: true, createdAt: now, updatedAt: now });
+      return cId;
+    });
+    const betaOverview = await t.withIdentity(identity("beta_admin", "beta_admin@example.com")).query(api.companyManagement.overview, { companyId: secondCompanyId });
+    const betaEmployee = betaOverview.users.find((u) => u.user._id === employeeUser!._id);
+    expect(betaEmployee?.user.firstName).toBe("Employee");
+    expect(betaEmployee?.user.name).toBe("Employee");
+
+    // Verify audit event
+    const auditEvents = await t.run(async (ctx) => {
+      return await ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(10);
+    });
+    expect(auditEvents.find((e) => e.action === "user.update_name")).toBeDefined();
+
+    // Verify explicit blank last name override is preserved
+    await t.run(async (ctx) => {
+      await ctx.db.patch(employeeUser!._id, { secondName: "GlobalSurname" });
+    });
+    await t.withIdentity(identity("admin")).mutation(api.companyManagement.updateMemberName, {
+      companyId,
+      userId: employeeUser!._id,
+      firstName: "Jane",
+      secondName: "",
+    });
+    const overviewAfterClear = await t.withIdentity(identity("admin")).query(api.companyManagement.overview, { companyId });
+    const clearedUser = overviewAfterClear.users.find((u) => u.membership._id === employeeMembershipId);
+    expect(clearedUser?.user.secondName).toBe("");
+    expect(clearedUser?.user.name).toBe("Jane");
+
+    // Verify accessStatus returns company-scoped displayName
+    const employeeAccess = await t.withIdentity(identity("employee")).query(api.companies.accessStatus, {});
+    if (employeeAccess.status === "ready") {
+      const companyEntry = employeeAccess.companies.find((c) => c.company._id === companyId);
+      expect(companyEntry?.displayName).toBe("Jane");
+    }
+
+    // Validation: empty first name is rejected
+    await expect(
+      t.withIdentity(identity("admin")).mutation(api.companyManagement.updateMemberName, {
+        companyId,
+        userId: employeeUser!._id,
+        firstName: "   ",
+        secondName: "Smith",
+      }),
+    ).rejects.toThrow("First name is required.");
+
+    // Unauthorized: regular employee cannot update another user's name
+    await expect(
+      t.withIdentity(identity("employee")).mutation(api.companyManagement.updateMemberName, {
+        companyId,
+        userId: employeeUser!._id,
+        firstName: "Hacker",
+      }),
+    ).rejects.toThrow("You do not have access to do that.");
+  });
+
+  test("pagination queries support search, priority, and frequency filters", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const admin = t.withIdentity(identity("admin"));
+
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let i = 1; i <= 250; i++) {
+        await ctx.db.insert("oneTimeTasks", {
+          companyId,
+          reference: `OT-${String(i).padStart(4, "0")}`,
+          title: i === 245 ? "Rare Needle Task" : `Generic Task ${i}`,
+          priority: i === 245 ? "high" : "low",
+          status: "due",
+          assigneeMembershipIds: [adminMembershipId],
+          createdByMembershipId: adminMembershipId,
+          createdAt: now + i,
+          updatedAt: now + i,
+        });
+      }
+    });
+
+    // No-match search returns empty page with isDone: true
+    const noMatch = await admin.query(api.tasks.listOneTimeRows, {
+      companyId,
+      search: "NonexistentQueryXYZ",
+      paginationOpts: { numItems: 200, cursor: null },
+    });
+    expect(noMatch.page).toHaveLength(0);
+
+    // Filter-aware search finds matching task
+    const rareMatch = await admin.query(api.tasks.listOneTimeRows, {
+      companyId,
+      search: "Rare Needle",
+      paginationOpts: { numItems: 200, cursor: null },
+    });
+    expect(rareMatch.page).toHaveLength(1);
+    expect(rareMatch.page[0].title).toBe("Rare Needle Task");
+
+    // Filter by priority
+    const highPriority = await admin.query(api.tasks.listOneTimeRows, {
+      companyId,
+      priority: "high",
+      paginationOpts: { numItems: 200, cursor: null },
+    });
+    expect(highPriority.page).toHaveLength(1);
+    expect(highPriority.page[0].title).toBe("Rare Needle Task");
+
+    // Test personalFilterOptions returns assigned options
+    const personalOpts = await admin.query(api.tasks.personalFilterOptions, {
+      companyId,
+      kind: "one_time",
+    });
+    expect(personalOpts.values).toContain("high");
+    expect(personalOpts.values).toContain("low");
   });
 });

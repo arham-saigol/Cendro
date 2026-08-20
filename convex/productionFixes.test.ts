@@ -508,4 +508,57 @@ describe("production permission and validation fixes", () => {
 
     await expect(t.withIdentity(identity("sole_admin", "sole_admin@example.com")).mutation(api.invitations.accept, { token })).rejects.toThrow("At least one active member must be able to manage permissions");
   });
+
+  test("admins can update member first and last names in company management", async () => {
+    const { t, companyId, employeeMembershipId } = await seedCompany();
+    const employeeUser = await t.run(async (ctx) => {
+      const membership = await ctx.db.get(employeeMembershipId);
+      return await ctx.db.get(membership!.userId);
+    });
+
+    // Admin updates employee name
+    await expect(
+      t.withIdentity(identity("admin")).mutation(api.companyManagement.updateMemberName, {
+        companyId,
+        userId: employeeUser!._id,
+        firstName: "Jane",
+        secondName: "Doe",
+      }),
+    ).resolves.toBe(employeeUser!._id);
+
+    // Verify in overview
+    const overview = await t.withIdentity(identity("admin")).query(api.companyManagement.overview, { companyId });
+    const updatedUser = overview.users.find((u) => u.membership._id === employeeMembershipId);
+    expect(updatedUser?.user).toMatchObject({
+      _id: employeeUser!._id,
+      name: "Jane Doe",
+      firstName: "Jane",
+      secondName: "Doe",
+    });
+
+    // Verify audit event
+    const auditEvents = await t.run(async (ctx) => {
+      return await ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(10);
+    });
+    expect(auditEvents.find((e) => e.action === "user.update_name")).toBeDefined();
+
+    // Validation: empty first name is rejected
+    await expect(
+      t.withIdentity(identity("admin")).mutation(api.companyManagement.updateMemberName, {
+        companyId,
+        userId: employeeUser!._id,
+        firstName: "   ",
+        secondName: "Smith",
+      }),
+    ).rejects.toThrow("First name is required.");
+
+    // Unauthorized: regular employee cannot update another user's name
+    await expect(
+      t.withIdentity(identity("employee")).mutation(api.companyManagement.updateMemberName, {
+        companyId,
+        userId: employeeUser!._id,
+        firstName: "Hacker",
+      }),
+    ).rejects.toThrow("You do not have access to do that.");
+  });
 });

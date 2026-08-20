@@ -100,7 +100,7 @@ export const overview = query({
       const departmentIds = (await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500)).map((a) => a.departmentId);
       const scope = canReadPermissions ? await managerScope(ctx, m._id) : { branchIds: [], departmentIds: [], userMembershipIds: [] };
       const overrides = canReadPermissions ? await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500) : [];
-      if (user) users.push({ membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt }, user: { _id: user._id, name: fullName(user), firstName: firstName(user), secondName: canReadPermissions ? user.secondName ?? "" : "", email: user.email }, branchIds, departmentIds, scope, overrides: overrides.map((o) => ({ _id: o._id, capability: o.capability, effect: o.effect })) });
+      if (user) users.push({ membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt }, user: { _id: user._id, name: fullName(user), firstName: user.firstName || "", secondName: user.secondName ?? "", email: user.email }, branchIds, departmentIds, scope, overrides: overrides.map((o) => ({ _id: o._id, capability: o.capability, effect: o.effect })) });
     }
     const invitations = canReadInvitations ? await ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100) : [];
     return {
@@ -228,6 +228,48 @@ export const removeUsers = mutation({
       await ctx.db.patch(membershipId, { active: false, updatedAt: now });
     }
     return null;
+  },
+});
+
+export const updateMemberName = mutation({
+  args: {
+    companyId: v.id("companies"),
+    userId: v.id("appUsers"),
+    firstName: v.string(),
+    secondName: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const { user: actor } = await requireCapability(ctx, args.companyId, "company:manage_users");
+    const targetUser = await ctx.db.get(args.userId);
+    if (!targetUser) throw new ConvexError("User not found.");
+
+    const membership = await ctx.db
+      .query("companyMemberships")
+      .withIndex("by_company_user", (q) => q.eq("companyId", args.companyId).eq("userId", args.userId))
+      .unique();
+    if (!membership) throw new ConvexError("User not found in this company.");
+
+    const firstName = args.firstName.trim();
+    const secondName = args.secondName?.trim() ?? "";
+    if (!firstName) throw new ConvexError("First name is required.");
+
+    await ctx.db.patch(targetUser._id, {
+      firstName,
+      secondName: secondName || undefined,
+      updatedAt: Date.now(),
+    });
+
+    await ctx.db.insert("auditEvents", {
+      companyId: args.companyId,
+      actorUserId: actor._id,
+      action: "user.update_name",
+      targetType: "user",
+      targetId: targetUser._id,
+      metadata: { firstName, secondName },
+      createdAt: Date.now(),
+    });
+
+    return targetUser._id;
   },
 });
 

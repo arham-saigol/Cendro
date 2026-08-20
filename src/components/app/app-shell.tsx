@@ -53,7 +53,18 @@ function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
   const { user } = useUser();
   const { theme, toggleTheme } = useTheme();
   const profile = useQuery(api.users.me);
-  const updateName = useMutation(api.users.updateCurrentName);
+  const updateName = useMutation(api.users.updateCurrentName).withOptimisticUpdate((localStore, args) => {
+    const me = localStore.getQuery(api.users.me, {}) as any;
+    if (me) {
+      const cleanSecondName = args.secondName?.trim() ?? "";
+      const firstName = args.firstName.trim();
+      localStore.setQuery(api.users.me, {}, {
+        ...me,
+        firstName,
+        secondName: cleanSecondName,
+      });
+    }
+  });
   const [firstName, setFirstName] = useState("");
   const [secondName, setSecondName] = useState("");
   const [saving, setSaving] = useState(false);
@@ -61,11 +72,11 @@ function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
 
   useEffect(() => {
     if (open) {
-      setFirstName(profile?.firstName || user?.fullName || "");
-      setSecondName(profile?.secondName || "");
+      setFirstName(profile?.firstName || user?.firstName || user?.fullName || "");
+      setSecondName(profile?.secondName || user?.lastName || "");
       setError(null);
     }
-  }, [open, profile?.firstName, profile?.secondName, user?.fullName]);
+  }, [open, profile?.firstName, profile?.secondName, user?.firstName, user?.lastName, user?.fullName]);
 
   async function saveName() {
     const trimmedFirstName = firstName.trim();
@@ -214,9 +225,12 @@ function AccountCompanyMenu({ searchItems = nav }: { searchItems?: typeof nav })
   const { user } = useUser();
   const { signOut } = useClerk();
   const { companies, activeCompanyId, setActiveCompanyId } = useCompany();
+  const profile = useQuery(api.users.me);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const displayName = user?.fullName || user?.primaryEmailAddress?.emailAddress || "User";
+  const profileName = profile ? [profile.firstName, profile.secondName].filter(Boolean).join(" ").trim() : "";
+  const displayName = profileName || user?.fullName || profile?.email || user?.primaryEmailAddress?.emailAddress || "User";
+  const displayImage = profile?.imageUrl || user?.imageUrl;
 
   return (
     <>
@@ -225,7 +239,7 @@ function AccountCompanyMenu({ searchItems = nav }: { searchItems?: typeof nav })
           <DropdownMenu.Trigger asChild>
             <button className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[var(--ink)] hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]">
               <span className="grid h-5 w-5 place-items-center overflow-hidden rounded-md bg-[var(--surface-pressed)] text-[11px] font-medium text-[var(--ink-secondary)]">
-                {user?.imageUrl ? <span aria-hidden="true" className="h-full w-full bg-cover bg-center" style={{ backgroundImage: `url(${user.imageUrl})` }} /> : initials(displayName)}
+                {displayImage ? <span aria-hidden="true" className="h-full w-full bg-cover bg-center" style={{ backgroundImage: `url(${displayImage})` }} /> : initials(displayName)}
               </span>
               <span className="min-w-0 truncate text-sm font-medium tracking-[-0.01em]">{displayName}</span>
               <ChevronDown className="h-3 w-3 shrink-0 text-[var(--ink-faint)]" />
@@ -235,11 +249,11 @@ function AccountCompanyMenu({ searchItems = nav }: { searchItems?: typeof nav })
           <DropdownMenu.Content align="start" sideOffset={7} className="z-50 w-76 rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-2 shadow-[var(--shadow-popover)]">
             <div className="flex items-center gap-3 px-2 py-2">
               <div className="grid h-9 w-9 place-items-center overflow-hidden rounded-md bg-[var(--surface-pressed)] text-base font-medium text-[var(--ink-secondary)]">
-                {user?.imageUrl ? <span aria-hidden="true" className="h-full w-full bg-cover bg-center" style={{ backgroundImage: `url(${user.imageUrl})` }} /> : initials(displayName)}
+                {displayImage ? <span aria-hidden="true" className="h-full w-full bg-cover bg-center" style={{ backgroundImage: `url(${displayImage})` }} /> : initials(displayName)}
               </div>
               <div className="min-w-0">
                 <div className="truncate text-sm font-semibold text-[var(--ink)]">{displayName}</div>
-                {user?.primaryEmailAddress?.emailAddress && <div className="truncate text-xs text-[var(--ink-faint)]">{user.primaryEmailAddress.emailAddress}</div>}
+                {(profile?.email || user?.primaryEmailAddress?.emailAddress) && <div className="truncate text-xs text-[var(--ink-faint)]">{profile?.email || user?.primaryEmailAddress?.emailAddress}</div>}
               </div>
             </div>
             <DropdownMenu.Item className={dropdownItemClass} onSelect={() => setSettingsOpen(true)}>

@@ -16,6 +16,7 @@ import {
   MailPlus,
   Network,
   PanelRight,
+  Pencil,
   Plus,
   Search,
   Settings,
@@ -55,7 +56,7 @@ type MembershipCore = { _id: Id<"companyMemberships">; role: Role; active: boole
 type Scope = { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] };
 type UserRow = {
   membership: MembershipCore;
-  user: { name: string; email: string };
+  user: { _id: Id<"appUsers">; name: string; firstName: string; secondName: string; email: string };
   branchIds: Id<"branches">[];
   departmentIds: Id<"departments">[];
   scope: Scope;
@@ -900,6 +901,128 @@ function StructureTab({
 }
 
 /* ============================================================== */
+/*  Edit member name dialog                                        */
+/* ============================================================== */
+
+function EditMemberNameDialog({
+  open,
+  onOpenChange,
+  user,
+  onSave,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  user?: UserRow;
+  onSave: (user: UserRow, firstName: string, secondName: string) => Promise<void>;
+}) {
+  const [firstName, setFirstName] = useState("");
+  const [secondName, setSecondName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open && user) {
+      setFirstName(user.user.firstName || user.user.name || "");
+      setSecondName(user.user.secondName || "");
+      setError(null);
+    }
+  }, [open, user]);
+
+  async function submit() {
+    if (!user || saving) return;
+    const trimmedFirst = firstName.trim();
+    const trimmedSecond = secondName.trim();
+    if (!trimmedFirst) {
+      setError("First name is required.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave(user, trimmedFirst, trimmedSecond);
+      onOpenChange(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update name.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/35 backdrop-blur-[2px]" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(480px,94dvh)] w-[min(440px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]">
+          <div className="flex items-start justify-between border-b border-[var(--hairline)] px-5 py-4">
+            <div>
+              <Dialog.Title className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">
+                Edit name
+              </Dialog.Title>
+              <Dialog.Description className="mt-0.5 text-[12.5px] text-[var(--ink-muted)]">
+                Update name for {user?.user.email}
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button type="button" className="task-icon-btn" aria-label="Close">
+                <X className="h-4 w-4" />
+              </button>
+            </Dialog.Close>
+          </div>
+          <form
+            className="flex min-h-0 flex-1 flex-col"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submit();
+            }}
+          >
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block">
+                  <span className="mb-1.5 block text-[12px] font-medium text-[var(--ink-muted)]">
+                    First name
+                  </span>
+                  <Input
+                    value={firstName}
+                    onChange={(event) => setFirstName(event.target.value)}
+                    placeholder="First name"
+                    autoFocus
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1.5 block text-[12px] font-medium text-[var(--ink-muted)]">
+                    Last name
+                  </span>
+                  <Input
+                    value={secondName}
+                    onChange={(event) => setSecondName(event.target.value)}
+                    placeholder="Last name"
+                  />
+                </label>
+              </div>
+              {error && (
+                <p className="alert-error mt-4 rounded-md px-3 py-2 text-[12.5px]" role="alert">
+                  {error}
+                </p>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-[var(--hairline)] bg-[var(--surface)] px-5 py-3">
+              <Dialog.Close asChild>
+                <Button type="button">
+                  Cancel
+                </Button>
+              </Dialog.Close>
+              <Button type="submit" variant="primary" disabled={saving || !firstName.trim()}>
+                {saving ? "Saving..." : "Save changes"}
+              </Button>
+            </div>
+          </form>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+/* ============================================================== */
 /*  People tab                                                     */
 /* ============================================================== */
 
@@ -908,6 +1031,7 @@ type PeopleView = "members" | "invitations";
 function PeopleTab({
   data,
   onInvite,
+  onUpdateName,
   onRoleChange,
   onBranchChange,
   onDepartmentChange,
@@ -919,6 +1043,7 @@ function PeopleTab({
 }: {
   data: Overview;
   onInvite: () => void;
+  onUpdateName: (user: UserRow, firstName: string, secondName: string) => Promise<void>;
   onRoleChange: (user: UserRow, role: Role) => Promise<void>;
   onBranchChange: (user: UserRow, branchId: Id<"branches"> | "") => Promise<void>;
   onDepartmentChange: (user: UserRow, departmentId: Id<"departments"> | "") => Promise<void>;
@@ -929,6 +1054,7 @@ function PeopleTab({
   canInvite: boolean;
 }) {
   const [view, setView] = useState<PeopleView>("members");
+  const [editingUser, setEditingUser] = useState<UserRow | undefined>();
   const [query, setQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState<Role | "all">("all");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -1008,7 +1134,33 @@ function PeopleTab({
                   const departmentOptions: { value: Id<"departments"> | ""; label: string }[] = [{ value: "", label: "No department" }, ...data.departments.filter((department) => department.branchId === branchId).map((department) => ({ value: department._id, label: department.name }))];
                   return (
                     <tr key={user.membership._id} className="group/row" data-checked={isChecked ? "true" : undefined}>
-                      <td><div className="flex items-center gap-2.5"><MemberAvatar name={user.user.name} email={user.user.email} /><div className="min-w-0"><div className="truncate text-[13px] font-medium text-[var(--ink)]">{user.user.name || user.user.email}</div><div className="truncate text-[12px] text-[var(--ink-muted)]">{user.user.email}</div></div></div></td>
+                      <td className="col-task max-w-[280px]">
+                        <div className="task-title-cell">
+                          <div className="flex min-w-0 items-center gap-2.5">
+                            <MemberAvatar name={user.user.name} email={user.user.email} />
+                            <div className="min-w-0">
+                              <div className="truncate text-[13px] font-medium text-[var(--ink)]">{user.user.name || user.user.email}</div>
+                              <div className="truncate text-[12px] text-[var(--ink-muted)]">{user.user.email}</div>
+                            </div>
+                          </div>
+                          {canManageUsers && (
+                            <button
+                              type="button"
+                              data-interactive="true"
+                              data-tooltip="Edit name"
+                              className="task-title-open"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setEditingUser(user);
+                              }}
+                              aria-label={`Edit name for ${user.user.name || user.user.email}`}
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                              <span>EDIT</span>
+                            </button>
+                          )}
+                        </div>
+                      </td>
                       <td><PeopleCellMenu value={user.membership.role} options={roles.map((role) => ({ value: role, label: role }))} onChange={(role) => { if (role !== user.membership.role) void onRoleChange(user, role); }} ariaLabel={`Change role for ${user.user.name || user.user.email}`} disabled={!canManagePermissions} renderValue={(option) => <Badge tone={roleTone[(option?.value ?? user.membership.role) as Role]}>{option?.label ?? user.membership.role}</Badge>} /></td>
                       <td><PeopleCellMenu value={branchId} options={branchOptions} onChange={(nextBranchId) => { if (nextBranchId !== branchId) void onBranchChange(user, nextBranchId); }} ariaLabel={`Change branch for ${user.user.name || user.user.email}`} disabled={!canManageUsers} /></td>
                       <td><PeopleCellMenu value={departmentId} options={departmentOptions} onChange={(nextDepartmentId) => { if (nextDepartmentId !== departmentId) void onDepartmentChange(user, nextDepartmentId); }} ariaLabel={`Change department for ${user.user.name || user.user.email}`} disabled={!canManageUsers || !branchId} placeholder={branchId ? "—" : "Select branch first"} /></td>
@@ -1026,6 +1178,13 @@ function PeopleTab({
           {isEmpty ? <tr><td colSpan={6} className="!h-auto !border-0 !bg-transparent py-2"><EmptyState icon={MailPlus} title={query || roleFilter !== "all" ? "No matching invitations" : "No pending invitations"} message={query || roleFilter !== "all" ? "Try adjusting your search or filters." : "Invite a person to send them a join link."} action={canInvite && !query && roleFilter === "all" ? <Button size="sm" variant="primary" onClick={onInvite}><MailPlus className="h-3.5 w-3.5" />Invite member</Button> : undefined} /></td></tr> : filteredInvitations.map((invitation) => <tr key={invitation._id} className="group/row"><td><div className="flex items-center gap-2.5"><span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-[var(--surface-muted)] text-[var(--ink-faint)]"><MailPlus className="h-3.5 w-3.5" /></span><div className="min-w-0"><div className="truncate text-[13px] font-medium text-[var(--ink)]">{invitation.email}</div><div className="truncate text-[12px] text-[var(--ink-muted)]">Pending invitation</div></div></div></td><td><Badge tone={roleTone[invitation.role]}>{invitation.role}</Badge></td><td className="text-[var(--ink-secondary)]"><span className="truncate">{invitation.branchIds.map((id) => branchMap.get(id)).filter(Boolean).join(", ") || "—"}</span></td><td className="text-[var(--ink-secondary)]"><span className="truncate">{invitation.departmentIds.map((id) => departmentMap.get(id)).filter(Boolean).join(", ") || "—"}</span></td><td><Badge tone="yellow" className="capitalize">{invitation.status}</Badge></td><td className="text-[12.5px] text-[var(--ink-secondary)]">{formatDate(invitation.createdAt)}</td></tr>)}
         </tbody></table></div>
       )}
+
+      <EditMemberNameDialog
+        open={Boolean(editingUser)}
+        onOpenChange={(open) => !open && setEditingUser(undefined)}
+        user={editingUser}
+        onSave={onUpdateName}
+      />
     </div>
   );
 }
@@ -1832,6 +1991,34 @@ export default function Company() {
       });
     }
   });
+  const updateMemberName = useMutation(api.companyManagement.updateMemberName).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
+    const cleanSecondName = args.secondName?.trim() ?? "";
+    const firstName = args.firstName.trim();
+    const fullName = [firstName, cleanSecondName].filter(Boolean).join(" ");
+    if (current) {
+      localStore.setQuery(api.companyManagement.overview, { companyId: args.companyId }, {
+        ...current,
+        users: current.users.map((row) => (row.user._id === args.userId ? {
+          ...row,
+          user: {
+            ...row.user,
+            name: fullName || row.user.email,
+            firstName,
+            secondName: cleanSecondName,
+          },
+        } : row)),
+      } as any);
+    }
+    const me = localStore.getQuery(api.users.me, {}) as any;
+    if (me && me._id === args.userId) {
+      localStore.setQuery(api.users.me, {}, {
+        ...me,
+        firstName,
+        secondName: cleanSecondName,
+      });
+    }
+  });
   const setUserPermissions = useMutation(api.companyManagement.setUserPermissions).withOptimisticUpdate((localStore, args) => {
     const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
     if (!current) return;
@@ -1983,6 +2170,16 @@ export default function Company() {
     await setAssignments({ companyId: activeCompanyId, membershipId: user.membership._id, branchIds: [branchId], departmentIds: departmentId ? [departmentId] : [] });
   }
 
+  async function changeUserName(user: UserRow, firstName: string, secondName?: string) {
+    if (!activeCompanyId) return;
+    await updateMemberName({
+      companyId: activeCompanyId,
+      userId: user.user._id,
+      firstName,
+      secondName,
+    });
+  }
+
   async function changeUserStatus(user: UserRow, active: boolean) {
     if (!activeCompanyId) return;
     await setUserActive({ companyId: activeCompanyId, membershipId: user.membership._id, active });
@@ -2058,6 +2255,7 @@ export default function Company() {
               <PeopleTab
                 data={data}
                 onInvite={() => setInviteOpen(true)}
+                onUpdateName={(user, firstName, secondName) => run(() => changeUserName(user, firstName, secondName), "Could not update user name.")}
                 onRoleChange={(user, role) => run(() => changeUserRole(user, role), "Could not update role.")}
                 onBranchChange={(user, branchId) => run(() => changeUserBranch(user, branchId), "Could not update branch.")}
                 onDepartmentChange={(user, departmentId) => run(() => changeUserDepartment(user, departmentId), "Could not update department.")}

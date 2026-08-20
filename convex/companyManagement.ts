@@ -257,12 +257,12 @@ export const updateMemberName = mutation({
     if (!membership) throw new ConvexError("User not found in this company.");
 
     const firstName = args.firstName.trim();
-    const secondName = args.secondName?.trim() ?? "";
+    const secondName = args.secondName !== undefined ? args.secondName.trim() : undefined;
     if (!firstName) throw new ConvexError("First name is required.");
 
     await ctx.db.patch(membership._id, {
       firstName,
-      secondName: secondName || undefined,
+      secondName,
       updatedAt: Date.now(),
     });
 

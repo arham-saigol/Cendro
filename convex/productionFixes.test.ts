@@ -560,6 +560,28 @@ describe("production permission and validation fixes", () => {
     });
     expect(auditEvents.find((e) => e.action === "user.update_name")).toBeDefined();
 
+    // Verify explicit blank last name override is preserved
+    await t.run(async (ctx) => {
+      await ctx.db.patch(employeeUser!._id, { secondName: "GlobalSurname" });
+    });
+    await t.withIdentity(identity("admin")).mutation(api.companyManagement.updateMemberName, {
+      companyId,
+      userId: employeeUser!._id,
+      firstName: "Jane",
+      secondName: "",
+    });
+    const overviewAfterClear = await t.withIdentity(identity("admin")).query(api.companyManagement.overview, { companyId });
+    const clearedUser = overviewAfterClear.users.find((u) => u.membership._id === employeeMembershipId);
+    expect(clearedUser?.user.secondName).toBe("");
+    expect(clearedUser?.user.name).toBe("Jane");
+
+    // Verify accessStatus returns company-scoped displayName
+    const employeeAccess = await t.withIdentity(identity("employee")).query(api.companies.accessStatus, {});
+    if (employeeAccess.status === "ready") {
+      const companyEntry = employeeAccess.companies.find((c) => c.company._id === companyId);
+      expect(companyEntry?.displayName).toBe("Jane");
+    }
+
     // Validation: empty first name is rejected
     await expect(
       t.withIdentity(identity("admin")).mutation(api.companyManagement.updateMemberName, {
@@ -626,5 +648,13 @@ describe("production permission and validation fixes", () => {
     });
     expect(highPriority.page).toHaveLength(1);
     expect(highPriority.page[0].title).toBe("Rare Needle Task");
+
+    // Test personalFilterOptions returns assigned options
+    const personalOpts = await admin.query(api.tasks.personalFilterOptions, {
+      companyId,
+      kind: "one_time",
+    });
+    expect(personalOpts.values).toContain("high");
+    expect(personalOpts.values).toContain("low");
   });
 });

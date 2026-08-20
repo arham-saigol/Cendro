@@ -2010,6 +2010,24 @@ export default function Company() {
         } : row)),
       } as any);
     }
+    const access = localStore.getQuery(api.companies.accessStatus, {}) as any;
+    if (access && access.status === "ready") {
+      const targetUser = current?.users.find((row) => row.user._id === args.userId);
+      const targetMembershipId = targetUser?.membership._id;
+      localStore.setQuery(api.companies.accessStatus, {}, {
+        ...access,
+        companies: access.companies.map((c: any) => {
+          if (c.company._id === args.companyId && (!targetMembershipId || c.membership._id === targetMembershipId)) {
+            return {
+              ...c,
+              membership: { ...c.membership, firstName, secondName: cleanSecondName },
+              displayName: fullName || c.displayName,
+            };
+          }
+          return c;
+        }),
+      });
+    }
   });
   const setUserPermissions = useMutation(api.companyManagement.setUserPermissions).withOptimisticUpdate((localStore, args) => {
     const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;

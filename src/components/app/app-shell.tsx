@@ -224,12 +224,12 @@ function SearchCommandDialog({
 function AccountCompanyMenu({ searchItems = nav }: { searchItems?: typeof nav }) {
   const { user } = useUser();
   const { signOut } = useClerk();
-  const { companies, activeCompanyId, setActiveCompanyId } = useCompany();
+  const { companies, activeCompanyId, setActiveCompanyId, active } = useCompany();
   const profile = useQuery(api.users.me);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const profileName = profile ? [profile.firstName, profile.secondName].filter(Boolean).join(" ").trim() : "";
-  const displayName = profileName || user?.fullName || profile?.email || user?.primaryEmailAddress?.emailAddress || "User";
+  const displayName = active?.displayName || profileName || user?.fullName || profile?.email || user?.primaryEmailAddress?.emailAddress || "User";
   const displayImage = profile?.imageUrl || user?.imageUrl;
 
   return (

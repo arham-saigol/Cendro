@@ -207,6 +207,28 @@ export const listOneTimeRows = query({
   },
 });
 
+export const personalFilterOptions = query({
+  args: { companyId: v.id("companies"), kind: v.union(v.literal("jd"), v.literal("one_time")) },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    if (args.kind === "jd") {
+      const tasks = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
+      const values = new Set<string>();
+      for (const t of tasks) {
+        if (t.assigneeMembershipIds.includes(membership._id)) values.add(t.recurrence);
+      }
+      return { values: Array.from(values) };
+    } else {
+      const tasks = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
+      const values = new Set<string>();
+      for (const t of tasks) {
+        if (t.assigneeMembershipIds.includes(membership._id)) values.add(t.priority);
+      }
+      return { values: Array.from(values) };
+    }
+  },
+});
+
 export const getJd = query({
   args: { companyId: v.id("companies"), taskId: v.id("jdTasks") },
   handler: async (ctx, args) => {

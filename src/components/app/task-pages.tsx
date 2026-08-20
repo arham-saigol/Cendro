@@ -1164,20 +1164,17 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const priorityViewActive = kind === "one" && personalPriorityView !== "all";
   const effectiveTaskView: TaskView = canUseAllTasks ? taskView : "my";
   const currentMembershipId = active?.membership._id as string | undefined;
-  const jdFrequencyPillTasks = tasks;
-  const oneTimePriorityPillTasks = tasks;
+  const personalOptions = useQuery(api.tasks.personalFilterOptions, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip");
   const ownFrequencyValues = useMemo(() => {
-    if (kind !== "jd" || !currentMembershipId) return [] as Frequency[];
-    const values = new Set<Frequency>();
-    for (const task of jdFrequencyPillTasks ?? []) if (taskHasAssignee(task, currentMembershipId)) values.add(task.recurrence as Frequency);
-    return frequencies.map((option) => option.value).filter((value) => values.has(value));
-  }, [currentMembershipId, jdFrequencyPillTasks, kind]);
+    if (kind !== "jd" || !personalOptions) return [] as Frequency[];
+    const set = new Set(personalOptions.values as Frequency[]);
+    return frequencies.map((option) => option.value).filter((value) => set.has(value));
+  }, [kind, personalOptions]);
   const ownPriorityValues = useMemo(() => {
-    if (kind !== "one" || !currentMembershipId) return [] as Priority[];
-    const values = new Set<Priority>();
-    for (const task of oneTimePriorityPillTasks ?? []) if (taskHasAssignee(task, currentMembershipId)) values.add(task.priority as Priority);
-    return priorities.filter((priority) => values.has(priority));
-  }, [currentMembershipId, kind, oneTimePriorityPillTasks]);
+    if (kind !== "one" || !personalOptions) return [] as Priority[];
+    const set = new Set(personalOptions.values as Priority[]);
+    return priorities.filter((priority) => set.has(priority));
+  }, [kind, personalOptions]);
   const showAssigneeColumn = canUseAllTasks && effectiveTaskView === "all";
   const showFrequencyColumn = kind === "jd" && !frequencyFilterActive;
   const showPriorityColumn = kind === "one" && !priorityFilterActive;
@@ -1213,20 +1210,20 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   }, [effectiveTaskView, assigneeFilter]);
 
   useEffect(() => {
-    if (kind !== "jd" || personalFrequencyView === "all" || !jdFrequencyPillTasks) return;
+    if (kind !== "jd" || personalFrequencyView === "all" || !personalOptions) return;
     if (!ownFrequencyValues.includes(personalFrequencyView)) {
       setPersonalFrequencyView("all");
       setFrequency((current) => current === personalFrequencyView ? "all" : current);
     }
-  }, [jdFrequencyPillTasks, kind, ownFrequencyValues, personalFrequencyView]);
+  }, [kind, ownFrequencyValues, personalFrequencyView, personalOptions]);
 
   useEffect(() => {
-    if (kind !== "one" || personalPriorityView === "all" || !oneTimePriorityPillTasks) return;
+    if (kind !== "one" || personalPriorityView === "all" || !personalOptions) return;
     if (!ownPriorityValues.includes(personalPriorityView)) {
       setPersonalPriorityView("all");
       setPriorityFilter((current) => current === personalPriorityView ? "all" : current);
     }
-  }, [kind, oneTimePriorityPillTasks, ownPriorityValues, personalPriorityView]);
+  }, [kind, ownPriorityValues, personalPriorityView, personalOptions]);
 
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus();

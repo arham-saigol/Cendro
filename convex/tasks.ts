@@ -4,7 +4,7 @@ import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } fr
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { currentJdCycle, defaultTimeZone, elapsedJdCyclesSince } from "./taskCycles";
-import { assertCanAssign, assertCanUpdateTask, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds } from "./permissions";
+import { assertCanAssign, assertCanUpdateTask, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
 import { nextReference } from "./references";
@@ -30,7 +30,11 @@ async function enrich(ctx: Ctx, ids: Id<"companyMemberships">[]) {
   const userById = new Map(users.map((user) => [user._id, user]));
   return memberships.flatMap((membership) => {
     const user = userById.get(membership.userId);
-    return user ? [{ membership: { _id: membership._id, role: membership.role }, user: { name: firstName(user), firstName: firstName(user), secondName: user.secondName ?? "", fullName: fullName(user), email: user.email, imageUrl: user.imageUrl } }] : [];
+    if (!user) return [];
+    const fName = memberFirstName(membership, user);
+    const sName = membership.secondName !== undefined ? membership.secondName.trim() : (user.secondName?.trim() ?? "");
+    const full = memberFullName(membership, user);
+    return [{ membership: { _id: membership._id, role: membership.role }, user: { name: fName, firstName: fName, secondName: sName, fullName: full, email: user.email, imageUrl: user.imageUrl } }];
   });
 }
 
@@ -187,7 +191,7 @@ export const exportRows = query({
 });
 
 export const listOneTimeRows = query({
-  args: { companyId: v.id("companies"), search: v.optional(v.string()), paginationOpts: paginationOptsValidator },
+  args: { companyId: v.id("companies"), search: v.optional(v.string()), priority: v.optional(v.union(v.literal("all"), priorityValidator)), paginationOpts: paginationOptsValidator },
   returns: paginationResultValidator(v.any()),
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
@@ -195,6 +199,7 @@ export const listOneTimeRows = query({
     const page = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
     const rows = [];
     for (const task of page.page) {
+      if (args.priority && args.priority !== "all" && task.priority !== args.priority) continue;
       if (!matchesSearch(task, args.search)) continue;
       if (await visible(ctx, args.companyId, membership, task, "one_time", auth)) rows.push(await enrichedOneTime(ctx, task));
     }

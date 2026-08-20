@@ -1125,9 +1125,26 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const canUseAllTasks = active?.membership.role === "Admin" || active?.membership.role === "Manager";
   const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip") as any[] | undefined;
   const filterableAssignees = useQuery(api.tasks.filterableAssignees, activeCompanyId && canUseAllTasks ? { companyId: activeCompanyId } : "skip") as any[] | undefined;
+  const queryArgs = useMemo(() => {
+    if (!activeCompanyId) return "skip" as const;
+    const cleanSearch = search.trim() || undefined;
+    if (kind === "jd") {
+      return {
+        companyId: activeCompanyId,
+        search: cleanSearch,
+        frequency: frequency !== "all" ? frequency : undefined,
+      };
+    }
+    return {
+      companyId: activeCompanyId,
+      search: cleanSearch,
+      priority: priorityFilter !== "all" ? priorityFilter : undefined,
+    };
+  }, [activeCompanyId, kind, search, frequency, priorityFilter]);
+
   const taskPages = usePaginatedQuery(
     kind === "jd" ? api.tasks.listJdRows : api.tasks.listOneTimeRows,
-    activeCompanyId ? { companyId: activeCompanyId } : "skip",
+    queryArgs,
     { initialNumItems: TASK_PAGE_SIZE }
   );
   const tasks = taskPages.status === "LoadingFirstPage" ? undefined : taskPages.results as any[];
@@ -1549,7 +1566,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             )}
           </thead>
           <tbody>
-            {!tasks ? (
+            {!tasks || (visibleTasks.length === 0 && (taskPages.status === "CanLoadMore" || taskPages.status === "LoadingMore")) ? (
               Array.from({ length: 6 }).map((_, index) => (
                 <tr key={`skel-${index}`}>
                   <td colSpan={kind === "jd" ? jdColumns : oneColumns} className="pl-4">
@@ -1565,14 +1582,14 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                 <td colSpan={kind === "jd" ? jdColumns : oneColumns} className="!h-auto py-2">
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
-                    <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{tasks.length === 0 ? "No tasks yet" : "No matching tasks"}</div>
-                    <p className="mt-1 max-w-[280px] text-[13px] text-[var(--ink-muted)]">{tasks.length === 0 ? "Create your first task to get started." : "Try adjusting your search or filters."}</p>
-                    {canCreate && tasks.length === 0 && (
+                    <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{!hasActiveFilters && tasks.length === 0 ? "No tasks yet" : "No matching tasks"}</div>
+                    <p className="mt-1 max-w-[280px] text-[13px] text-[var(--ink-muted)]">{!hasActiveFilters && tasks.length === 0 ? "Create your first task to get started." : "Try adjusting your search or filters."}</p>
+                    {canCreate && !hasActiveFilters && tasks.length === 0 && (
                       <Button className="mt-4" size="sm" variant="primary" onClick={() => setCreateOpen(true)}>
                         <Plus className="h-3.5 w-3.5" />New task
                       </Button>
                     )}
-                    {hasActiveFilters && tasks.length > 0 && (
+                    {hasActiveFilters && (
                       <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); setStatusFilter("all"); setFrequency("all"); setPriorityFilter("all"); setPersonalFrequencyView("all"); setPersonalPriorityView("all"); setAssigneeFilter("all"); }}>Clear filters</Button>
                     )}
                   </div>

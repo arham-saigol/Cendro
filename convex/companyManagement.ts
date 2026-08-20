@@ -5,6 +5,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import {
   assertPermissionManagerRemains,
   assertPermissionManagerRemainsAfterActiveChanges,
+  memberFirstName,
+  memberFullName,
   membershipCapabilities,
   requireCapability,
   requireMembership,
@@ -100,7 +102,12 @@ export const overview = query({
       const departmentIds = (await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500)).map((a) => a.departmentId);
       const scope = canReadPermissions ? await managerScope(ctx, m._id) : { branchIds: [], departmentIds: [], userMembershipIds: [] };
       const overrides = canReadPermissions ? await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500) : [];
-      if (user) users.push({ membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt }, user: { _id: user._id, name: fullName(user), firstName: user.firstName || "", secondName: user.secondName ?? "", email: user.email }, branchIds, departmentIds, scope, overrides: overrides.map((o) => ({ _id: o._id, capability: o.capability, effect: o.effect })) });
+      if (user) {
+        const memFirstName = memberFirstName(m, user);
+        const memSecondName = m.secondName !== undefined ? m.secondName.trim() : (user.secondName?.trim() ?? "");
+        const memFullName = memberFullName(m, user);
+        users.push({ membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt }, user: { _id: user._id, name: memFullName, firstName: memFirstName, secondName: memSecondName, email: user.email }, branchIds, departmentIds, scope, overrides: overrides.map((o) => ({ _id: o._id, capability: o.capability, effect: o.effect })) });
+      }
     }
     const invitations = canReadInvitations ? await ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100) : [];
     return {
@@ -253,7 +260,7 @@ export const updateMemberName = mutation({
     const secondName = args.secondName?.trim() ?? "";
     if (!firstName) throw new ConvexError("First name is required.");
 
-    await ctx.db.patch(targetUser._id, {
+    await ctx.db.patch(membership._id, {
       firstName,
       secondName: secondName || undefined,
       updatedAt: Date.now(),

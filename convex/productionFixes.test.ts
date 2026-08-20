@@ -526,7 +526,7 @@ describe("production permission and validation fixes", () => {
       }),
     ).resolves.toBe(employeeUser!._id);
 
-    // Verify in overview
+    // Verify in overview for this company
     const overview = await t.withIdentity(identity("admin")).query(api.companyManagement.overview, { companyId });
     const updatedUser = overview.users.find((u) => u.membership._id === employeeMembershipId);
     expect(updatedUser?.user).toMatchObject({
@@ -535,6 +535,24 @@ describe("production permission and validation fixes", () => {
       firstName: "Jane",
       secondName: "Doe",
     });
+
+    // Verify the global appUsers record is NOT modified (tenant isolation)
+    const rawUser = await t.run(async (ctx) => await ctx.db.get(employeeUser!._id));
+    expect(rawUser?.firstName).toBe("Employee");
+
+    // Verify in a second company that the employee's name remains the global profile name
+    const secondCompanyId = await t.run(async (ctx) => {
+      const now = Date.now();
+      const cId = await ctx.db.insert("companies", { name: "Beta Corp", createdAt: now });
+      const adminId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|beta_admin", email: "beta_admin@example.com", firstName: "Beta Admin", secondName: "", createdAt: now, updatedAt: now });
+      await ctx.db.insert("companyMemberships", { companyId: cId, userId: adminId, role: "Admin", active: true, createdAt: now, updatedAt: now });
+      await ctx.db.insert("companyMemberships", { companyId: cId, userId: employeeUser!._id, role: "Employee", active: true, createdAt: now, updatedAt: now });
+      return cId;
+    });
+    const betaOverview = await t.withIdentity(identity("beta_admin", "beta_admin@example.com")).query(api.companyManagement.overview, { companyId: secondCompanyId });
+    const betaEmployee = betaOverview.users.find((u) => u.user._id === employeeUser!._id);
+    expect(betaEmployee?.user.firstName).toBe("Employee");
+    expect(betaEmployee?.user.name).toBe("Employee");
 
     // Verify audit event
     const auditEvents = await t.run(async (ctx) => {
@@ -560,5 +578,53 @@ describe("production permission and validation fixes", () => {
         firstName: "Hacker",
       }),
     ).rejects.toThrow("You do not have access to do that.");
+  });
+
+  test("pagination queries support search, priority, and frequency filters", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const admin = t.withIdentity(identity("admin"));
+
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let i = 1; i <= 250; i++) {
+        await ctx.db.insert("oneTimeTasks", {
+          companyId,
+          reference: `OT-${String(i).padStart(4, "0")}`,
+          title: i === 245 ? "Rare Needle Task" : `Generic Task ${i}`,
+          priority: i === 245 ? "high" : "low",
+          status: "due",
+          assigneeMembershipIds: [adminMembershipId],
+          createdByMembershipId: adminMembershipId,
+          createdAt: now + i,
+          updatedAt: now + i,
+        });
+      }
+    });
+
+    // No-match search returns empty page with isDone: true
+    const noMatch = await admin.query(api.tasks.listOneTimeRows, {
+      companyId,
+      search: "NonexistentQueryXYZ",
+      paginationOpts: { numItems: 200, cursor: null },
+    });
+    expect(noMatch.page).toHaveLength(0);
+
+    // Filter-aware search finds matching task
+    const rareMatch = await admin.query(api.tasks.listOneTimeRows, {
+      companyId,
+      search: "Rare Needle",
+      paginationOpts: { numItems: 200, cursor: null },
+    });
+    expect(rareMatch.page).toHaveLength(1);
+    expect(rareMatch.page[0].title).toBe("Rare Needle Task");
+
+    // Filter by priority
+    const highPriority = await admin.query(api.tasks.listOneTimeRows, {
+      companyId,
+      priority: "high",
+      paginationOpts: { numItems: 200, cursor: null },
+    });
+    expect(highPriority.page).toHaveLength(1);
+    expect(highPriority.page[0].title).toBe("Rare Needle Task");
   });
 });

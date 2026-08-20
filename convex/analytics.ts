@@ -79,12 +79,14 @@ const statusFilterValidator = v.union(v.literal("all"), v.literal("due"), v.lite
 const priorityFilterValidator = v.union(v.literal("all"), v.literal("low"), v.literal("medium"), v.literal("high"));
 const frequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
 
-function firstName(user: Doc<"appUsers">) {
-  return user.firstName.trim() || "Unknown";
+function firstName(membership: { firstName?: string } | null | undefined, user: Doc<"appUsers">) {
+  return membership?.firstName?.trim() || user.firstName.trim() || "Unknown";
 }
 
-function fullName(user: Doc<"appUsers">) {
-  return [user.firstName.trim(), user.secondName?.trim()].filter(Boolean).join(" ") || "Unknown";
+function fullName(membership: { firstName?: string; secondName?: string } | null | undefined, user: Doc<"appUsers">) {
+  const first = firstName(membership, user);
+  const second = membership?.secondName !== undefined ? membership.secondName.trim() : (user.secondName?.trim() ?? "");
+  return [first === "Unknown" ? "" : first, second].filter(Boolean).join(" ") || first;
 }
 
 function safeRate(part: number, total: number) {
@@ -123,8 +125,8 @@ async function loadPeople(ctx: QueryCtx, membershipIds: Set<Id<"companyMembershi
     people.set(membershipId, {
       _id: membershipId,
       role: membership.role,
-      name: fullName(user),
-      firstName: firstName(user),
+      name: fullName(membership, user),
+      firstName: firstName(membership, user),
       imageUrl: user.imageUrl ?? null,
     });
   }

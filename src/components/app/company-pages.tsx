@@ -2010,14 +2010,6 @@ export default function Company() {
         } : row)),
       } as any);
     }
-    const me = localStore.getQuery(api.users.me, {}) as any;
-    if (me && me._id === args.userId) {
-      localStore.setQuery(api.users.me, {}, {
-        ...me,
-        firstName,
-        secondName: cleanSecondName,
-      });
-    }
   });
   const setUserPermissions = useMutation(api.companyManagement.setUserPermissions).withOptimisticUpdate((localStore, args) => {
     const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;

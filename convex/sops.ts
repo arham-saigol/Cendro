@@ -4,7 +4,7 @@ import { internal } from "./_generated/api";
 import { action, internalAction, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { Capability } from "../src/lib/permissions";
-import { buildSopVisibilityContext, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds, visibleSop, visibleSopForSelf, type SopVisibilityContext } from "./permissions";
+import { buildSopVisibilityContext, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds, visibleSop, visibleSopForSelf, type SopVisibilityContext } from "./permissions";
 import { nonEmpty } from "./validation";
 import { nextReference } from "./references";
 
@@ -97,8 +97,8 @@ async function withScopes(ctx: QueryCtx, sop: Doc<"sops">, companyName?: string)
     const membership = userMembershipIds[0] ? await ctx.db.get(userMembershipIds[0]) : null;
     const user = membership?.companyId === sop.companyId ? await ctx.db.get(membership.userId) : null;
     if (user) {
-      scopeTargetName = fullName(user);
-      scopeTargetUser = { firstName: firstName(user), name: scopeTargetName, imageUrl: user.imageUrl ?? null };
+      scopeTargetName = memberFullName(membership, user);
+      scopeTargetUser = { firstName: memberFirstName(membership, user), name: scopeTargetName, imageUrl: user.imageUrl ?? null };
     } else {
       scopeTargetName = "Unknown user";
     }
@@ -207,7 +207,7 @@ export const scopeOptions = query({
     const userRows = await Promise.all(activeMemberships.map(async (membership) => ({ membership, user: await ctx.db.get(membership.userId) })));
     const users = [];
     for (const { membership, user } of userRows) {
-      if (user) users.push({ membership: { _id: membership._id, role: membership.role }, user: { name: fullName(user), firstName: firstName(user), imageUrl: user.imageUrl ?? null } });
+      if (user) users.push({ membership: { _id: membership._id, role: membership.role }, user: { name: memberFullName(membership, user), firstName: memberFirstName(membership, user), imageUrl: user.imageUrl ?? null } });
     }
     return {
       branches: scopedBranches.map((branch) => ({ _id: branch._id, name: branch.name })),
@@ -260,7 +260,7 @@ export const filterOptions = query({
       const userMembership = await ctx.db.get(membershipId);
       if (!userMembership || userMembership.companyId !== args.companyId || !userMembership.active) continue;
       const user = await ctx.db.get(userMembership.userId);
-      if (user) users.push({ membership: { _id: userMembership._id, role: userMembership.role }, user: { name: fullName(user), firstName: firstName(user), imageUrl: user.imageUrl ?? null } });
+      if (user) users.push({ membership: { _id: userMembership._id, role: userMembership.role }, user: { name: memberFullName(userMembership, user), firstName: memberFirstName(userMembership, user), imageUrl: user.imageUrl ?? null } });
     }
     branches.sort((a, b) => a.name.localeCompare(b.name));
     departments.sort((a, b) => a.name.localeCompare(b.name));

@@ -73,6 +73,7 @@ const frequencies: { value: Frequency; label: string }[] = [
 ];
 const frequencyRank = new Map<Frequency, number>(frequencies.map((frequency, index) => [frequency.value, index]));
 const priorities: Priority[] = ["low", "medium", "high"];
+const TASK_PAGE_SIZE = 200;
 const manualStatuses: { value: ManualStatus; label: string }[] = [
   { value: "due", label: "Pending" },
   { value: "in_progress", label: "In Progress" },
@@ -1105,6 +1106,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const loadMoreRef = useRef<HTMLDivElement>(null);
   const [taskView, setTaskView] = useState<TaskView>("all");
   const [frequency, setFrequency] = useState<FrequencyFilter>("all");
   const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>("all");
@@ -1123,9 +1125,12 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const canUseAllTasks = active?.membership.role === "Admin" || active?.membership.role === "Manager";
   const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip") as any[] | undefined;
   const filterableAssignees = useQuery(api.tasks.filterableAssignees, activeCompanyId && canUseAllTasks ? { companyId: activeCompanyId } : "skip") as any[] | undefined;
-  const tasks = useQuery(kind === "jd" ? api.tasks.listJdRows : api.tasks.listOneTimeRows, activeCompanyId ? (kind === "jd" ? { companyId: activeCompanyId, search: search || undefined, sort: "frequency" as const } : { companyId: activeCompanyId, search: search || undefined, sort: "newest" as const }) : "skip") as any[] | undefined;
-  const jdFrequencySourceTasks = useQuery(api.tasks.listJdRows, activeCompanyId && kind === "jd" && search.trim() !== "" ? { companyId: activeCompanyId, sort: "frequency" as const } : "skip") as any[] | undefined;
-  const oneTimePrioritySourceTasks = useQuery(api.tasks.listOneTimeRows, activeCompanyId && kind === "one" && search.trim() !== "" ? { companyId: activeCompanyId, sort: "newest" as const } : "skip") as any[] | undefined;
+  const taskPages = usePaginatedQuery(
+    kind === "jd" ? api.tasks.listJdRows : api.tasks.listOneTimeRows,
+    activeCompanyId ? { companyId: activeCompanyId } : "skip",
+    { initialNumItems: TASK_PAGE_SIZE }
+  );
+  const tasks = taskPages.status === "LoadingFirstPage" ? undefined : taskPages.results as any[];
   const updateJd = useMutation(api.tasks.updateJd);
   const updateOneTime = useMutation(api.tasks.updateOneTime);
   const deleteJd = useMutation(api.tasks.deleteJd);
@@ -1142,8 +1147,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const priorityViewActive = kind === "one" && personalPriorityView !== "all";
   const effectiveTaskView: TaskView = canUseAllTasks ? taskView : "my";
   const currentMembershipId = active?.membership._id as string | undefined;
-  const jdFrequencyPillTasks = search.trim() !== "" ? (jdFrequencySourceTasks ?? tasks) : tasks;
-  const oneTimePriorityPillTasks = search.trim() !== "" ? (oneTimePrioritySourceTasks ?? tasks) : tasks;
+  const jdFrequencyPillTasks = tasks;
+  const oneTimePriorityPillTasks = tasks;
   const ownFrequencyValues = useMemo(() => {
     if (kind !== "jd" || !currentMembershipId) return [] as Frequency[];
     const values = new Set<Frequency>();
@@ -1161,6 +1166,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const showPriorityColumn = kind === "one" && !priorityFilterActive;
   const visibleTasks = (tasks ?? [])
     .filter((task) => {
+      const needle = search.trim().toLowerCase();
+      if (needle && !task.title.toLowerCase().includes(needle) && !task.reference.toLowerCase().includes(needle)) return false;
       if (effectiveTaskView === "my" && !taskHasAssignee(task, currentMembershipId)) return false;
       if (kind === "jd" && frequency !== "all" && task.recurrence !== frequency) return false;
       if (!statusMatches(task, statusFilter)) return false;
@@ -1207,6 +1214,19 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus();
   }, [searchOpen]);
+
+  useEffect(() => {
+    const node = loadMoreRef.current;
+    if (!node || taskPages.status !== "CanLoadMore") return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) taskPages.loadMore(TASK_PAGE_SIZE);
+      },
+      { rootMargin: "400px 0px" }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [taskPages]);
 
   useEffect(() => {
     if (tasks && selectedIds.size > 0) {
@@ -1677,6 +1697,12 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             )}
           </tbody>
         </table>
+        </div>
+        <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center py-2" aria-live="polite">
+          {taskPages.status === "LoadingMore" && <span className="text-[12px] text-[var(--ink-muted)]">Loading more tasks…</span>}
+          {taskPages.status === "CanLoadMore" && (
+            <Button size="sm" variant="ghost" onClick={() => taskPages.loadMore(TASK_PAGE_SIZE)}>Load more tasks</Button>
+          )}
         </div>
       </div>
     </div>

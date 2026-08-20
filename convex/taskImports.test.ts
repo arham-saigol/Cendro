@@ -50,8 +50,8 @@ describe("task import backend", () => {
       ...args,
       rows: [{ ...args.rows[0], draft: draft({ title: "Different task" }) }],
     })).rejects.toThrow(/already used for different rows/);
-    const tasks = await admin.query(api.tasks.listJdRows, { companyId });
-    expect(tasks).toHaveLength(1);
+    const tasks = await admin.query(api.tasks.listJdRows, { companyId, paginationOpts: { numItems: 10, cursor: null } });
+    expect(tasks.page).toHaveLength(1);
   });
 
   test("applies imported JD status to the current cycle after older cycles elapsed", async () => {

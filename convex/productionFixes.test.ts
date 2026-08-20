@@ -98,9 +98,60 @@ describe("production permission and validation fixes", () => {
     ]);
     expect([firstJd.task.reference, secondJd.task.reference, oneTime.task.reference, sop.reference]).toEqual(["JD-0001", "JD-0002", "OT-0001", "SOP-0001"]);
 
-    await expect(admin.query(api.tasks.listJdRows, { companyId, search: "jd-0002" })).resolves.toMatchObject([{ _id: secondJdId }]);
-    await expect(admin.query(api.tasks.listOneTimeRows, { companyId, search: "OT-0001" })).resolves.toMatchObject([{ _id: oneTimeId }]);
+    await expect(admin.query(api.tasks.listJdRows, { companyId, search: "jd-0002", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: secondJdId }] });
+    await expect(admin.query(api.tasks.listOneTimeRows, { companyId, search: "OT-0001", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: oneTimeId }] });
     await expect(admin.query(api.sops.listRows, { companyId, search: "sop-0001" })).resolves.toMatchObject([{ _id: sopId }]);
+  });
+
+  test("assignee results continue past the first 200 company tasks", async () => {
+    const { t, companyId, adminMembershipId, employeeMembershipId } = await seedCompany();
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let index = 1; index <= 68; index += 1) {
+        await ctx.db.insert("jdTasks", {
+          companyId,
+          reference: `JD-${String(index).padStart(4, "0")}`,
+          title: `Task ${index}`,
+          recurrence: "daily",
+          cycleStartedAt: now,
+          status: "due",
+          assigneeMembershipIds: [employeeMembershipId],
+          createdByMembershipId: adminMembershipId,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let index = 69; index <= 263; index += 1) {
+        await ctx.db.insert("jdTasks", {
+          companyId,
+          reference: `JD-${String(index).padStart(4, "0")}`,
+          title: `Task ${index}`,
+          recurrence: "daily",
+          cycleStartedAt: now,
+          status: "due",
+          assigneeMembershipIds: [adminMembershipId],
+          createdByMembershipId: adminMembershipId,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+
+    const admin = t.withIdentity(identity("admin"));
+    const first = await admin.query(api.tasks.listJdRows, { companyId, paginationOpts: { numItems: 200, cursor: null } });
+    const second = await admin.query(api.tasks.listJdRows, { companyId, paginationOpts: { numItems: 200, cursor: first.continueCursor } });
+    const employeeTasks = [...first.page, ...second.page].filter((task) => task.assigneeMembershipIds.includes(employeeMembershipId));
+
+    expect(first.isDone).toBe(false);
+    expect(first.page).toHaveLength(200);
+    expect(first.page.filter((task) => task.assigneeMembershipIds.includes(employeeMembershipId))).toHaveLength(5);
+    expect(second.isDone).toBe(true);
+    expect(second.page).toHaveLength(63);
+    expect(second.page.every((task) => task.assigneeMembershipIds.includes(employeeMembershipId))).toBe(true);
+    expect(employeeTasks).toHaveLength(68);
   });
 
   test("company timezone defaults to GMT+5 and can be changed", async () => {

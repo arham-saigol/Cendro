@@ -43,7 +43,7 @@ import { cn, formatDate, initials } from "@/lib/utils";
 
 type Kind = "jd" | "one";
 type Priority = "low" | "medium" | "high";
-type Frequency = "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "semiannually" | "annually";
+type Frequency = "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "quarterly" | "semiannually" | "annually";
 type ManualStatus = "due" | "in_progress" | "completed";
 type StatusFilter = "all" | ManualStatus | "overdue";
 type TaskView = "all" | "my";
@@ -68,6 +68,7 @@ const frequencies: { value: Frequency; label: string }[] = [
   { value: "weekly", label: "Weekly" },
   { value: "semimonthly", label: "Semi-monthly" },
   { value: "monthly", label: "Monthly" },
+  { value: "quarterly", label: "Quarterly" },
   { value: "semiannually", label: "Bi-yearly" },
   { value: "annually", label: "Yearly" },
 ];

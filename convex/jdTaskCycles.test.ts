@@ -4,7 +4,7 @@ import { convexTest } from "convex-test";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import schema from "./schema";
-import { currentJdCycle } from "./taskCycles";
+import { currentJdCycle, nextJdCycleStart, previousJdCycleStart } from "./taskCycles";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -182,6 +182,10 @@ describe("fixed JD calendar cycle boundaries", () => {
     expect(currentJdCycle("monthly", utc(2026, 6, 15, 9), "UTC")).toEqual({ start: utc(2026, 6, 1), end: utc(2026, 7, 1) });
     expect(currentJdCycle("semiannually", utc(2026, 6, 30, 23, 59), "UTC")).toEqual({ start: utc(2026, 1, 1), end: utc(2026, 7, 1) });
     expect(currentJdCycle("semiannually", utc(2026, 7, 1), "UTC")).toEqual({ start: utc(2026, 7, 1), end: utc(2027, 1, 1) });
+    expect(currentJdCycle("quarterly", utc(2026, 5, 15, 9), "UTC")).toEqual({ start: utc(2026, 4, 1), end: utc(2026, 7, 1) });
+    expect(currentJdCycle("quarterly", utc(2026, 7, 1), "UTC")).toEqual({ start: utc(2026, 7, 1), end: utc(2026, 10, 1) });
+    expect(nextJdCycleStart(utc(2026, 4, 1), "quarterly", "UTC")).toBe(utc(2026, 7, 1));
+    expect(previousJdCycleStart(utc(2026, 7, 1), "quarterly", "UTC")).toBe(utc(2026, 4, 1));
     expect(currentJdCycle("annually", utc(2026, 12, 31, 23, 59), "UTC")).toEqual({ start: utc(2026, 1, 1), end: utc(2027, 1, 1) });
   });
 

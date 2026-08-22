@@ -49,6 +49,7 @@ const recurrenceOptions = [
   "weekly",
   "semimonthly",
   "monthly",
+  "quarterly",
   "semiannually",
   "annually",
 ] as const;

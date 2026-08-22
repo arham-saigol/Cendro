@@ -36,7 +36,7 @@ type DatePreset = "7d" | "30d" | "90d" | "365d";
 type TaskTypeFilter = "all" | "jd" | "one_time";
 type StatusFilter = "all" | "due" | "in_progress" | "completed" | "overdue";
 type PriorityFilter = "all" | "low" | "medium" | "high";
-type FrequencyFilter = "all" | "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "semiannually" | "annually";
+type FrequencyFilter = "all" | "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "quarterly" | "semiannually" | "annually";
 type DashboardTab = "overview" | "attention" | "organization" | "team" | "breakdowns";
 
 type BreakdownItem = { key: string; label: string; value: number };

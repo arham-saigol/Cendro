@@ -10,7 +10,7 @@ import { normalizeEmail, nonEmpty } from "./validation";
 
 const kindValidator = v.union(v.literal("jd"), v.literal("one_time"));
 const sourceValidator = v.literal("cendro");
-const recurrenceValidator = v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("semiannually"), v.literal("annually"));
+const recurrenceValidator = v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("quarterly"), v.literal("semiannually"), v.literal("annually"));
 const priorityValidator = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
 const statusValidator = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
 const nullableString = v.union(v.string(), v.null());
@@ -59,7 +59,7 @@ type Draft = {
   reference: string | null;
   title: string | null;
   description: string | null;
-  recurrence: "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "semiannually" | "annually" | null;
+  recurrence: "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "quarterly" | "semiannually" | "annually" | null;
   dueDate: number | null;
   priority: "low" | "medium" | "high" | null;
   time: string | null;

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const taskKinds = ["jd", "one_time"] as const;
 export const extractionSources = ["cendro"] as const;
-export const frequencies = ["daily", "every_other_day", "weekly", "semimonthly", "monthly", "semiannually", "annually"] as const;
+export const frequencies = ["daily", "every_other_day", "weekly", "semimonthly", "monthly", "quarterly", "semiannually", "annually"] as const;
 export const priorities = ["low", "medium", "high"] as const;
 export const taskStatuses = ["due", "in_progress", "completed"] as const;
 

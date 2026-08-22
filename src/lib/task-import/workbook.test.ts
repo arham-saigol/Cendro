@@ -18,6 +18,7 @@ import { referenceForKind } from "./schema";
 describe("task workbook pure helpers", () => {
   test("normalizes canonical enum aliases and statuses", () => {
     expect(normalizeFrequency("Every other day")).toBe("every_other_day");
+    expect(normalizeFrequency("qtr")).toBe("quarterly");
     expect(normalizeFrequency("bi-yearly")).toBe("semiannually");
     expect(normalizePriority("MED")).toBe("medium");
     expect(normalizePriority("urgent")).toBeNull();

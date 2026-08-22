@@ -1103,12 +1103,12 @@ function PeopleTab({
 
   return (
     <div className="company-tab-body company-people-body">
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="task-view-toggle" aria-label="People view">
+      <div className="flex flex-col items-stretch gap-2 md:flex-row md:flex-nowrap md:items-center">
+        <div className="task-view-toggle min-w-0 flex-1" aria-label="People view">
           <button type="button" className="task-view-button" data-active={view === "members"} onClick={() => setView("members")}><Users className="h-4 w-4" />Members<span className="rounded-full bg-[var(--surface-pressed)] px-1.5 text-[11px] font-medium tabular-nums text-[var(--ink-muted)]">{data.users.length}</span></button>
           <button type="button" className="task-view-button" data-active={view === "invitations"} onClick={() => setView("invitations")}><MailPlus className="h-4 w-4" />Invitations<span className="rounded-full bg-[var(--surface-pressed)] px-1.5 text-[11px] font-medium tabular-nums text-[var(--ink-muted)]">{data.invitations.length}</span></button>
         </div>
-        <div className="ml-auto flex flex-1 items-center justify-end gap-2">
+        <div className="flex items-center justify-end gap-2 shrink-0 md:ml-auto">
           <div className="task-search-control" data-open={searchOpen || query.trim() !== ""}>
             <Input value={query} onChange={(event) => setQuery(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder={view === "members" ? "Search by name or email" : "Search invitations"} aria-label={view === "members" ? "Search members" : "Search invitations"} tabIndex={searchOpen || query.trim() !== "" ? 0 : -1} />
             <button type="button" className="task-search-button" aria-label={query ? "Clear search" : "Search people"} onClick={() => { if (query) setQuery(""); else setSearchOpen((open) => !open); }}>{query ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}</button>

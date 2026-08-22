@@ -1045,9 +1045,28 @@ button:disabled { cursor: not-allowed; }
 
 .task-view-toggle {
   display: inline-flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 4px;
+  min-width: 0;
+  padding-block: 3px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+}
+.task-view-toggle::-webkit-scrollbar { display: none; }
+.task-view-toggle[data-scroll-start="true"] {
+  mask-image: linear-gradient(to right, transparent, black 16px);
+  -webkit-mask-image: linear-gradient(to right, transparent, black 16px);
+}
+.task-view-toggle[data-scroll-end="true"] {
+  mask-image: linear-gradient(to left, transparent, black 16px);
+  -webkit-mask-image: linear-gradient(to left, transparent, black 16px);
+}
+.task-view-toggle[data-scroll-start="true"][data-scroll-end="true"] {
+  mask-image: linear-gradient(to right, transparent, black 16px, black calc(100% - 16px), transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent, black 16px, black calc(100% - 16px), transparent);
 }
 .task-view-button {
   display: inline-flex;

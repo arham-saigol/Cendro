@@ -284,6 +284,7 @@ export function TaskImportExportMenu({
           <Button
             variant="secondary"
             size="sm"
+            className="whitespace-nowrap"
             disabled={isBusy || !activeCompanyId}
             aria-label="Import or export tasks"
           >

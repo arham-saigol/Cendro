@@ -30,7 +30,7 @@ Read `convex/_generated/ai/guidelines.md` before editing.
 - **`src/lib/task-import/workbook.test.ts`**: one assertion that `normalizeFrequency("qtr")` → `"quarterly"` alongside the existing alias tests.
 
 ## Verify
-```
+```sh
 npm run typecheck
 npx vitest run convex/jdTaskCycles.test.ts src/lib/task-import/workbook.test.ts
 npm run lint

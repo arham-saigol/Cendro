@@ -1247,7 +1247,13 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   }, [syncToggleScrollState, canUseAllTasks, ownFilterCount]);
 
   useEffect(() => {
-    viewToggleRef.current?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const rail = viewToggleRef.current;
+    const pill = rail?.querySelector<HTMLElement>('[data-active="true"]');
+    if (!rail || !pill) return;
+    const railBox = rail.getBoundingClientRect();
+    const pillBox = pill.getBoundingClientRect();
+    if (pillBox.left < railBox.left) rail.scrollLeft -= railBox.left - pillBox.left;
+    else if (pillBox.right > railBox.right) rail.scrollLeft += pillBox.right - railBox.right;
   }, [activeView, ownFilterCount]);
 
   useEffect(() => {
@@ -1452,7 +1458,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             </>
           )}
         </div>
-        <div className="flex items-center justify-end gap-2 shrink-0 md:ml-auto">
+        <div className="flex flex-wrap items-center justify-end gap-2 shrink-0 md:flex-nowrap md:ml-auto">
           <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
             <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search title or ref" aria-label="Search tasks by title or reference" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
             <button type="button" className="task-search-button" aria-label={search ? "Clear search" : "Search tasks"} onClick={() => { if (search) setSearch(""); else setSearchOpen((open) => !open); }}>

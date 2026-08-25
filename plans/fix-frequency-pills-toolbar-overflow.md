@@ -11,7 +11,9 @@ screenshots).
 
 Fix so that:
 
-- The action cluster (search icon, filter icon, Import/Export, New task) never wraps or moves.
+- At `md` and wider, the action cluster (search icon, filter icon, Import/Export, New task) stays
+  on the toolbar's single row and its buttons never wrap or move; below `md` it stacks as its own
+  full-width, right-aligned row under the pills.
 - Toolbar height stays constant regardless of how many pills exist.
 - All pills remain reachable when they don't fit.
 

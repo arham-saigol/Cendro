@@ -1237,16 +1237,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     node.dataset.scrollEnd = maxScroll > 1 && node.scrollLeft < maxScroll - 1 ? "true" : "false";
   }, []);
 
-  useEffect(() => {
-    syncToggleScrollState();
-    const node = viewToggleRef.current;
-    if (!node) return;
-    const observer = new ResizeObserver(syncToggleScrollState);
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [syncToggleScrollState, canUseAllTasks, ownFilterCount]);
-
-  useEffect(() => {
+  const scrollActivePillIntoView = useCallback(() => {
     const rail = viewToggleRef.current;
     const pill = rail?.querySelector<HTMLElement>('[data-active="true"]');
     if (!rail || !pill) return;
@@ -1254,7 +1245,25 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     const pillBox = pill.getBoundingClientRect();
     if (pillBox.left < railBox.left) rail.scrollLeft -= railBox.left - pillBox.left;
     else if (pillBox.right > railBox.right) rail.scrollLeft += pillBox.right - railBox.right;
-  }, [activeView, ownFilterCount]);
+  }, []);
+
+  useEffect(() => {
+    scrollActivePillIntoView();
+    syncToggleScrollState();
+    const node = viewToggleRef.current;
+    if (!node) return;
+    const observer = new ResizeObserver(() => {
+      scrollActivePillIntoView();
+      syncToggleScrollState();
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [scrollActivePillIntoView, syncToggleScrollState, canUseAllTasks, ownFilterCount]);
+
+  useEffect(() => {
+    scrollActivePillIntoView();
+    syncToggleScrollState();
+  }, [scrollActivePillIntoView, syncToggleScrollState, activeView, ownFilterCount]);
 
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus();

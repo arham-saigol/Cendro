@@ -35,6 +35,7 @@ import { useCompany } from "./company-context";
 import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
 import { TaskImportExportMenu } from "./task-import-dialog";
+import { useTaskRailAutoScroll } from "./task-rail-scroll";
 import { downloadBlob, exportTaskWorkbook } from "@/lib/task-import/workbook";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -1108,6 +1109,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
+  const viewToggleRef = useRef<HTMLDivElement>(null);
   const [taskView, setTaskView] = useState<TaskView>("all");
   const [frequency, setFrequency] = useState<FrequencyFilter>("all");
   const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>("all");
@@ -1225,6 +1227,18 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       setPriorityFilter((current) => current === personalPriorityView ? "all" : current);
     }
   }, [kind, ownPriorityValues, personalPriorityView, personalOptions]);
+
+  const ownFilterCount = kind === "jd" ? ownFrequencyValues.length : ownPriorityValues.length;
+  const activeView = kind === "jd" ? personalFrequencyView : personalPriorityView;
+
+  const { syncToggleScrollState } = useTaskRailAutoScroll({
+    railRef: viewToggleRef,
+    activeCompanyId,
+    canUseAllTasks,
+    effectiveTaskView,
+    activeView,
+    ownFilterCount,
+  });
 
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus();
@@ -1392,8 +1406,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
 
       <TaskDialog kind={kind} mode="create" open={createOpen} onOpenChange={setCreateOpen} assignable={assignable ?? []} />
 
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <div className="task-view-toggle" aria-label="Task view">
+      <div className="mb-3 flex flex-col items-stretch gap-2 md:flex-row md:flex-nowrap md:items-center">
+        <div ref={viewToggleRef} className="task-view-toggle min-w-0 flex-1" aria-label="Task view" onScroll={syncToggleScrollState}>
           {kind === "jd" ? (
             <>
               <button type="button" className="task-view-button" data-active={(!canUseAllTasks && !frequencyViewActive) || (canUseAllTasks && effectiveTaskView === "all")} onClick={() => { setFrequency("all"); setPersonalFrequencyView("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
@@ -1428,7 +1442,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             </>
           )}
         </div>
-        <div className="ml-auto flex flex-1 items-center justify-end gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2 shrink-0 md:flex-nowrap md:ml-auto">
           <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
             <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search title or ref" aria-label="Search tasks by title or reference" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
             <button type="button" className="task-search-button" aria-label={search ? "Clear search" : "Search tasks"} onClick={() => { if (search) setSearch(""); else setSearchOpen((open) => !open); }}>
@@ -1452,7 +1466,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
           {canCreate && (
             <TaskImportExportMenu kind={kind} onNotification={(notif) => setImportBanner(notif)} />
           )}
-          {canCreate && <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />New task</Button>}
+          {canCreate && <Button variant="primary" size="sm" className="whitespace-nowrap" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />New task</Button>}
         </div>
       </div>
 

@@ -827,8 +827,8 @@ export function SopList({ selectedId }: { selectedId?: string }) {
 
       <SopDialog mode="create" open={createOpen} onOpenChange={setCreateOpen} onCreated={(id) => router.push(`/sops/${id}`)} />
 
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <div className="task-view-toggle" aria-label="SOP view">
+      <div className="mb-3 flex flex-col items-stretch gap-2 md:flex-row md:flex-nowrap md:items-center">
+        <div className="task-view-toggle min-w-0 flex-1" aria-label="SOP view">
           {canUseAllSops && (
             <button type="button" className="task-view-button" data-active={effectiveSopView === "all"} onClick={() => setSopView("all")}>
               <StarIcon className="h-4 w-4" />All SOPs
@@ -838,7 +838,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
             <User className="h-4 w-4" />My SOPs
           </button>
         </div>
-        <div className="ml-auto flex flex-1 items-center justify-end gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2 shrink-0 md:flex-nowrap md:ml-auto">
           <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
             <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search SOPs or ref" aria-label="Search SOPs by reference, title, or body" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
             <button type="button" className="task-search-button" aria-label={search ? "Clear search" : "Search SOPs"} onClick={() => { if (search) setSearch(""); else setSearchOpen((open) => !open); }}>
@@ -859,7 +859,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
               onPersonChange={setPersonFilter}
             />
           )}
-          {canCreate && <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />New SOP</Button>}
+          {canCreate && <Button variant="primary" size="sm" className="whitespace-nowrap" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />New SOP</Button>}
         </div>
       </div>
 

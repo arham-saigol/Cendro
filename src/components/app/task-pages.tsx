@@ -35,6 +35,7 @@ import { useCompany } from "./company-context";
 import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
 import { TaskImportExportMenu } from "./task-import-dialog";
+import { useTaskRailAutoScroll } from "./task-rail-scroll";
 import { downloadBlob, exportTaskWorkbook } from "@/lib/task-import/workbook";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -1229,41 +1230,14 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const ownFilterCount = kind === "jd" ? ownFrequencyValues.length : ownPriorityValues.length;
   const activeView = kind === "jd" ? personalFrequencyView : personalPriorityView;
 
-  const syncToggleScrollState = useCallback(() => {
-    const node = viewToggleRef.current;
-    if (!node) return;
-    const maxScroll = node.scrollWidth - node.clientWidth;
-    node.dataset.scrollStart = node.scrollLeft > 1 ? "true" : "false";
-    node.dataset.scrollEnd = maxScroll > 1 && node.scrollLeft < maxScroll - 1 ? "true" : "false";
-  }, []);
-
-  const scrollActivePillIntoView = useCallback(() => {
-    const rail = viewToggleRef.current;
-    const pill = rail?.querySelector<HTMLElement>('[data-active="true"]');
-    if (!rail || !pill) return;
-    const railBox = rail.getBoundingClientRect();
-    const pillBox = pill.getBoundingClientRect();
-    if (pillBox.left < railBox.left) rail.scrollLeft -= railBox.left - pillBox.left;
-    else if (pillBox.right > railBox.right) rail.scrollLeft += pillBox.right - railBox.right;
-  }, []);
-
-  useEffect(() => {
-    scrollActivePillIntoView();
-    syncToggleScrollState();
-    const node = viewToggleRef.current;
-    if (!node) return;
-    const observer = new ResizeObserver(() => {
-      scrollActivePillIntoView();
-      syncToggleScrollState();
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [scrollActivePillIntoView, syncToggleScrollState, canUseAllTasks, ownFilterCount]);
-
-  useEffect(() => {
-    scrollActivePillIntoView();
-    syncToggleScrollState();
-  }, [scrollActivePillIntoView, syncToggleScrollState, activeView, ownFilterCount]);
+  const { syncToggleScrollState } = useTaskRailAutoScroll({
+    railRef: viewToggleRef,
+    activeCompanyId,
+    canUseAllTasks,
+    effectiveTaskView,
+    activeView,
+    ownFilterCount,
+  });
 
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus();

@@ -284,6 +284,7 @@ function SopDialog({
   const { activeCompanyId, active } = useCompany();
   const create = useMutation(api.sops.create);
   const update = useMutation(api.sops.update);
+  const updateScope = useMutation(api.sops.updateScope);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [scopeType, setScopeType] = useState<CreateScopeType>("company");
@@ -294,16 +295,17 @@ function SopDialog({
   const [saving, setSaving] = useState(false);
   const titleRef = useRef<HTMLTextAreaElement>(null);
 
-  const createScopes = useMemo<CreateScopeType[]>(() => active?.capabilities.includes("sops:create") ? [
-    ...(active.capabilities.includes("sops:manage:company") ? ["company" as const] : []),
-    ...(active.capabilities.includes("sops:manage:branch") ? ["branch" as const] : []),
-    ...(active.capabilities.includes("sops:manage:department") ? ["department" as const] : []),
-    ...(active.capabilities.includes("sops:manage:user") ? ["user" as const] : []),
-  ] : [], [active]);
-  const defaultCreateScope = createScopes[0] ?? "company";
-  const canSelectCreateTarget = createScopes.some((scope) => scope !== "company");
-  const scopeOptions = useQuery(api.sops.scopeOptions, mode === "create" && open && activeCompanyId && canSelectCreateTarget ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
-  const scopeTargetValid = mode !== "create" || scopeType === "company" || (scopeType === "branch" ? Boolean(branchId) : scopeType === "department" ? Boolean(departmentId) : Boolean(userMembershipId));
+  const availableScopes = useMemo<CreateScopeType[]>(() => {
+    if (mode === "create") {
+      return active?.capabilities.includes("sops:create")
+        ? editableScopeTypes.filter((scope) => canManageSop(active, scope))
+        : [];
+    }
+    return editableScopeTypes.filter((scope) => canManageSop(active, scope));
+  }, [active, mode]);
+  const defaultCreateScope = availableScopes[0] ?? "company";
+  const scopeOptions = useQuery(api.sops.scopeOptions, open && activeCompanyId && canLoadSopScopeOptions(active) ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
+  const scopeTargetValid = scopeType === "company" || (scopeType === "branch" ? Boolean(branchId) : scopeType === "department" ? Boolean(departmentId) : Boolean(userMembershipId));
 
   useEffect(() => {
     if (!open) return;
@@ -314,6 +316,11 @@ function SopDialog({
       setBranchId("");
       setDepartmentId("");
       setUserMembershipId("");
+    } else {
+      setScopeType(sop?.scopeType ?? "company");
+      setBranchId(sop?.branchIds?.[0] ?? "");
+      setDepartmentId(sop?.departmentIds?.[0] ?? "");
+      setUserMembershipId(sop?.userMembershipIds?.[0] ?? "");
     }
     setError(null);
     setSaving(false);
@@ -321,15 +328,15 @@ function SopDialog({
 
   useEffect(() => {
     if (mode !== "create" || !open) return;
-    if (!createScopes.includes(scopeType)) setScopeType(defaultCreateScope);
-  }, [createScopes, defaultCreateScope, mode, open, scopeType]);
+    if (!availableScopes.includes(scopeType)) setScopeType(defaultCreateScope);
+  }, [availableScopes, defaultCreateScope, mode, open, scopeType]);
 
   useEffect(() => {
-    if (mode !== "create" || !open || !scopeOptions) return;
+    if (!open || !scopeOptions) return;
     if (scopeType === "branch" && !scopeOptions.branches.some((branch) => branch._id === branchId)) setBranchId(scopeOptions.branches[0]?._id ?? "");
     if (scopeType === "department" && !scopeOptions.departments.some((department) => department._id === departmentId)) setDepartmentId(scopeOptions.departments[0]?._id ?? "");
     if (scopeType === "user" && !scopeOptions.users.some((user) => user.membership._id === userMembershipId)) setUserMembershipId(scopeOptions.users[0]?.membership._id ?? "");
-  }, [branchId, departmentId, mode, open, scopeOptions, scopeType, userMembershipId]);
+  }, [branchId, departmentId, open, scopeOptions, scopeType, userMembershipId]);
 
   useEffect(() => autoSize(titleRef), [title, open]);
 
@@ -338,9 +345,9 @@ function SopDialog({
     const trimmedTitle = title.trim();
     const trimmedContent = content.trim();
     if (!trimmedTitle) { setError("Title is required."); return; }
-    if (mode === "create" && scopeType === "branch" && !branchId) { setError("Select a branch for this SOP."); return; }
-    if (mode === "create" && scopeType === "department" && !departmentId) { setError("Select a department for this SOP."); return; }
-    if (mode === "create" && scopeType === "user" && !userMembershipId) { setError("Select a user for this SOP."); return; }
+    if (scopeType === "branch" && !branchId) { setError("Select a branch for this SOP."); return; }
+    if (scopeType === "department" && !departmentId) { setError("Select a department for this SOP."); return; }
+    if (scopeType === "user" && !userMembershipId) { setError("Select a user for this SOP."); return; }
     setSaving(true);
     setError(null);
     try {
@@ -356,7 +363,33 @@ function SopDialog({
         });
         if (scopeType === "company" || (scopeType === "user" && userMembershipId === active?.membership._id)) onCreated?.(id as unknown as string);
       } else {
-        await update({ companyId: activeCompanyId, sopId: sop._id as Id<"sops">, title: trimmedTitle, content: trimmedContent });
+        const titleOrContentChanged = trimmedTitle !== (sop?.title ?? "").trim() || trimmedContent !== (sop?.content ?? "").trim();
+        const prevBranchId = sop?.branchIds?.[0] ?? "";
+        const prevDepartmentId = sop?.departmentIds?.[0] ?? "";
+        const prevUserMembershipId = sop?.userMembershipIds?.[0] ?? "";
+        const scopeChanged = scopeType !== sop?.scopeType ||
+          (scopeType === "branch" && branchId !== prevBranchId) ||
+          (scopeType === "department" && departmentId !== prevDepartmentId) ||
+          (scopeType === "user" && userMembershipId !== prevUserMembershipId);
+
+        if (titleOrContentChanged) {
+          await update({
+            companyId: activeCompanyId,
+            sopId: sop._id as Id<"sops">,
+            title: trimmedTitle,
+            content: trimmedContent,
+          });
+        }
+        if (scopeChanged) {
+          await updateScope({
+            companyId: activeCompanyId,
+            sopId: sop._id as Id<"sops">,
+            scopeType,
+            branchIds: scopeType === "branch" ? [branchId as Id<"branches">] : [],
+            departmentIds: scopeType === "department" ? [departmentId as Id<"departments">] : [],
+            userMembershipIds: scopeType === "user" ? [userMembershipId as Id<"companyMemberships">] : [],
+          });
+        }
       }
       onOpenChange(false);
     } catch (err) {
@@ -398,20 +431,33 @@ function SopDialog({
               <div className="mt-4 divide-y divide-[var(--hairline)] border-y border-[var(--hairline)]">
                 <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
                   <span className="text-[13px] text-[var(--ink-muted)]">Type</span>
-                  {mode === "create" ? (
+                  {availableScopes.includes(scopeType) ? (
                     <div className="min-w-0">
                       <DialogSelectPicker
                         ariaLabel="SOP type"
                         value={scopeType}
-                        options={createScopes.map((scope) => ({ value: scope, label: scopeLabels[scope] }))}
-                        onChange={(value) => { setScopeType(value); setError(null); }}
+                        options={availableScopes.map((scope) => ({ value: scope, label: scopeLabels[scope] }))}
+                        onChange={(value) => {
+                          setScopeType(value);
+                          setError(null);
+                          if (scopeOptions) {
+                            if (value === "branch" && !scopeOptions.branches.some((b) => b._id === branchId)) {
+                              setBranchId(scopeOptions.branches[0]?._id ?? "");
+                            } else if (value === "department" && !scopeOptions.departments.some((d) => d._id === departmentId)) {
+                              setDepartmentId(scopeOptions.departments[0]?._id ?? "");
+                            } else if (value === "user" && !scopeOptions.users.some((u) => u.membership._id === userMembershipId)) {
+                              setUserMembershipId(scopeOptions.users[0]?.membership._id ?? "");
+                            }
+                          }
+                        }}
+                        disabled={availableScopes.length <= 1}
                       />
                     </div>
                   ) : (
                     <div className="min-w-0"><ScopePill scopeType={sop?.scopeType ?? "company"} /></div>
                   )}
                 </div>
-                {mode === "create" && scopeType !== "company" && (
+                {scopeType !== "company" && (
                   <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
                     <span className="text-[13px] text-[var(--ink-muted)]">Assigned to</span>
                     <div className="min-w-0">
@@ -682,6 +728,8 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   const [branchFilter, setBranchFilter] = useState("all");
   const [personFilter, setPersonFilter] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editingSop, setEditingSop] = useState<any | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -715,6 +763,9 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
   const selectionCount = selectedIds.size;
   const canDeleteSelection = selectionCount > 0 && !deleting;
+  const selectedSopId = selectionCount === 1 ? Array.from(selectedIds)[0] : null;
+  const selectedSop = selectedSopId ? rows.find((sop) => sop._id === selectedSopId) ?? null : null;
+  const canEditSelectedSop = Boolean(selectedSop && canManageSop(active, selectedSop.scopeType as ScopeType));
 
   useEffect(() => { if (searchOpen) searchInputRef.current?.focus(); }, [searchOpen]);
 
@@ -788,6 +839,19 @@ export function SopList({ selectedId }: { selectedId?: string }) {
     setDeleteError(null);
   }
 
+  function handleEditSelection() {
+    if (!selectedSop || !canEditSelectedSop) return;
+    setEditingSop(selectedSop);
+    setEditOpen(true);
+  }
+
+  function handleEditOpenChange(open: boolean) {
+    setEditOpen(open);
+    if (!open) {
+      setEditingSop(null);
+    }
+  }
+
   async function handleDeleteSelection() {
     if (!activeCompanyId || deleting || selectionCount === 0) return;
     setDeleting(true);
@@ -828,6 +892,15 @@ export function SopList({ selectedId }: { selectedId?: string }) {
       <PageHeader title="SOPs" description="Searchable operating procedures with company, branch, department, and user visibility." />
 
       <SopDialog mode="create" open={createOpen} onOpenChange={setCreateOpen} onCreated={(id) => router.push(`/sops/${id}`)} />
+      {editingSop && (
+        <SopDialog
+          key={editingSop._id}
+          mode="edit"
+          open={editOpen}
+          onOpenChange={handleEditOpenChange}
+          sop={editingSop}
+        />
+      )}
 
       <div className="mb-3 flex flex-col items-stretch gap-2 md:flex-row md:flex-nowrap md:items-center">
         <div className="task-view-toggle min-w-0 flex-1" aria-label="SOP view">
@@ -878,11 +951,26 @@ export function SopList({ selectedId }: { selectedId?: string }) {
             <div className="task-selection-pill" role="status" aria-live="polite">
               <span className="task-selection-pill-count">{selectionCount} selected</span>
               <span className="task-selection-pill-divider" aria-hidden="true" />
-              <button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={deleting} aria-label="Cancel selection">
+              <button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={deleting} aria-label="Cancel selection" title="Cancel selection">
                 <X className="h-4 w-4" />
               </button>
+              {selectionCount === 1 && canEditSelectedSop && (
+                <>
+                  <span className="task-selection-pill-divider" aria-hidden="true" />
+                  <button
+                    type="button"
+                    className="task-selection-pill-btn"
+                    onClick={handleEditSelection}
+                    disabled={deleting}
+                    aria-label="Edit selected SOP"
+                    title="Edit selected"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </button>
+                </>
+              )}
               <span className="task-selection-pill-divider" aria-hidden="true" />
-              <button type="button" className="task-selection-pill-btn" data-danger="true" onClick={handleDeleteSelection} disabled={!canDeleteSelection} aria-label={selectionCount === 1 ? "Delete selected SOP" : `Delete ${selectionCount} selected SOPs`}>
+              <button type="button" className="task-selection-pill-btn" data-danger="true" onClick={handleDeleteSelection} disabled={!canDeleteSelection || deleting} aria-label={selectionCount === 1 ? "Delete selected SOP" : `Delete ${selectionCount} selected SOPs`} title="Delete selected">
                 <Trash2 className="h-4 w-4" />
               </button>
             </div>

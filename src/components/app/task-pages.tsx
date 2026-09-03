@@ -708,13 +708,14 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
     onChange(toDateField(next.getTime(), withTime));
   }
 
-  function commitDateDraft(): boolean {
+  function commitDateDraft(): boolean | null {
     const parsed = dateFromField(dateDraft);
     if (!parsed) {
       setDateDraft(selectedDate ? formatDateOnly(selectedDate, "short") : "");
-      return false;
+      return null;
     }
     const draftIncludesTime = dateFieldHasTime(dateDraft);
+    const committedIncludesTime = draftIncludesTime || includeTime;
     setMonthDate(new Date(parsed.getFullYear(), parsed.getMonth(), 1));
     if (draftIncludesTime) {
       setIncludeTime(true);
@@ -722,7 +723,7 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
     } else {
       emitDate(parsed, includeTime);
     }
-    return true;
+    return committedIncludesTime;
   }
 
   function commitTimeDraft(): boolean {
@@ -786,8 +787,8 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
           onKeyDown={(event) => {
             if (event.key === "Enter") {
               event.preventDefault();
-              const saved = commitDateDraft();
-              if (saved && !includeTime) setOpen(false);
+              const committedIncludesTime = commitDateDraft();
+              if (committedIncludesTime === false) setOpen(false);
             }
             if (event.key === "Escape") setDateDraft(selectedDate ? formatDateOnly(selectedDate, "short") : "");
           }}

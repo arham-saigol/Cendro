@@ -600,47 +600,68 @@ function SelectPicker<T extends string>({ ariaLabel, value, options, onChange, p
 function AssigneePicker({ assignable, selected, onChange, required = false }: { assignable: any[]; selected: string[]; onChange: (ids: string[]) => void; required?: boolean }) {
   const [open, setOpen] = useState(false);
   const [searchValue, setSearchValue] = useState("");
+  const containerRef = useRef<HTMLDivElement>(null);
   const selectedAssignee = assignable.find((assignee) => assignee.membership._id === selected[0]);
   const filtered = assignable.filter((assignee) => `${assignee.user.name || ""} ${assignee.user.email || ""} ${assignee.membership.role}`.toLowerCase().includes(searchValue.toLowerCase()));
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(e: MouseEvent | PointerEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        setSearchValue("");
+      }
+    }
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setOpen(false);
+        setSearchValue("");
+      }
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
   if (!assignable.length) return <div className="py-2 text-[13px] text-[var(--ink-faint)]">No assignable people.</div>;
   return (
-    <div className="relative">
+    <div ref={containerRef} className="relative">
       <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((current) => !current); }} className="task-inline-control" data-interactive="true">
         {selectedAssignee ? <Avatar name={selectedAssignee.user.name} email={selectedAssignee.user.email} imageUrl={selectedAssignee.user.imageUrl} /> : <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>}
         <span className={cn("min-w-0 flex-1 truncate", !selectedAssignee && "text-[var(--ink-faint)]")}>{selectedAssignee ? (selectedAssignee.user.name || selectedAssignee.user.email) : required ? "Select assignee" : "Unassigned"}</span>
         <ChevronDown className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
       </button>
       {open && (
-        <>
-          <button type="button" aria-label="Close" className="fixed inset-0 z-[70]" onClick={() => { setOpen(false); setSearchValue(""); }} />
-          <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-[71] rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-1.5 shadow-[var(--shadow-popover)]">
-            <div className="relative px-1 pb-1.5 pt-1">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--ink-faint)]" />
-              <Input aria-label="Search assignees" className="h-8 rounded-md pl-8 text-[13px]" value={searchValue} onChange={(event) => setSearchValue(event.target.value)} placeholder="Search people" autoFocus />
-            </div>
-            <div className="max-h-56 overflow-auto p-0.5">
-              {!required && (
-                <button type="button" onClick={() => { onChange([]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
-                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>
-                  <span className="flex-1 text-[var(--ink-secondary)]">Unassigned</span>
-                  {!selected[0] && <Check className="h-4 w-4 text-[var(--primary)]" />}
-                </button>
-              )}
-              {filtered.map((assignee) => {
-                const id = assignee.membership._id as string;
-                const name = assignee.user.name || assignee.user.email;
-                return (
-                  <button key={id} type="button" onClick={() => { onChange([id]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
-                    <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} />
-                    <span className="min-w-0 flex-1"><span className="block truncate font-medium text-[var(--ink)]">{name}</span><span className="block truncate text-[11.5px] text-[var(--ink-muted)]">{assignee.membership.role}</span></span>
-                    {selected[0] === id && <Check className="h-4 w-4 shrink-0 text-[var(--primary)]" />}
-                  </button>
-                );
-              })}
-              {filtered.length === 0 && <div className="px-2.5 py-3 text-[13px] text-[var(--ink-muted)]">No people found.</div>}
-            </div>
+        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-[71] rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-1.5 shadow-[var(--shadow-popover)]" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+          <div className="relative px-1 pb-1.5 pt-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--ink-faint)]" />
+            <Input aria-label="Search assignees" className="h-8 rounded-md pl-8 text-[13px]" value={searchValue} onChange={(event) => setSearchValue(event.target.value)} placeholder="Search people" autoFocus />
           </div>
-        </>
+          <div className="max-h-56 overflow-auto p-0.5">
+            {!required && (
+              <button type="button" onClick={() => { onChange([]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
+                <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>
+                <span className="flex-1 text-[var(--ink-secondary)]">Unassigned</span>
+                {!selected[0] && <Check className="h-4 w-4 text-[var(--primary)]" />}
+              </button>
+            )}
+            {filtered.map((assignee) => {
+              const id = assignee.membership._id as string;
+              const name = assignee.user.name || assignee.user.email;
+              return (
+                <button key={id} type="button" onClick={() => { onChange([id]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
+                  <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} />
+                  <span className="min-w-0 flex-1"><span className="block truncate font-medium text-[var(--ink)]">{name}</span><span className="block truncate text-[11.5px] text-[var(--ink-muted)]">{assignee.membership.role}</span></span>
+                  {selected[0] === id && <Check className="h-4 w-4 shrink-0 text-[var(--primary)]" />}
+                </button>
+              );
+            })}
+            {filtered.length === 0 && <div className="px-2.5 py-3 text-[13px] text-[var(--ink-muted)]">No people found.</div>}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -715,12 +736,18 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
   function pick(date: Date) {
     setMonthDate(new Date(date.getFullYear(), date.getMonth(), 1));
     emitDate(date, includeTime);
+    if (!includeTime) {
+      setOpen(false);
+    }
   }
 
   function jumpToCurrent() {
     const now = new Date();
     setMonthDate(new Date(now.getFullYear(), now.getMonth(), 1));
     emitDate(now, includeTime, includeTime ? now : null);
+    if (!includeTime) {
+      setOpen(false);
+    }
   }
 
   function toggleIncludeTime(nextIncludesTime: boolean) {
@@ -752,7 +779,11 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
           onChange={(event) => setDateDraft(event.target.value)}
           onBlur={commitDateDraft}
           onKeyDown={(event) => {
-            if (event.key === "Enter") { event.preventDefault(); commitDateDraft(); }
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commitDateDraft();
+              if (!includeTime) setOpen(false);
+            }
             if (event.key === "Escape") setDateDraft(selectedDate ? formatDateOnly(selectedDate, "short") : "");
           }}
           placeholder="Jun 24, 2026"
@@ -766,7 +797,11 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
               onChange={(event) => setTimeDraft(event.target.value)}
               onBlur={commitTimeDraft}
               onKeyDown={(event) => {
-                if (event.key === "Enter") { event.preventDefault(); commitTimeDraft(); }
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commitTimeDraft();
+                  setOpen(false);
+                }
                 if (event.key === "Escape") setTimeDraft(selectedDate && includeTime ? formatTimeOnly(selectedDate) : "");
               }}
               placeholder="5:00 PM"
@@ -1035,7 +1070,11 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
     <Dialog.Root open={open} onOpenChange={reset}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(760px,92dvh)] w-[min(560px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]">
+        <Dialog.Content
+          onPointerDownOutside={(e) => e.preventDefault()}
+          onInteractOutside={(e) => e.preventDefault()}
+          className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(760px,92dvh)] w-[min(560px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]"
+        >
           <div className="flex shrink-0 items-center justify-between border-b border-[var(--hairline)] px-6 py-4">
             <Dialog.Title className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">{mode === "create" ? `New ${kind === "jd" ? "JD " : ""}task` : `Edit ${kind === "jd" ? "JD " : ""}task`}</Dialog.Title>
             <Dialog.Close asChild><button type="button" className="task-icon-btn" aria-label="Close"><X className="h-4 w-4" /></button></Dialog.Close>

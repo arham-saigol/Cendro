@@ -1199,8 +1199,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const deleteOneTime = useMutation(api.tasks.deleteOneTime);
   const deleteOneTimeBulk = useMutation(api.tasks.deleteOneTimeBulk);
   const base = kind === "jd" ? "/jd-tasks" : "/one-time-tasks";
-  const pageTitle = kind === "jd" ? "JD Tasks" : "One-Time Tasks";
-  const description = kind === "jd" ? "Recurring role responsibilities with cycle-aware status and clear ownership." : "One-off work with priority, due dates, and clear completion status.";
+  const pageTitle = kind === "jd" ? "Job Description" : "Tasks";
+  const description = kind === "jd" ? "Track and manage recurring responsibilities and scheduled duties." : "Track and manage assignments, action items, and upcoming deadlines.";
   const canCreate = canCreateTasks(active, kind);
   const frequencyFilterActive = kind === "jd" && frequency !== "all";
   const priorityFilterActive = kind === "one" && priorityFilter !== "all";

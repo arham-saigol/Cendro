@@ -12,7 +12,7 @@ const prefixes: Record<ReferenceKind, string> = {
 const padLengths: Record<ReferenceKind, number> = {
   jd: 3,
   one_time: 3,
-  sop: 4,
+  sop: 3,
 };
 
 /** Allocates a company-scoped, human-readable reference inside the caller's transaction. */

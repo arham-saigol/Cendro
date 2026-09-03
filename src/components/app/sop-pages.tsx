@@ -8,6 +8,7 @@ import {
   ChevronRight,
   ChevronsRight,
   FileText,
+  Hash,
   History,
   Inbox,
   Layers,
@@ -232,7 +233,7 @@ function SopFilterMenu({
   onBranchChange: (value: string) => void;
   onPersonChange: (value: string) => void;
 }) {
-  const scopeOptions: { value: SopScopeFilter; label: string }[] = [{ value: "all", label: "All scopes" }, ...(["company", "branch", "department", "user"] as ScopeType[]).map((scope) => ({ value: scope, label: scopeLabels[scope] }))];
+  const scopeOptions: { value: SopScopeFilter; label: string }[] = [{ value: "all", label: "All types" }, ...(["company", "branch", "department", "user"] as ScopeType[]).map((scope) => ({ value: scope, label: scopeLabels[scope] }))];
   const branchOptions = [{ value: "all", label: "All branches" }, ...branches.map((branch) => ({ value: branch._id as string, label: branch.name }))];
   const personOptions = [{ value: "all", label: "All people" }, ...users.map((user) => ({ value: user.membership._id as string, label: user.user.name, avatar: <SopUserAvatar name={user.user.name} imageUrl={user.user.imageUrl} /> }))];
 
@@ -246,7 +247,7 @@ function SopFilterMenu({
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content align="end" sideOffset={6} className="task-menu min-w-48" aria-label="SOP filters">
-          <SopFilterSubmenu label="Scope" value={scopeFilter} options={scopeOptions} onChange={onScopeChange} />
+          <SopFilterSubmenu label="Type" value={scopeFilter} options={scopeOptions} onChange={onScopeChange} />
           <SopFilterSubmenu label="Branch" value={branchFilter} options={branchOptions} onChange={onBranchChange} />
           {showPersonFilter && <SopFilterSubmenu label="Person" value={personFilter} options={personOptions} onChange={onPersonChange} />}
         </DropdownMenu.Content>
@@ -255,9 +256,9 @@ function SopFilterMenu({
   );
 }
 
-function SopTargetValue({ scopeType, targetName, user }: { scopeType: ScopeType; targetName: string; user?: SopTargetUser }) {
+function SopTargetValue({ scopeType, targetName, user, showFullName = false }: { scopeType: ScopeType; targetName: string; user?: SopTargetUser; showFullName?: boolean }) {
   if (scopeType !== "user") return <span className="block truncate" title={targetName}>{targetName}</span>;
-  const displayName = firstDisplayName(user, targetName);
+  const displayName = showFullName ? (user?.name?.trim() || targetName) : firstDisplayName(user, targetName);
   const avatarName = user?.name?.trim() || targetName;
   return (
     <span className="inline-flex min-w-0 items-center gap-1.5" title={avatarName}>
@@ -332,14 +333,11 @@ function SopDialog({
 
   useEffect(() => autoSize(titleRef), [title, open]);
 
-  const contentPlainText = richTextPlainText(content);
-
   async function submit() {
     if (!activeCompanyId || saving) return;
     const trimmedTitle = title.trim();
     const trimmedContent = content.trim();
     if (!trimmedTitle) { setError("Title is required."); return; }
-    if (!richTextPlainText(trimmedContent)) { setError("SOP body is required."); return; }
     if (mode === "create" && scopeType === "branch" && !branchId) { setError("Select a branch for this SOP."); return; }
     if (mode === "create" && scopeType === "department" && !departmentId) { setError("Select a department for this SOP."); return; }
     if (mode === "create" && scopeType === "user" && !userMembershipId) { setError("Select a user for this SOP."); return; }
@@ -399,11 +397,11 @@ function SopDialog({
 
               <div className="mt-4 divide-y divide-[var(--hairline)] border-y border-[var(--hairline)]">
                 <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
-                  <span className="text-[13px] text-[var(--ink-muted)]">Scope</span>
+                  <span className="text-[13px] text-[var(--ink-muted)]">Type</span>
                   {mode === "create" ? (
                     <div className="min-w-0">
                       <DialogSelectPicker
-                        ariaLabel="SOP scope"
+                        ariaLabel="SOP type"
                         value={scopeType}
                         options={createScopes.map((scope) => ({ value: scope, label: scopeLabels[scope] }))}
                         onChange={(value) => { setScopeType(value); setError(null); }}
@@ -467,7 +465,7 @@ function SopDialog({
 
             <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--hairline)] px-6 py-4">
               <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>Cancel</Button>
-              <Button type="submit" size="lg" variant="primary" disabled={saving || !title.trim() || !contentPlainText || !scopeTargetValid}>{saving ? "Saving..." : mode === "create" ? "Create SOP" : "Save changes"}</Button>
+              <Button type="submit" size="lg" variant="primary" disabled={saving || !title.trim() || !scopeTargetValid}>{saving ? "Saving..." : mode === "create" ? "Create SOP" : "Save changes"}</Button>
             </div>
           </form>
         </Dialog.Content>
@@ -622,7 +620,7 @@ function InlineScopeCell({ value, options, pending, onSave }: { value: EditableS
   const [open, setOpen] = useState(false);
   const header = <span className="min-w-0 flex-1 truncate"><ScopePill scopeType={value} /></span>;
   return (
-    <SopCellPopover open={open} onOpenChange={setOpen} disabled={pending || options.length === 0} pending={pending} ariaLabel="Change SOP scope" header={header}>
+    <SopCellPopover open={open} onOpenChange={setOpen} disabled={pending || options.length === 0} pending={pending} ariaLabel="Change SOP type" header={header}>
       {options.map((option) => (
         <button key={option} type="button" onClick={() => { setOpen(false); if (option !== value) void onSave(option); }} className="task-cell-popover-item">
           <ScopePill scopeType={option} />
@@ -844,7 +842,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 shrink-0 md:flex-nowrap md:ml-auto">
           <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
-            <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search SOPs or ref" aria-label="Search SOPs by reference, title, or body" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
+            <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search SOPs or code" aria-label="Search SOPs by code, title, or body" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
             <button type="button" className="task-search-button" aria-label={search ? "Clear search" : "Search SOPs"} onClick={() => { if (search) setSearch(""); else setSearchOpen((open) => !open); }}>
               {search ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
             </button>
@@ -923,8 +921,10 @@ export function SopList({ selectedId }: { selectedId?: string }) {
         <table className="task-table">
           <thead>
             <tr className="group/head">
-              <th className="w-[96px] whitespace-nowrap">REF</th>
-              <th className="min-w-[200px] max-w-[420px]"><span className="inline-flex items-center gap-1.5"><FileText className="h-3.5 w-3.5" />Title</span></th>
+              <th className="w-[96px] whitespace-nowrap"><span className="inline-flex items-center gap-1.5"><Hash className="h-3.5 w-3.5" />CODE</span></th>
+              <th className="min-w-[200px] max-w-[360px]"><span className="inline-flex items-center gap-1.5"><FileText className="h-3.5 w-3.5" />Title</span></th>
+              <th className="w-28"><span className="inline-flex items-center gap-1.5"><Layers className="h-3.5 w-3.5" />Type</span></th>
+              <th className="min-w-[150px] max-w-[240px]"><span className="inline-flex items-center gap-1.5"><Users className="h-3.5 w-3.5" />Assigned To</span></th>
               <th><span className="inline-flex items-center gap-1.5"><History className="h-3.5 w-3.5" />Updated</span></th>
               <th><span className="inline-flex items-center gap-1.5"><Plus className="h-3.5 w-3.5" />Created at</span></th>
             </tr>
@@ -933,7 +933,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
             {isLoading ? (
               Array.from({ length: 6 }).map((_, index) => (
                 <tr key={`skel-${index}`}>
-                  <td colSpan={4} className="pl-4">
+                  <td colSpan={6} className="pl-4">
                     <div className="flex items-center gap-3">
                       <div className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-[var(--surface-muted)]" />
                       <div className="h-3 w-2/5 animate-pulse rounded bg-[var(--surface-muted)]" />
@@ -943,7 +943,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
               ))
             ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={4} className="!h-auto py-2">
+                <td colSpan={6} className="!h-auto py-2">
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
                     <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{hasActiveFilters ? "No matching SOPs" : "No SOPs yet"}</div>
@@ -963,6 +963,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                   const isChecked = selectedIds.has(sop._id);
                   const sopScope = sop.scopeType as ScopeType;
                   const rowCanEdit = canManageSop(active, sopScope);
+                  const targetName = sopTargetName(sop, active?.company.name);
                   const pending = (field: string) => pendingCell === `${sop._id}:${field}`;
                   const detailsHref = `/sops/${sop._id}`;
                   const prefetchDetails = () => router.prefetch(detailsHref);
@@ -988,7 +989,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                       className="group/row"
                     >
                       <td className="w-[96px] whitespace-nowrap font-mono text-[12px] text-[var(--ink-muted)]">{sop.reference}</td>
-                      <td className="col-task max-w-[420px]">
+                      <td className="col-task max-w-[360px]">
                         <div className="task-title-cell">
                           {rowCanEdit ? (
                             <InlineTitleCell value={sop.title ?? ""} ariaLabel="SOP title" pending={pending("title")} onSave={(title) => saveTitle(sop, title)} />
@@ -1013,6 +1014,12 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                           )}
                         </div>
                       </td>
+                      <td className="w-28 whitespace-nowrap">
+                        <ScopePill scopeType={sopScope} />
+                      </td>
+                      <td className="min-w-[150px] max-w-[240px] text-[13px] text-[var(--ink-secondary)]">
+                        <SopTargetValue scopeType={sopScope} targetName={targetName} user={sop.scopeTargetUser} showFullName />
+                      </td>
                       <td className="task-col-meta" title={`Updated ${formatDate(sop.updatedAt)}`}>{relativeTime(sop.updatedAt)}</td>
                       <td className="task-col-meta" title={`Created ${formatDate(sop.createdAt)}`}>{relativeTime(sop.createdAt)}</td>
                     </tr>
@@ -1020,7 +1027,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                 })}
                 {canCreate && (
                   <tr className="task-add-row">
-                    <td colSpan={4}>
+                    <td colSpan={6}>
                       <button type="button" className="task-add-label inline-flex items-center gap-1.5" onClick={() => setCreateOpen(true)}>
                         <Plus className="h-3.5 w-3.5" />New SOP
                       </button>
@@ -1263,7 +1270,7 @@ export function SopDetail({ id }: { id: string }) {
         <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
           {canShowScopeProperties && (
             <>
-              <PropertyRow icon={<Layers className="h-3.5 w-3.5" />} label="Scope">
+              <PropertyRow icon={<Layers className="h-3.5 w-3.5" />} label="Type">
                 {canEdit && editableScope ? (
                   <InlineScopeCell value={editableScope} options={editableScopes} pending={pendingProperty === "scope"} onSave={(scopeType) => saveScope({ scopeType }, "scope")} />
                 ) : (

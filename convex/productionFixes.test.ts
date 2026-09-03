@@ -96,11 +96,19 @@ describe("production permission and validation fixes", () => {
       admin.query(api.tasks.getOneTime, { companyId, taskId: oneTimeId }),
       admin.query(api.sops.get, { companyId, sopId }),
     ]);
-    expect([firstJd.task.reference, secondJd.task.reference, oneTime.task.reference, sop.reference]).toEqual(["JD-001", "JD-002", "TSK-001", "SOP-0001"]);
+    expect([firstJd.task.reference, secondJd.task.reference, oneTime.task.reference, sop.reference]).toEqual(["JD-001", "JD-002", "TSK-001", "SOP-001"]);
 
     await expect(admin.query(api.tasks.listJdRows, { companyId, search: "jd-002", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: secondJdId }] });
     await expect(admin.query(api.tasks.listOneTimeRows, { companyId, search: "TSK-001", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: oneTimeId }] });
-    await expect(admin.query(api.sops.listRows, { companyId, search: "sop-0001" })).resolves.toMatchObject([{ _id: sopId }]);
+    await expect(admin.query(api.sops.listRows, { companyId, search: "sop-001" })).resolves.toMatchObject([{ _id: sopId }]);
+  });
+
+  test("SOPs can be created without a body", async () => {
+    const { t, companyId } = await seedCompany();
+    const admin = t.withIdentity(identity("admin"));
+    const emptySopId = await admin.mutation(api.sops.create, { companyId, title: "Empty SOP", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
+    const emptySop = await admin.query(api.sops.get, { companyId, sopId: emptySopId });
+    expect(emptySop.content).toBe("");
   });
 
   test("assignee results continue past the first 200 company tasks", async () => {

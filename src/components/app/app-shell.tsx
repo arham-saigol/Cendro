@@ -17,6 +17,7 @@ import {
   Repeat,
   Search,
   Settings,
+  SquareCheck,
   Sun,
   X,
 } from "lucide-react";
@@ -32,9 +33,9 @@ import { cn, initials } from "@/lib/utils";
 
 const nav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, requiresDashboard: true },
-  { href: "/jd-tasks", label: "JD Tasks", icon: Repeat },
-  { href: "/one-time-tasks", label: "One-Time Tasks", icon: Check },
-  { href: "/sops", label: "SOPs", icon: FileText },
+  { href: "/jd-tasks", label: "Job Description", icon: Repeat },
+  { href: "/one-time-tasks", label: "Tasks", icon: SquareCheck },
+  { href: "/sops", label: "SOP's", icon: FileText },
   { href: "/company", label: "Company Management", icon: Building2, requiresCompanyManagement: true },
 ];
 
@@ -405,7 +406,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "flex h-8 items-center gap-2 rounded-md px-2 text-sm text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)]",
+                  "flex h-8 items-center gap-2 rounded-md px-2 text-sm uppercase text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)]",
                   activeRow && "bg-[var(--surface-pressed)] text-[var(--ink)]",
                 )}
               >
@@ -416,7 +417,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
           })}
         </nav>
         {isPlatformAdmin && (
-          <Button asChild variant="ghost" className="mt-auto justify-start px-2">
+          <Button asChild variant="ghost" className="mt-auto justify-start px-2 uppercase">
             <Link href="/admin">Platform admin</Link>
           </Button>
         )}
@@ -434,7 +435,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    "flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)]",
+                    "flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm uppercase text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)]",
                     activeRow && "bg-[var(--surface-pressed)] text-[var(--ink)]",
                   )}
                 >
@@ -444,7 +445,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
               );
             })}
             {isPlatformAdmin && (
-              <Button asChild variant="ghost" size="sm" className="h-8 shrink-0 px-2">
+              <Button asChild variant="ghost" size="sm" className="h-8 shrink-0 px-2 uppercase">
                 <Link href="/admin">Platform admin</Link>
               </Button>
             )}

@@ -1157,6 +1157,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [assigneeFilter, setAssigneeFilter] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editingTask, setEditingTask] = useState<any | null>(null);
   const [importBanner, setImportBanner] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
@@ -1238,6 +1240,9 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
   const selectionCount = selectedIds.size;
   const canDeleteSelection = selectionCount > 0 && !deleting;
+  const selectedTaskId = selectionCount === 1 ? Array.from(selectedIds)[0] : null;
+  const selectedTask = selectedTaskId ? (tasks ?? visibleTasks).find((task: any) => task._id === selectedTaskId) ?? null : null;
+  const canEditSelectedTask = Boolean(selectedTask && canEditTaskRow(active, kind, selectedTask));
 
   useEffect(() => {
     if (!activeCompanyId) return;
@@ -1339,6 +1344,19 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   function clearSelection() {
     setSelectedIds(new Set());
     setDeleteError(null);
+  }
+
+  function handleEditSelection() {
+    if (!selectedTask || !canEditSelectedTask) return;
+    setEditingTask(selectedTask);
+    setEditOpen(true);
+  }
+
+  function handleEditOpenChange(open: boolean) {
+    setEditOpen(open);
+    if (!open) {
+      setEditingTask(null);
+    }
   }
 
   async function handleDeleteSelection() {
@@ -1444,6 +1462,17 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       />
 
       <TaskDialog kind={kind} mode="create" open={createOpen} onOpenChange={setCreateOpen} assignable={assignable ?? []} />
+      {editingTask && (
+        <TaskDialog
+          key={editingTask._id}
+          kind={kind}
+          mode="edit"
+          open={editOpen}
+          onOpenChange={handleEditOpenChange}
+          task={editingTask}
+          assignable={assignable ?? []}
+        />
+      )}
 
       <div className="mb-3 flex flex-col items-stretch gap-2 md:flex-row md:flex-nowrap md:items-center">
         <TaskRail
@@ -1550,6 +1579,21 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               <button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={deleting || exportingSelection} aria-label="Cancel selection" title="Cancel selection">
                 <X className="h-4 w-4" />
               </button>
+              {selectionCount === 1 && canEditSelectedTask && (
+                <>
+                  <span className="task-selection-pill-divider" aria-hidden="true" />
+                  <button
+                    type="button"
+                    className="task-selection-pill-btn"
+                    onClick={handleEditSelection}
+                    disabled={deleting || exportingSelection}
+                    aria-label="Edit selected task"
+                    title="Edit selected"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </button>
+                </>
+              )}
               {canCreate && (
                 <>
                   <span className="task-selection-pill-divider" aria-hidden="true" />

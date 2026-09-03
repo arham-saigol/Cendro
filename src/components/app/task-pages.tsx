@@ -561,7 +561,7 @@ function TaskFilterMenu({
           )}
           {showAssigneeFilter && (
             <TaskFilterSubmenu
-              label="Assignee"
+              label="Assigned To"
               value={assigneeFilter}
               options={[{ value: "all", label: "All assignees" }, ...assignees.map((assignee) => ({ value: assignee.membership._id as string, label: assigneeDisplayName(assignee), avatar: <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} /> }))]}
               onChange={onAssigneeChange}
@@ -776,7 +776,7 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
     <div className="p-3">
       <div className="mb-3 flex items-center gap-1.5">
         <input
-          aria-label="Due date"
+          aria-label="Due Date"
           className="h-8 min-w-0 flex-1 rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2.5 text-[13px] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--focus-ring)]"
           value={dateDraft}
           onChange={(event) => setDateDraft(event.target.value)}
@@ -847,7 +847,7 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
     </div>
   );
 
-  if (compact) return <TaskCellPopover open={open} onOpenChange={setOpen} ariaLabel="Change due date" header={header} panelClassName="task-cell-popover-date">{calendar}</TaskCellPopover>;
+  if (compact) return <TaskCellPopover open={open} onOpenChange={setOpen} ariaLabel="Change Due Date" header={header} panelClassName="task-cell-popover-date">{calendar}</TaskCellPopover>;
 
   return (
     <DropdownMenu.Root open={open} onOpenChange={setOpen}>
@@ -954,7 +954,7 @@ function InlineAssigneeCell({ assignable, assignees, selected, onSave, pending =
   const selectedId = selected[0];
   const header = <span className="min-w-0 flex-1 truncate"><AvatarStack assignees={assignees} showName /></span>;
   return (
-    <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending || assignable.length === 0} pending={pending} ariaLabel="Change assignee" header={header} panelClassName="task-cell-popover-scroll">
+    <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending || assignable.length === 0} pending={pending} ariaLabel="Change assigned to" header={header} panelClassName="task-cell-popover-scroll">
       {assignable.map((assignee) => {
         const id = assignee.membership._id as string;
         const name = assignee.user.name || assignee.user.email;
@@ -1098,11 +1098,11 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
 
           <form className="flex min-h-0 flex-1 flex-col" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-              <input aria-label="Task title" className="w-full border-none bg-transparent text-lg font-semibold tracking-[-0.01em] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" value={values.title} onChange={(event) => patch({ title: event.target.value })} placeholder="Untitled" autoFocus />
+              <input aria-label="Task title" className="w-full border-none bg-transparent text-lg font-semibold tracking-[-0.01em] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" value={values.title} onChange={(event) => patch({ title: event.target.value })} placeholder="Title" autoFocus />
 
               <div className="mt-4 divide-y divide-[var(--hairline)] border-y border-[var(--hairline)]">
                 <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
-                  <span className="text-[13px] text-[var(--ink-muted)]">Assignee</span>
+                  <span className="text-[13px] text-[var(--ink-muted)]">Assigned To</span>
                   <div className="min-w-0"><AssigneePicker assignable={dialogAssignable} selected={values.assigneeMembershipIds} onChange={(ids) => patch({ assigneeMembershipIds: ids })} required={mode === "create"} /></div>
                 </div>
                 {kind === "jd" ? (
@@ -1117,7 +1117,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
                       <div className="min-w-0"><SelectPicker ariaLabel="Priority" value={values.priority} options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))} onChange={(priority) => patch({ priority })} /></div>
                     </div>
                     <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
-                      <span className="text-[13px] text-[var(--ink-muted)]">Due date</span>
+                      <span className="text-[13px] text-[var(--ink-muted)]">Due Date</span>
                       <div className="min-w-0"><DatePicker value={values.dueDate} onChange={(dueDate) => patch({ dueDate })} /></div>
                     </div>
                   </>
@@ -1666,7 +1666,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                 <th className="w-[92px] whitespace-nowrap"><span className="inline-flex items-center gap-1.5"><Hash className="h-3.5 w-3.5" />CODE</span></th>
                 <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
                 {showFrequencyColumn && <th><span className="inline-flex items-center gap-1.5"><FrequencyIcon className="h-3.5 w-3.5" />FREQUENCY</span></th>}
-                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>}
+                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNED TO</span></th>}
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />TIME</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><QuantityIcon className="h-3.5 w-3.5" />QUANTITY</span></th>
@@ -1676,7 +1676,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                 <th className="w-[92px] whitespace-nowrap"><span className="inline-flex items-center gap-1.5"><Hash className="h-3.5 w-3.5" />CODE</span></th>
                 <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
                 {showPriorityColumn && <th><span className="inline-flex items-center gap-1.5"><Tag className="h-3.5 w-3.5" />PRIORITY</span></th>}
-                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>}
+                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNED TO</span></th>}
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><CalendarClock className="h-3.5 w-3.5" />DATE ASSIGNED</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><CalendarDays className="h-3.5 w-3.5" />DUE DATE</span></th>
@@ -2277,7 +2277,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
 
       <div className="task-section !mt-6">
         <div className="prop-list">
-          <PropertyRow icon={<UsersIcon className="h-3.5 w-3.5" />} label="Assignee" muted={!canEdit && !task.assignees?.length}>
+          <PropertyRow icon={<UsersIcon className="h-3.5 w-3.5" />} label="Assigned To" muted={!canEdit && !task.assignees?.length}>
             {canEdit && assignable ? (
               <InlineAssigneeCell assignable={assignable} assignees={task.assignees ?? []} selected={task.assigneeMembershipIds ?? []} pending={fieldPending("assignee")} onSave={(assigneeMembershipIds) => saveTaskField({ assigneeMembershipIds }, "assignee")} />
             ) : task.assignees?.length ? (
@@ -2318,7 +2318,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
             </PropertyRow>
           )}
           {kind === "one" && (
-            <PropertyRow icon={<CalendarClock className="h-3.5 w-3.5" />} label="Due date" muted={!canEdit && !task.dueDate}>
+            <PropertyRow icon={<CalendarClock className="h-3.5 w-3.5" />} label="Due Date" muted={!canEdit && !task.dueDate}>
               {canEdit ? (
                 <DatePicker value={task.dueDate ? toDateField(task.dueDate, dateHasExplicitTime(task.dueDate)) : ""} displayValue={dueLabel(task)} compact onChange={(dueDate) => { void saveTaskField({ dueDate }, "due"); }} />
               ) : dueLabel(task)}

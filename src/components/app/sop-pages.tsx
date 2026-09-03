@@ -922,11 +922,11 @@ export function SopList({ selectedId }: { selectedId?: string }) {
           <thead>
             <tr className="group/head">
               <th className="w-[96px] whitespace-nowrap"><span className="inline-flex items-center gap-1.5"><Hash className="h-3.5 w-3.5" />CODE</span></th>
-              <th className="min-w-[200px] max-w-[360px]"><span className="inline-flex items-center gap-1.5"><FileText className="h-3.5 w-3.5" />Title</span></th>
-              <th className="w-28"><span className="inline-flex items-center gap-1.5"><Layers className="h-3.5 w-3.5" />Type</span></th>
-              <th className="min-w-[150px] max-w-[240px]"><span className="inline-flex items-center gap-1.5"><Users className="h-3.5 w-3.5" />Assigned To</span></th>
-              <th><span className="inline-flex items-center gap-1.5"><History className="h-3.5 w-3.5" />Updated</span></th>
-              <th><span className="inline-flex items-center gap-1.5"><Plus className="h-3.5 w-3.5" />Created at</span></th>
+              <th className="min-w-[200px] max-w-[360px]"><span className="inline-flex items-center gap-1.5"><FileText className="h-3.5 w-3.5" />TITLE</span></th>
+              <th className="w-28"><span className="inline-flex items-center gap-1.5"><Layers className="h-3.5 w-3.5" />TYPE</span></th>
+              <th className="min-w-[150px] max-w-[240px]"><span className="inline-flex items-center gap-1.5"><Users className="h-3.5 w-3.5" />ASSIGNED TO</span></th>
+              <th><span className="inline-flex items-center gap-1.5"><History className="h-3.5 w-3.5" />UPDATED</span></th>
+              <th><span className="inline-flex items-center gap-1.5"><Plus className="h-3.5 w-3.5" />CREATED AT</span></th>
             </tr>
           </thead>
           <tbody>

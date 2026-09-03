@@ -431,7 +431,7 @@ export function TaskImportExportMenu({
                           htmlFor={`assignee-${row.rowKey}`}
                           className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]"
                         >
-                          Assignee
+                          Assigned To
                         </label>
                         <select
                           id={`assignee-${row.rowKey}`}

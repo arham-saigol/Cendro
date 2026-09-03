@@ -35,7 +35,7 @@ import { useCompany } from "./company-context";
 import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
 import { TaskImportExportMenu } from "./task-import-dialog";
-import { useTaskRailAutoScroll } from "./task-rail-scroll";
+import { TaskRail, useTaskRailAutoScroll } from "./task-rail-scroll";
 import { downloadBlob, exportTaskWorkbook } from "@/lib/task-import/workbook";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -1270,7 +1270,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const ownFilterCount = kind === "jd" ? ownFrequencyValues.length : ownPriorityValues.length;
   const activeView = kind === "jd" ? personalFrequencyView : personalPriorityView;
 
-  const { syncToggleScrollState } = useTaskRailAutoScroll({
+  const { syncToggleScrollState, canScrollStart, canScrollEnd, scrollRail } = useTaskRailAutoScroll({
     railRef: viewToggleRef,
     activeCompanyId,
     canUseAllTasks,
@@ -1446,7 +1446,10 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       <TaskDialog kind={kind} mode="create" open={createOpen} onOpenChange={setCreateOpen} assignable={assignable ?? []} />
 
       <div className="mb-3 flex flex-col items-stretch gap-2 md:flex-row md:flex-nowrap md:items-center">
-        <div ref={viewToggleRef} className="task-view-toggle min-w-0 flex-1" aria-label="Task view" onScroll={syncToggleScrollState}>
+        <TaskRail
+          railRef={viewToggleRef}
+          onScroll={syncToggleScrollState}
+        >
           {kind === "jd" ? (
             <>
               <button type="button" className="task-view-button" data-active={(!canUseAllTasks && !frequencyViewActive) || (canUseAllTasks && effectiveTaskView === "all")} onClick={() => { setFrequency("all"); setPersonalFrequencyView("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
@@ -1480,7 +1483,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               ))}
             </>
           )}
-        </div>
+        </TaskRail>
         <div className="flex flex-wrap items-center justify-end gap-2 shrink-0 md:flex-nowrap md:ml-auto">
           <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
             <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search title or ref" aria-label="Search tasks by title or reference" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />

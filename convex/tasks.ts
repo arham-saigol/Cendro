@@ -240,7 +240,7 @@ export const getJd = query({
 });
 
 export const createJd = mutation({
-  args: { companyId: v.id("companies"), title: v.string(), description: v.optional(v.string()), time: v.optional(v.string()), quantity: v.optional(v.number()), recurrence: recurrenceValidator, assigneeMembershipIds: v.array(v.id("companyMemberships")) },
+  args: { companyId: v.id("companies"), title: v.string(), description: v.optional(v.string()), notes: v.optional(v.string()), time: v.optional(v.string()), quantity: v.optional(v.number()), recurrence: recurrenceValidator, assigneeMembershipIds: v.array(v.id("companyMemberships")) },
   handler: async (ctx, args) => {
     const { membership, user, company } = await requireCapability(ctx, args.companyId, "tasks:jd:create");
     const title = nonEmpty(args.title, "Task title");
@@ -249,7 +249,7 @@ export const createJd = mutation({
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
     const reference = await nextReference(ctx, args.companyId, "jd");
-    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), notes: cleanOptionalText(args.notes), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
     await logTaskActivity(ctx, { companyId: args.companyId, taskType: "jd", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now });
     return id;
@@ -257,7 +257,7 @@ export const createJd = mutation({
 });
 
 export const updateJd = mutation({
-  args: { companyId: v.id("companies"), taskId: v.id("jdTasks"), title: v.string(), description: v.optional(v.string()), time: v.optional(v.string()), quantity: v.optional(v.number()), recurrence: recurrenceValidator, assigneeMembershipIds: v.array(v.id("companyMemberships")) },
+  args: { companyId: v.id("companies"), taskId: v.id("jdTasks"), title: v.string(), description: v.optional(v.string()), notes: v.optional(v.string()), time: v.optional(v.string()), quantity: v.optional(v.number()), recurrence: recurrenceValidator, assigneeMembershipIds: v.array(v.id("companyMemberships")) },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     const task = await ctx.db.get(args.taskId);
@@ -265,7 +265,8 @@ export const updateJd = mutation({
     await assertCanUpdateTask(ctx, args.companyId, membership, updateAuthTargets(task), "jd");
     requireTaskAssignee(args.assigneeMembershipIds);
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
-    if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
+    const assigneesChanged = task.assigneeMembershipIds.length !== args.assigneeMembershipIds.length || args.assigneeMembershipIds.some((id) => !task.assigneeMembershipIds.includes(id));
+    if (assigneesChanged && args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
     const timeZone = await companyTimeZone(ctx, args.companyId);
     await recordMissedJdCycles(ctx, task, now, timeZone);
@@ -275,6 +276,9 @@ export const updateJd = mutation({
     const desc = cleanOptionalText(args.description);
     if (desc === undefined) delete nextTask.description;
     else nextTask.description = desc;
+    const n = cleanOptionalText(args.notes);
+    if (n === undefined) delete nextTask.notes;
+    else nextTask.notes = n;
     const t = cleanOptionalText(args.time);
     if (t === undefined) delete nextTask.time;
     else nextTask.time = t;
@@ -295,9 +299,9 @@ export const updateJd = mutation({
 });
 
 export const updateJdText = mutation({
-  args: { companyId: v.id("companies"), taskId: v.id("jdTasks"), title: v.optional(v.string()), description: v.optional(v.string()) },
+  args: { companyId: v.id("companies"), taskId: v.id("jdTasks"), title: v.optional(v.string()), description: v.optional(v.string()), notes: v.optional(v.string()) },
   handler: async (ctx, args) => {
-    if (args.title === undefined && args.description === undefined) return null;
+    if (args.title === undefined && args.description === undefined && args.notes === undefined) return null;
     const { membership } = await requireMembership(ctx, args.companyId);
     const task = await ctx.db.get(args.taskId);
     if (!task || task.companyId !== args.companyId) throw new ConvexError("Task not found.");
@@ -308,6 +312,11 @@ export const updateJdText = mutation({
       const desc = cleanOptionalText(args.description);
       if (desc === undefined) delete nextTask.description;
       else nextTask.description = desc;
+    }
+    if (args.notes !== undefined) {
+      const notes = cleanOptionalText(args.notes);
+      if (notes === undefined) delete nextTask.notes;
+      else nextTask.notes = notes;
     }
     nextTask.updatedAt = Date.now();
     await ctx.db.replace(args.taskId, nextTask);
@@ -321,13 +330,14 @@ export const updateJdFields = mutation({
     taskId: v.id("jdTasks"),
     title: v.optional(v.string()),
     description: v.optional(v.string()),
+    notes: v.optional(v.string()),
     time: v.optional(v.string()),
     quantity: v.optional(v.union(v.number(), v.null())),
     recurrence: v.optional(recurrenceValidator),
     assigneeMembershipIds: v.optional(v.array(v.id("companyMemberships"))),
   },
   handler: async (ctx, args) => {
-    const hasUpdate = args.title !== undefined || args.description !== undefined || args.time !== undefined || args.quantity !== undefined || args.recurrence !== undefined || args.assigneeMembershipIds !== undefined;
+    const hasUpdate = args.title !== undefined || args.description !== undefined || args.notes !== undefined || args.time !== undefined || args.quantity !== undefined || args.recurrence !== undefined || args.assigneeMembershipIds !== undefined;
     if (!hasUpdate) return null;
     const { membership } = await requireMembership(ctx, args.companyId);
     const task = await ctx.db.get(args.taskId);
@@ -336,7 +346,8 @@ export const updateJdFields = mutation({
     if (args.assigneeMembershipIds !== undefined) {
       requireTaskAssignee(args.assigneeMembershipIds);
       await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
-      await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
+      const assigneesChanged = task.assigneeMembershipIds.length !== args.assigneeMembershipIds.length || args.assigneeMembershipIds.some((id) => !task.assigneeMembershipIds.includes(id));
+      if (assigneesChanged) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     }
     const now = Date.now();
     const timeZone = await companyTimeZone(ctx, args.companyId);
@@ -348,6 +359,11 @@ export const updateJdFields = mutation({
       const desc = cleanOptionalText(args.description);
       if (desc === undefined) delete nextTask.description;
       else nextTask.description = desc;
+    }
+    if (args.notes !== undefined) {
+      const notes = cleanOptionalText(args.notes);
+      if (notes === undefined) delete nextTask.notes;
+      else nextTask.notes = notes;
     }
     if (args.time !== undefined) {
       const t = cleanOptionalText(args.time);
@@ -435,7 +451,7 @@ export const getOneTime = query({
 });
 
 export const createOneTime = mutation({
-  args: { companyId: v.id("companies"), title: v.string(), description: v.optional(v.string()), dueDate: v.optional(v.number()), time: v.optional(v.string()), quantity: v.optional(v.number()), assigneeMembershipIds: v.array(v.id("companyMemberships")), priority: priorityValidator },
+  args: { companyId: v.id("companies"), title: v.string(), description: v.optional(v.string()), notes: v.optional(v.string()), dueDate: v.optional(v.number()), time: v.optional(v.string()), quantity: v.optional(v.number()), assigneeMembershipIds: v.array(v.id("companyMemberships")), priority: priorityValidator },
   handler: async (ctx, args) => {
     const { membership, user } = await requireCapability(ctx, args.companyId, "tasks:one_time:create");
     const title = nonEmpty(args.title, "Task title");
@@ -444,7 +460,7 @@ export const createOneTime = mutation({
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     const now = Date.now();
     const reference = await nextReference(ctx, args.companyId, "one_time");
-    const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), dueDate: args.dueDate, time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
+    const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), notes: cleanOptionalText(args.notes), dueDate: args.dueDate, time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
     await logTaskActivity(ctx, { companyId: args.companyId, taskType: "one_time", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "one_time_task.create", targetType: "oneTimeTask", targetId: id, createdAt: now });
     return id;
@@ -452,7 +468,7 @@ export const createOneTime = mutation({
 });
 
 export const updateOneTime = mutation({
-  args: { companyId: v.id("companies"), taskId: v.id("oneTimeTasks"), title: v.string(), description: v.optional(v.string()), dueDate: v.optional(v.number()), time: v.optional(v.string()), quantity: v.optional(v.number()), assigneeMembershipIds: v.array(v.id("companyMemberships")), priority: priorityValidator },
+  args: { companyId: v.id("companies"), taskId: v.id("oneTimeTasks"), title: v.string(), description: v.optional(v.string()), notes: v.optional(v.string()), dueDate: v.optional(v.number()), time: v.optional(v.string()), quantity: v.optional(v.number()), assigneeMembershipIds: v.array(v.id("companyMemberships")), priority: priorityValidator },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     const task = await ctx.db.get(args.taskId);
@@ -460,13 +476,17 @@ export const updateOneTime = mutation({
     await assertCanUpdateTask(ctx, args.companyId, membership, updateAuthTargets(task), "one_time");
     requireTaskAssignee(args.assigneeMembershipIds);
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
-    if (args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
+    const assigneesChanged = task.assigneeMembershipIds.length !== args.assigneeMembershipIds.length || args.assigneeMembershipIds.some((id) => !task.assigneeMembershipIds.includes(id));
+    if (assigneesChanged && args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     const state = oneState(task);
     const nextTask = { ...task };
     nextTask.title = nonEmpty(args.title, "Task title");
     const desc = cleanOptionalText(args.description);
     if (desc === undefined) delete nextTask.description;
     else nextTask.description = desc;
+    const n = cleanOptionalText(args.notes);
+    if (n === undefined) delete nextTask.notes;
+    else nextTask.notes = n;
     if (args.dueDate === undefined) delete nextTask.dueDate;
     else nextTask.dueDate = args.dueDate;
     const t = cleanOptionalText(args.time);
@@ -485,9 +505,9 @@ export const updateOneTime = mutation({
 });
 
 export const updateOneTimeText = mutation({
-  args: { companyId: v.id("companies"), taskId: v.id("oneTimeTasks"), title: v.optional(v.string()), description: v.optional(v.string()) },
+  args: { companyId: v.id("companies"), taskId: v.id("oneTimeTasks"), title: v.optional(v.string()), description: v.optional(v.string()), notes: v.optional(v.string()) },
   handler: async (ctx, args) => {
-    if (args.title === undefined && args.description === undefined) return null;
+    if (args.title === undefined && args.description === undefined && args.notes === undefined) return null;
     const { membership } = await requireMembership(ctx, args.companyId);
     const task = await ctx.db.get(args.taskId);
     if (!task || task.companyId !== args.companyId) throw new ConvexError("Task not found.");
@@ -498,6 +518,11 @@ export const updateOneTimeText = mutation({
       const desc = cleanOptionalText(args.description);
       if (desc === undefined) delete nextTask.description;
       else nextTask.description = desc;
+    }
+    if (args.notes !== undefined) {
+      const notes = cleanOptionalText(args.notes);
+      if (notes === undefined) delete nextTask.notes;
+      else nextTask.notes = notes;
     }
     nextTask.updatedAt = Date.now();
     await ctx.db.replace(args.taskId, nextTask);
@@ -511,6 +536,7 @@ export const updateOneTimeFields = mutation({
     taskId: v.id("oneTimeTasks"),
     title: v.optional(v.string()),
     description: v.optional(v.string()),
+    notes: v.optional(v.string()),
     dueDate: v.optional(v.union(v.number(), v.null())),
     time: v.optional(v.string()),
     quantity: v.optional(v.union(v.number(), v.null())),
@@ -518,7 +544,7 @@ export const updateOneTimeFields = mutation({
     priority: v.optional(priorityValidator),
   },
   handler: async (ctx, args) => {
-    const hasUpdate = args.title !== undefined || args.description !== undefined || args.dueDate !== undefined || args.time !== undefined || args.quantity !== undefined || args.assigneeMembershipIds !== undefined || args.priority !== undefined;
+    const hasUpdate = args.title !== undefined || args.description !== undefined || args.notes !== undefined || args.dueDate !== undefined || args.time !== undefined || args.quantity !== undefined || args.assigneeMembershipIds !== undefined || args.priority !== undefined;
     if (!hasUpdate) return null;
     const { membership } = await requireMembership(ctx, args.companyId);
     const task = await ctx.db.get(args.taskId);
@@ -527,7 +553,8 @@ export const updateOneTimeFields = mutation({
     if (args.assigneeMembershipIds !== undefined) {
       requireTaskAssignee(args.assigneeMembershipIds);
       await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
-      await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
+      const assigneesChanged = task.assigneeMembershipIds.length !== args.assigneeMembershipIds.length || args.assigneeMembershipIds.some((id) => !task.assigneeMembershipIds.includes(id));
+      if (assigneesChanged) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     }
     const state = oneState(task);
     const nextTask = { ...task };
@@ -536,6 +563,11 @@ export const updateOneTimeFields = mutation({
       const desc = cleanOptionalText(args.description);
       if (desc === undefined) delete nextTask.description;
       else nextTask.description = desc;
+    }
+    if (args.notes !== undefined) {
+      const notes = cleanOptionalText(args.notes);
+      if (notes === undefined) delete nextTask.notes;
+      else nextTask.notes = notes;
     }
     if (args.dueDate !== undefined) {
       if (args.dueDate === null) delete nextTask.dueDate;
@@ -753,12 +785,12 @@ async function aiAssignees(ctx: Ctx, ids: Id<"companyMemberships">[]) {
 
 async function aiJdRow(ctx: Ctx, task: Doc<"jdTasks">) {
   const state = await jdState(ctx, task);
-  return { kind: "jd" as const, id: task._id, title: task.title, description: task.description, status: state.status, dueAt: state.dueAt, recurrence: task.recurrence, quantity: task.quantity, time: task.time, assignees: await aiAssignees(ctx, task.assigneeMembershipIds) };
+  return { kind: "jd" as const, id: task._id, title: task.title, description: task.description, notes: task.notes, status: state.status, dueAt: state.dueAt, recurrence: task.recurrence, quantity: task.quantity, time: task.time, assignees: await aiAssignees(ctx, task.assigneeMembershipIds) };
 }
 
 async function aiOneTimeRow(ctx: Ctx, task: Doc<"oneTimeTasks">) {
   const state = oneState(task);
-  return { kind: "one_time" as const, id: task._id, title: task.title, description: task.description, status: state.status, dueAt: task.dueDate, priority: task.priority, quantity: task.quantity, time: task.time, assignees: await aiAssignees(ctx, task.assigneeMembershipIds) };
+  return { kind: "one_time" as const, id: task._id, title: task.title, description: task.description, notes: task.notes, status: state.status, dueAt: task.dueDate, priority: task.priority, quantity: task.quantity, time: task.time, assignees: await aiAssignees(ctx, task.assigneeMembershipIds) };
 }
 
 export const aiListVisible = query({
@@ -826,7 +858,7 @@ export const aiAssignableUsers = query({
 });
 
 export const aiCreateOneTime = mutation({
-  args: { companyId: v.id("companies"), title: v.string(), description: v.optional(v.string()), dueDate: v.optional(v.number()), assigneeMembershipIds: v.array(v.id("companyMemberships")), priority: priorityValidator },
+  args: { companyId: v.id("companies"), title: v.string(), description: v.optional(v.string()), notes: v.optional(v.string()), dueDate: v.optional(v.number()), assigneeMembershipIds: v.array(v.id("companyMemberships")), priority: priorityValidator },
   handler: async (ctx, args) => {
     const { membership, user } = await requireCapability(ctx, args.companyId, "tasks:one_time:create");
     const title = nonEmpty(args.title, "Task title");
@@ -835,7 +867,7 @@ export const aiCreateOneTime = mutation({
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time");
     const now = Date.now();
     const reference = await nextReference(ctx, args.companyId, "one_time");
-    const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), dueDate: args.dueDate, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
+    const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), notes: cleanOptionalText(args.notes), dueDate: args.dueDate, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, priority: args.priority, status: "due", createdAt: now, updatedAt: now });
     await logTaskActivity(ctx, { companyId: args.companyId, taskType: "one_time", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "one_time_task.create", targetType: "oneTimeTask", targetId: id, createdAt: now });
     const task = await ctx.db.get(id);
@@ -845,7 +877,7 @@ export const aiCreateOneTime = mutation({
 });
 
 export const aiCreateJd = mutation({
-  args: { companyId: v.id("companies"), title: v.string(), description: v.optional(v.string()), recurrence: recurrenceValidator, assigneeMembershipIds: v.array(v.id("companyMemberships")) },
+  args: { companyId: v.id("companies"), title: v.string(), description: v.optional(v.string()), notes: v.optional(v.string()), recurrence: recurrenceValidator, assigneeMembershipIds: v.array(v.id("companyMemberships")) },
   handler: async (ctx, args) => {
     const { membership, user, company } = await requireCapability(ctx, args.companyId, "tasks:jd:create");
     const title = nonEmpty(args.title, "Task title");
@@ -854,7 +886,7 @@ export const aiCreateJd = mutation({
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
     const reference = await nextReference(ctx, args.companyId, "jd");
-    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), notes: cleanOptionalText(args.notes), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
     await logTaskActivity(ctx, { companyId: args.companyId, taskType: "jd", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now });
     const task = await ctx.db.get(id);

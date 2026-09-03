@@ -184,6 +184,98 @@ describe("production permission and validation fixes", () => {
     expect(detail.task.description).toBe("New body");
   });
 
+  test("task notes can be created and edited by the assigned employee for JD and one-time tasks", async () => {
+    const { t, companyId, adminMembershipId, employeeMembershipId } = await seedCompany();
+    const admin = t.withIdentity(identity("admin"));
+    const employee = t.withIdentity(identity("employee"));
+
+    // Create JD task with notes
+    const jdTaskId = await admin.mutation(api.tasks.createJd, {
+      companyId,
+      title: "Daily Store Check",
+      description: "Check locks and lights",
+      notes: "Initial manager note",
+      recurrence: "daily",
+      assigneeMembershipIds: [employeeMembershipId],
+    });
+
+    // Create One-time task with notes
+    const oneTimeTaskId = await admin.mutation(api.tasks.createOneTime, {
+      companyId,
+      title: "Repair Front Hinge",
+      description: "Door hinge is loose",
+      notes: "Initial repair note",
+      dueDate: Date.now() + 86_400_000,
+      priority: "medium",
+      assigneeMembershipIds: [employeeMembershipId],
+    });
+
+    // Verify initial notes
+    const initialJd = await employee.query(api.tasks.getJd, { companyId, taskId: jdTaskId });
+    const initialOneTime = await employee.query(api.tasks.getOneTime, { companyId, taskId: oneTimeTaskId });
+    expect(initialJd.task.notes).toBe("Initial manager note");
+    expect(initialJd.canUpdate).toBe(true);
+    expect(initialOneTime.task.notes).toBe("Initial repair note");
+    expect(initialOneTime.canUpdate).toBe(true);
+
+    // Assigned employee edits notes via text mutation (drawer inline edit)
+    await expect(employee.mutation(api.tasks.updateJdText, {
+      companyId,
+      taskId: jdTaskId,
+      notes: "Employee updated note for JD",
+    })).resolves.toBeNull();
+
+    await expect(employee.mutation(api.tasks.updateOneTimeText, {
+      companyId,
+      taskId: oneTimeTaskId,
+      notes: "Employee updated note for one-time",
+    })).resolves.toBeNull();
+
+    // Verify updated notes
+    const afterTextUpdateJd = await employee.query(api.tasks.getJd, { companyId, taskId: jdTaskId });
+    const afterTextUpdateOneTime = await employee.query(api.tasks.getOneTime, { companyId, taskId: oneTimeTaskId });
+    expect(afterTextUpdateJd.task.notes).toBe("Employee updated note for JD");
+    expect(afterTextUpdateOneTime.task.notes).toBe("Employee updated note for one-time");
+
+    // Assigned employee edits notes via full update mutation (edit dialog)
+    await expect(employee.mutation(api.tasks.updateJd, {
+      companyId,
+      taskId: jdTaskId,
+      title: "Daily Store Check",
+      notes: "Employee final note via dialog",
+      recurrence: "daily",
+      assigneeMembershipIds: [employeeMembershipId],
+    })).resolves.toBeNull();
+
+    await expect(employee.mutation(api.tasks.updateOneTime, {
+      companyId,
+      taskId: oneTimeTaskId,
+      title: "Repair Front Hinge",
+      notes: "Employee final note via dialog",
+      priority: "medium",
+      assigneeMembershipIds: [employeeMembershipId],
+    })).resolves.toBeNull();
+
+    const afterFullUpdateJd = await employee.query(api.tasks.getJd, { companyId, taskId: jdTaskId });
+    const afterFullUpdateOneTime = await employee.query(api.tasks.getOneTime, { companyId, taskId: oneTimeTaskId });
+    expect(afterFullUpdateJd.task.notes).toBe("Employee final note via dialog");
+    expect(afterFullUpdateOneTime.task.notes).toBe("Employee final note via dialog");
+
+    // Verify non-assigned employee cannot update notes on an admin-assigned task
+    const adminJdTaskId = await admin.mutation(api.tasks.createJd, {
+      companyId,
+      title: "Admin Only Task",
+      recurrence: "daily",
+      assigneeMembershipIds: [adminMembershipId],
+    });
+
+    await expect(employee.mutation(api.tasks.updateJdText, {
+      companyId,
+      taskId: adminJdTaskId,
+      notes: "Unauthorized attempt",
+    })).rejects.toThrow("update this task");
+  });
+
   test("analytics requires an effective analytics:view capability", async () => {
     const { t, companyId, employeeMembershipId } = await seedCompany();
     await t.run(async (ctx) => {

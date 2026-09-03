@@ -54,6 +54,7 @@ type FrequencyFilter = Frequency | "all";
 type TaskFormValues = {
   title: string;
   description: string;
+  notes: string;
   assigneeMembershipIds: string[];
   recurrence: Frequency;
   priority: Priority;
@@ -91,13 +92,14 @@ const toneClasses: Record<string, string> = {
 };
 
 function emptyForm(kind: Kind): TaskFormValues {
-  return { title: "", description: "", assigneeMembershipIds: [], recurrence: "daily", priority: "medium", dueDate: kind === "one" ? toDateField(Date.now() + 86_400_000) : "", quantity: "", time: "", files: [] };
+  return { title: "", description: "", notes: "", assigneeMembershipIds: [], recurrence: "daily", priority: "medium", dueDate: kind === "one" ? toDateField(Date.now() + 86_400_000) : "", quantity: "", time: "", files: [] };
 }
 
 function formFromTask(kind: Kind, task: any): TaskFormValues {
   return {
     title: task.title ?? "",
     description: task.description ?? "",
+    notes: task.notes ?? "",
     assigneeMembershipIds: task.assigneeMembershipIds ?? [],
     recurrence: task.recurrence ?? "daily",
     priority: task.priority ?? "medium",
@@ -1011,6 +1013,18 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
   const [saving, setSaving] = useState(false);
   const [persistedTaskId, setPersistedTaskId] = useState<string | null>(null);
 
+  const taskAssignees = task?.assignees;
+  const dialogAssignable = useMemo(() => {
+    if (!taskAssignees || taskAssignees.length === 0) return assignable;
+    const list = [...assignable];
+    for (const a of taskAssignees) {
+      if (!list.some((existing) => existing.membership._id === a.membership._id)) {
+        list.push(a);
+      }
+    }
+    return list;
+  }, [assignable, taskAssignees]);
+
   function reset(nextOpen: boolean) {
     onOpenChange(nextOpen);
     if (!nextOpen) {
@@ -1044,7 +1058,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
     setError(null);
     try {
       let taskId = persistedTaskId ?? (task?._id as string | undefined);
-      const common = { companyId: activeCompanyId, title: values.title.trim(), description: values.description, time: values.time, quantity: quantityFromInput(values.quantity), assigneeMembershipIds: values.assigneeMembershipIds as Id<"companyMemberships">[] };
+      const common = { companyId: activeCompanyId, title: values.title.trim(), description: values.description, notes: values.notes, time: values.time, quantity: quantityFromInput(values.quantity), assigneeMembershipIds: values.assigneeMembershipIds as Id<"companyMemberships">[] };
       if (!persistedTaskId) {
         if (kind === "jd") {
           if (mode === "create") taskId = await createJd({ ...common, recurrence: values.recurrence });
@@ -1088,7 +1102,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
               <div className="mt-4 divide-y divide-[var(--hairline)] border-y border-[var(--hairline)]">
                 <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
                   <span className="text-[13px] text-[var(--ink-muted)]">Assignee</span>
-                  <div className="min-w-0"><AssigneePicker assignable={assignable} selected={values.assigneeMembershipIds} onChange={(ids) => patch({ assigneeMembershipIds: ids })} required={mode === "create"} /></div>
+                  <div className="min-w-0"><AssigneePicker assignable={dialogAssignable} selected={values.assigneeMembershipIds} onChange={(ids) => patch({ assigneeMembershipIds: ids })} required={mode === "create"} /></div>
                 </div>
                 {kind === "jd" ? (
                   <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
@@ -1117,7 +1131,11 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
                 </div>
                 <div className="grid grid-cols-[120px_1fr] items-start gap-3 py-2">
                   <span className="pt-2 text-[13px] text-[var(--ink-muted)]">Description</span>
-                  <div className="min-w-0"><textarea aria-label="Description" className="block w-full resize-none border-none bg-transparent px-2 py-2 text-[13px] leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" rows={3} value={values.description} onChange={(event) => patch({ description: event.target.value })} placeholder="Add context, notes, or acceptance criteria." /></div>
+                  <div className="min-w-0"><textarea aria-label="Description" className="block w-full resize-none border-none bg-transparent px-2 py-2 text-[13px] leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" rows={3} value={values.description} onChange={(event) => patch({ description: event.target.value })} placeholder="Add context, instructions, or acceptance criteria." /></div>
+                </div>
+                <div className="grid grid-cols-[120px_1fr] items-start gap-3 py-2">
+                  <span className="pt-2 text-[13px] text-[var(--ink-muted)]">Notes</span>
+                  <div className="min-w-0"><textarea aria-label="Notes" className="block w-full resize-none border-none bg-transparent px-2 py-2 text-[13px] leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" rows={3} value={values.notes} onChange={(event) => patch({ notes: event.target.value })} placeholder="Add notes, reminders, or observations." /></div>
                 </div>
                 {active?.capabilities.includes("tasks:attachment:add") && (
                   <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
@@ -1424,6 +1442,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
         companyId: activeCompanyId,
         title: (patch.title ?? task.title ?? "").trim(),
         description: patch.description ?? task.description,
+        notes: patch.notes ?? task.notes,
         time: patch.time ?? task.time,
         quantity: patch.quantity !== undefined ? quantityFromInput(patch.quantity) : task.quantity,
         assigneeMembershipIds: (patch.assigneeMembershipIds ?? task.assigneeMembershipIds) as Id<"companyMemberships">[],
@@ -2113,7 +2132,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   if (!data) return <TaskDetailSkeleton />;
   const task = data.task;
 
-  async function saveTaskText(patch: { title?: string; description?: string }) {
+  async function saveTaskText(patch: { title?: string; description?: string; notes?: string }) {
     if (!activeCompanyId) return false;
     setTextError(null);
     try {
@@ -2137,6 +2156,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
           taskId: task._id as Id<"jdTasks">,
           title: patch.title,
           description: patch.description,
+          notes: patch.notes,
           time: patch.time,
           quantity: patch.quantity !== undefined ? quantityFromInput(patch.quantity) ?? null : undefined,
           recurrence: patch.recurrence,
@@ -2148,6 +2168,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
           taskId: task._id as Id<"oneTimeTasks">,
           title: patch.title,
           description: patch.description,
+          notes: patch.notes,
           dueDate: patch.dueDate !== undefined ? fromDateInput(patch.dueDate) ?? null : undefined,
           time: patch.time,
           quantity: patch.quantity !== undefined ? quantityFromInput(patch.quantity) ?? null : undefined,
@@ -2315,6 +2336,11 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
       <section className="task-section">
         <h2 className="task-section-title">Description</h2>
         <EditableTaskText value={task.description ?? ""} placeholder={canEdit ? "Add description..." : "No description."} ariaLabel="Edit task description" canEdit={canEdit} variant="description" onSave={(description) => saveTaskText({ description })} />
+      </section>
+
+      <section className="task-section">
+        <h2 className="task-section-title">Notes</h2>
+        <EditableTaskText value={task.notes ?? ""} placeholder={canEdit ? "Add notes..." : "No notes."} ariaLabel="Edit task notes" canEdit={canEdit} variant="description" onSave={(notes) => saveTaskText({ notes })} />
       </section>
 
       <section className="task-section">

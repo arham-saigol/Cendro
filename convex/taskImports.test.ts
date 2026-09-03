@@ -44,7 +44,7 @@ describe("task import backend", () => {
     const args = { companyId, kind: "jd" as const, importKey: "import-1", batchKey: "batch-1", source: "cendro" as const, rows: [{ draft: draft(), include: true, selectedAssigneeMembershipIds: [adminMembershipId] }] };
     const first = await admin.mutation(api.taskImports.commitTaskImportBatch, args);
     const second = await admin.mutation(api.taskImports.commitTaskImportBatch, args);
-    expect(first).toMatchObject({ created: 1, updated: 0, taskReferences: ["JD-0001"] });
+    expect(first).toMatchObject({ created: 1, updated: 0, taskReferences: ["JD-001"] });
     expect(second).toEqual(first);
     await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
       ...args,

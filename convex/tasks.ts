@@ -1,6 +1,6 @@
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
-import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internalAction, internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { currentJdCycle, defaultTimeZone, elapsedJdCyclesSince } from "./taskCycles";
@@ -921,3 +921,126 @@ export const aiAddComment = mutation({
     return await ctx.db.insert("taskComments", { companyId: args.companyId, taskType: args.kind, taskId: normalized, authorMembershipId: membership._id, body: nonEmpty(args.body, "Comment"), createdAt: Date.now() });
   },
 });
+
+/**
+ * Migrates a single batch of tasks for a given table (jdTasks or oneTimeTasks)
+ * using cursor-based pagination to ensure transactions stay bounded.
+ */
+export const migrateTaskBatch = internalMutation({
+  args: {
+    table: v.union(v.literal("jdTasks"), v.literal("oneTimeTasks")),
+    cursor: v.union(v.string(), v.null()),
+    batchSize: v.number(),
+    dryRun: v.boolean(),
+    companyId: v.optional(v.id("companies")),
+  },
+  handler: async (ctx, args) => {
+    const baseQuery = args.companyId
+      ? ctx.db.query(args.table).withIndex("by_company", (q) => q.eq("companyId", args.companyId!))
+      : ctx.db.query(args.table);
+
+    const page = await baseQuery.paginate({ numItems: args.batchSize, cursor: args.cursor });
+    let migrated = 0;
+
+    for (const task of page.page) {
+      if (args.table === "jdTasks") {
+        const match = /^JD-(\d+)$/i.exec(task.reference);
+        if (match) {
+          const num = parseInt(match[1], 10);
+          const newRef = `JD-${String(num).padStart(3, "0")}`;
+          if (task.reference !== newRef) {
+            if (!args.dryRun) {
+              await ctx.db.patch(task._id, { reference: newRef });
+            }
+            migrated += 1;
+          }
+        }
+      } else {
+        const match = /^(?:OT|TSK)-(\d+)$/i.exec(task.reference);
+        if (match) {
+          const num = parseInt(match[1], 10);
+          const newRef = `TSK-${String(num).padStart(3, "0")}`;
+          if (task.reference !== newRef) {
+            if (!args.dryRun) {
+              await ctx.db.patch(task._id, { reference: newRef });
+            }
+            migrated += 1;
+          }
+        }
+      }
+    }
+
+    return {
+      continueCursor: page.continueCursor,
+      isDone: page.isDone,
+      migrated,
+      scanned: page.page.length,
+    };
+  },
+});
+
+/**
+ * Migrates existing task codes to the 3-digit format across all batches:
+ * - JD tasks: "JD-0001" -> "JD-001"
+ * - One-time tasks: "OT-0001" -> "TSK-001" (and normalizes 4-digit "TSK-0001" -> "TSK-001")
+ *
+ * Designed to handle any number of tasks on prod by running bounded batches.
+ * Can be run via the Convex CLI:
+ *   npx convex run tasks:migrateTaskCodes '{"dryRun": true}'   # preview changes
+ *   npx convex run tasks:migrateTaskCodes '{"dryRun": false}'  # apply changes
+ */
+export const migrateTaskCodes = internalAction({
+  args: {
+    dryRun: v.optional(v.boolean()),
+    companyId: v.optional(v.id("companies")),
+    batchSize: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const dryRun = args.dryRun ?? false;
+    const batchSize = Math.min(Math.max(args.batchSize ?? 250, 1), 1000);
+    let jdMigrated = 0;
+    let oneTimeMigrated = 0;
+
+    // 1. Paginate JD Tasks
+    let jdCursor: string | null = null;
+    let jdDone = false;
+    while (!jdDone) {
+      const batchResult: { continueCursor: string; isDone: boolean; migrated: number } =
+        await ctx.runMutation(internal.tasks.migrateTaskBatch, {
+          table: "jdTasks",
+          cursor: jdCursor,
+          batchSize,
+          dryRun,
+          companyId: args.companyId,
+        });
+      jdMigrated += batchResult.migrated;
+      jdCursor = batchResult.continueCursor;
+      jdDone = batchResult.isDone;
+    }
+
+    // 2. Paginate One-Time Tasks
+    let oneTimeCursor: string | null = null;
+    let oneTimeDone = false;
+    while (!oneTimeDone) {
+      const batchResult: { continueCursor: string; isDone: boolean; migrated: number } =
+        await ctx.runMutation(internal.tasks.migrateTaskBatch, {
+          table: "oneTimeTasks",
+          cursor: oneTimeCursor,
+          batchSize,
+          dryRun,
+          companyId: args.companyId,
+        });
+      oneTimeMigrated += batchResult.migrated;
+      oneTimeCursor = batchResult.continueCursor;
+      oneTimeDone = batchResult.isDone;
+    }
+
+    return {
+      dryRun,
+      jdMigrated,
+      oneTimeMigrated,
+      totalMigrated: jdMigrated + oneTimeMigrated,
+    };
+  },
+});
+

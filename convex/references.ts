@@ -5,8 +5,14 @@ export type ReferenceKind = "jd" | "one_time" | "sop";
 
 const prefixes: Record<ReferenceKind, string> = {
   jd: "JD",
-  one_time: "OT",
+  one_time: "TSK",
   sop: "SOP",
+};
+
+const padLengths: Record<ReferenceKind, number> = {
+  jd: 3,
+  one_time: 3,
+  sop: 4,
 };
 
 /** Allocates a company-scoped, human-readable reference inside the caller's transaction. */
@@ -20,5 +26,5 @@ export async function nextReference(ctx: MutationCtx, companyId: Id<"companies">
   if (counter) await ctx.db.patch(counter._id, { lastNumber: number });
   else await ctx.db.insert("referenceCounters", { companyId, kind, lastNumber: number });
 
-  return `${prefixes[kind]}-${String(number).padStart(4, "0")}`;
+  return `${prefixes[kind]}-${String(number).padStart(padLengths[kind], "0")}`;
 }

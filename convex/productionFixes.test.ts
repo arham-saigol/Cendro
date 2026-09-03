@@ -96,10 +96,10 @@ describe("production permission and validation fixes", () => {
       admin.query(api.tasks.getOneTime, { companyId, taskId: oneTimeId }),
       admin.query(api.sops.get, { companyId, sopId }),
     ]);
-    expect([firstJd.task.reference, secondJd.task.reference, oneTime.task.reference, sop.reference]).toEqual(["JD-0001", "JD-0002", "OT-0001", "SOP-0001"]);
+    expect([firstJd.task.reference, secondJd.task.reference, oneTime.task.reference, sop.reference]).toEqual(["JD-001", "JD-002", "TSK-001", "SOP-0001"]);
 
-    await expect(admin.query(api.tasks.listJdRows, { companyId, search: "jd-0002", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: secondJdId }] });
-    await expect(admin.query(api.tasks.listOneTimeRows, { companyId, search: "OT-0001", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: oneTimeId }] });
+    await expect(admin.query(api.tasks.listJdRows, { companyId, search: "jd-002", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: secondJdId }] });
+    await expect(admin.query(api.tasks.listOneTimeRows, { companyId, search: "TSK-001", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: oneTimeId }] });
     await expect(admin.query(api.sops.listRows, { companyId, search: "sop-0001" })).resolves.toMatchObject([{ _id: sopId }]);
   });
 
@@ -748,5 +748,57 @@ describe("production permission and validation fixes", () => {
     });
     expect(personalOpts.values).toContain("high");
     expect(personalOpts.values).toContain("low");
+  });
+
+  test("migrateTaskCodes backfills 4-digit JD and OT tasks to 3-digit format", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const now = Date.now();
+
+    const [jd1, jd42, jd100, jdAlready] = await t.run(async (ctx) => {
+      const base = { companyId, title: "JD", recurrence: "daily" as const, cycleStartedAt: now, status: "due" as const, assigneeMembershipIds: [adminMembershipId], createdByMembershipId: adminMembershipId, createdAt: now, updatedAt: now };
+      const id1 = await ctx.db.insert("jdTasks", { ...base, reference: "JD-0001" });
+      const id42 = await ctx.db.insert("jdTasks", { ...base, reference: "JD-0042" });
+      const id100 = await ctx.db.insert("jdTasks", { ...base, reference: "JD-0100" });
+      const idAlready = await ctx.db.insert("jdTasks", { ...base, reference: "JD-002" });
+      return [id1, id42, id100, idAlready];
+    });
+
+    const [ot1, ot42, tsk4digit, tskAlready] = await t.run(async (ctx) => {
+      const base = { companyId, title: "OT", priority: "medium" as const, status: "due" as const, assigneeMembershipIds: [adminMembershipId], createdByMembershipId: adminMembershipId, createdAt: now, updatedAt: now };
+      const id1 = await ctx.db.insert("oneTimeTasks", { ...base, reference: "OT-0001" });
+      const id42 = await ctx.db.insert("oneTimeTasks", { ...base, reference: "OT-0042" });
+      const id4digit = await ctx.db.insert("oneTimeTasks", { ...base, reference: "TSK-0003" });
+      const idAlready = await ctx.db.insert("oneTimeTasks", { ...base, reference: "TSK-005" });
+      return [id1, id42, id4digit, idAlready];
+    });
+
+    // 1. Dry run should report changes without applying
+    const dryResult = await t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: true });
+    expect(dryResult).toEqual({ dryRun: true, jdMigrated: 3, oneTimeMigrated: 3, totalMigrated: 6 });
+
+    await t.run(async (ctx) => {
+      expect((await ctx.db.get(jd1))?.reference).toBe("JD-0001");
+      expect((await ctx.db.get(ot1))?.reference).toBe("OT-0001");
+    });
+
+    // 2. Real migration applies all changes
+    const realResult = await t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: false });
+    expect(realResult).toEqual({ dryRun: false, jdMigrated: 3, oneTimeMigrated: 3, totalMigrated: 6 });
+
+    await t.run(async (ctx) => {
+      expect((await ctx.db.get(jd1))?.reference).toBe("JD-001");
+      expect((await ctx.db.get(jd42))?.reference).toBe("JD-042");
+      expect((await ctx.db.get(jd100))?.reference).toBe("JD-100");
+      expect((await ctx.db.get(jdAlready))?.reference).toBe("JD-002");
+
+      expect((await ctx.db.get(ot1))?.reference).toBe("TSK-001");
+      expect((await ctx.db.get(ot42))?.reference).toBe("TSK-042");
+      expect((await ctx.db.get(tsk4digit))?.reference).toBe("TSK-003");
+      expect((await ctx.db.get(tskAlready))?.reference).toBe("TSK-005");
+    });
+
+    // 3. Second run is idempotent
+    const rerun = await t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: false });
+    expect(rerun).toEqual({ dryRun: false, jdMigrated: 0, oneTimeMigrated: 0, totalMigrated: 0 });
   });
 });

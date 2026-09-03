@@ -42,13 +42,17 @@ describe("task workbook pure helpers", () => {
 
   test("protects formula-leading text and validates references", () => {
     expect(protectFormulaText("=1+1")).toBe("'=1+1");
+    expect(referenceForKind("JD-001", "jd")).toEqual({ value: "JD-001" });
     expect(referenceForKind("JD-0001", "jd")).toEqual({ value: "JD-0001" });
     expect(referenceForKind("JD-10000", "jd")).toEqual({ value: "JD-10000" });
-    expect(referenceForKind("OT-0001", "jd").error).toBeTruthy();
+    expect(referenceForKind("TSK-001", "jd").error).toBeTruthy();
+    expect(referenceForKind("OT-001", "jd").error).toBeTruthy();
+    expect(referenceForKind("TSK-001", "one_time")).toEqual({ value: "TSK-001" });
+    expect(referenceForKind("OT-0001", "one_time")).toEqual({ value: "OT-0001" });
   });
 
   test("finds duplicate workbook references", () => {
-    expect(duplicateReferences([{ reference: "JD-0001" }, { reference: "jd-0001" }, { reference: null }])).toEqual(new Set(["JD-0001"]));
+    expect(duplicateReferences([{ reference: "JD-001" }, { reference: "jd-001" }, { reference: null }])).toEqual(new Set(["JD-001"]));
   });
 
   test("rejects formula XML rather than executing it", () => {
@@ -68,11 +72,11 @@ describe("task workbook pure helpers", () => {
   });
 
   test("exports and parses a Cendro workbook without task IDs", async () => {
-    const workbook = await exportTaskWorkbook("one_time", "company-1", "Acme", [{ reference: "OT-0001", title: "=literal text", description: "Body", dueDate: Date.UTC(2026, 1, 1, 23, 59, 59), priority: "high", time: "30m", quantity: 2, assigneeEmails: "a@example.com", status: "Pending" }]);
+    const workbook = await exportTaskWorkbook("one_time", "company-1", "Acme", [{ reference: "TSK-001", title: "=literal text", description: "Body", dueDate: Date.UTC(2026, 1, 1, 23, 59, 59), priority: "high", time: "30m", quantity: 2, assigneeEmails: "a@example.com", status: "Pending" }]);
     const sheets = await readXlsxFile(await workbook.toBlob());
     const parsed = parseCendroWorkbookSheets(sheets, "company-1", "one_time");
     expect(parsed.rows).toHaveLength(1);
-    expect(parsed.rows[0]).toMatchObject({ reference: "OT-0001", title: "=literal text", priority: "high", quantity: 2, assigneeEmails: ["a@example.com"], status: "due" });
+    expect(parsed.rows[0]).toMatchObject({ reference: "TSK-001", title: "=literal text", priority: "high", quantity: 2, assigneeEmails: ["a@example.com"], status: "due" });
     expect(parsed.rows[0].dueDate).toBeTypeOf("number");
   });
 

@@ -1534,7 +1534,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
         </TaskRail>
         <div className="flex flex-wrap items-center justify-end gap-2 shrink-0 md:flex-nowrap md:ml-auto">
           <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
-            <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search title or ref" aria-label="Search tasks by title or reference" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
+            <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search title or code" aria-label="Search tasks by title or code" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
             <button type="button" className="task-search-button" aria-label={search ? "Clear search" : "Search tasks"} onClick={() => { if (search) setSearch(""); else setSearchOpen((open) => !open); }}>
               {search ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
             </button>
@@ -1662,7 +1662,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
           <thead>
             {kind === "jd" ? (
               <tr className="group/head">
-                <th className="w-[92px] whitespace-nowrap">REF</th>
+                <th className="w-[92px] whitespace-nowrap">CODE</th>
                 <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
                 {showFrequencyColumn && <th><span className="inline-flex items-center gap-1.5"><FrequencyIcon className="h-3.5 w-3.5" />FREQUENCY</span></th>}
                 {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>}
@@ -1672,7 +1672,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               </tr>
             ) : (
               <tr className="group/head">
-                <th className="w-[92px] whitespace-nowrap">REF</th>
+                <th className="w-[92px] whitespace-nowrap">CODE</th>
                 <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
                 {showPriorityColumn && <th><span className="inline-flex items-center gap-1.5"><Tag className="h-3.5 w-3.5" />PRIORITY</span></th>}
                 {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>}

@@ -82,7 +82,7 @@ type ImportAuth = {
   membershipIdsByEmail: Map<string, Id<"companyMemberships">[]>;
 };
 
-function prefix(kind: TaskKind) { return kind === "jd" ? "JD" : "OT"; }
+function prefix(kind: TaskKind) { return kind === "jd" ? "JD" : "TSK"; }
 function capabilityPrefix(kind: TaskKind) { return kind === "jd" ? "tasks:jd" : "tasks:one_time"; }
 function cleanText(value: string | null) { const text = value?.trim() ?? ""; return text || undefined; }
 function normalizedReference(value: string | null) { return value?.trim().toUpperCase() ?? ""; }
@@ -98,7 +98,10 @@ async function fingerprintRows(rows: ReviewedRow[]) {
 function parseReference(reference: string | null, kind: TaskKind) {
   const normalized = normalizedReference(reference);
   if (!normalized) return { value: null as string | null };
-  if (!new RegExp(`^${prefix(kind)}-\\d{4,}$`).test(normalized)) return { value: normalized, error: `Reference must match ${prefix(kind)}-0001.` };
+  const valid = kind === "jd"
+    ? /^JD-\d{3,}$/.test(normalized)
+    : /^(?:TSK|OT)-\d{3,}$/.test(normalized);
+  if (!valid) return { value: normalized, error: `Code must match ${prefix(kind)}-001.` };
   return { value: normalized };
 }
 

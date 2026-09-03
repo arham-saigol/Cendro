@@ -70,8 +70,8 @@ export type ParsedWorkbook = {
   rows: TaskImportDraft[];
 };
 
-const jdHeaders = ["Reference", "Title", "Description", "Frequency", "Time", "Quantity", "Assignee Emails", "Status"] as const;
-const oneTimeHeaders = ["Reference", "Title", "Description", "Due Date", "Priority", "Time", "Quantity", "Assignee Emails", "Status"] as const;
+const jdHeaders = ["Code", "Title", "Description", "Frequency", "Time", "Quantity", "Assignee Emails", "Status"] as const;
+const oneTimeHeaders = ["Code", "Title", "Description", "Due Date", "Priority", "Time", "Quantity", "Assignee Emails", "Status"] as const;
 
 const metadataKeyAliases: Record<string, keyof WorkbookMetadata> = {
   format: "format",
@@ -252,7 +252,13 @@ function metadataFromRows(rows: SheetData): WorkbookMetadata | null {
 
 function findHeaderRow(rows: SheetData, kind: TaskImportKind) {
   const headers = expectedHeaders(kind).map(normalizeHeader);
-  return rows.findIndex((row) => headers.every((header, index) => normalizeHeader(row[index]) === header));
+  return rows.findIndex((row) =>
+    headers.every((header, index) => {
+      const cell = normalizeHeader(row[index]);
+      if (index === 0) return cell === "code" || cell === "reference";
+      return cell === header;
+    })
+  );
 }
 
 function valueAt(row: readonly unknown[], index: number) {
@@ -409,7 +415,7 @@ function metadataRows(metadata: WorkbookMetadata): WriteSheetData {
     [textCell("Source company name"), textCell(metadata.companyName)],
     [textCell("Export timestamp"), textCell(metadata.exportedAt)],
     [],
-    [textCell("Instructions"), textCell("Edit task fields. Blank references create tasks. Blank assignee cells preserve existing assignees; new tasks need an assignee. Status can be Pending, In Progress, or Completed.")],
+    [textCell("Instructions"), textCell("Edit task fields. Blank codes create tasks. Blank assignee cells preserve existing assignees; new tasks need an assignee. Status can be Pending, In Progress, or Completed.")],
     [textCell("Frequency values"), textCell(Object.entries(recurrenceLabels).map(([key, label]) => `${key} = ${label}`).join("; "))],
     [textCell("Priority values"), textCell(Object.entries(priorityLabels).map(([key, label]) => `${key} = ${label}`).join("; "))],
   ];

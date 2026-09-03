@@ -288,7 +288,52 @@ export const create = mutation({
   },
 });
 
-export const update = mutation({ args: { companyId: v.id("companies"), sopId: v.id("sops"), title: v.string(), content: v.optional(v.string()) }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found."); await requireCapability(ctx, args.companyId, manageCapability(sop.scopeType)); await ctx.db.patch(args.sopId, { title: nonEmpty(args.title, "Title"), content: args.content?.trim() ?? "", updatedByMembershipId: membership._id, updatedAt: Date.now() }); await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: args.sopId }); } });
+export const update = mutation({
+  args: {
+    companyId: v.id("companies"),
+    sopId: v.id("sops"),
+    title: v.optional(v.string()),
+    content: v.optional(v.string()),
+    scopeType: v.optional(v.union(v.literal("company"), v.literal("branch"), v.literal("department"), v.literal("user"))),
+    branchIds: v.optional(v.array(v.id("branches"))),
+    departmentIds: v.optional(v.array(v.id("departments"))),
+    userMembershipIds: v.optional(v.array(v.id("companyMemberships"))),
+  },
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const sop = await ctx.db.get(args.sopId);
+    if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found.");
+    await requireCapability(ctx, args.companyId, manageCapability(sop.scopeType));
+
+    const patch: {
+      title?: string;
+      content?: string;
+      scopeType?: Doc<"sops">["scopeType"];
+      updatedByMembershipId: Id<"companyMemberships">;
+      updatedAt: number;
+    } = {
+      updatedByMembershipId: membership._id,
+      updatedAt: Date.now(),
+    };
+
+    if (args.title !== undefined) patch.title = nonEmpty(args.title, "Title");
+    if (args.content !== undefined) patch.content = args.content.trim();
+
+    if (args.scopeType !== undefined) {
+      await requireCapability(ctx, args.companyId, manageCapability(args.scopeType));
+      const scopeArgs = { scopeType: args.scopeType, branchIds: args.branchIds ?? [], departmentIds: args.departmentIds ?? [], userMembershipIds: args.userMembershipIds ?? [] };
+      assertScopeSelection(scopeArgs);
+      await assertTargets(ctx, args.companyId, scopeArgs);
+      await assertManagedTargets(ctx, args.companyId, membership, scopeArgs);
+      await deleteScopeRows(ctx, args.sopId);
+      patch.scopeType = args.scopeType;
+      await insertScopeRows(ctx, args.companyId, args.sopId, scopeArgs);
+    }
+
+    await ctx.db.patch(args.sopId, patch);
+    await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: args.sopId });
+  },
+});
 
 export const updateScope = mutation({
   args: { companyId: v.id("companies"), sopId: v.id("sops"), scopeType: v.union(v.literal("company"), v.literal("branch"), v.literal("department"), v.literal("user")), branchIds: v.array(v.id("branches")), departmentIds: v.optional(v.array(v.id("departments"))), userMembershipIds: v.array(v.id("companyMemberships")) },

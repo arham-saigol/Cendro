@@ -708,11 +708,11 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
     onChange(toDateField(next.getTime(), withTime));
   }
 
-  function commitDateDraft() {
+  function commitDateDraft(): boolean {
     const parsed = dateFromField(dateDraft);
     if (!parsed) {
       setDateDraft(selectedDate ? formatDateOnly(selectedDate, "short") : "");
-      return;
+      return false;
     }
     const draftIncludesTime = dateFieldHasTime(dateDraft);
     setMonthDate(new Date(parsed.getFullYear(), parsed.getMonth(), 1));
@@ -722,18 +722,20 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
     } else {
       emitDate(parsed, includeTime);
     }
+    return true;
   }
 
-  function commitTimeDraft() {
+  function commitTimeDraft(): boolean {
     const parts = parseTimeParts(timeDraft);
     if (!parts) {
       setTimeDraft(selectedDate && includeTime ? formatTimeOnly(selectedDate) : "");
-      return;
+      return false;
     }
     const next = selectedDate ? new Date(selectedDate) : new Date();
     next.setHours(parts.hours, parts.minutes, 0, 0);
     setIncludeTime(true);
     onChange(toDateField(next.getTime(), true));
+    return true;
   }
 
   function pick(date: Date) {
@@ -784,8 +786,8 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
           onKeyDown={(event) => {
             if (event.key === "Enter") {
               event.preventDefault();
-              commitDateDraft();
-              if (!includeTime) setOpen(false);
+              const saved = commitDateDraft();
+              if (saved && !includeTime) setOpen(false);
             }
             if (event.key === "Escape") setDateDraft(selectedDate ? formatDateOnly(selectedDate, "short") : "");
           }}
@@ -802,8 +804,8 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   event.preventDefault();
-                  commitTimeDraft();
-                  setOpen(false);
+                  const saved = commitTimeDraft();
+                  if (saved) setOpen(false);
                 }
                 if (event.key === "Escape") setTimeDraft(selectedDate && includeTime ? formatTimeOnly(selectedDate) : "");
               }}

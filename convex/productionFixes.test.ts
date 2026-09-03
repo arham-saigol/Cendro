@@ -82,6 +82,22 @@ describe("production permission and validation fixes", () => {
     await expect(t.withIdentity(identity("admin")).mutation(api.tasks.updateOneTime, { companyId, taskId: oneTimeTaskId, title: "One-time task", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [], priority: "medium" })).rejects.toThrow("Task assignee is required");
   });
 
+  test("task creation and updates reject duplicate assignees", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const admin = t.withIdentity(identity("admin"));
+
+    await expect(admin.mutation(api.tasks.createJd, { companyId, title: "JD duplicate", recurrence: "daily", assigneeMembershipIds: [adminMembershipId, adminMembershipId] })).rejects.toThrow("Duplicate assignees are not allowed");
+    await expect(admin.mutation(api.tasks.createOneTime, { companyId, title: "OT duplicate", assigneeMembershipIds: [adminMembershipId, adminMembershipId], priority: "medium" })).rejects.toThrow("Duplicate assignees are not allowed");
+
+    const jdTaskId = await admin.mutation(api.tasks.createJd, { companyId, title: "JD valid", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    const oneTimeTaskId = await admin.mutation(api.tasks.createOneTime, { companyId, title: "OT valid", assigneeMembershipIds: [adminMembershipId], priority: "medium" });
+
+    await expect(admin.mutation(api.tasks.updateJd, { companyId, taskId: jdTaskId, title: "JD updated", recurrence: "daily", assigneeMembershipIds: [adminMembershipId, adminMembershipId] })).rejects.toThrow("Duplicate assignees are not allowed");
+    await expect(admin.mutation(api.tasks.updateJdFields, { companyId, taskId: jdTaskId, assigneeMembershipIds: [adminMembershipId, adminMembershipId] })).rejects.toThrow("Duplicate assignees are not allowed");
+    await expect(admin.mutation(api.tasks.updateOneTime, { companyId, taskId: oneTimeTaskId, title: "OT updated", assigneeMembershipIds: [adminMembershipId, adminMembershipId], priority: "medium" })).rejects.toThrow("Duplicate assignees are not allowed");
+    await expect(admin.mutation(api.tasks.updateOneTimeFields, { companyId, taskId: oneTimeTaskId, assigneeMembershipIds: [adminMembershipId, adminMembershipId] })).rejects.toThrow("Duplicate assignees are not allowed");
+  });
+
   test("tasks and SOPs receive searchable, unique references", async () => {
     const { t, companyId, adminMembershipId } = await seedCompany();
     const admin = t.withIdentity(identity("admin"));
@@ -808,5 +824,56 @@ describe("production permission and validation fixes", () => {
     // 3. Second run is idempotent
     const rerun = await t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: false });
     expect(rerun).toEqual({ dryRun: false, jdMigrated: 0, oneTimeMigrated: 0, totalMigrated: 0 });
+  });
+
+  test("migrateTaskCodes throws an error on reference collision", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const now = Date.now();
+    await t.run(async (ctx) => {
+      const base = { companyId, title: "JD", recurrence: "daily" as const, cycleStartedAt: now, status: "due" as const, assigneeMembershipIds: [adminMembershipId], createdByMembershipId: adminMembershipId, createdAt: now, updatedAt: now };
+      await ctx.db.insert("jdTasks", { ...base, reference: "JD-0001" });
+      await ctx.db.insert("jdTasks", { ...base, reference: "JD-001" });
+    });
+
+    await expect(t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: false })).rejects.toThrow("target reference already exists");
+  });
+
+  test("sops.update atomically updates text and scope, and rolls back on failure", async () => {
+    const { t, companyId } = await seedCompany();
+    const admin = t.withIdentity(identity("admin"));
+    const branchId = await t.run(async (ctx) => await ctx.db.insert("branches", { companyId, name: "Downtown", createdAt: Date.now(), updatedAt: Date.now() }));
+    const sopId = await admin.mutation(api.sops.create, { companyId, title: "Original Title", content: "Original Content", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
+
+    // Atomic success
+    await admin.mutation(api.sops.update, {
+      companyId,
+      sopId,
+      title: "Updated Title",
+      content: "Updated Content",
+      scopeType: "branch",
+      branchIds: [branchId],
+      departmentIds: [],
+      userMembershipIds: [],
+    });
+
+    const updatedSop = await admin.query(api.sops.get, { companyId, sopId });
+    expect(updatedSop.title).toBe("Updated Title");
+    expect(updatedSop.content).toBe("Updated Content");
+    expect(updatedSop.scopeType).toBe("branch");
+    expect(updatedSop.branchIds).toEqual([branchId]);
+
+    // Validation failure on scope rolls back entire edit
+    await expect(admin.mutation(api.sops.update, {
+      companyId,
+      sopId,
+      title: "Should Not Persist",
+      scopeType: "branch",
+      branchIds: [], // invalid branch selection
+      departmentIds: [],
+      userMembershipIds: [],
+    })).rejects.toThrow();
+
+    const untouchedSop = await admin.query(api.sops.get, { companyId, sopId });
+    expect(untouchedSop.title).toBe("Updated Title");
   });
 });

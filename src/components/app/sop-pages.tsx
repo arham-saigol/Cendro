@@ -33,7 +33,7 @@ import { PageHeader } from "./page-header";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { SopRichTextEditor, SopRichTextViewer, richTextPlainText } from "./sop-rich-text";
+import { SopRichTextEditor, SopRichTextViewer } from "./sop-rich-text";
 import { cn, formatDate, initials } from "@/lib/utils";
 
 type ScopeType = "company" | "branch" | "department" | "user";
@@ -284,7 +284,6 @@ function SopDialog({
   const { activeCompanyId, active } = useCompany();
   const create = useMutation(api.sops.create);
   const update = useMutation(api.sops.update);
-  const updateScope = useMutation(api.sops.updateScope);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [scopeType, setScopeType] = useState<CreateScopeType>("company");
@@ -306,6 +305,30 @@ function SopDialog({
   const defaultCreateScope = availableScopes[0] ?? "company";
   const scopeOptions = useQuery(api.sops.scopeOptions, open && activeCompanyId && canLoadSopScopeOptions(active) ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const scopeTargetValid = scopeType === "company" || (scopeType === "branch" ? Boolean(branchId) : scopeType === "department" ? Boolean(departmentId) : Boolean(userMembershipId));
+
+  const branchPickerOptions = useMemo(() => {
+    const list = scopeOptions?.branches.map((branch) => ({ value: branch._id as string, label: branch.name })) ?? [];
+    if (mode === "edit" && sop?.scopeType === "branch" && sop?.branchIds?.[0] && !list.some((o) => o.value === sop.branchIds[0])) {
+      return [{ value: sop.branchIds[0] as string, label: sopTargetName(sop, active?.company?.name) }, ...list];
+    }
+    return list;
+  }, [active?.company?.name, mode, scopeOptions?.branches, sop]);
+
+  const departmentPickerOptions = useMemo(() => {
+    const list = scopeOptions?.departments.map((department) => ({ value: department._id as string, label: department.name, helper: department.branchName })) ?? [];
+    if (mode === "edit" && sop?.scopeType === "department" && sop?.departmentIds?.[0] && !list.some((o) => o.value === sop.departmentIds[0])) {
+      return [{ value: sop.departmentIds[0] as string, label: sopTargetName(sop, active?.company?.name) }, ...list];
+    }
+    return list;
+  }, [active?.company?.name, mode, scopeOptions?.departments, sop]);
+
+  const userPickerOptions = useMemo(() => {
+    const list = scopeOptions?.users.map((user) => ({ value: user.membership._id as string, label: user.user.name, helper: user.membership.role })) ?? [];
+    if (mode === "edit" && sop?.scopeType === "user" && sop?.userMembershipIds?.[0] && !list.some((o) => o.value === sop.userMembershipIds[0])) {
+      return [{ value: sop.userMembershipIds[0] as string, label: sopTargetName(sop, active?.company?.name) }, ...list];
+    }
+    return list;
+  }, [active?.company?.name, mode, scopeOptions?.users, sop]);
 
   useEffect(() => {
     if (!open) return;
@@ -333,10 +356,26 @@ function SopDialog({
 
   useEffect(() => {
     if (!open || !scopeOptions) return;
-    if (scopeType === "branch" && !scopeOptions.branches.some((branch) => branch._id === branchId)) setBranchId(scopeOptions.branches[0]?._id ?? "");
-    if (scopeType === "department" && !scopeOptions.departments.some((department) => department._id === departmentId)) setDepartmentId(scopeOptions.departments[0]?._id ?? "");
-    if (scopeType === "user" && !scopeOptions.users.some((user) => user.membership._id === userMembershipId)) setUserMembershipId(scopeOptions.users[0]?.membership._id ?? "");
-  }, [branchId, departmentId, open, scopeOptions, scopeType, userMembershipId]);
+    if (mode === "create") {
+      if (scopeType === "branch" && !scopeOptions.branches.some((branch) => branch._id === branchId)) setBranchId(scopeOptions.branches[0]?._id ?? "");
+      if (scopeType === "department" && !scopeOptions.departments.some((department) => department._id === departmentId)) setDepartmentId(scopeOptions.departments[0]?._id ?? "");
+      if (scopeType === "user" && !scopeOptions.users.some((user) => user.membership._id === userMembershipId)) setUserMembershipId(scopeOptions.users[0]?.membership._id ?? "");
+    } else {
+      const isInitialBranch = sop?.scopeType === "branch" && branchId === (sop?.branchIds?.[0] ?? "");
+      const isInitialDepartment = sop?.scopeType === "department" && departmentId === (sop?.departmentIds?.[0] ?? "");
+      const isInitialUser = sop?.scopeType === "user" && userMembershipId === (sop?.userMembershipIds?.[0] ?? "");
+
+      if (scopeType === "branch" && !isInitialBranch && !scopeOptions.branches.some((branch) => branch._id === branchId)) {
+        setBranchId(scopeOptions.branches[0]?._id ?? "");
+      }
+      if (scopeType === "department" && !isInitialDepartment && !scopeOptions.departments.some((department) => department._id === departmentId)) {
+        setDepartmentId(scopeOptions.departments[0]?._id ?? "");
+      }
+      if (scopeType === "user" && !isInitialUser && !scopeOptions.users.some((user) => user.membership._id === userMembershipId)) {
+        setUserMembershipId(scopeOptions.users[0]?.membership._id ?? "");
+      }
+    }
+  }, [branchId, departmentId, mode, open, scopeOptions, scopeType, sop, userMembershipId]);
 
   useEffect(() => autoSize(titleRef), [title, open]);
 
@@ -372,22 +411,17 @@ function SopDialog({
           (scopeType === "department" && departmentId !== prevDepartmentId) ||
           (scopeType === "user" && userMembershipId !== prevUserMembershipId);
 
-        if (titleOrContentChanged) {
+        if (titleOrContentChanged || scopeChanged) {
           await update({
             companyId: activeCompanyId,
             sopId: sop._id as Id<"sops">,
-            title: trimmedTitle,
-            content: trimmedContent,
-          });
-        }
-        if (scopeChanged) {
-          await updateScope({
-            companyId: activeCompanyId,
-            sopId: sop._id as Id<"sops">,
-            scopeType,
-            branchIds: scopeType === "branch" ? [branchId as Id<"branches">] : [],
-            departmentIds: scopeType === "department" ? [departmentId as Id<"departments">] : [],
-            userMembershipIds: scopeType === "user" ? [userMembershipId as Id<"companyMemberships">] : [],
+            ...(titleOrContentChanged ? { title: trimmedTitle, content: trimmedContent } : {}),
+            ...(scopeChanged ? {
+              scopeType,
+              branchIds: scopeType === "branch" ? [branchId as Id<"branches">] : [],
+              departmentIds: scopeType === "department" ? [departmentId as Id<"departments">] : [],
+              userMembershipIds: scopeType === "user" ? [userMembershipId as Id<"companyMemberships">] : [],
+            } : {}),
           });
         }
       }
@@ -465,28 +499,28 @@ function SopDialog({
                         <DialogSelectPicker
                           ariaLabel="Assign SOP to branch"
                           value={branchId}
-                          options={scopeOptions?.branches.map((branch) => ({ value: branch._id as string, label: branch.name })) ?? []}
+                          options={branchPickerOptions}
                           onChange={(value) => { setBranchId(value); setError(null); }}
                           placeholder={scopeOptions ? "No branches available" : "Loading branches..."}
-                          disabled={!scopeOptions?.branches.length}
+                          disabled={!branchPickerOptions.length}
                         />
                       ) : scopeType === "department" ? (
                         <DialogSelectPicker
                           ariaLabel="Assign SOP to department"
                           value={departmentId}
-                          options={scopeOptions?.departments.map((department) => ({ value: department._id as string, label: department.name, helper: department.branchName })) ?? []}
+                          options={departmentPickerOptions}
                           onChange={(value) => { setDepartmentId(value); setError(null); }}
                           placeholder={scopeOptions ? "No departments available" : "Loading departments..."}
-                          disabled={!scopeOptions?.departments.length}
+                          disabled={!departmentPickerOptions.length}
                         />
                       ) : (
                         <DialogSelectPicker
                           ariaLabel="Assign SOP to user"
                           value={userMembershipId}
-                          options={scopeOptions?.users.map((user) => ({ value: user.membership._id as string, label: user.user.name, helper: user.membership.role })) ?? []}
+                          options={userPickerOptions}
                           onChange={(value) => { setUserMembershipId(value); setError(null); }}
                           placeholder={scopeOptions ? "No users available" : "Loading users..."}
-                          disabled={!scopeOptions?.users.length}
+                          disabled={!userPickerOptions.length}
                         />
                       )}
                     </div>
@@ -1158,7 +1192,7 @@ function EditableSopField({ value, placeholder, variant, ariaLabel, canEdit, onS
   async function commit() {
     const next = draft.trim();
     if (next === value.trim()) return;
-    if (variant === "body" ? !richTextPlainText(next) : !next) { setDraft(value); setState("error"); setError(variant === "title" ? "Title is required." : "Body is required."); return; }
+    if (variant === "title" && !next) { setDraft(value); setState("error"); setError("Title is required."); return; }
     setState("saving");
     setError(null);
     const ok = await onSave(next);

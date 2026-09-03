@@ -67,6 +67,7 @@ async function assertAssigneesInCompany(ctx: Ctx, companyId: Id<"companies">, as
 
 function requireTaskAssignee(assignees: Id<"companyMemberships">[]) {
   if (assignees.length === 0) throw new ConvexError("Task assignee is required.");
+  if (new Set(assignees).size !== assignees.length) throw new ConvexError("Duplicate assignees are not allowed.");
 }
 
 function updateAuthTargets(task: Pick<Doc<"jdTasks"> | Doc<"oneTimeTasks">, "assigneeMembershipIds" | "createdByMembershipId">) {
@@ -949,6 +950,17 @@ export const migrateTaskBatch = internalMutation({
           const num = parseInt(match[1], 10);
           const newRef = `JD-${String(num).padStart(3, "0")}`;
           if (task.reference !== newRef) {
+            const existing = await ctx.db
+              .query("jdTasks")
+              .withIndex("by_companyId_and_reference", (q) =>
+                q.eq("companyId", task.companyId).eq("reference", newRef)
+              )
+              .first();
+            if (existing && existing._id !== task._id) {
+              throw new ConvexError(
+                `Cannot migrate task ${task._id} (${task.reference}) to ${newRef}: target reference already exists in company ${task.companyId}.`
+              );
+            }
             if (!args.dryRun) {
               await ctx.db.patch(task._id, { reference: newRef });
             }
@@ -961,6 +973,17 @@ export const migrateTaskBatch = internalMutation({
           const num = parseInt(match[1], 10);
           const newRef = `TSK-${String(num).padStart(3, "0")}`;
           if (task.reference !== newRef) {
+            const existing = await ctx.db
+              .query("oneTimeTasks")
+              .withIndex("by_companyId_and_reference", (q) =>
+                q.eq("companyId", task.companyId).eq("reference", newRef)
+              )
+              .first();
+            if (existing && existing._id !== task._id) {
+              throw new ConvexError(
+                `Cannot migrate task ${task._id} (${task.reference}) to ${newRef}: target reference already exists in company ${task.companyId}.`
+              );
+            }
             if (!args.dryRun) {
               await ctx.db.patch(task._id, { reference: newRef });
             }

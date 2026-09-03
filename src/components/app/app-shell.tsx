@@ -36,7 +36,7 @@ const nav = [
   { href: "/jd-tasks", label: "Job Description", icon: Repeat },
   { href: "/one-time-tasks", label: "Tasks", icon: SquareCheck },
   { href: "/sops", label: "SOP's", icon: FileText },
-  { href: "/company", label: "Company Management", icon: Building2, requiresCompanyManagement: true },
+  { href: "/company", label: "Settings", icon: Building2, requiresCompanyManagement: true },
 ];
 
 const dropdownItemClass =

@@ -106,8 +106,8 @@ const roleTone: Record<Role, "blue" | "green" | "neutral"> = {
 
 const TABS: { value: TabValue; label: string; icon: LucideIcon }[] = [
   { value: "general", label: "General", icon: Settings },
-  { value: "structure", label: "Structure", icon: Network },
-  { value: "people", label: "People", icon: Users },
+  { value: "structure", label: "Hierarchy", icon: Network },
+  { value: "people", label: "Users", icon: Users },
   { value: "permissions", label: "Permissions", icon: ShieldCheck },
 ];
 
@@ -124,11 +124,11 @@ const TAB_COPY: Record<TabValue, { title: string; description: string }> = {
     description: "Keep the workspace name and identity tidy.",
   },
   structure: {
-    title: "Structure",
+    title: "Hierarchy",
     description: "Define the branches and departments that shape ownership across the company.",
   },
   people: {
-    title: "People",
+    title: "Users",
     description: "Manage members, pending invitations, team placement, and access level.",
   },
   permissions: {

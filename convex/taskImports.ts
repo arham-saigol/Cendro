@@ -15,7 +15,7 @@ const priorityValidator = v.union(v.literal("low"), v.literal("medium"), v.liter
 const statusValidator = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
 const nullableString = v.union(v.string(), v.null());
 const nullableNumber = v.union(v.number(), v.null());
-const presentFieldValidator = v.union(v.literal("reference"), v.literal("title"), v.literal("description"), v.literal("recurrence"), v.literal("dueDate"), v.literal("priority"), v.literal("time"), v.literal("quantity"), v.literal("assignees"), v.literal("status"));
+const presentFieldValidator = v.union(v.literal("reference"), v.literal("title"), v.literal("description"), v.literal("notes"), v.literal("recurrence"), v.literal("dueDate"), v.literal("priority"), v.literal("time"), v.literal("quantity"), v.literal("assignees"), v.literal("status"));
 const draftValidator = v.object({
   rowKey: v.string(),
   sourceSheet: v.string(),
@@ -25,6 +25,7 @@ const draftValidator = v.object({
   reference: nullableString,
   title: nullableString,
   description: nullableString,
+  notes: nullableString,
   recurrence: v.union(recurrenceValidator, v.null()),
   dueDate: nullableNumber,
   priority: v.union(priorityValidator, v.null()),
@@ -59,6 +60,7 @@ type Draft = {
   reference: string | null;
   title: string | null;
   description: string | null;
+  notes: string | null;
   recurrence: "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "quarterly" | "semiannually" | "annually" | null;
   dueDate: number | null;
   priority: "low" | "medium" | "high" | null;
@@ -165,9 +167,10 @@ function validateDraftValues(row: Draft, kind: TaskKind) {
   if (hasField(row, "title") && !row.title?.trim()) errors.push("Task title is required.");
   if (row.title !== null && row.title.length > 500) errors.push("Title is too long.");
   if (row.description !== null && row.description.length > 20_000) errors.push("Description is too long.");
+  if (row.notes !== null && row.notes.length > 20_000) errors.push("Notes is too long.");
   if (row.time !== null && row.time.length > 200) errors.push("Time is too long.");
   if (row.quantity !== null && (!Number.isFinite(row.quantity) || row.quantity <= 0)) errors.push("Quantity must be a positive number.");
-  if (row.presentFields.length > 9 || new Set(row.presentFields).size !== row.presentFields.length) errors.push("Import row contains invalid field markers.");
+  if (row.presentFields.length > 10 || new Set(row.presentFields).size !== row.presentFields.length) errors.push("Import row contains invalid field markers.");
   if (row.reference !== null && !hasField(row, "reference")) errors.push("Reference was not marked as present in the source.");
   if (row.rawAssigneeText.length > 2_000 || row.assigneeEmails.length > 50 || row.assigneeEmails.some((email) => email.length > 320)) errors.push("Assignee data is too large.");
   if (row.warnings.length > 20 || row.warnings.some((warning) => warning.length > 500)) errors.push("Import warnings are too large.");
@@ -262,8 +265,8 @@ export const previewTaskImport = query({
 
 function editableSnapshot(task: Task, kind: TaskKind) {
   return kind === "jd"
-    ? { reference: task.reference, title: task.title, description: task.description ?? null, recurrence: (task as Doc<"jdTasks">).recurrence, time: task.time ?? null, quantity: task.quantity ?? null, assigneeMembershipIds: task.assigneeMembershipIds, updatedAt: task.updatedAt }
-    : { reference: task.reference, title: task.title, description: task.description ?? null, dueDate: (task as Doc<"oneTimeTasks">).dueDate ?? null, priority: (task as Doc<"oneTimeTasks">).priority, time: task.time ?? null, quantity: task.quantity ?? null, assigneeMembershipIds: task.assigneeMembershipIds, updatedAt: task.updatedAt };
+    ? { reference: task.reference, title: task.title, description: task.description ?? null, notes: task.notes ?? null, recurrence: (task as Doc<"jdTasks">).recurrence, time: task.time ?? null, quantity: task.quantity ?? null, assigneeMembershipIds: task.assigneeMembershipIds, updatedAt: task.updatedAt }
+    : { reference: task.reference, title: task.title, description: task.description ?? null, notes: task.notes ?? null, dueDate: (task as Doc<"oneTimeTasks">).dueDate ?? null, priority: (task as Doc<"oneTimeTasks">).priority, time: task.time ?? null, quantity: task.quantity ?? null, assigneeMembershipIds: task.assigneeMembershipIds, updatedAt: task.updatedAt };
 }
 
 async function validateCommitRow(ctx: MutationCtx, companyId: Id<"companies">, kind: TaskKind, auth: ImportAuth, row: ReviewedRow) {
@@ -353,6 +356,11 @@ export const commitTaskImportBatch = mutation({
             if (desc === undefined) delete nextTask.description;
             else nextTask.description = desc;
           }
+          if (hasField(item.draft, "notes")) {
+            const n = cleanText(item.draft.notes);
+            if (n === undefined) delete nextTask.notes;
+            else nextTask.notes = n;
+          }
           if (hasField(item.draft, "time")) {
             const t = cleanText(item.draft.time);
             if (t === undefined) delete nextTask.time;
@@ -391,6 +399,11 @@ export const commitTaskImportBatch = mutation({
             const desc = cleanText(item.draft.description);
             if (desc === undefined) delete nextTask.description;
             else nextTask.description = desc;
+          }
+          if (hasField(item.draft, "notes")) {
+            const n = cleanText(item.draft.notes);
+            if (n === undefined) delete nextTask.notes;
+            else nextTask.notes = n;
           }
           if (hasField(item.draft, "dueDate")) {
             if (item.draft.dueDate === null || item.draft.dueDate === undefined) delete nextTask.dueDate;
@@ -431,14 +444,14 @@ export const commitTaskImportBatch = mutation({
         if (args.kind === "jd") {
           const cycle = currentJdCycle(item.draft.recurrence!, now, company.timeZone);
           const initialStatus = hasField(item.draft, "status") && item.draft.status ? item.draft.status : "due";
-          const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title: nonEmpty(item.draft.title ?? "", "Task title"), description: cleanText(item.draft.description), time: cleanText(item.draft.time), quantity: item.draft.quantity ?? undefined, recurrence: item.draft.recurrence!, cycleStartedAt: now, status: initialStatus, statusCycleStart: cycle.start, assigneeMembershipIds: item.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+          const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title: nonEmpty(item.draft.title ?? "", "Task title"), description: cleanText(item.draft.description), notes: cleanText(item.draft.notes), time: cleanText(item.draft.time), quantity: item.draft.quantity ?? undefined, recurrence: item.draft.recurrence!, cycleStartedAt: now, status: initialStatus, statusCycleStart: cycle.start, assigneeMembershipIds: item.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
           if (initialStatus === "completed") {
             await ctx.db.insert("jdTaskCompletions", { companyId: args.companyId, jdTaskId: id, cycleStart: cycle.start, completedByMembershipId: membership._id, completedAt: now });
           }
           await ctx.db.insert("taskActivityLogs", { companyId: args.companyId, taskType: "jd", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
         } else {
           const initialStatus = hasField(item.draft, "status") && item.draft.status ? item.draft.status : "due";
-          const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, reference, title: nonEmpty(item.draft.title ?? "", "Task title"), description: cleanText(item.draft.description), dueDate: item.draft.dueDate ?? undefined, time: cleanText(item.draft.time), quantity: item.draft.quantity ?? undefined, assigneeMembershipIds: item.assigneeMembershipIds, createdByMembershipId: membership._id, priority: item.draft.priority!, status: initialStatus, completedAt: initialStatus === "completed" ? now : undefined, completedByMembershipId: initialStatus === "completed" ? membership._id : undefined, createdAt: now, updatedAt: now });
+          const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, reference, title: nonEmpty(item.draft.title ?? "", "Task title"), description: cleanText(item.draft.description), notes: cleanText(item.draft.notes), dueDate: item.draft.dueDate ?? undefined, time: cleanText(item.draft.time), quantity: item.draft.quantity ?? undefined, assigneeMembershipIds: item.assigneeMembershipIds, createdByMembershipId: membership._id, priority: item.draft.priority!, status: initialStatus, completedAt: initialStatus === "completed" ? now : undefined, completedByMembershipId: initialStatus === "completed" ? membership._id : undefined, createdAt: now, updatedAt: now });
           await ctx.db.insert("taskActivityLogs", { companyId: args.companyId, taskType: "one_time", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
         }
         created += 1;

@@ -838,6 +838,39 @@ describe("production permission and validation fixes", () => {
     await expect(t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: false })).rejects.toThrow("target reference already exists");
   });
 
+  test("migrateTaskCodes detects normalized collisions during dry run across batches and prevents partial migration", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const now = Date.now();
+    const [id1, id2] = await t.run(async (ctx) => {
+      const base = { companyId, title: "JD", recurrence: "daily" as const, cycleStartedAt: now, status: "due" as const, assigneeMembershipIds: [adminMembershipId], createdByMembershipId: adminMembershipId, createdAt: now, updatedAt: now };
+      const first = await ctx.db.insert("jdTasks", { ...base, reference: "JD-0001" });
+      const second = await ctx.db.insert("jdTasks", { ...base, reference: "JD-00001" });
+      return [first, second];
+    });
+
+    // 1. Dry run with batchSize: 1 must fail and detect the collision instead of falsely reporting migratable
+    await expect(
+      t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: true, batchSize: 1 })
+    ).rejects.toThrow("target reference already exists");
+
+    // Verify neither task was touched by dry run
+    await t.run(async (ctx) => {
+      expect((await ctx.db.get(id1))?.reference).toBe("JD-0001");
+      expect((await ctx.db.get(id2))?.reference).toBe("JD-00001");
+    });
+
+    // 2. Real migration with batchSize: 1 preflights and aborts before any writes, preventing partial migration
+    await expect(
+      t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: false, batchSize: 1 })
+    ).rejects.toThrow("target reference already exists");
+
+    // Verify neither task was mutated (no partial migration of JD-0001)
+    await t.run(async (ctx) => {
+      expect((await ctx.db.get(id1))?.reference).toBe("JD-0001");
+      expect((await ctx.db.get(id2))?.reference).toBe("JD-00001");
+    });
+  });
+
   test("sops.update atomically updates text and scope, and rolls back on failure", async () => {
     const { t, companyId } = await seedCompany();
     const admin = t.withIdentity(identity("admin"));

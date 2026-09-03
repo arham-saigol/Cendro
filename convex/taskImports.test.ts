@@ -29,7 +29,7 @@ async function seed() {
 function draft(overrides: Record<string, unknown> = {}) {
   return {
     rowKey: "JD Tasks:2", sourceSheet: "JD Tasks", sourceRow: 2, source: "cendro" as const, kind: "jd" as const,
-    reference: null, title: "Opening checklist", description: null, recurrence: "daily" as const, dueDate: null, priority: null,
+    reference: null, title: "Opening checklist", description: null, notes: null, recurrence: "daily" as const, dueDate: null, priority: null,
     time: null, quantity: null, rawAssigneeText: "admin@example.com", assigneeEmails: ["admin@example.com"], status: null, presentFields: ["title", "recurrence", "assignees"] as ("title" | "recurrence" | "assignees" | "status")[],
     warnings: [], ...overrides,
   };
@@ -271,5 +271,59 @@ describe("task import backend", () => {
     expect(updated.task.status).toBe("completed");
     const logs = await t.run(async (ctx) => await ctx.db.query("taskActivityLogs").withIndex("by_task", (q) => q.eq("taskType", "one_time").eq("taskId", taskId)).collect());
     expect(logs.some((l) => l.event === "status_changed" && l.fromStatus === "due" && l.toStatus === "completed")).toBe(true);
+  });
+
+  test("exportRows includes notes and imports preserve notes across create and update", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+
+    // 1. Create JD and One-time tasks with notes
+    const jdId = await admin.mutation(api.tasks.createJd, { companyId, title: "JD with notes", notes: "Initial JD note", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    const otId = await admin.mutation(api.tasks.createOneTime, { companyId, title: "OT with notes", notes: "Initial OT note", priority: "high", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [adminMembershipId] });
+
+    // 2. Verify exportRows includes notes
+    const jdExport = await admin.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts: { cursor: null, numItems: 50 } });
+    expect(jdExport.page).toContainEqual(expect.objectContaining({ title: "JD with notes", notes: "Initial JD note" }));
+
+    const otExport = await admin.query(api.tasks.exportRows, { companyId, kind: "one_time", paginationOpts: { cursor: null, numItems: 50 } });
+    expect(otExport.page).toContainEqual(expect.objectContaining({ title: "OT with notes", notes: "Initial OT note" }));
+
+    // 3. Create task via import with notes
+    const importCreateRes = await admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-notes-create", batchKey: "batch-1", source: "cendro",
+      rows: [{
+        include: true,
+        selectedAssigneeMembershipIds: [adminMembershipId],
+        draft: draft({
+          title: "Imported JD Task",
+          notes: "Created via import",
+          presentFields: ["title", "notes", "recurrence", "assignees"],
+        }),
+      }],
+    });
+    expect(importCreateRes.created).toBe(1);
+    const createdTasks = await admin.query(api.tasks.listJdRows, { companyId, search: "Imported JD Task", paginationOpts: { numItems: 10, cursor: null } });
+    expect(createdTasks.page[0].notes).toBe("Created via import");
+
+    // 4. Update existing task notes via import
+    const existingJd = await admin.query(api.tasks.getJd, { companyId, taskId: jdId });
+    await admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-notes-update", batchKey: "batch-1", source: "cendro",
+      rows: [{
+        include: true,
+        expectedUpdatedAt: existingJd.task.updatedAt,
+        selectedAssigneeMembershipIds: null,
+        draft: draft({
+          reference: existingJd.task.reference,
+          title: existingJd.task.title,
+          notes: "Updated JD note via import",
+          presentFields: ["reference", "notes"],
+          rawAssigneeText: "",
+          assigneeEmails: [],
+        }),
+      }],
+    });
+    const updatedJd = await admin.query(api.tasks.getJd, { companyId, taskId: jdId });
+    expect(updatedJd.task.notes).toBe("Updated JD note via import");
   });
 });

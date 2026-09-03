@@ -1410,6 +1410,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
         reference: t.reference,
         title: t.title,
         description: t.description ?? null,
+        notes: t.notes ?? null,
         recurrence: kind === "jd" ? t.recurrence : undefined,
         dueDate: kind === "one" ? (t.dueDate ?? null) : undefined,
         priority: kind === "one" ? t.priority : undefined,

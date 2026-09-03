@@ -176,7 +176,7 @@ export const exportRows = query({
       for (const task of page.page) if (await visible(ctx, args.companyId, membership, task, "jd", auth)) {
         const assignees = await enrich(ctx, task.assigneeMembershipIds);
         const state = await jdState(ctx, task, Date.now(), company.timeZone);
-        rows.push({ reference: task.reference, title: task.title, description: task.description ?? null, recurrence: task.recurrence, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: assignees.map((row) => row.user.email).join("; "), status: state.status });
+        rows.push({ reference: task.reference, title: task.title, description: task.description ?? null, notes: task.notes ?? null, recurrence: task.recurrence, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: assignees.map((row) => row.user.email).join("; "), status: state.status });
       }
       return { ...page, page: rows };
     }
@@ -185,7 +185,7 @@ export const exportRows = query({
     for (const task of page.page) if (await visible(ctx, args.companyId, membership, task, "one_time", auth)) {
       const assignees = await enrich(ctx, task.assigneeMembershipIds);
       const state = oneState(task);
-      rows.push({ reference: task.reference, title: task.title, description: task.description ?? null, dueDate: task.dueDate ?? null, priority: task.priority, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: assignees.map((row) => row.user.email).join("; "), status: state.status });
+      rows.push({ reference: task.reference, title: task.title, description: task.description ?? null, notes: task.notes ?? null, dueDate: task.dueDate ?? null, priority: task.priority, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: assignees.map((row) => row.user.email).join("; "), status: state.status });
     }
     return { ...page, page: rows };
   },
@@ -942,6 +942,8 @@ export const migrateTaskBatch = internalMutation({
 
     const page = await baseQuery.paginate({ numItems: args.batchSize, cursor: args.cursor });
     let migrated = 0;
+    const batchTargets = new Set<string>();
+    const targets: Array<{ id: string; reference: string; targetRef: string; companyId: string }> = [];
 
     for (const task of page.page) {
       if (args.table === "jdTasks") {
@@ -950,6 +952,12 @@ export const migrateTaskBatch = internalMutation({
           const num = parseInt(match[1], 10);
           const newRef = `JD-${String(num).padStart(3, "0")}`;
           if (task.reference !== newRef) {
+            const key = `${task.companyId}:${newRef}`;
+            if (batchTargets.has(key)) {
+              throw new ConvexError(
+                `Cannot migrate task ${task._id} (${task.reference}) to ${newRef}: target reference already exists in company ${task.companyId}.`
+              );
+            }
             const existing = await ctx.db
               .query("jdTasks")
               .withIndex("by_companyId_and_reference", (q) =>
@@ -961,6 +969,8 @@ export const migrateTaskBatch = internalMutation({
                 `Cannot migrate task ${task._id} (${task.reference}) to ${newRef}: target reference already exists in company ${task.companyId}.`
               );
             }
+            batchTargets.add(key);
+            targets.push({ id: task._id, reference: task.reference, targetRef: newRef, companyId: task.companyId });
             if (!args.dryRun) {
               await ctx.db.patch(task._id, { reference: newRef });
             }
@@ -973,6 +983,12 @@ export const migrateTaskBatch = internalMutation({
           const num = parseInt(match[1], 10);
           const newRef = `TSK-${String(num).padStart(3, "0")}`;
           if (task.reference !== newRef) {
+            const key = `${task.companyId}:${newRef}`;
+            if (batchTargets.has(key)) {
+              throw new ConvexError(
+                `Cannot migrate task ${task._id} (${task.reference}) to ${newRef}: target reference already exists in company ${task.companyId}.`
+              );
+            }
             const existing = await ctx.db
               .query("oneTimeTasks")
               .withIndex("by_companyId_and_reference", (q) =>
@@ -984,6 +1000,8 @@ export const migrateTaskBatch = internalMutation({
                 `Cannot migrate task ${task._id} (${task.reference}) to ${newRef}: target reference already exists in company ${task.companyId}.`
               );
             }
+            batchTargets.add(key);
+            targets.push({ id: task._id, reference: task.reference, targetRef: newRef, companyId: task.companyId });
             if (!args.dryRun) {
               await ctx.db.patch(task._id, { reference: newRef });
             }
@@ -998,6 +1016,7 @@ export const migrateTaskBatch = internalMutation({
       isDone: page.isDone,
       migrated,
       scanned: page.page.length,
+      targets,
     };
   },
 });
@@ -1021,19 +1040,102 @@ export const migrateTaskCodes = internalAction({
   handler: async (ctx, args) => {
     const dryRun = args.dryRun ?? false;
     const batchSize = Math.min(Math.max(args.batchSize ?? 250, 1), 1000);
+
+    // Collision preflight across the whole run (dry-run pass that reserves computed targets)
+    const reservedTargets = new Set<string>();
+    let preflightJdMigrated = 0;
+    let preflightOneTimeMigrated = 0;
+
+    let jdCursor: string | null = null;
+    let jdDone = false;
+    while (!jdDone) {
+      const batchResult: {
+        continueCursor: string;
+        isDone: boolean;
+        migrated: number;
+        targets: Array<{ id: string; reference: string; targetRef: string; companyId: string }>;
+      } = await ctx.runMutation(internal.tasks.migrateTaskBatch, {
+        table: "jdTasks",
+        cursor: jdCursor,
+        batchSize,
+        dryRun: true,
+        companyId: args.companyId,
+      });
+      for (const target of batchResult.targets) {
+        const key = `${target.companyId}:${target.targetRef}`;
+        if (reservedTargets.has(key)) {
+          throw new ConvexError(
+            `Cannot migrate task ${target.id} (${target.reference}) to ${target.targetRef}: target reference already exists in company ${target.companyId}.`
+          );
+        }
+        reservedTargets.add(key);
+      }
+      preflightJdMigrated += batchResult.migrated;
+      jdCursor = batchResult.continueCursor;
+      jdDone = batchResult.isDone;
+    }
+
+    let oneTimeCursor: string | null = null;
+    let oneTimeDone = false;
+    while (!oneTimeDone) {
+      const batchResult: {
+        continueCursor: string;
+        isDone: boolean;
+        migrated: number;
+        targets: Array<{ id: string; reference: string; targetRef: string; companyId: string }>;
+      } = await ctx.runMutation(internal.tasks.migrateTaskBatch, {
+        table: "oneTimeTasks",
+        cursor: oneTimeCursor,
+        batchSize,
+        dryRun: true,
+        companyId: args.companyId,
+      });
+      for (const target of batchResult.targets) {
+        const key = `${target.companyId}:${target.targetRef}`;
+        if (reservedTargets.has(key)) {
+          throw new ConvexError(
+            `Cannot migrate task ${target.id} (${target.reference}) to ${target.targetRef}: target reference already exists in company ${target.companyId}.`
+          );
+        }
+        reservedTargets.add(key);
+      }
+      preflightOneTimeMigrated += batchResult.migrated;
+      oneTimeCursor = batchResult.continueCursor;
+      oneTimeDone = batchResult.isDone;
+    }
+
+    const totalMigratable = preflightJdMigrated + preflightOneTimeMigrated;
+    if (dryRun) {
+      return {
+        dryRun: true,
+        jdMigrated: preflightJdMigrated,
+        oneTimeMigrated: preflightOneTimeMigrated,
+        totalMigrated: totalMigratable,
+      };
+    }
+
+    if (totalMigratable === 0) {
+      return {
+        dryRun: false,
+        jdMigrated: 0,
+        oneTimeMigrated: 0,
+        totalMigrated: 0,
+      };
+    }
+
+    // Real run: preflight passed with no collisions, safe to write
     let jdMigrated = 0;
     let oneTimeMigrated = 0;
 
-    // 1. Paginate JD Tasks
-    let jdCursor: string | null = null;
-    let jdDone = false;
+    jdCursor = null;
+    jdDone = false;
     while (!jdDone) {
       const batchResult: { continueCursor: string; isDone: boolean; migrated: number } =
         await ctx.runMutation(internal.tasks.migrateTaskBatch, {
           table: "jdTasks",
           cursor: jdCursor,
           batchSize,
-          dryRun,
+          dryRun: false,
           companyId: args.companyId,
         });
       jdMigrated += batchResult.migrated;
@@ -1041,16 +1143,15 @@ export const migrateTaskCodes = internalAction({
       jdDone = batchResult.isDone;
     }
 
-    // 2. Paginate One-Time Tasks
-    let oneTimeCursor: string | null = null;
-    let oneTimeDone = false;
+    oneTimeCursor = null;
+    oneTimeDone = false;
     while (!oneTimeDone) {
       const batchResult: { continueCursor: string; isDone: boolean; migrated: number } =
         await ctx.runMutation(internal.tasks.migrateTaskBatch, {
           table: "oneTimeTasks",
           cursor: oneTimeCursor,
           batchSize,
-          dryRun,
+          dryRun: false,
           companyId: args.companyId,
         });
       oneTimeMigrated += batchResult.migrated;
@@ -1059,7 +1160,7 @@ export const migrateTaskCodes = internalAction({
     }
 
     return {
-      dryRun,
+      dryRun: false,
       jdMigrated,
       oneTimeMigrated,
       totalMigrated: jdMigrated + oneTimeMigrated,

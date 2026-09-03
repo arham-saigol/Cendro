@@ -12,6 +12,7 @@ describe("task import schema", () => {
       reference: null,
       title: "Task",
       description: null,
+      notes: null,
       recurrence: null,
       dueDate: Date.now(),
       priority: null,

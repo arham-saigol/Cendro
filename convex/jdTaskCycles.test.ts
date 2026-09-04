@@ -175,6 +175,59 @@ describe("JD task cycle behavior", () => {
     expect(countAfterCron.count).toBe(0);
   });
 
+  test("resetJdTaskCyclesBatch spans across multiple pages (>100 tasks) with serialized clearing and prevents cron interleaving recreation", async () => {
+    const start = utc(2026, 1, 1, 12);
+    vi.setSystemTime(start);
+    const { t, companyId, adminMembershipId } = await seedCompany();
+
+    // Create 105 tasks to cross the 100-item batch pagination limit
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 105; i++) {
+        await ctx.db.insert("jdTasks", {
+          companyId,
+          reference: `JD-${String(i + 1).padStart(3, "0")}`,
+          title: `Task ${i + 1}`,
+          recurrence: "daily",
+          cycleStartedAt: start,
+          status: "due",
+          statusCycleStart: utc(2026, 1, 1),
+          assigneeMembershipIds: [adminMembershipId],
+          createdByMembershipId: adminMembershipId,
+          createdAt: start,
+          updatedAt: start,
+        });
+      }
+    });
+
+    // Advance 4 days so cycles elapse
+    const now = utc(2026, 1, 5, 12);
+    vi.setSystemTime(now);
+
+    // Record missed cycles across batches
+    await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const countBefore = await t.query(internal.tasks.countMissedJdCycles, { companyId });
+    expect(countBefore.count).toBeGreaterThan(100);
+
+    // Start reset and clearing; it must chain across 2 task reset pages, then clear
+    await t.mutation(internal.tasks.resetAndClearMissedJdCycles, { companyId, now });
+
+    // Interleave an hourly cron run before finishing all scheduled work
+    await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const countAfter = await t.query(internal.tasks.countMissedJdCycles, { companyId });
+    expect(countAfter).toEqual({ count: 0, hasMore: false });
+
+    // Ensure all 105 tasks are reset and none recreated by cron
+    await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const finalCount = await t.query(internal.tasks.countMissedJdCycles, { companyId });
+    expect(finalCount).toEqual({ count: 0, hasMore: false });
+  });
+
   test("completed previous JD cycle starts the new current cycle as pending", async () => {
     vi.setSystemTime(utc(2026, 6, 25, 12));
     const { t, companyId, adminMembershipId } = await seedCompany();

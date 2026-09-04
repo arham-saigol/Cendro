@@ -499,8 +499,12 @@ export const resetJdTaskCyclesBatch = internalMutation({
     if (!page.isDone) {
       await ctx.scheduler.runAfter(0, internal.tasks.resetJdTaskCyclesBatch, {
         companyId: args.companyId,
-        now: args.now,
+        now,
         cursor: page.continueCursor,
+      });
+    } else {
+      await ctx.scheduler.runAfter(0, internal.tasks.clearMissedJdCyclesBatch, {
+        companyId: args.companyId,
       });
     }
     return { reset: page.page.length, isDone: page.isDone };
@@ -515,10 +519,7 @@ export const resetAndClearMissedJdCycles = internalMutation({
   handler: async (ctx, args) => {
     await ctx.scheduler.runAfter(0, internal.tasks.resetJdTaskCyclesBatch, {
       companyId: args.companyId,
-      now: args.now,
-    });
-    await ctx.scheduler.runAfter(0, internal.tasks.clearMissedJdCyclesBatch, {
-      companyId: args.companyId,
+      now: args.now ?? Date.now(),
     });
     return { status: "scheduled" };
   },
@@ -527,15 +528,18 @@ export const resetAndClearMissedJdCycles = internalMutation({
 export const countMissedJdCycles = internalQuery({
   args: {
     companyId: v.optional(v.id("companies")),
+    limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const max = Math.min(args.limit ?? 5000, 5000);
     const records = args.companyId
       ? await ctx.db
           .query("jdTaskCycleRecords")
           .withIndex("by_company", (q) => q.eq("companyId", args.companyId!))
-          .collect()
-      : await ctx.db.query("jdTaskCycleRecords").collect();
-    return { count: records.length };
+          .take(max + 1)
+      : await ctx.db.query("jdTaskCycleRecords").take(max + 1);
+    const hasMore = records.length > max;
+    return { count: hasMore ? max : records.length, hasMore };
   },
 });
 

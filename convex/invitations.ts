@@ -17,15 +17,40 @@ export const preview = query({
 export const accept = mutation({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    const { user } = await currentOrCreateUser(ctx);
+    const { user, identity } = await currentOrCreateUser(ctx);
+    if (!identity.emailVerified) {
+      throw new ConvexError("Email verification is required to accept an invitation.");
+    }
     const invitation = await ctx.db.query("invitations").withIndex("by_token", (q) => q.eq("token", args.token)).unique();
     if (!invitation || invitation.status !== "pending") throw new ConvexError("Invitation not found.");
     if (invitation.expiresAt < Date.now()) throw new ConvexError("This invitation has expired.");
     if (invitation.email.toLowerCase() !== user.email.toLowerCase()) throw new ConvexError("This invitation was sent to a different email address.");
     const company = await ctx.db.get(invitation.companyId);
     if (!company || company.deletedAt) throw new ConvexError("Company not found.");
+
+    const companyAuthVersion = company.authVersion ?? 1;
+    if (invitation.authVersion !== undefined && invitation.authVersion !== companyAuthVersion) {
+      throw new ConvexError("This invitation is invalid or has been superseded.");
+    }
+
     const now = Date.now();
     const existing = await ctx.db.query("companyMemberships").withIndex("by_company_user", (q) => q.eq("companyId", invitation.companyId).eq("userId", user._id)).unique();
+    if (existing && existing.active) {
+      throw new ConvexError("You are already an active member of this company.");
+    }
+
+    if (existing && !existing.active) {
+      if (invitation.targetMembershipId && invitation.targetMembershipId !== existing._id) {
+        throw new ConvexError("Invitation target membership does not match.");
+      }
+      if (
+        invitation.targetMembershipUpdatedAt !== undefined &&
+        existing.updatedAt !== invitation.targetMembershipUpdatedAt
+      ) {
+        throw new ConvexError("Membership state has changed since invitation was issued. Please request a new invitation.");
+      }
+    }
+
     if (existing) {
       const invited = (invitation.permissionOverrides ?? []).filter((o) => capabilities.includes(o.capability as Capability));
       const invitedCapabilities = new Set(invited.map((o) => o.capability));

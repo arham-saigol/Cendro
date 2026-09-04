@@ -172,7 +172,7 @@ describe("task import backend", () => {
 
   test("manager exportRows and imports are scoped to their managed branch", async () => {
     const t = convexTest(schema, modules);
-    const { companyId, managerMembershipId, empAMembershipId, empBMembershipId } = await t.run(async (ctx) => {
+    const { companyId, empAMembershipId, empBMembershipId } = await t.run(async (ctx) => {
       const now = Date.now();
       const companyId = await ctx.db.insert("companies", { name: "Scoped Corp", createdAt: now });
       const adminUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin", email: "admin@example.com", firstName: "Admin", createdAt: now, updatedAt: now });
@@ -279,7 +279,7 @@ describe("task import backend", () => {
 
     // 1. Create JD and One-time tasks with notes
     const jdId = await admin.mutation(api.tasks.createJd, { companyId, title: "JD with notes", notes: "Initial JD note", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
-    const otId = await admin.mutation(api.tasks.createOneTime, { companyId, title: "OT with notes", notes: "Initial OT note", priority: "high", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [adminMembershipId] });
+    await admin.mutation(api.tasks.createOneTime, { companyId, title: "OT with notes", notes: "Initial OT note", priority: "high", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [adminMembershipId] });
 
     // 2. Verify exportRows includes notes
     const jdExport = await admin.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts: { cursor: null, numItems: 50 } });

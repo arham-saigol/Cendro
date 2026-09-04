@@ -1,10 +1,8 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
-import type { Doc, Id } from "./_generated/dataModel";
+import type { Id } from "./_generated/dataModel";
 import { analyticsScopedMembershipIds, memberFullName, membershipCapabilities, requireMembership, scopedMembershipIds, taskHasVisibleAssignee } from "./permissions";
 
-function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.email; }
-function fullName(user: Doc<"appUsers">) { return [firstName(user), user.secondName?.trim()].filter(Boolean).join(" ") || user.email; }
 
 async function peopleRows(ctx: QueryCtx, companyId: Id<"companies">, ids: Set<Id<"companyMemberships">>, limit: number) {
   const out = [];
@@ -23,25 +21,21 @@ export const context = query({
   handler: async (ctx, args) => {
     const { membership, company } = await requireMembership(ctx, args.companyId);
     const capabilities = await membershipCapabilities(ctx, membership);
+    if (!capabilities.has("ai:use")) {
+      throw new ConvexError("You do not have access to AI capabilities.");
+    }
     const scoped = await scopedMembershipIds(ctx, args.companyId, membership);
+    const hasCompanyScope = capabilities.has("analytics:view:company") || capabilities.has("tasks:jd:view:any") || capabilities.has("tasks:one_time:view:any") || capabilities.has("sops:view:company");
+    const hasManagedScope = capabilities.has("analytics:view:managed_scope") || capabilities.has("tasks:jd:view:managed") || capabilities.has("tasks:one_time:view:managed") || capabilities.has("sops:view:managed");
+    const scope = hasCompanyScope ? "company" : hasManagedScope ? "managed" : "self";
     return {
       companyName: company.name,
       role: membership.role,
       capabilities: Array.from(capabilities),
-      scope: membership.role === "Admin" ? "company" : membership.role === "Manager" ? "managed" : "self",
+      scope,
       visiblePeopleLimit: scoped.size,
       unsupportedActions: ["delete", "remove", "role-change", "permission-change", "bulk-update"],
     };
-  },
-});
-
-export const peopleInScope = query({
-  args: { companyId: v.id("companies"), limit: v.number() },
-  handler: async (ctx, args) => {
-    const { membership } = await requireMembership(ctx, args.companyId);
-    const limit = Math.min(Math.max(Math.floor(args.limit), 1), 50);
-    const ids = await scopedMembershipIds(ctx, args.companyId, membership);
-    return await peopleRows(ctx, args.companyId, ids, limit);
   },
 });
 
@@ -49,6 +43,10 @@ export const performanceSummary = query({
   args: { companyId: v.id("companies") },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
+    const capabilities = await membershipCapabilities(ctx, membership);
+    if (!capabilities.has("ai:use")) {
+      throw new ConvexError("You do not have access to AI capabilities.");
+    }
     const scoped = await analyticsScopedMembershipIds(ctx, args.companyId, membership);
     const oneTime = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
     const visibleOneTime = oneTime.filter((task) => taskHasVisibleAssignee(task, scoped));

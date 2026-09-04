@@ -9,8 +9,8 @@ const modules = import.meta.glob("./**/*.ts");
 
 type Seed = Awaited<ReturnType<typeof seedCompany>>;
 
-function identity(key: string, email = `${key}@example.com`) {
-  return { tokenIdentifier: `clerk|${key}`, subject: key, issuer: "https://clerk.test", email, name: key };
+function identity(key: string, email = `${key}@example.com`, emailVerified = true) {
+  return { tokenIdentifier: `clerk|${key}`, subject: key, issuer: "https://clerk.test", email, emailVerified, name: key };
 }
 
 async function seedCompany() {
@@ -622,7 +622,7 @@ describe("production permission and validation fixes", () => {
       return { token: "demote-token" };
     });
 
-    await expect(t.withIdentity(identity("sole_admin", "sole_admin@example.com")).mutation(api.invitations.accept, { token })).rejects.toThrow("At least one active member must be able to manage permissions");
+    await expect(t.withIdentity(identity("sole_admin", "sole_admin@example.com")).mutation(api.invitations.accept, { token })).rejects.toThrow("You are already an active member of this company.");
   });
 
   test("admins can update member first and last names in company management", async () => {

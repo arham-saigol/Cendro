@@ -8,11 +8,13 @@ Cendro is a Notion-like internal operations workspace for company-scoped tasks, 
 2. Copy `.env.example` to `.env.local` and fill in Clerk, Convex, Resend, AI Gateway, Voyage, and platform admin values.
 3. Configure Clerk Google OAuth and a Clerk JWT template named `convex` with audience/application ID `convex`.
 4. Create/connect a Convex deployment: `npx convex dev`.
-5. Before deploying/generating Convex functions, set Convex environment variables: `CLERK_JWT_ISSUER_DOMAIN` is required by `convex/auth.config.ts`; also set `PLATFORM_ADMIN_EMAIL`, `RESEND_API_KEY`, `RESEND_FROM`, `APP_URL`, `VOYAGE_API_KEY`, and `VOYAGE_EMBEDDING_MODEL`.
+5. Before deploying/generating Convex functions, set Convex environment variables: `CLERK_JWT_ISSUER_DOMAIN` is required by `convex/auth.config.ts`; also set `PLATFORM_ADMIN_CLERK_USER_IDS` (comma-separated Clerk user IDs, e.g. `user_2...`), `AI_CHAT_PERSISTENCE_SECRET`, `RESEND_API_KEY`, `RESEND_FROM`, `APP_URL`, `VOYAGE_API_KEY`, and `VOYAGE_EMBEDDING_MODEL`.
 6. Run the app: `npm run dev`.
 
 ## Validation
 
+- `npm run audit:authz`
+- `npm test`
 - `npm run typecheck`
 - `npm run lint`
 - `npm run build`

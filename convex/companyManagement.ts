@@ -50,8 +50,6 @@ function assertSameIdSet<T>(actual: T[], expected: T[], message: string) {
   const expectedSet = new Set(expected);
   if (actual.some((id) => !expectedSet.has(id))) throw new ConvexError(message);
 }
-function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.email; }
-function fullName(user: Doc<"appUsers">) { return [firstName(user), user.secondName?.trim()].filter(Boolean).join(" ") || user.email; }
 
 async function validatePermissionOverrides(overrides: { capability: string }[], requireAll = false) {
   const seen = new Set<string>();
@@ -201,23 +199,80 @@ export const moveDepartment = mutation({
 export const setUserRole = mutation({
   args: { companyId: v.id("companies"), membershipId: v.id("companyMemberships"), role: roleValidator },
   handler: async (ctx, args) => {
-    await requireCapability(ctx, args.companyId, "company:manage_permissions");
-    await assertMembership(ctx, args.companyId, args.membershipId);
+    const { user } = await requireCapability(ctx, args.companyId, "company:manage_permissions");
+    const membership = await assertMembership(ctx, args.companyId, args.membershipId);
     const inheritAll = capabilities.map((capability) => ({ membershipId: args.membershipId, capability, effect: "inherit" as const }));
     await assertPermissionManagerRemains(ctx, args.companyId, args.membershipId, args.role, inheritAll);
-    await ctx.db.patch(args.membershipId, { role: args.role, updatedAt: Date.now() });
+    const now = Date.now();
+    await ctx.db.patch(args.membershipId, { role: args.role, updatedAt: now });
     for (const row of await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", args.membershipId)).take(500)) await ctx.db.delete(row._id);
+
+    const pendingTargeted = await ctx.db
+      .query("invitations")
+      .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
+      .take(500);
+    for (const invite of pendingTargeted) {
+      if (invite.status === "pending" && invite.targetMembershipId === args.membershipId) {
+        await ctx.db.patch(invite._id, { status: "revoked" });
+      }
+    }
+
+    await ctx.db.insert("auditEvents", {
+      companyId: args.companyId,
+      actorUserId: user._id,
+      action: "member.role_change",
+      targetType: "membership",
+      targetId: args.membershipId,
+      metadata: { previousRole: membership.role, nextRole: args.role },
+      createdAt: now,
+    });
+    return null;
   },
 });
 
 export const setUserActive = mutation({
   args: { companyId: v.id("companies"), membershipId: v.id("companyMemberships"), active: v.boolean() },
   handler: async (ctx, args) => {
-    await requireCapability(ctx, args.companyId, "company:manage_users");
+    const { user, capabilities: actorCaps } = await requireCapability(ctx, args.companyId, "company:manage_users");
     const membership = await assertMembership(ctx, args.companyId, args.membershipId);
     if (membership.active === args.active) return null;
-    await assertPermissionManagerRemainsAfterActiveChanges(ctx, args.companyId, new Map([[args.membershipId, args.active]]));
-    await ctx.db.patch(args.membershipId, { active: args.active, updatedAt: Date.now() });
+    const now = Date.now();
+    if (!args.active) {
+      const targetCaps = await membershipCapabilities(ctx, membership);
+      if (targetCaps.has("company:manage_permissions") && !actorCaps.has("company:manage_permissions")) {
+        throw new ConvexError("You do not have access to deactivate a permission administrator.");
+      }
+      await assertPermissionManagerRemainsAfterActiveChanges(ctx, args.companyId, new Map([[args.membershipId, false]]));
+      await clearUserManagementRows(ctx, args.membershipId);
+      const pendingTargeted = await ctx.db
+        .query("invitations")
+        .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
+        .take(500);
+      for (const invite of pendingTargeted) {
+        if (invite.status === "pending" && invite.targetMembershipId === args.membershipId) {
+          await ctx.db.patch(invite._id, { status: "revoked" });
+        }
+      }
+      await ctx.db.patch(args.membershipId, { active: false, updatedAt: now });
+      await ctx.db.insert("auditEvents", {
+        companyId: args.companyId,
+        actorUserId: user._id,
+        action: "member.deactivate",
+        targetType: "membership",
+        targetId: args.membershipId,
+        createdAt: now,
+      });
+    } else {
+      await ctx.db.patch(args.membershipId, { active: true, updatedAt: now });
+      await ctx.db.insert("auditEvents", {
+        companyId: args.companyId,
+        actorUserId: user._id,
+        action: "member.activate",
+        targetType: "membership",
+        targetId: args.membershipId,
+        createdAt: now,
+      });
+    }
     return null;
   },
 });
@@ -225,14 +280,37 @@ export const setUserActive = mutation({
 export const removeUsers = mutation({
   args: { companyId: v.id("companies"), membershipIds: v.array(v.id("companyMemberships")) },
   handler: async (ctx, args) => {
-    await requireCapability(ctx, args.companyId, "company:manage_users");
+    const { user, capabilities: actorCaps } = await requireCapability(ctx, args.companyId, "company:manage_users");
     const membershipIds = unique(args.membershipIds);
-    for (const membershipId of membershipIds) await assertMembership(ctx, args.companyId, membershipId);
+    for (const membershipId of membershipIds) {
+      const membership = await assertMembership(ctx, args.companyId, membershipId);
+      const targetCaps = await membershipCapabilities(ctx, membership);
+      if (targetCaps.has("company:manage_permissions") && !actorCaps.has("company:manage_permissions")) {
+        throw new ConvexError("You do not have access to remove a permission administrator.");
+      }
+    }
     await assertPermissionManagerRemainsAfterActiveChanges(ctx, args.companyId, new Map(membershipIds.map((membershipId) => [membershipId, false])));
     const now = Date.now();
     for (const membershipId of membershipIds) {
       await clearUserManagementRows(ctx, membershipId);
+      const pendingTargeted = await ctx.db
+        .query("invitations")
+        .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
+        .take(500);
+      for (const invite of pendingTargeted) {
+        if (invite.status === "pending" && invite.targetMembershipId === membershipId) {
+          await ctx.db.patch(invite._id, { status: "revoked" });
+        }
+      }
       await ctx.db.patch(membershipId, { active: false, updatedAt: now });
+      await ctx.db.insert("auditEvents", {
+        companyId: args.companyId,
+        actorUserId: user._id,
+        action: "member.deactivate",
+        targetType: "membership",
+        targetId: membershipId,
+        createdAt: now,
+      });
     }
     return null;
   },
@@ -375,31 +453,102 @@ export const setUserPermissions = mutation({
 });
 
 export const createInvitationRecord = internalMutation({
-  args: { companyId: v.id("companies"), email: v.string(), role: roleValidator, branchIds: v.optional(v.array(v.id("branches"))), departmentIds: v.optional(v.array(v.id("departments"))), managedBranchIds: v.optional(v.array(v.id("branches"))), managedDepartmentIds: v.optional(v.array(v.id("departments"))), managedUserMembershipIds: v.optional(v.array(v.id("companyMemberships"))), permissionOverrides: v.optional(v.array(invitationOverrideValidator)) },
+  args: {
+    companyId: v.id("companies"),
+    email: v.string(),
+    role: roleValidator,
+    branchIds: v.optional(v.array(v.id("branches"))),
+    departmentIds: v.optional(v.array(v.id("departments"))),
+    managedBranchIds: v.optional(v.array(v.id("branches"))),
+    managedDepartmentIds: v.optional(v.array(v.id("departments"))),
+    managedUserMembershipIds: v.optional(v.array(v.id("companyMemberships"))),
+    permissionOverrides: v.optional(v.array(invitationOverrideValidator)),
+  },
   handler: async (ctx, args) => {
-    const { user, capabilities: caps } = await requireCapability(ctx, args.companyId, "company:invite_users");
-    if (args.role === "Admin" && !caps.has("company:manage_permissions")) throw new ConvexError("You cannot invite Admins.");
+    const { user, company, capabilities: caps } = await requireCapability(ctx, args.companyId, "company:invite_users");
+    if (args.role !== "Employee" && !caps.has("company:manage_permissions")) {
+      throw new ConvexError("You cannot invite non-Employees.");
+    }
     const branchIds = unique(args.branchIds ?? []);
     const departmentIds = unique(args.departmentIds ?? []);
     const managedBranchIds = unique(args.managedBranchIds ?? []);
     const managedDepartmentIds = unique(args.managedDepartmentIds ?? []);
     const managedUserMembershipIds = unique(args.managedUserMembershipIds ?? []);
     const permissionOverrides = args.permissionOverrides ?? [];
-    if ((managedBranchIds.length || managedDepartmentIds.length || managedUserMembershipIds.length || permissionOverrides.length) && !caps.has("company:manage_permissions")) throw new ConvexError("You cannot grant managed scopes or permission overrides.");
+    if (
+      (managedBranchIds.length || managedDepartmentIds.length || managedUserMembershipIds.length || permissionOverrides.length) &&
+      !caps.has("company:manage_permissions")
+    ) {
+      throw new ConvexError("You cannot grant managed scopes or permission overrides.");
+    }
     for (const branchId of [...branchIds, ...managedBranchIds]) await assertBranch(ctx, args.companyId, branchId);
     for (const departmentId of [...departmentIds, ...managedDepartmentIds]) await assertDepartment(ctx, args.companyId, departmentId);
-    for (const membershipId of managedUserMembershipIds) await assertMembership(ctx, args.companyId, membershipId);
+    for (const membershipId of managedUserMembershipIds) {
+      const m = await assertMembership(ctx, args.companyId, membershipId);
+      if (!m.active) throw new ConvexError("Inactive users cannot be target scopes.");
+    }
     await validatePermissionOverrides(permissionOverrides);
     const email = normalizeEmail(args.email);
     const now = Date.now();
-    const existing = (await ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500)).find((i) => i.email === email && i.status === "pending" && i.expiresAt > now);
-    const patch = { role: args.role, branchIds, departmentIds, managedBranchIds, managedDepartmentIds, managedUserMembershipIds, permissionOverrides, expiresAt: now + 1_209_600_000 };
-    if (existing) {
-      await ctx.db.patch(existing._id, patch);
-      return { id: existing._id, token: existing.token };
+
+    const existingUser = await ctx.db.query("appUsers").withIndex("by_email", (q) => q.eq("email", email)).unique();
+    let targetMembership: Doc<"companyMemberships"> | null = null;
+    if (existingUser) {
+      targetMembership = await ctx.db
+        .query("companyMemberships")
+        .withIndex("by_company_user", (q) => q.eq("companyId", args.companyId).eq("userId", existingUser._id))
+        .unique();
+      if (targetMembership && targetMembership.active) {
+        throw new ConvexError("A user with this email is already an active member of this company.");
+      }
     }
+
+    const existingPending = await ctx.db
+      .query("invitations")
+      .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
+      .take(500);
+    for (const inv of existingPending) {
+      if (inv.email.toLowerCase() === email.toLowerCase() && inv.status === "pending") {
+        await ctx.db.patch(inv._id, { status: "revoked" });
+      }
+    }
+
+    const companyAuthVersion = company.authVersion ?? 1;
     const token = crypto.randomUUID();
-    const id = await ctx.db.insert("invitations", { companyId: args.companyId, email, ...patch, token, status: "pending", invitedBy: user._id, createdAt: now });
+    const patch = {
+      role: args.role,
+      branchIds,
+      departmentIds,
+      managedBranchIds,
+      managedDepartmentIds,
+      managedUserMembershipIds,
+      permissionOverrides,
+      expiresAt: now + 1_209_600_000,
+    };
+    const id = await ctx.db.insert("invitations", {
+      companyId: args.companyId,
+      email,
+      ...patch,
+      token,
+      status: "pending",
+      invitedBy: user._id,
+      authVersion: companyAuthVersion,
+      issuedAt: now,
+      targetMembershipId: targetMembership?._id,
+      targetMembershipUpdatedAt: targetMembership?.updatedAt,
+      createdAt: now,
+    });
+
+    await ctx.db.insert("auditEvents", {
+      companyId: args.companyId,
+      actorUserId: user._id,
+      action: "invitation.create",
+      targetType: "invitation",
+      targetId: id,
+      metadata: { email, role: args.role },
+      createdAt: now,
+    });
+
     return { id, token };
   },
 });

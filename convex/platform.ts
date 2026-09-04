@@ -2,20 +2,20 @@ import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { action, internalMutation, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { assertPlatformAdminEmail, isPlatformAdminEmail } from "./permissions";
+import { assertPlatformAdmin, isPlatformAdminSubject } from "./permissions";
 import { nonEmpty, normalizeEmail } from "./validation";
 
-async function platformEmail(ctx: { auth: { getUserIdentity: () => Promise<{ email?: string | null } | null> } }) {
+async function requirePlatformAdmin(ctx: { auth: { getUserIdentity: () => Promise<any> } }) {
   const identity = await ctx.auth.getUserIdentity();
-  assertPlatformAdminEmail(identity?.email);
-  return identity?.email || "";
+  assertPlatformAdmin(identity);
+  return identity!;
 }
 
 export const access = query({
   args: {},
   handler: async (ctx) => {
     const identity = await ctx.auth.getUserIdentity();
-    return { isAdmin: isPlatformAdminEmail(identity?.email), email: identity?.email ?? null };
+    return { isAdmin: Boolean(identity && isPlatformAdminSubject(identity.subject)), email: identity?.email ?? null };
   },
 });
 
@@ -25,7 +25,7 @@ export const adminDashboard = query({
   args: { companyLimit: v.number() },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
-    const access = { isAdmin: isPlatformAdminEmail(identity?.email), email: identity?.email ?? null };
+    const access = { isAdmin: Boolean(identity && isPlatformAdminSubject(identity?.subject)), email: identity?.email ?? null };
     if (!access.isAdmin) return { access, companies: [], hasMore: false };
 
     const limit = Math.min(Math.max(Math.floor(args.companyLimit), 1), MAX_ADMIN_COMPANIES);
@@ -42,7 +42,7 @@ export const adminDashboard = query({
 export const listCompanies = query({
   args: { paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
-    await platformEmail(ctx);
+    await requirePlatformAdmin(ctx);
     const page = await ctx.db.query("companies").order("desc").paginate(args.paginationOpts);
     const rows = [];
     for (const company of page.page) {
@@ -56,7 +56,8 @@ export const listCompanies = query({
 export const createCompanyRecord = internalMutation({
   args: { name: v.string(), adminEmail: v.string() },
   handler: async (ctx, args) => {
-    const actorEmail = await platformEmail(ctx);
+    const identity = await requirePlatformAdmin(ctx);
+    const actorEmail = identity.email || identity.subject;
     const now = Date.now();
     const name = nonEmpty(args.name, "Company name");
     const adminEmail = normalizeEmail(args.adminEmail);
@@ -68,7 +69,17 @@ export const createCompanyRecord = internalMutation({
     }
     const companyId = await ctx.db.insert("companies", { name, createdAt: now });
     const token = crypto.randomUUID();
-    const invitationId = await ctx.db.insert("invitations", { companyId, email: adminEmail, role: "Admin", token, status: "pending", createdAt: now, expiresAt: now + 1_209_600_000 });
+    const invitationId = await ctx.db.insert("invitations", {
+      companyId,
+      email: adminEmail,
+      role: "Admin",
+      token,
+      status: "pending",
+      createdAt: now,
+      expiresAt: now + 1_209_600_000,
+      authVersion: 1,
+      issuedAt: now,
+    });
     await ctx.db.insert("auditEvents", { companyId, actorEmail, action: "platform.company_create", targetType: "company", targetId: companyId, createdAt: now });
     return { companyId, invitationId, token };
   },
@@ -77,7 +88,7 @@ export const createCompanyRecord = internalMutation({
 export const createCompany = action({
   args: { name: v.string(), adminEmail: v.string() },
   handler: async (ctx, args): Promise<{ companyId: string }> => {
-    await platformEmail(ctx);
+    await requirePlatformAdmin(ctx);
     const created = await ctx.runMutation(internal.platform.createCompanyRecord, args);
     await ctx.runAction(internal.email.sendInvitation, { companyId: created.companyId, invitationId: created.invitationId, email: args.adminEmail, role: "Admin", token: created.token });
     return { companyId: created.companyId };
@@ -87,7 +98,8 @@ export const createCompany = action({
 export const deleteCompany = mutation({
   args: { companyId: v.id("companies"), confirmation: v.string() },
   handler: async (ctx, args) => {
-    const actorEmail = await platformEmail(ctx);
+    const identity = await requirePlatformAdmin(ctx);
+    const actorEmail = identity.email || identity.subject;
     const company = await ctx.db.get(args.companyId);
     if (!company) throw new ConvexError("Company not found.");
     if (args.confirmation !== company.name) throw new ConvexError("Type the company name to confirm deletion.");

@@ -192,12 +192,12 @@ function canEditTasks(active: { capabilities: string[] } | null | undefined, kin
   return hasAnyCapability(active, [`${prefix}:update:any`, `${prefix}:update:managed`, `${prefix}:update:self`]);
 }
 function canEditTaskRow(active: { capabilities: string[]; membership: { _id: string; role: string } } | null | undefined, kind: Kind, task: any) {
+  if (task && typeof task.canUpdate === "boolean") return task.canUpdate;
   const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   if (active?.capabilities.includes(`${prefix}:update:any`)) return true;
   if (active?.capabilities.includes(`${prefix}:update:managed`)) return true;
   return Boolean(active?.capabilities.includes(`${prefix}:update:self`) && taskHasAssignee(task, active.membership._id));
 }
-function canEditPriority(active: { membership: { role: string } } | null | undefined) { return active?.membership.role === "Admin" || active?.membership.role === "Manager"; }
 function statusMatches(task: any, filter: StatusFilter) {
   if (filter === "all") return true;
   const raw = rawStatus(task);
@@ -1188,7 +1188,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [pendingCell, setPendingCell] = useState<string | null>(null);
-  const canUseAllTasks = active?.membership.role === "Admin" || active?.membership.role === "Manager";
+  const taskPrefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
+  const canUseAllTasks = Boolean(active?.capabilities.some((c) => c === `${taskPrefix}:view:any` || c === `${taskPrefix}:view:managed`));
   const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip") as any[] | undefined;
   const filterableAssignees = useQuery(api.tasks.filterableAssignees, activeCompanyId && canUseAllTasks ? { companyId: activeCompanyId } : "skip") as any[] | undefined;
   const queryArgs = useMemo(() => {
@@ -1297,7 +1298,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const ownFilterCount = kind === "jd" ? ownFrequencyValues.length : ownPriorityValues.length;
   const activeView = kind === "jd" ? personalFrequencyView : personalPriorityView;
 
-  const { syncToggleScrollState, canScrollStart, canScrollEnd, scrollRail } = useTaskRailAutoScroll({
+  const { syncToggleScrollState } = useTaskRailAutoScroll({
     railRef: viewToggleRef,
     activeCompanyId,
     canUseAllTasks,
@@ -1775,7 +1776,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                       ) : (
                         showPriorityColumn && (
                           <td>
-                            {rowCanEdit && canEditPriority(active) ? (
+                            {rowCanEdit ? (
                               <InlineSelectCell
                                 value={task.priority as Priority}
                                 options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))}
@@ -2305,7 +2306,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
             </PropertyRow>
           ) : (
             <PropertyRow icon={<Flag className="h-3.5 w-3.5" />} label="Priority">
-              {canEdit && canEditPriority(active) ? (
+              {canEdit ? (
                 <InlineSelectCell
                   value={task.priority as Priority}
                   options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))}

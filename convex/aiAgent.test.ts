@@ -4,6 +4,7 @@ import { convexTest } from "convex-test";
 import { describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
+import { createAiPersistencePayload, signAiPersistencePayload } from "../src/lib/ai-chat-hmac";
 
 const modules = import.meta.glob("./**/*.ts");
 const MESSAGE_HISTORY_LIMIT = 100;
@@ -148,5 +149,135 @@ describe("AI agent Convex boundaries", () => {
     const sessions = await t.withIdentity(identity("admin")).query(api.aiChat.listSessions, { companyId });
     expect(sessions.some((session) => session._id === sessionId)).toBe(false);
     await expect(t.withIdentity(identity("admin")).query(api.aiChat.listMessages, { companyId, sessionId })).rejects.toThrow("Chat session not found");
+  });
+
+  test("appendMessage only allows user role and rejects assistant or tool roles from browser", async () => {
+    const { t, companyId } = await seed();
+    const sessionId = await t.withIdentity(identity("admin")).mutation(api.aiChat.createSession, { companyId });
+
+    // Calling appendMessage with role "assistant" fails at validator level
+    await expect(
+      t.withIdentity(identity("admin")).mutation(api.aiChat.appendMessage, {
+        companyId,
+        sessionId,
+        role: "assistant" as any,
+        content: "I am a rogue assistant",
+      })
+    ).rejects.toThrow();
+  });
+
+  test("ai:use capability deny blocks appendMessage and aiWorkspace.context", async () => {
+    const { t, companyId, employeeMembershipId } = await seed();
+    const sessionId = await t.withIdentity(identity("employee")).mutation(api.aiChat.createSession, { companyId });
+
+    // Deny ai:use for employee
+    await t.run(async (ctx) => {
+      await ctx.db.insert("permissionOverrides", {
+        companyId,
+        membershipId: employeeMembershipId,
+        capability: "ai:use",
+        effect: "deny",
+        updatedAt: Date.now(),
+      });
+    });
+
+    await expect(
+      t.withIdentity(identity("employee")).mutation(api.aiChat.appendMessage, {
+        companyId,
+        sessionId,
+        role: "user",
+        content: "Hello?",
+      })
+    ).rejects.toThrow("You do not have permission to use AI.");
+
+    await expect(
+      t.withIdentity(identity("employee")).query(api.aiWorkspace.context, { companyId })
+    ).rejects.toThrow("You do not have access to AI capabilities.");
+  });
+
+  test("persistServerMessage enforces HMAC verification, expiry, replay prevention, and saves message", async () => {
+    const { t, companyId } = await seed();
+    const sessionId = await t.withIdentity(identity("admin")).mutation(api.aiChat.createSession, { companyId });
+    const secret = "super-secret-hmac-key-for-test-32b";
+    process.env.AI_CHAT_PERSISTENCE_SECRET = secret;
+
+    const timestamp = Date.now();
+    const requestId = "req_test_12345";
+    const content = "This is a verified assistant response.";
+
+    const payload = createAiPersistencePayload({
+      companyId,
+      sessionId,
+      role: "assistant",
+      timestamp,
+      requestId,
+      content,
+    });
+    const validSignature = await signAiPersistencePayload(secret, payload);
+
+    // Rejects invalid signature
+    await expect(
+      t.withIdentity(identity("admin")).mutation(api.aiChat.persistServerMessage, {
+        companyId,
+        sessionId,
+        role: "assistant",
+        content,
+        timestamp,
+        requestId: "req_bad_sig",
+        signature: "0000000000000000000000000000000000000000000000000000000000000000",
+      })
+    ).rejects.toThrow("Invalid persistence signature.");
+
+    // Rejects expired timestamp (> 5 min)
+    const expiredTimestamp = timestamp - 10 * 60 * 1000;
+    const expiredPayload = createAiPersistencePayload({
+      companyId,
+      sessionId,
+      role: "assistant",
+      timestamp: expiredTimestamp,
+      requestId: "req_expired",
+      content,
+    });
+    const expiredSignature = await signAiPersistencePayload(secret, expiredPayload);
+    await expect(
+      t.withIdentity(identity("admin")).mutation(api.aiChat.persistServerMessage, {
+        companyId,
+        sessionId,
+        role: "assistant",
+        content,
+        timestamp: expiredTimestamp,
+        requestId: "req_expired",
+        signature: expiredSignature,
+      })
+    ).rejects.toThrow("Persistence request expired.");
+
+    // Successfully persists with valid signature
+    const msgId = await t.withIdentity(identity("admin")).mutation(api.aiChat.persistServerMessage, {
+      companyId,
+      sessionId,
+      role: "assistant",
+      content,
+      timestamp,
+      requestId,
+      signature: validSignature,
+    });
+    expect(msgId).toBeDefined();
+
+    // Rejects replay of the same requestId
+    await expect(
+      t.withIdentity(identity("admin")).mutation(api.aiChat.persistServerMessage, {
+        companyId,
+        sessionId,
+        role: "assistant",
+        content,
+        timestamp,
+        requestId,
+        signature: validSignature,
+      })
+    ).rejects.toThrow("Replay detected: request ID already used.");
+
+    // Message appears in listMessages
+    const messages = await t.withIdentity(identity("admin")).query(api.aiChat.listMessages, { companyId, sessionId });
+    expect(messages.some((m) => m.content === content && m.role === "assistant")).toBe(true);
   });
 });

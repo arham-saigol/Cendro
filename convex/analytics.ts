@@ -576,7 +576,7 @@ export const dashboard = query({
           actorName: actor ? actor.name : null,
         };
       });
-    const recentAudit = access.dashboardRole === "Admin"
+    const recentAudit = access.caps.has("company:view_audit_log")
       ? (await ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(6)).map((event) => ({
         id: event._id,
         action: event.action,
@@ -672,7 +672,7 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
   const sopVisibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
   let sopCount = 0;
   for (const sop of sops) if (await visibleSop(ctx, args.companyId, membership, sop, sopVisibility, caps)) sopCount++;
-  const recent = membership.role === "Admin"
+  const recent = caps.has("company:view_audit_log")
     ? (await ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(8)).map((event) => ({ _id: event._id, action: event.action, targetType: event.targetType, createdAt: event.createdAt }))
     : [];
   return { role: membership.role, scopeSize: scoped.size, jdTaskCount: visibleJd.length, oneTimeTaskCount: visibleOne.length, overdueTasks: overdueOne, completionRate: visibleOne.length ? Math.round(completedOne / visibleOne.length * 100) : 100, sopCount, recent };

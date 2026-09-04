@@ -12,6 +12,7 @@ import { readJsonRequest } from "@/lib/ai/request-body";
 import { CENDRO_AI_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { safeAiChatServerEnv } from "@/lib/env";
 import { finalTextOfAssistantMessage, serializeAssistantMessage, textOf, toModelMessage } from "@/lib/message-utils";
+import { createAiPersistencePayload, signAiPersistencePayload } from "@/lib/ai-chat-hmac";
 
 const idSchema = <Table extends TableNames>() => z.custom<Id<Table>>((value) => typeof value === "string");
 const requestSchema = z.object({
@@ -117,7 +118,28 @@ export async function POST(req: Request) {
       onFinish: async ({ responseMessage, isAborted, finishReason }) => {
         if (isAborted || finishReason === "length" || finishReason === "error" || !finalTextOfAssistantMessage(responseMessage).trim()) return;
         const content = serializeAssistantMessage(responseMessage);
-        await client.mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "assistant", content });
+        const secret = process.env.AI_CHAT_PERSISTENCE_SECRET;
+        if (!secret) return;
+        const timestamp = Date.now();
+        const requestId = crypto.randomUUID();
+        const payload = createAiPersistencePayload({
+          companyId,
+          sessionId,
+          role: "assistant",
+          timestamp,
+          requestId,
+          content,
+        });
+        const signature = await signAiPersistencePayload(secret, payload);
+        await client.mutation(api.aiChat.persistServerMessage, {
+          companyId,
+          sessionId,
+          role: "assistant",
+          content,
+          timestamp,
+          requestId,
+          signature,
+        });
       },
     });
   } catch {

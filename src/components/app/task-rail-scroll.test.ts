@@ -3,6 +3,7 @@ import React, { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   scrollActivePillIntoView,
+  scrollRail,
   syncToggleScrollState,
   useTaskRailAutoScroll,
   type TaskRailScrollOptions,
@@ -38,6 +39,13 @@ function createMockElement(tag = "div"): any {
   el.scrollLeft = 0;
   el.scrollWidth = 500;
   el.clientWidth = 300;
+  el.offsetLeft = 0;
+  el.scrollBy = (options: { left?: number; top?: number; behavior?: string }) => {
+    if (options.left !== undefined) el.scrollLeft += options.left;
+  };
+  el.scrollTo = (options: { left?: number; top?: number; behavior?: string }) => {
+    if (options.left !== undefined) el.scrollLeft = options.left;
+  };
 
   el.appendChild = (child: any) => {
     child.parentNode = el;
@@ -80,6 +88,8 @@ function createMockElement(tag = "div"): any {
   el.querySelector = (selector: string) => {
     if (selector === '[data-active="true"]') {
       return el.dataset.hasActiveChild ? {
+        offsetLeft: 250,
+        clientWidth: 80,
         getBoundingClientRect: () => ({
           left: 400 - el.scrollLeft,
           right: 480 - el.scrollLeft,
@@ -141,7 +151,7 @@ describe("task-rail-scroll pure helpers", () => {
     expect(node.dataset.scrollEnd).toBe("false");
   });
 
-  test("scrollActivePillIntoView adjusts scrollLeft when active pill is outside viewport", () => {
+  test("scrollActivePillIntoView scrolls pill into view only when near/beyond edges", () => {
     let activePillRect = { left: 400, right: 480 };
     const railRect = { left: 100, right: 300 };
 
@@ -149,22 +159,39 @@ describe("task-rail-scroll pure helpers", () => {
       getBoundingClientRect: () => activePillRect,
     } as unknown as HTMLElement;
 
-    const rail = {
-      scrollLeft: 0,
-      getBoundingClientRect: () => railRect,
-      querySelector: (selector: string) => (selector === '[data-active="true"]' ? pill : null),
-    } as unknown as HTMLElement;
+    const rail = createMockElement("div");
+    rail.scrollLeft = 0;
+    rail.scrollWidth = 600;
+    rail.clientWidth = 200;
+    rail.getBoundingClientRect = () => railRect;
+    rail.querySelector = (selector: string) => (selector === '[data-active="true"]' ? pill : null);
 
-    // Pill is beyond the right edge (right: 480 > railBox.right: 300)
-    // Diff is 480 - 300 = 180
-    scrollActivePillIntoView(rail);
-    expect(rail.scrollLeft).toBe(180);
+    // Pill right: 480 > railRect.right - 36 (300 - 36 = 264) => diff = 480 - 264 = 216
+    scrollActivePillIntoView(rail as any);
+    expect(rail.scrollLeft).toBe(216);
 
-    // Pill is beyond the left edge (left: 50 < railBox.left: 100)
-    activePillRect = { left: 50, right: 130 };
-    scrollActivePillIntoView(rail);
-    // rail.scrollLeft was 180, decreases by (100 - 50 = 50) => 130
-    expect(rail.scrollLeft).toBe(130);
+    // When pill is already comfortably visible, scrollLeft does not change
+    activePillRect = { left: 150, right: 230 };
+    scrollActivePillIntoView(rail as any);
+    expect(rail.scrollLeft).toBe(216);
+
+    // When pill is clipped on the left edge: left: 110 < railRect.left + 36 (100 + 36 = 136) => diff = 136 - 110 = 26
+    activePillRect = { left: 110, right: 190 };
+    scrollActivePillIntoView(rail as any);
+    expect(rail.scrollLeft).toBe(190); // 216 - 26 = 190
+  });
+
+  test("scrollRail adjusts scrollLeft by step in left and right directions", () => {
+    const rail = createMockElement("div");
+    rail.clientWidth = 300;
+    rail.scrollLeft = 100;
+
+    // Step = Math.max(160, Math.min(240, Math.round(300 * 0.6))) = 180
+    scrollRail(rail, "right");
+    expect(rail.scrollLeft).toBe(280);
+
+    scrollRail(rail, "left");
+    expect(rail.scrollLeft).toBe(100);
   });
 });
 
@@ -192,8 +219,10 @@ describe("useTaskRailAutoScroll hook", () => {
     railElement.clientWidth = 200;
     railElement.scrollLeft = 0;
     railElement.dataset.hasActiveChild = "true";
+    railElement.getBoundingClientRect = () => ({ left: 0, right: 200 });
 
     let setPropsFn: (props: Partial<TaskRailScrollOptions>) => void;
+    let hookResult: ReturnType<typeof useTaskRailAutoScroll>;
 
     function TestHost() {
       const [options, setOptions] = useState<TaskRailScrollOptions>({
@@ -207,7 +236,7 @@ describe("useTaskRailAutoScroll hook", () => {
 
       setPropsFn = (patch) => setOptions((prev) => ({ ...prev, ...patch }));
 
-      useTaskRailAutoScroll(options);
+      hookResult = useTaskRailAutoScroll(options);
       return null;
     }
 
@@ -219,9 +248,12 @@ describe("useTaskRailAutoScroll hook", () => {
     });
 
     // Initial mount: rail is observed and scroll state is synced
+    // Active child rect is left: 400, right: 480 => diff = 480 - (200 - 36) = 316
     expect(observedElements).toHaveLength(1);
-    expect(railElement.scrollLeft).toBe(180);
+    expect(railElement.scrollLeft).toBe(316);
     expect(railElement.dataset.scrollStart).toBe("true");
+    expect(hookResult!.canScrollStart).toBe(true);
+    expect(hookResult!.canScrollEnd).toBe(true);
 
     // Reset scroll position to test re-trigger
     railElement.scrollLeft = 0;
@@ -234,24 +266,27 @@ describe("useTaskRailAutoScroll hook", () => {
       setPropsFn({ activeCompanyId: "company-beta" });
     });
 
-    // Both the ResizeObserver effect and the state effect retrigger because activeCompanyId changed
-    expect(observedElements.length).toBeGreaterThan(initialObservedCount);
-    expect(railElement.scrollLeft).toBe(180);
+    // Mount effect retriggers because activeCompanyId changed
+    expect(railElement.scrollLeft).toBe(316);
     expect(railElement.dataset.scrollStart).toBe("true");
 
     // Reset scroll position again to test effectiveTaskView switch
     railElement.scrollLeft = 0;
     railElement.dataset.scrollStart = "false";
-    const afterCompanyObservedCount = observedElements.length;
 
     // Switch effectiveTaskView from "all" to "my" with same company, role, count, and activeView
     await act(async () => {
       setPropsFn({ effectiveTaskView: "my" });
     });
 
-    expect(observedElements.length).toBeGreaterThan(afterCompanyObservedCount);
-    expect(railElement.scrollLeft).toBe(180);
+    expect(railElement.scrollLeft).toBe(316);
     expect(railElement.dataset.scrollStart).toBe("true");
+
+    // Test scrollRail method from hook
+    act(() => {
+      hookResult.scrollRail("left");
+    });
+    expect(railElement.scrollLeft).toBe(156); // 316 - 160 = 156 (step for clientWidth 200 is 160)
 
     await act(async () => {
       root.unmount();

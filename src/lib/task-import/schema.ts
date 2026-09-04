@@ -16,6 +16,7 @@ export const taskImportFieldNames = [
   "reference",
   "title",
   "description",
+  "notes",
   "recurrence",
   "dueDate",
   "priority",
@@ -48,6 +49,7 @@ export const taskImportDraftSchema = z.object({
   reference: z.string().max(200).nullable(),
   title: z.string().max(500).nullable(),
   description: z.string().max(20_000).nullable(),
+  notes: z.string().max(20_000).nullable(),
   recurrence: frequencySchema.nullable(),
   dueDate: z.number().finite().nullable(),
   priority: prioritySchema.nullable(),
@@ -79,7 +81,10 @@ export type TaskImportDraft = z.infer<typeof taskImportDraftSchema>;
 export function referenceForKind(value: unknown, kind: TaskImportKind) {
   const reference = typeof value === "string" ? value.trim().toUpperCase() : value == null ? "" : String(value).trim().toUpperCase();
   if (!reference) return { value: null as string | null };
-  const prefix = kind === "jd" ? "JD" : "OT";
-  if (!new RegExp(`^${prefix}-\\d{4,}$`).test(reference)) return { value: reference, error: `Reference must match ${prefix}-0001.` };
+  const prefix = kind === "jd" ? "JD" : "TSK";
+  const valid = kind === "jd"
+    ? /^JD-\d{3,}$/.test(reference)
+    : /^(?:TSK|OT)-\d{3,}$/.test(reference);
+  if (!valid) return { value: reference, error: `Code must match ${prefix}-001.` };
   return { value: reference };
 }

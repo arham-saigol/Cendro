@@ -1043,6 +1043,60 @@ button:disabled { cursor: not-allowed; }
 }
 .filter-chip:disabled { opacity: 0.55; cursor: not-allowed; }
 
+.task-rail-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1 1 0%;
+}
+.task-rail-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 20;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.14), 0 0 1px rgba(0, 0, 0, 0.1);
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
+}
+.task-rail-arrow:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.2), 0 0 1px rgba(0, 0, 0, 0.12);
+  transform: translateY(-50%) scale(1.1);
+}
+.task-rail-arrow:active {
+  background: var(--surface-pressed);
+  transform: translateY(-50%) scale(0.95);
+}
+.task-rail-arrow:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+.task-rail-arrow-left {
+  left: 2px;
+}
+.task-rail-arrow-right {
+  right: 2px;
+}
+.task-rail-wrapper[data-scroll-start="true"] > .task-rail-arrow-left,
+.task-rail-wrapper:has(> .task-view-toggle[data-scroll-start="true"]) > .task-rail-arrow-left {
+  display: inline-flex;
+}
+.task-rail-wrapper[data-scroll-end="true"] > .task-rail-arrow-right,
+.task-rail-wrapper:has(> .task-view-toggle[data-scroll-end="true"]) > .task-rail-arrow-right {
+  display: inline-flex;
+}
+
 .task-view-toggle {
   display: inline-flex;
   flex-wrap: nowrap;
@@ -1057,16 +1111,16 @@ button:disabled { cursor: not-allowed; }
 }
 .task-view-toggle::-webkit-scrollbar { display: none; }
 .task-view-toggle[data-scroll-start="true"] {
-  mask-image: linear-gradient(to right, transparent, black 16px);
-  -webkit-mask-image: linear-gradient(to right, transparent, black 16px);
+  mask-image: linear-gradient(to right, transparent, black 32px);
+  -webkit-mask-image: linear-gradient(to right, transparent, black 32px);
 }
 .task-view-toggle[data-scroll-end="true"] {
-  mask-image: linear-gradient(to left, transparent, black 16px);
-  -webkit-mask-image: linear-gradient(to left, transparent, black 16px);
+  mask-image: linear-gradient(to left, transparent, black 32px);
+  -webkit-mask-image: linear-gradient(to left, transparent, black 32px);
 }
 .task-view-toggle[data-scroll-start="true"][data-scroll-end="true"] {
-  mask-image: linear-gradient(to right, transparent, black 16px, black calc(100% - 16px), transparent);
-  -webkit-mask-image: linear-gradient(to right, transparent, black 16px, black calc(100% - 16px), transparent);
+  mask-image: linear-gradient(to right, transparent, black 32px, black calc(100% - 32px), transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent, black 32px, black calc(100% - 32px), transparent);
 }
 .task-view-button {
   display: inline-flex;

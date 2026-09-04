@@ -82,6 +82,22 @@ describe("production permission and validation fixes", () => {
     await expect(t.withIdentity(identity("admin")).mutation(api.tasks.updateOneTime, { companyId, taskId: oneTimeTaskId, title: "One-time task", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [], priority: "medium" })).rejects.toThrow("Task assignee is required");
   });
 
+  test("task creation and updates reject duplicate assignees", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const admin = t.withIdentity(identity("admin"));
+
+    await expect(admin.mutation(api.tasks.createJd, { companyId, title: "JD duplicate", recurrence: "daily", assigneeMembershipIds: [adminMembershipId, adminMembershipId] })).rejects.toThrow("Duplicate assignees are not allowed");
+    await expect(admin.mutation(api.tasks.createOneTime, { companyId, title: "OT duplicate", assigneeMembershipIds: [adminMembershipId, adminMembershipId], priority: "medium" })).rejects.toThrow("Duplicate assignees are not allowed");
+
+    const jdTaskId = await admin.mutation(api.tasks.createJd, { companyId, title: "JD valid", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    const oneTimeTaskId = await admin.mutation(api.tasks.createOneTime, { companyId, title: "OT valid", assigneeMembershipIds: [adminMembershipId], priority: "medium" });
+
+    await expect(admin.mutation(api.tasks.updateJd, { companyId, taskId: jdTaskId, title: "JD updated", recurrence: "daily", assigneeMembershipIds: [adminMembershipId, adminMembershipId] })).rejects.toThrow("Duplicate assignees are not allowed");
+    await expect(admin.mutation(api.tasks.updateJdFields, { companyId, taskId: jdTaskId, assigneeMembershipIds: [adminMembershipId, adminMembershipId] })).rejects.toThrow("Duplicate assignees are not allowed");
+    await expect(admin.mutation(api.tasks.updateOneTime, { companyId, taskId: oneTimeTaskId, title: "OT updated", assigneeMembershipIds: [adminMembershipId, adminMembershipId], priority: "medium" })).rejects.toThrow("Duplicate assignees are not allowed");
+    await expect(admin.mutation(api.tasks.updateOneTimeFields, { companyId, taskId: oneTimeTaskId, assigneeMembershipIds: [adminMembershipId, adminMembershipId] })).rejects.toThrow("Duplicate assignees are not allowed");
+  });
+
   test("tasks and SOPs receive searchable, unique references", async () => {
     const { t, companyId, adminMembershipId } = await seedCompany();
     const admin = t.withIdentity(identity("admin"));
@@ -96,11 +112,19 @@ describe("production permission and validation fixes", () => {
       admin.query(api.tasks.getOneTime, { companyId, taskId: oneTimeId }),
       admin.query(api.sops.get, { companyId, sopId }),
     ]);
-    expect([firstJd.task.reference, secondJd.task.reference, oneTime.task.reference, sop.reference]).toEqual(["JD-0001", "JD-0002", "OT-0001", "SOP-0001"]);
+    expect([firstJd.task.reference, secondJd.task.reference, oneTime.task.reference, sop.reference]).toEqual(["JD-001", "JD-002", "TSK-001", "SOP-001"]);
 
-    await expect(admin.query(api.tasks.listJdRows, { companyId, search: "jd-0002", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: secondJdId }] });
-    await expect(admin.query(api.tasks.listOneTimeRows, { companyId, search: "OT-0001", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: oneTimeId }] });
-    await expect(admin.query(api.sops.listRows, { companyId, search: "sop-0001" })).resolves.toMatchObject([{ _id: sopId }]);
+    await expect(admin.query(api.tasks.listJdRows, { companyId, search: "jd-002", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: secondJdId }] });
+    await expect(admin.query(api.tasks.listOneTimeRows, { companyId, search: "TSK-001", paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: [{ _id: oneTimeId }] });
+    await expect(admin.query(api.sops.listRows, { companyId, search: "sop-001" })).resolves.toMatchObject([{ _id: sopId }]);
+  });
+
+  test("SOPs can be created without a body", async () => {
+    const { t, companyId } = await seedCompany();
+    const admin = t.withIdentity(identity("admin"));
+    const emptySopId = await admin.mutation(api.sops.create, { companyId, title: "Empty SOP", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
+    const emptySop = await admin.query(api.sops.get, { companyId, sopId: emptySopId });
+    expect(emptySop.content).toBe("");
   });
 
   test("assignee results continue past the first 200 company tasks", async () => {
@@ -182,6 +206,98 @@ describe("production permission and validation fixes", () => {
     expect(detail.canUpdate).toBe(true);
     expect(detail.task.title).toBe("New title");
     expect(detail.task.description).toBe("New body");
+  });
+
+  test("task notes can be created and edited by the assigned employee for JD and one-time tasks", async () => {
+    const { t, companyId, adminMembershipId, employeeMembershipId } = await seedCompany();
+    const admin = t.withIdentity(identity("admin"));
+    const employee = t.withIdentity(identity("employee"));
+
+    // Create JD task with notes
+    const jdTaskId = await admin.mutation(api.tasks.createJd, {
+      companyId,
+      title: "Daily Store Check",
+      description: "Check locks and lights",
+      notes: "Initial manager note",
+      recurrence: "daily",
+      assigneeMembershipIds: [employeeMembershipId],
+    });
+
+    // Create One-time task with notes
+    const oneTimeTaskId = await admin.mutation(api.tasks.createOneTime, {
+      companyId,
+      title: "Repair Front Hinge",
+      description: "Door hinge is loose",
+      notes: "Initial repair note",
+      dueDate: Date.now() + 86_400_000,
+      priority: "medium",
+      assigneeMembershipIds: [employeeMembershipId],
+    });
+
+    // Verify initial notes
+    const initialJd = await employee.query(api.tasks.getJd, { companyId, taskId: jdTaskId });
+    const initialOneTime = await employee.query(api.tasks.getOneTime, { companyId, taskId: oneTimeTaskId });
+    expect(initialJd.task.notes).toBe("Initial manager note");
+    expect(initialJd.canUpdate).toBe(true);
+    expect(initialOneTime.task.notes).toBe("Initial repair note");
+    expect(initialOneTime.canUpdate).toBe(true);
+
+    // Assigned employee edits notes via text mutation (drawer inline edit)
+    await expect(employee.mutation(api.tasks.updateJdText, {
+      companyId,
+      taskId: jdTaskId,
+      notes: "Employee updated note for JD",
+    })).resolves.toBeNull();
+
+    await expect(employee.mutation(api.tasks.updateOneTimeText, {
+      companyId,
+      taskId: oneTimeTaskId,
+      notes: "Employee updated note for one-time",
+    })).resolves.toBeNull();
+
+    // Verify updated notes
+    const afterTextUpdateJd = await employee.query(api.tasks.getJd, { companyId, taskId: jdTaskId });
+    const afterTextUpdateOneTime = await employee.query(api.tasks.getOneTime, { companyId, taskId: oneTimeTaskId });
+    expect(afterTextUpdateJd.task.notes).toBe("Employee updated note for JD");
+    expect(afterTextUpdateOneTime.task.notes).toBe("Employee updated note for one-time");
+
+    // Assigned employee edits notes via full update mutation (edit dialog)
+    await expect(employee.mutation(api.tasks.updateJd, {
+      companyId,
+      taskId: jdTaskId,
+      title: "Daily Store Check",
+      notes: "Employee final note via dialog",
+      recurrence: "daily",
+      assigneeMembershipIds: [employeeMembershipId],
+    })).resolves.toBeNull();
+
+    await expect(employee.mutation(api.tasks.updateOneTime, {
+      companyId,
+      taskId: oneTimeTaskId,
+      title: "Repair Front Hinge",
+      notes: "Employee final note via dialog",
+      priority: "medium",
+      assigneeMembershipIds: [employeeMembershipId],
+    })).resolves.toBeNull();
+
+    const afterFullUpdateJd = await employee.query(api.tasks.getJd, { companyId, taskId: jdTaskId });
+    const afterFullUpdateOneTime = await employee.query(api.tasks.getOneTime, { companyId, taskId: oneTimeTaskId });
+    expect(afterFullUpdateJd.task.notes).toBe("Employee final note via dialog");
+    expect(afterFullUpdateOneTime.task.notes).toBe("Employee final note via dialog");
+
+    // Verify non-assigned employee cannot update notes on an admin-assigned task
+    const adminJdTaskId = await admin.mutation(api.tasks.createJd, {
+      companyId,
+      title: "Admin Only Task",
+      recurrence: "daily",
+      assigneeMembershipIds: [adminMembershipId],
+    });
+
+    await expect(employee.mutation(api.tasks.updateJdText, {
+      companyId,
+      taskId: adminJdTaskId,
+      notes: "Unauthorized attempt",
+    })).rejects.toThrow("update this task");
   });
 
   test("analytics requires an effective analytics:view capability", async () => {
@@ -656,5 +772,141 @@ describe("production permission and validation fixes", () => {
     });
     expect(personalOpts.values).toContain("high");
     expect(personalOpts.values).toContain("low");
+  });
+
+  test("migrateTaskCodes backfills 4-digit JD and OT tasks to 3-digit format", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const now = Date.now();
+
+    const [jd1, jd42, jd100, jdAlready] = await t.run(async (ctx) => {
+      const base = { companyId, title: "JD", recurrence: "daily" as const, cycleStartedAt: now, status: "due" as const, assigneeMembershipIds: [adminMembershipId], createdByMembershipId: adminMembershipId, createdAt: now, updatedAt: now };
+      const id1 = await ctx.db.insert("jdTasks", { ...base, reference: "JD-0001" });
+      const id42 = await ctx.db.insert("jdTasks", { ...base, reference: "JD-0042" });
+      const id100 = await ctx.db.insert("jdTasks", { ...base, reference: "JD-0100" });
+      const idAlready = await ctx.db.insert("jdTasks", { ...base, reference: "JD-002" });
+      return [id1, id42, id100, idAlready];
+    });
+
+    const [ot1, ot42, tsk4digit, tskAlready] = await t.run(async (ctx) => {
+      const base = { companyId, title: "OT", priority: "medium" as const, status: "due" as const, assigneeMembershipIds: [adminMembershipId], createdByMembershipId: adminMembershipId, createdAt: now, updatedAt: now };
+      const id1 = await ctx.db.insert("oneTimeTasks", { ...base, reference: "OT-0001" });
+      const id42 = await ctx.db.insert("oneTimeTasks", { ...base, reference: "OT-0042" });
+      const id4digit = await ctx.db.insert("oneTimeTasks", { ...base, reference: "TSK-0003" });
+      const idAlready = await ctx.db.insert("oneTimeTasks", { ...base, reference: "TSK-005" });
+      return [id1, id42, id4digit, idAlready];
+    });
+
+    // 1. Dry run should report changes without applying
+    const dryResult = await t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: true });
+    expect(dryResult).toEqual({ dryRun: true, jdMigrated: 3, oneTimeMigrated: 3, totalMigrated: 6 });
+
+    await t.run(async (ctx) => {
+      expect((await ctx.db.get(jd1))?.reference).toBe("JD-0001");
+      expect((await ctx.db.get(ot1))?.reference).toBe("OT-0001");
+    });
+
+    // 2. Real migration applies all changes
+    const realResult = await t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: false });
+    expect(realResult).toEqual({ dryRun: false, jdMigrated: 3, oneTimeMigrated: 3, totalMigrated: 6 });
+
+    await t.run(async (ctx) => {
+      expect((await ctx.db.get(jd1))?.reference).toBe("JD-001");
+      expect((await ctx.db.get(jd42))?.reference).toBe("JD-042");
+      expect((await ctx.db.get(jd100))?.reference).toBe("JD-100");
+      expect((await ctx.db.get(jdAlready))?.reference).toBe("JD-002");
+
+      expect((await ctx.db.get(ot1))?.reference).toBe("TSK-001");
+      expect((await ctx.db.get(ot42))?.reference).toBe("TSK-042");
+      expect((await ctx.db.get(tsk4digit))?.reference).toBe("TSK-003");
+      expect((await ctx.db.get(tskAlready))?.reference).toBe("TSK-005");
+    });
+
+    // 3. Second run is idempotent
+    const rerun = await t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: false });
+    expect(rerun).toEqual({ dryRun: false, jdMigrated: 0, oneTimeMigrated: 0, totalMigrated: 0 });
+  });
+
+  test("migrateTaskCodes throws an error on reference collision", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const now = Date.now();
+    await t.run(async (ctx) => {
+      const base = { companyId, title: "JD", recurrence: "daily" as const, cycleStartedAt: now, status: "due" as const, assigneeMembershipIds: [adminMembershipId], createdByMembershipId: adminMembershipId, createdAt: now, updatedAt: now };
+      await ctx.db.insert("jdTasks", { ...base, reference: "JD-0001" });
+      await ctx.db.insert("jdTasks", { ...base, reference: "JD-001" });
+    });
+
+    await expect(t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: false })).rejects.toThrow("target reference already exists");
+  });
+
+  test("migrateTaskCodes detects normalized collisions during dry run across batches and prevents partial migration", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const now = Date.now();
+    const [id1, id2] = await t.run(async (ctx) => {
+      const base = { companyId, title: "JD", recurrence: "daily" as const, cycleStartedAt: now, status: "due" as const, assigneeMembershipIds: [adminMembershipId], createdByMembershipId: adminMembershipId, createdAt: now, updatedAt: now };
+      const first = await ctx.db.insert("jdTasks", { ...base, reference: "JD-0001" });
+      const second = await ctx.db.insert("jdTasks", { ...base, reference: "JD-00001" });
+      return [first, second];
+    });
+
+    // 1. Dry run with batchSize: 1 must fail and detect the collision instead of falsely reporting migratable
+    await expect(
+      t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: true, batchSize: 1 })
+    ).rejects.toThrow("target reference already exists");
+
+    // Verify neither task was touched by dry run
+    await t.run(async (ctx) => {
+      expect((await ctx.db.get(id1))?.reference).toBe("JD-0001");
+      expect((await ctx.db.get(id2))?.reference).toBe("JD-00001");
+    });
+
+    // 2. Real migration with batchSize: 1 preflights and aborts before any writes, preventing partial migration
+    await expect(
+      t.action(internal.tasks.migrateTaskCodes, { companyId, dryRun: false, batchSize: 1 })
+    ).rejects.toThrow("target reference already exists");
+
+    // Verify neither task was mutated (no partial migration of JD-0001)
+    await t.run(async (ctx) => {
+      expect((await ctx.db.get(id1))?.reference).toBe("JD-0001");
+      expect((await ctx.db.get(id2))?.reference).toBe("JD-00001");
+    });
+  });
+
+  test("sops.update atomically updates text and scope, and rolls back on failure", async () => {
+    const { t, companyId } = await seedCompany();
+    const admin = t.withIdentity(identity("admin"));
+    const branchId = await t.run(async (ctx) => await ctx.db.insert("branches", { companyId, name: "Downtown", createdAt: Date.now(), updatedAt: Date.now() }));
+    const sopId = await admin.mutation(api.sops.create, { companyId, title: "Original Title", content: "Original Content", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
+
+    // Atomic success
+    await admin.mutation(api.sops.update, {
+      companyId,
+      sopId,
+      title: "Updated Title",
+      content: "Updated Content",
+      scopeType: "branch",
+      branchIds: [branchId],
+      departmentIds: [],
+      userMembershipIds: [],
+    });
+
+    const updatedSop = await admin.query(api.sops.get, { companyId, sopId });
+    expect(updatedSop.title).toBe("Updated Title");
+    expect(updatedSop.content).toBe("Updated Content");
+    expect(updatedSop.scopeType).toBe("branch");
+    expect(updatedSop.branchIds).toEqual([branchId]);
+
+    // Validation failure on scope rolls back entire edit
+    await expect(admin.mutation(api.sops.update, {
+      companyId,
+      sopId,
+      title: "Should Not Persist",
+      scopeType: "branch",
+      branchIds: [], // invalid branch selection
+      departmentIds: [],
+      userMembershipIds: [],
+    })).rejects.toThrow();
+
+    const untouchedSop = await admin.query(api.sops.get, { companyId, sopId });
+    expect(untouchedSop.title).toBe("Updated Title");
   });
 });

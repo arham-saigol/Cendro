@@ -46,6 +46,7 @@ export type WorkbookTaskRow = {
   reference?: string | null;
   title: string;
   description?: string | null;
+  notes?: string | null;
   recurrence?: Frequency | null;
   dueDate?: number | null;
   priority?: Priority | null;
@@ -70,8 +71,8 @@ export type ParsedWorkbook = {
   rows: TaskImportDraft[];
 };
 
-const jdHeaders = ["Reference", "Title", "Description", "Frequency", "Time", "Quantity", "Assignee Emails", "Status"] as const;
-const oneTimeHeaders = ["Reference", "Title", "Description", "Due Date", "Priority", "Time", "Quantity", "Assignee Emails", "Status"] as const;
+const jdHeaders = ["Code", "Title", "Description", "Notes", "Frequency", "Time", "Quantity", "Assignee Emails", "Status"] as const;
+const oneTimeHeaders = ["Code", "Title", "Description", "Notes", "Due Date", "Priority", "Time", "Quantity", "Assignee Emails", "Status"] as const;
 
 const metadataKeyAliases: Record<string, keyof WorkbookMetadata> = {
   format: "format",
@@ -252,7 +253,13 @@ function metadataFromRows(rows: SheetData): WorkbookMetadata | null {
 
 function findHeaderRow(rows: SheetData, kind: TaskImportKind) {
   const headers = expectedHeaders(kind).map(normalizeHeader);
-  return rows.findIndex((row) => headers.every((header, index) => normalizeHeader(row[index]) === header));
+  return rows.findIndex((row) =>
+    headers.every((header, index) => {
+      const cell = normalizeHeader(row[index]);
+      if (index === 0) return cell === "code" || cell === "reference";
+      return cell === header;
+    })
+  );
 }
 
 function valueAt(row: readonly unknown[], index: number) {
@@ -261,25 +268,26 @@ function valueAt(row: readonly unknown[], index: number) {
 
 function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number, row: readonly unknown[]): TaskImportDraft {
   const referenceResult = referenceForKind(sourceText(valueAt(row, 0)), kind);
-  const assignees = parseAssigneeEmails(sourceText(valueAt(row, kind === "jd" ? 6 : 7)));
+  const assignees = parseAssigneeEmails(sourceText(valueAt(row, kind === "jd" ? 7 : 8)));
   const title = sourceText(valueAt(row, 1)) || null;
   const description = sourceText(valueAt(row, 2)) || null;
-  const time = sourceText(valueAt(row, kind === "jd" ? 4 : 5)) || null;
-  const quantityText = sourceText(valueAt(row, kind === "jd" ? 5 : 6));
+  const notes = sourceText(valueAt(row, 3)) || null;
+  const time = sourceText(valueAt(row, kind === "jd" ? 5 : 6)) || null;
+  const quantityText = sourceText(valueAt(row, kind === "jd" ? 6 : 7));
   const quantity = quantityText ? Number(quantityText) : null;
   const validQuantity = typeof quantity === "number" && Number.isFinite(quantity) && quantity > 0 ? quantity : null;
-  const parsedDate = kind === "one_time" ? parseStrictDate(valueAt(row, 3)) : { value: null };
-  const recurrence = kind === "jd" ? normalizeFrequency(valueAt(row, 3)) : null;
-  const priority = kind === "one_time" ? normalizePriority(valueAt(row, 4)) : null;
-  const rawStatus = sourceText(valueAt(row, kind === "jd" ? 7 : 8));
+  const parsedDate = kind === "one_time" ? parseStrictDate(valueAt(row, 4)) : { value: null };
+  const recurrence = kind === "jd" ? normalizeFrequency(valueAt(row, 4)) : null;
+  const priority = kind === "one_time" ? normalizePriority(valueAt(row, 5)) : null;
+  const rawStatus = sourceText(valueAt(row, kind === "jd" ? 8 : 9));
   const parsedStatus = rawStatus ? normalizeStatus(rawStatus) : null;
   const statusWarning = rawStatus && !parsedStatus ? [`Status "${rawStatus}" is not recognized (use Pending, In Progress, or Completed).`] : [];
   const warnings = [
     ...(referenceResult.error ? [referenceResult.error] : []),
     ...(parsedDate.error ? [parsedDate.error] : []),
     ...(quantityText && (validQuantity === null) ? ["Quantity must be a positive number."] : []),
-    ...(kind === "jd" && sourceText(valueAt(row, 3)) && !recurrence ? ["Frequency is not a supported canonical value."] : []),
-    ...(kind === "one_time" && sourceText(valueAt(row, 4)) && !priority ? ["Priority is not a supported canonical value."] : []),
+    ...(kind === "jd" && sourceText(valueAt(row, 4)) && !recurrence ? ["Frequency is not a supported canonical value."] : []),
+    ...(kind === "one_time" && sourceText(valueAt(row, 5)) && !priority ? ["Priority is not a supported canonical value."] : []),
     ...statusWarning,
     ...(isFormulaLikeValue(valueAt(row, 0)) || isFormulaLikeValue(valueAt(row, 1)) ? ["Formula-like text was rejected as an input value."] : []),
   ];
@@ -287,6 +295,7 @@ function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number,
     ...(sourceText(valueAt(row, 0)) ? ["reference"] : []),
     "title",
     "description",
+    "notes",
     ...(kind === "jd" ? ["recurrence"] : ["dueDate", "priority"]),
     "time",
     "quantity",
@@ -302,6 +311,7 @@ function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number,
     reference: referenceResult.value,
     title,
     description,
+    notes,
     recurrence,
     dueDate: parsedDate.value,
     priority,
@@ -393,8 +403,8 @@ function taskRows(kind: TaskImportKind, tasks: readonly ExportTask[]): WriteShee
   const rows: WriteSheetData = [headers];
   for (const task of tasks) {
     const values: Cell[] = kind === "jd"
-      ? [textCell(task.reference), textCell(task.title), textCell(task.description), textCell(task.recurrence), textCell(task.time), task.quantity == null ? null : { value: task.quantity, type: Number }, textCell(task.assigneeEmails), textCell(task.status)]
-      : [textCell(task.reference), textCell(task.title), textCell(task.description), dateCell(task.dueDate), textCell(task.priority), textCell(task.time), task.quantity == null ? null : { value: task.quantity, type: Number }, textCell(task.assigneeEmails), textCell(task.status)];
+      ? [textCell(task.reference), textCell(task.title), textCell(task.description), textCell(task.notes), textCell(task.recurrence), textCell(task.time), task.quantity == null ? null : { value: task.quantity, type: Number }, textCell(task.assigneeEmails), textCell(task.status)]
+      : [textCell(task.reference), textCell(task.title), textCell(task.description), textCell(task.notes), dateCell(task.dueDate), textCell(task.priority), textCell(task.time), task.quantity == null ? null : { value: task.quantity, type: Number }, textCell(task.assigneeEmails), textCell(task.status)];
     rows.push(values);
   }
   return rows;
@@ -409,7 +419,7 @@ function metadataRows(metadata: WorkbookMetadata): WriteSheetData {
     [textCell("Source company name"), textCell(metadata.companyName)],
     [textCell("Export timestamp"), textCell(metadata.exportedAt)],
     [],
-    [textCell("Instructions"), textCell("Edit task fields. Blank references create tasks. Blank assignee cells preserve existing assignees; new tasks need an assignee. Status can be Pending, In Progress, or Completed.")],
+    [textCell("Instructions"), textCell("Edit task fields. Blank codes create tasks. Blank assignee cells preserve existing assignees; new tasks need an assignee. Status can be Pending, In Progress, or Completed.")],
     [textCell("Frequency values"), textCell(Object.entries(recurrenceLabels).map(([key, label]) => `${key} = ${label}`).join("; "))],
     [textCell("Priority values"), textCell(Object.entries(priorityLabels).map(([key, label]) => `${key} = ${label}`).join("; "))],
   ];

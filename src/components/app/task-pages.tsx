@@ -14,6 +14,7 @@ import {
   Clock,
   Download,
   Flag,
+  Hash,
   Inbox,
   PanelRight,
   Paperclip,
@@ -35,7 +36,7 @@ import { useCompany } from "./company-context";
 import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
 import { TaskImportExportMenu } from "./task-import-dialog";
-import { useTaskRailAutoScroll } from "./task-rail-scroll";
+import { TaskRail, useTaskRailAutoScroll } from "./task-rail-scroll";
 import { downloadBlob, exportTaskWorkbook } from "@/lib/task-import/workbook";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -54,6 +55,7 @@ type FrequencyFilter = Frequency | "all";
 type TaskFormValues = {
   title: string;
   description: string;
+  notes: string;
   assigneeMembershipIds: string[];
   recurrence: Frequency;
   priority: Priority;
@@ -91,13 +93,14 @@ const toneClasses: Record<string, string> = {
 };
 
 function emptyForm(kind: Kind): TaskFormValues {
-  return { title: "", description: "", assigneeMembershipIds: [], recurrence: "daily", priority: "medium", dueDate: kind === "one" ? toDateField(Date.now() + 86_400_000) : "", quantity: "", time: "", files: [] };
+  return { title: "", description: "", notes: "", assigneeMembershipIds: [], recurrence: "daily", priority: "medium", dueDate: kind === "one" ? toDateField(Date.now() + 86_400_000) : "", quantity: "", time: "", files: [] };
 }
 
 function formFromTask(kind: Kind, task: any): TaskFormValues {
   return {
     title: task.title ?? "",
     description: task.description ?? "",
+    notes: task.notes ?? "",
     assigneeMembershipIds: task.assigneeMembershipIds ?? [],
     recurrence: task.recurrence ?? "daily",
     priority: task.priority ?? "medium",
@@ -558,7 +561,7 @@ function TaskFilterMenu({
           )}
           {showAssigneeFilter && (
             <TaskFilterSubmenu
-              label="Assignee"
+              label="Assigned To"
               value={assigneeFilter}
               options={[{ value: "all", label: "All assignees" }, ...assignees.map((assignee) => ({ value: assignee.membership._id as string, label: assigneeDisplayName(assignee), avatar: <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} /> }))]}
               onChange={onAssigneeChange}
@@ -600,47 +603,68 @@ function SelectPicker<T extends string>({ ariaLabel, value, options, onChange, p
 function AssigneePicker({ assignable, selected, onChange, required = false }: { assignable: any[]; selected: string[]; onChange: (ids: string[]) => void; required?: boolean }) {
   const [open, setOpen] = useState(false);
   const [searchValue, setSearchValue] = useState("");
+  const containerRef = useRef<HTMLDivElement>(null);
   const selectedAssignee = assignable.find((assignee) => assignee.membership._id === selected[0]);
   const filtered = assignable.filter((assignee) => `${assignee.user.name || ""} ${assignee.user.email || ""} ${assignee.membership.role}`.toLowerCase().includes(searchValue.toLowerCase()));
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(e: MouseEvent | PointerEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        setSearchValue("");
+      }
+    }
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setOpen(false);
+        setSearchValue("");
+      }
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
   if (!assignable.length) return <div className="py-2 text-[13px] text-[var(--ink-faint)]">No assignable people.</div>;
   return (
-    <div className="relative">
+    <div ref={containerRef} className="relative">
       <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((current) => !current); }} className="task-inline-control" data-interactive="true">
         {selectedAssignee ? <Avatar name={selectedAssignee.user.name} email={selectedAssignee.user.email} imageUrl={selectedAssignee.user.imageUrl} /> : <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>}
         <span className={cn("min-w-0 flex-1 truncate", !selectedAssignee && "text-[var(--ink-faint)]")}>{selectedAssignee ? (selectedAssignee.user.name || selectedAssignee.user.email) : required ? "Select assignee" : "Unassigned"}</span>
         <ChevronDown className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
       </button>
       {open && (
-        <>
-          <button type="button" aria-label="Close" className="fixed inset-0 z-[70]" onClick={() => { setOpen(false); setSearchValue(""); }} />
-          <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-[71] rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-1.5 shadow-[var(--shadow-popover)]">
-            <div className="relative px-1 pb-1.5 pt-1">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--ink-faint)]" />
-              <Input aria-label="Search assignees" className="h-8 rounded-md pl-8 text-[13px]" value={searchValue} onChange={(event) => setSearchValue(event.target.value)} placeholder="Search people" autoFocus />
-            </div>
-            <div className="max-h-56 overflow-auto p-0.5">
-              {!required && (
-                <button type="button" onClick={() => { onChange([]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
-                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>
-                  <span className="flex-1 text-[var(--ink-secondary)]">Unassigned</span>
-                  {!selected[0] && <Check className="h-4 w-4 text-[var(--primary)]" />}
-                </button>
-              )}
-              {filtered.map((assignee) => {
-                const id = assignee.membership._id as string;
-                const name = assignee.user.name || assignee.user.email;
-                return (
-                  <button key={id} type="button" onClick={() => { onChange([id]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
-                    <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} />
-                    <span className="min-w-0 flex-1"><span className="block truncate font-medium text-[var(--ink)]">{name}</span><span className="block truncate text-[11.5px] text-[var(--ink-muted)]">{assignee.membership.role}</span></span>
-                    {selected[0] === id && <Check className="h-4 w-4 shrink-0 text-[var(--primary)]" />}
-                  </button>
-                );
-              })}
-              {filtered.length === 0 && <div className="px-2.5 py-3 text-[13px] text-[var(--ink-muted)]">No people found.</div>}
-            </div>
+        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-[71] rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-1.5 shadow-[var(--shadow-popover)]" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+          <div className="relative px-1 pb-1.5 pt-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--ink-faint)]" />
+            <Input aria-label="Search assignees" className="h-8 rounded-md pl-8 text-[13px]" value={searchValue} onChange={(event) => setSearchValue(event.target.value)} placeholder="Search people" autoFocus />
           </div>
-        </>
+          <div className="max-h-56 overflow-auto p-0.5">
+            {!required && (
+              <button type="button" onClick={() => { onChange([]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
+                <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>
+                <span className="flex-1 text-[var(--ink-secondary)]">Unassigned</span>
+                {!selected[0] && <Check className="h-4 w-4 text-[var(--primary)]" />}
+              </button>
+            )}
+            {filtered.map((assignee) => {
+              const id = assignee.membership._id as string;
+              const name = assignee.user.name || assignee.user.email;
+              return (
+                <button key={id} type="button" onClick={() => { onChange([id]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
+                  <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} />
+                  <span className="min-w-0 flex-1"><span className="block truncate font-medium text-[var(--ink)]">{name}</span><span className="block truncate text-[11.5px] text-[var(--ink-muted)]">{assignee.membership.role}</span></span>
+                  {selected[0] === id && <Check className="h-4 w-4 shrink-0 text-[var(--primary)]" />}
+                </button>
+              );
+            })}
+            {filtered.length === 0 && <div className="px-2.5 py-3 text-[13px] text-[var(--ink-muted)]">No people found.</div>}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -684,13 +708,14 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
     onChange(toDateField(next.getTime(), withTime));
   }
 
-  function commitDateDraft() {
+  function commitDateDraft(): boolean | null {
     const parsed = dateFromField(dateDraft);
     if (!parsed) {
       setDateDraft(selectedDate ? formatDateOnly(selectedDate, "short") : "");
-      return;
+      return null;
     }
     const draftIncludesTime = dateFieldHasTime(dateDraft);
+    const committedIncludesTime = draftIncludesTime || includeTime;
     setMonthDate(new Date(parsed.getFullYear(), parsed.getMonth(), 1));
     if (draftIncludesTime) {
       setIncludeTime(true);
@@ -698,29 +723,37 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
     } else {
       emitDate(parsed, includeTime);
     }
+    return committedIncludesTime;
   }
 
-  function commitTimeDraft() {
+  function commitTimeDraft(): boolean {
     const parts = parseTimeParts(timeDraft);
     if (!parts) {
       setTimeDraft(selectedDate && includeTime ? formatTimeOnly(selectedDate) : "");
-      return;
+      return false;
     }
     const next = selectedDate ? new Date(selectedDate) : new Date();
     next.setHours(parts.hours, parts.minutes, 0, 0);
     setIncludeTime(true);
     onChange(toDateField(next.getTime(), true));
+    return true;
   }
 
   function pick(date: Date) {
     setMonthDate(new Date(date.getFullYear(), date.getMonth(), 1));
     emitDate(date, includeTime);
+    if (!includeTime) {
+      setOpen(false);
+    }
   }
 
   function jumpToCurrent() {
     const now = new Date();
     setMonthDate(new Date(now.getFullYear(), now.getMonth(), 1));
     emitDate(now, includeTime, includeTime ? now : null);
+    if (!includeTime) {
+      setOpen(false);
+    }
   }
 
   function toggleIncludeTime(nextIncludesTime: boolean) {
@@ -746,13 +779,17 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
     <div className="p-3">
       <div className="mb-3 flex items-center gap-1.5">
         <input
-          aria-label="Due date"
+          aria-label="Due Date"
           className="h-8 min-w-0 flex-1 rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2.5 text-[13px] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--focus-ring)]"
           value={dateDraft}
           onChange={(event) => setDateDraft(event.target.value)}
           onBlur={commitDateDraft}
           onKeyDown={(event) => {
-            if (event.key === "Enter") { event.preventDefault(); commitDateDraft(); }
+            if (event.key === "Enter") {
+              event.preventDefault();
+              const committedIncludesTime = commitDateDraft();
+              if (committedIncludesTime === false) setOpen(false);
+            }
             if (event.key === "Escape") setDateDraft(selectedDate ? formatDateOnly(selectedDate, "short") : "");
           }}
           placeholder="Jun 24, 2026"
@@ -766,7 +803,11 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
               onChange={(event) => setTimeDraft(event.target.value)}
               onBlur={commitTimeDraft}
               onKeyDown={(event) => {
-                if (event.key === "Enter") { event.preventDefault(); commitTimeDraft(); }
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  const saved = commitTimeDraft();
+                  if (saved) setOpen(false);
+                }
                 if (event.key === "Escape") setTimeDraft(selectedDate && includeTime ? formatTimeOnly(selectedDate) : "");
               }}
               placeholder="5:00 PM"
@@ -809,7 +850,7 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
     </div>
   );
 
-  if (compact) return <TaskCellPopover open={open} onOpenChange={setOpen} ariaLabel="Change due date" header={header} panelClassName="task-cell-popover-date">{calendar}</TaskCellPopover>;
+  if (compact) return <TaskCellPopover open={open} onOpenChange={setOpen} ariaLabel="Change Due Date" header={header} panelClassName="task-cell-popover-date">{calendar}</TaskCellPopover>;
 
   return (
     <DropdownMenu.Root open={open} onOpenChange={setOpen}>
@@ -916,7 +957,7 @@ function InlineAssigneeCell({ assignable, assignees, selected, onSave, pending =
   const selectedId = selected[0];
   const header = <span className="min-w-0 flex-1 truncate"><AvatarStack assignees={assignees} showName /></span>;
   return (
-    <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending || assignable.length === 0} pending={pending} ariaLabel="Change assignee" header={header} panelClassName="task-cell-popover-scroll">
+    <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending || assignable.length === 0} pending={pending} ariaLabel="Change assigned to" header={header} panelClassName="task-cell-popover-scroll">
       {assignable.map((assignee) => {
         const id = assignee.membership._id as string;
         const name = assignee.user.name || assignee.user.email;
@@ -976,6 +1017,18 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
   const [saving, setSaving] = useState(false);
   const [persistedTaskId, setPersistedTaskId] = useState<string | null>(null);
 
+  const taskAssignees = task?.assignees;
+  const dialogAssignable = useMemo(() => {
+    if (!taskAssignees || taskAssignees.length === 0) return assignable;
+    const list = [...assignable];
+    for (const a of taskAssignees) {
+      if (!list.some((existing) => existing.membership._id === a.membership._id)) {
+        list.push(a);
+      }
+    }
+    return list;
+  }, [assignable, taskAssignees]);
+
   function reset(nextOpen: boolean) {
     onOpenChange(nextOpen);
     if (!nextOpen) {
@@ -1009,7 +1062,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
     setError(null);
     try {
       let taskId = persistedTaskId ?? (task?._id as string | undefined);
-      const common = { companyId: activeCompanyId, title: values.title.trim(), description: values.description, time: values.time, quantity: quantityFromInput(values.quantity), assigneeMembershipIds: values.assigneeMembershipIds as Id<"companyMemberships">[] };
+      const common = { companyId: activeCompanyId, title: values.title.trim(), description: values.description, notes: values.notes, time: values.time, quantity: quantityFromInput(values.quantity), assigneeMembershipIds: values.assigneeMembershipIds as Id<"companyMemberships">[] };
       if (!persistedTaskId) {
         if (kind === "jd") {
           if (mode === "create") taskId = await createJd({ ...common, recurrence: values.recurrence });
@@ -1035,7 +1088,11 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
     <Dialog.Root open={open} onOpenChange={reset}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(760px,92dvh)] w-[min(560px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]">
+        <Dialog.Content
+          onPointerDownOutside={(e) => e.preventDefault()}
+          onInteractOutside={(e) => e.preventDefault()}
+          className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(760px,92dvh)] w-[min(560px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]"
+        >
           <div className="flex shrink-0 items-center justify-between border-b border-[var(--hairline)] px-6 py-4">
             <Dialog.Title className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">{mode === "create" ? `New ${kind === "jd" ? "JD " : ""}task` : `Edit ${kind === "jd" ? "JD " : ""}task`}</Dialog.Title>
             <Dialog.Close asChild><button type="button" className="task-icon-btn" aria-label="Close"><X className="h-4 w-4" /></button></Dialog.Close>
@@ -1044,12 +1101,12 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
 
           <form className="flex min-h-0 flex-1 flex-col" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-              <input aria-label="Task title" className="w-full border-none bg-transparent text-lg font-semibold tracking-[-0.01em] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" value={values.title} onChange={(event) => patch({ title: event.target.value })} placeholder="Untitled" autoFocus />
+              <input aria-label="Task title" className="w-full border-none bg-transparent text-lg font-semibold tracking-[-0.01em] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" value={values.title} onChange={(event) => patch({ title: event.target.value })} placeholder="Title" autoFocus />
 
               <div className="mt-4 divide-y divide-[var(--hairline)] border-y border-[var(--hairline)]">
                 <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
-                  <span className="text-[13px] text-[var(--ink-muted)]">Assignee</span>
-                  <div className="min-w-0"><AssigneePicker assignable={assignable} selected={values.assigneeMembershipIds} onChange={(ids) => patch({ assigneeMembershipIds: ids })} required={mode === "create"} /></div>
+                  <span className="text-[13px] text-[var(--ink-muted)]">Assigned To</span>
+                  <div className="min-w-0"><AssigneePicker assignable={dialogAssignable} selected={values.assigneeMembershipIds} onChange={(ids) => patch({ assigneeMembershipIds: ids })} required={mode === "create"} /></div>
                 </div>
                 {kind === "jd" ? (
                   <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
@@ -1063,7 +1120,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
                       <div className="min-w-0"><SelectPicker ariaLabel="Priority" value={values.priority} options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))} onChange={(priority) => patch({ priority })} /></div>
                     </div>
                     <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
-                      <span className="text-[13px] text-[var(--ink-muted)]">Due date</span>
+                      <span className="text-[13px] text-[var(--ink-muted)]">Due Date</span>
                       <div className="min-w-0"><DatePicker value={values.dueDate} onChange={(dueDate) => patch({ dueDate })} /></div>
                     </div>
                   </>
@@ -1078,7 +1135,11 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
                 </div>
                 <div className="grid grid-cols-[120px_1fr] items-start gap-3 py-2">
                   <span className="pt-2 text-[13px] text-[var(--ink-muted)]">Description</span>
-                  <div className="min-w-0"><textarea aria-label="Description" className="block w-full resize-none border-none bg-transparent px-2 py-2 text-[13px] leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" rows={3} value={values.description} onChange={(event) => patch({ description: event.target.value })} placeholder="Add context, notes, or acceptance criteria." /></div>
+                  <div className="min-w-0"><textarea aria-label="Description" className="block w-full resize-none border-none bg-transparent px-2 py-2 text-[13px] leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" rows={3} value={values.description} onChange={(event) => patch({ description: event.target.value })} placeholder="Add context, instructions, or acceptance criteria." /></div>
+                </div>
+                <div className="grid grid-cols-[120px_1fr] items-start gap-3 py-2">
+                  <span className="pt-2 text-[13px] text-[var(--ink-muted)]">Notes</span>
+                  <div className="min-w-0"><textarea aria-label="Notes" className="block w-full resize-none border-none bg-transparent px-2 py-2 text-[13px] leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" rows={3} value={values.notes} onChange={(event) => patch({ notes: event.target.value })} placeholder="Add notes, reminders, or observations." /></div>
                 </div>
                 {active?.capabilities.includes("tasks:attachment:add") && (
                   <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
@@ -1118,6 +1179,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [assigneeFilter, setAssigneeFilter] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editingTask, setEditingTask] = useState<any | null>(null);
   const [importBanner, setImportBanner] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
@@ -1158,8 +1221,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const deleteOneTime = useMutation(api.tasks.deleteOneTime);
   const deleteOneTimeBulk = useMutation(api.tasks.deleteOneTimeBulk);
   const base = kind === "jd" ? "/jd-tasks" : "/one-time-tasks";
-  const pageTitle = kind === "jd" ? "JD Tasks" : "One-Time Tasks";
-  const description = kind === "jd" ? "Recurring role responsibilities with cycle-aware status and clear ownership." : "One-off work with priority, due dates, and clear completion status.";
+  const pageTitle = kind === "jd" ? "Job Description" : "Tasks";
+  const description = kind === "jd" ? "Track and manage recurring responsibilities and scheduled duties." : "Track and manage assignments, action items, and upcoming deadlines.";
   const canCreate = canCreateTasks(active, kind);
   const frequencyFilterActive = kind === "jd" && frequency !== "all";
   const priorityFilterActive = kind === "one" && priorityFilter !== "all";
@@ -1199,6 +1262,9 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
   const selectionCount = selectedIds.size;
   const canDeleteSelection = selectionCount > 0 && !deleting;
+  const selectedTaskId = selectionCount === 1 ? Array.from(selectedIds)[0] : null;
+  const selectedTask = selectedTaskId ? (tasks ?? visibleTasks).find((task: any) => task._id === selectedTaskId) ?? null : null;
+  const canEditSelectedTask = Boolean(selectedTask && canEditTaskRow(active, kind, selectedTask));
 
   useEffect(() => {
     if (!activeCompanyId) return;
@@ -1231,7 +1297,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const ownFilterCount = kind === "jd" ? ownFrequencyValues.length : ownPriorityValues.length;
   const activeView = kind === "jd" ? personalFrequencyView : personalPriorityView;
 
-  const { syncToggleScrollState } = useTaskRailAutoScroll({
+  const { syncToggleScrollState, canScrollStart, canScrollEnd, scrollRail } = useTaskRailAutoScroll({
     railRef: viewToggleRef,
     activeCompanyId,
     canUseAllTasks,
@@ -1302,6 +1368,19 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     setDeleteError(null);
   }
 
+  function handleEditSelection() {
+    if (!selectedTask || !canEditSelectedTask) return;
+    setEditingTask(selectedTask);
+    setEditOpen(true);
+  }
+
+  function handleEditOpenChange(open: boolean) {
+    setEditOpen(open);
+    if (!open) {
+      setEditingTask(null);
+    }
+  }
+
   async function handleDeleteSelection() {
     if (!activeCompanyId || deleting || selectionCount === 0) return;
     setDeleting(true);
@@ -1332,6 +1411,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
         reference: t.reference,
         title: t.title,
         description: t.description ?? null,
+        notes: t.notes ?? null,
         recurrence: kind === "jd" ? t.recurrence : undefined,
         dueDate: kind === "one" ? (t.dueDate ?? null) : undefined,
         priority: kind === "one" ? t.priority : undefined,
@@ -1367,6 +1447,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
         companyId: activeCompanyId,
         title: (patch.title ?? task.title ?? "").trim(),
         description: patch.description ?? task.description,
+        notes: patch.notes ?? task.notes,
         time: patch.time ?? task.time,
         quantity: patch.quantity !== undefined ? quantityFromInput(patch.quantity) : task.quantity,
         assigneeMembershipIds: (patch.assigneeMembershipIds ?? task.assigneeMembershipIds) as Id<"companyMemberships">[],
@@ -1405,9 +1486,23 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       />
 
       <TaskDialog kind={kind} mode="create" open={createOpen} onOpenChange={setCreateOpen} assignable={assignable ?? []} />
+      {editingTask && (
+        <TaskDialog
+          key={editingTask._id}
+          kind={kind}
+          mode="edit"
+          open={editOpen}
+          onOpenChange={handleEditOpenChange}
+          task={editingTask}
+          assignable={assignable ?? []}
+        />
+      )}
 
       <div className="mb-3 flex flex-col items-stretch gap-2 md:flex-row md:flex-nowrap md:items-center">
-        <div ref={viewToggleRef} className="task-view-toggle min-w-0 flex-1" aria-label="Task view" onScroll={syncToggleScrollState}>
+        <TaskRail
+          railRef={viewToggleRef}
+          onScroll={syncToggleScrollState}
+        >
           {kind === "jd" ? (
             <>
               <button type="button" className="task-view-button" data-active={(!canUseAllTasks && !frequencyViewActive) || (canUseAllTasks && effectiveTaskView === "all")} onClick={() => { setFrequency("all"); setPersonalFrequencyView("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
@@ -1441,10 +1536,10 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               ))}
             </>
           )}
-        </div>
+        </TaskRail>
         <div className="flex flex-wrap items-center justify-end gap-2 shrink-0 md:flex-nowrap md:ml-auto">
           <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
-            <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search title or ref" aria-label="Search tasks by title or reference" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
+            <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search title or code" aria-label="Search tasks by title or code" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
             <button type="button" className="task-search-button" aria-label={search ? "Clear search" : "Search tasks"} onClick={() => { if (search) setSearch(""); else setSearchOpen((open) => !open); }}>
               {search ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
             </button>
@@ -1508,6 +1603,21 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               <button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={deleting || exportingSelection} aria-label="Cancel selection" title="Cancel selection">
                 <X className="h-4 w-4" />
               </button>
+              {selectionCount === 1 && canEditSelectedTask && (
+                <>
+                  <span className="task-selection-pill-divider" aria-hidden="true" />
+                  <button
+                    type="button"
+                    className="task-selection-pill-btn"
+                    onClick={handleEditSelection}
+                    disabled={deleting || exportingSelection}
+                    aria-label="Edit selected task"
+                    title="Edit selected"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </button>
+                </>
+              )}
               {canCreate && (
                 <>
                   <span className="task-selection-pill-divider" aria-hidden="true" />
@@ -1557,20 +1667,20 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
           <thead>
             {kind === "jd" ? (
               <tr className="group/head">
-                <th className="w-[92px] whitespace-nowrap">REF</th>
+                <th className="w-[92px] whitespace-nowrap"><span className="inline-flex items-center gap-1.5"><Hash className="h-3.5 w-3.5" />CODE</span></th>
                 <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
                 {showFrequencyColumn && <th><span className="inline-flex items-center gap-1.5"><FrequencyIcon className="h-3.5 w-3.5" />FREQUENCY</span></th>}
-                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>}
+                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNED TO</span></th>}
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />TIME</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><QuantityIcon className="h-3.5 w-3.5" />QUANTITY</span></th>
               </tr>
             ) : (
               <tr className="group/head">
-                <th className="w-[92px] whitespace-nowrap">REF</th>
+                <th className="w-[92px] whitespace-nowrap"><span className="inline-flex items-center gap-1.5"><Hash className="h-3.5 w-3.5" />CODE</span></th>
                 <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
                 {showPriorityColumn && <th><span className="inline-flex items-center gap-1.5"><Tag className="h-3.5 w-3.5" />PRIORITY</span></th>}
-                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNEE</span></th>}
+                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNED TO</span></th>}
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><CalendarClock className="h-3.5 w-3.5" />DATE ASSIGNED</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><CalendarDays className="h-3.5 w-3.5" />DUE DATE</span></th>
@@ -2027,7 +2137,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   if (!data) return <TaskDetailSkeleton />;
   const task = data.task;
 
-  async function saveTaskText(patch: { title?: string; description?: string }) {
+  async function saveTaskText(patch: { title?: string; description?: string; notes?: string }) {
     if (!activeCompanyId) return false;
     setTextError(null);
     try {
@@ -2051,6 +2161,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
           taskId: task._id as Id<"jdTasks">,
           title: patch.title,
           description: patch.description,
+          notes: patch.notes,
           time: patch.time,
           quantity: patch.quantity !== undefined ? quantityFromInput(patch.quantity) ?? null : undefined,
           recurrence: patch.recurrence,
@@ -2062,6 +2173,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
           taskId: task._id as Id<"oneTimeTasks">,
           title: patch.title,
           description: patch.description,
+          notes: patch.notes,
           dueDate: patch.dueDate !== undefined ? fromDateInput(patch.dueDate) ?? null : undefined,
           time: patch.time,
           quantity: patch.quantity !== undefined ? quantityFromInput(patch.quantity) ?? null : undefined,
@@ -2169,7 +2281,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
 
       <div className="task-section !mt-6">
         <div className="prop-list">
-          <PropertyRow icon={<UsersIcon className="h-3.5 w-3.5" />} label="Assignee" muted={!canEdit && !task.assignees?.length}>
+          <PropertyRow icon={<UsersIcon className="h-3.5 w-3.5" />} label="Assigned To" muted={!canEdit && !task.assignees?.length}>
             {canEdit && assignable ? (
               <InlineAssigneeCell assignable={assignable} assignees={task.assignees ?? []} selected={task.assigneeMembershipIds ?? []} pending={fieldPending("assignee")} onSave={(assigneeMembershipIds) => saveTaskField({ assigneeMembershipIds }, "assignee")} />
             ) : task.assignees?.length ? (
@@ -2210,7 +2322,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
             </PropertyRow>
           )}
           {kind === "one" && (
-            <PropertyRow icon={<CalendarClock className="h-3.5 w-3.5" />} label="Due date" muted={!canEdit && !task.dueDate}>
+            <PropertyRow icon={<CalendarClock className="h-3.5 w-3.5" />} label="Due Date" muted={!canEdit && !task.dueDate}>
               {canEdit ? (
                 <DatePicker value={task.dueDate ? toDateField(task.dueDate, dateHasExplicitTime(task.dueDate)) : ""} displayValue={dueLabel(task)} compact onChange={(dueDate) => { void saveTaskField({ dueDate }, "due"); }} />
               ) : dueLabel(task)}
@@ -2229,6 +2341,11 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
       <section className="task-section">
         <h2 className="task-section-title">Description</h2>
         <EditableTaskText value={task.description ?? ""} placeholder={canEdit ? "Add description..." : "No description."} ariaLabel="Edit task description" canEdit={canEdit} variant="description" onSave={(description) => saveTaskText({ description })} />
+      </section>
+
+      <section className="task-section">
+        <h2 className="task-section-title">Notes</h2>
+        <EditableTaskText value={task.notes ?? ""} placeholder={canEdit ? "Add notes..." : "No notes."} ariaLabel="Edit task notes" canEdit={canEdit} variant="description" onSave={(notes) => saveTaskText({ notes })} />
       </section>
 
       <section className="task-section">

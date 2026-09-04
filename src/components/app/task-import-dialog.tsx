@@ -343,7 +343,11 @@ export function TaskImportExportMenu({
       <Dialog.Root open={issuesOpen} onOpenChange={(open) => !importBusy && setIssuesOpen(open)}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]" />
-          <Dialog.Content className="fixed inset-3 z-50 flex max-w-3xl flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] text-[var(--ink)] shadow-[var(--shadow-elevated)] md:inset-y-12 md:left-1/2 md:w-full md:-translate-x-1/2">
+          <Dialog.Content
+            onPointerDownOutside={(e) => e.preventDefault()}
+            onInteractOutside={(e) => e.preventDefault()}
+            className="fixed inset-3 z-50 flex max-w-3xl flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] text-[var(--ink)] shadow-[var(--shadow-elevated)] md:inset-y-12 md:left-1/2 md:w-full md:-translate-x-1/2"
+          >
             <div className="flex shrink-0 items-center justify-between border-b border-[var(--hairline)] px-5 py-4">
               <div className="flex items-center gap-3">
                 <AlertCircle className="h-5 w-5 text-[var(--badge-yellow-fg)]" />
@@ -427,7 +431,7 @@ export function TaskImportExportMenu({
                           htmlFor={`assignee-${row.rowKey}`}
                           className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]"
                         >
-                          Assignee
+                          Assigned To
                         </label>
                         <select
                           id={`assignee-${row.rowKey}`}

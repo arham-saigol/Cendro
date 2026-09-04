@@ -106,8 +106,8 @@ const roleTone: Record<Role, "blue" | "green" | "neutral"> = {
 
 const TABS: { value: TabValue; label: string; icon: LucideIcon }[] = [
   { value: "general", label: "General", icon: Settings },
-  { value: "structure", label: "Structure", icon: Network },
-  { value: "people", label: "People", icon: Users },
+  { value: "structure", label: "Hierarchy", icon: Network },
+  { value: "people", label: "Users", icon: Users },
   { value: "permissions", label: "Permissions", icon: ShieldCheck },
 ];
 
@@ -124,11 +124,11 @@ const TAB_COPY: Record<TabValue, { title: string; description: string }> = {
     description: "Keep the workspace name and identity tidy.",
   },
   structure: {
-    title: "Structure",
+    title: "Hierarchy",
     description: "Define the branches and departments that shape ownership across the company.",
   },
   people: {
-    title: "People",
+    title: "Users",
     description: "Manage members, pending invitations, team placement, and access level.",
   },
   permissions: {
@@ -952,7 +952,11 @@ function EditMemberNameDialog({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/35 backdrop-blur-[2px]" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(480px,94dvh)] w-[min(440px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]">
+        <Dialog.Content
+          onPointerDownOutside={(e) => e.preventDefault()}
+          onInteractOutside={(e) => e.preventDefault()}
+          className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(480px,94dvh)] w-[min(440px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]"
+        >
           <div className="flex items-start justify-between border-b border-[var(--hairline)] px-5 py-4">
             <div>
               <Dialog.Title className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">
@@ -1385,7 +1389,11 @@ function InviteDialog({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/35 backdrop-blur-[2px]" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(560px,94dvh)] w-[min(480px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]">
+        <Dialog.Content
+          onPointerDownOutside={(e) => e.preventDefault()}
+          onInteractOutside={(e) => e.preventDefault()}
+          className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(560px,94dvh)] w-[min(480px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]"
+        >
           <div className="flex items-start justify-between border-b border-[var(--hairline)] px-5 py-4">
             <div>
               <Dialog.Title className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">Invite member</Dialog.Title>
@@ -1748,7 +1756,11 @@ function PermissionsDialog({
     <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (nextOpen) onOpenChange(true); else closePermissions(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-transparent" />
-        <Dialog.Content asChild>
+        <Dialog.Content
+          asChild
+          onPointerDownOutside={(e) => e.preventDefault()}
+          onInteractOutside={(e) => e.preventDefault()}
+        >
           <motion.aside
             className="task-drawer !fixed"
             initial={reduceMotion ? { opacity: 0 } : { x: 32, opacity: 0 }}

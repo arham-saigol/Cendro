@@ -17,6 +17,7 @@ import {
   Repeat,
   Search,
   Settings,
+  SquareCheck,
   Sun,
   X,
 } from "lucide-react";
@@ -32,10 +33,10 @@ import { cn, initials } from "@/lib/utils";
 
 const nav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, requiresDashboard: true },
-  { href: "/jd-tasks", label: "JD Tasks", icon: Repeat },
-  { href: "/one-time-tasks", label: "One-Time Tasks", icon: Check },
-  { href: "/sops", label: "SOPs", icon: FileText },
-  { href: "/company", label: "Company Management", icon: Building2, requiresCompanyManagement: true },
+  { href: "/jd-tasks", label: "Job Description", icon: Repeat },
+  { href: "/one-time-tasks", label: "Tasks", icon: SquareCheck },
+  { href: "/sops", label: "SOP's", icon: FileText },
+  { href: "/company", label: "Settings", icon: Building2, requiresCompanyManagement: true },
 ];
 
 const dropdownItemClass =
@@ -100,7 +101,11 @@ function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-black/25" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(420px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-md border border-[var(--hairline)] bg-[var(--surface)] p-5 text-[var(--ink)] shadow-[var(--shadow-popover)]">
+        <Dialog.Content
+          onPointerDownOutside={(e) => e.preventDefault()}
+          onInteractOutside={(e) => e.preventDefault()}
+          className="fixed left-1/2 top-1/2 z-50 w-[min(420px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-md border border-[var(--hairline)] bg-[var(--surface)] p-5 text-[var(--ink)] shadow-[var(--shadow-popover)]"
+        >
           <div className="flex items-start justify-between gap-4">
             <div>
               <Dialog.Title className="text-base font-semibold">Settings</Dialog.Title>
@@ -401,7 +406,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "flex h-8 items-center gap-2 rounded-md px-2 text-sm text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)]",
+                  "flex h-8 items-center gap-2 rounded-md px-2 text-sm uppercase text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)]",
                   activeRow && "bg-[var(--surface-pressed)] text-[var(--ink)]",
                 )}
               >
@@ -412,7 +417,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
           })}
         </nav>
         {isPlatformAdmin && (
-          <Button asChild variant="ghost" className="mt-auto justify-start px-2">
+          <Button asChild variant="ghost" className="mt-auto justify-start px-2 uppercase">
             <Link href="/admin">Platform admin</Link>
           </Button>
         )}
@@ -430,7 +435,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    "flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)]",
+                    "flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm uppercase text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)]",
                     activeRow && "bg-[var(--surface-pressed)] text-[var(--ink)]",
                   )}
                 >
@@ -440,7 +445,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
               );
             })}
             {isPlatformAdmin && (
-              <Button asChild variant="ghost" size="sm" className="h-8 shrink-0 px-2">
+              <Button asChild variant="ghost" size="sm" className="h-8 shrink-0 px-2 uppercase">
                 <Link href="/admin">Platform admin</Link>
               </Button>
             )}

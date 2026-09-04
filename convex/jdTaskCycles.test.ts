@@ -147,6 +147,34 @@ describe("JD task cycle behavior", () => {
     expect(after?.statusCycleStart).toBe(before?.statusCycleStart);
   });
 
+  test("resetAndClearMissedJdCycles deletes missed cycle records, resets cycleStartedAt to current, and prevents re-recording old cycles", async () => {
+    vi.setSystemTime(utc(2026, 1, 1, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Daily check", description: "", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+
+    vi.setSystemTime(utc(2026, 1, 15, 12));
+    await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
+    const countBefore = await t.query(internal.tasks.countMissedJdCycles, { companyId });
+    expect(countBefore.count).toBeGreaterThan(0);
+
+    // Run reset and clear
+    await t.mutation(internal.tasks.resetAndClearMissedJdCycles, { companyId, now: utc(2026, 1, 15, 12) });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const countAfter = await t.query(internal.tasks.countMissedJdCycles, { companyId });
+    expect(countAfter.count).toBe(0);
+
+    // Verify task still exists and cycleStartedAt was reset
+    const taskAfter = await t.run(async (ctx) => await ctx.db.get(taskId));
+    expect(taskAfter).not.toBeNull();
+    expect(taskAfter?.status).toBe("due");
+
+    // Re-run the hourly cron: it must NOT re-insert old missed records
+    await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
+    const countAfterCron = await t.query(internal.tasks.countMissedJdCycles, { companyId });
+    expect(countAfterCron.count).toBe(0);
+  });
+
   test("completed previous JD cycle starts the new current cycle as pending", async () => {
     vi.setSystemTime(utc(2026, 6, 25, 12));
     const { t, companyId, adminMembershipId } = await seedCompany();

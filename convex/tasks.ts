@@ -1,6 +1,6 @@
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
-import { internalAction, internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internalAction, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { currentJdCycle, defaultTimeZone, elapsedJdCyclesSince } from "./taskCycles";
@@ -438,6 +438,104 @@ export const recordMissedJdCyclesBatch = internalMutation({
     for (const task of page.page) await recordMissedJdCycles(ctx, task);
     if (!page.isDone) await ctx.scheduler.runAfter(0, internal.tasks.recordMissedJdCyclesBatch, { cursor: page.continueCursor });
     return page.page.length;
+  },
+});
+
+export const clearMissedJdCyclesBatch = internalMutation({
+  args: {
+    companyId: v.optional(v.id("companies")),
+    cursor: v.optional(v.union(v.string(), v.null())),
+  },
+  handler: async (ctx, args) => {
+    const page = args.companyId
+      ? await ctx.db
+          .query("jdTaskCycleRecords")
+          .withIndex("by_company", (q) => q.eq("companyId", args.companyId!))
+          .paginate({ numItems: 250, cursor: args.cursor ?? null })
+      : await ctx.db
+          .query("jdTaskCycleRecords")
+          .paginate({ numItems: 250, cursor: args.cursor ?? null });
+
+    for (const record of page.page) {
+      await ctx.db.delete(record._id);
+    }
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.tasks.clearMissedJdCyclesBatch, {
+        companyId: args.companyId,
+        cursor: page.continueCursor,
+      });
+    }
+    return { deleted: page.page.length, isDone: page.isDone };
+  },
+});
+
+export const resetJdTaskCyclesBatch = internalMutation({
+  args: {
+    companyId: v.optional(v.id("companies")),
+    now: v.optional(v.number()),
+    cursor: v.optional(v.union(v.string(), v.null())),
+  },
+  handler: async (ctx, args) => {
+    const now = args.now ?? Date.now();
+    const page = args.companyId
+      ? await ctx.db
+          .query("jdTasks")
+          .withIndex("by_company", (q) => q.eq("companyId", args.companyId!))
+          .paginate({ numItems: 100, cursor: args.cursor ?? null })
+      : await ctx.db
+          .query("jdTasks")
+          .paginate({ numItems: 100, cursor: args.cursor ?? null });
+
+    for (const task of page.page) {
+      const timeZone = await companyTimeZone(ctx, task.companyId);
+      const current = currentJdCycle(task.recurrence, now, timeZone);
+      await ctx.db.patch(task._id, {
+        cycleStartedAt: current.start,
+        statusCycleStart: current.start,
+        status: "due",
+        updatedAt: now,
+      });
+    }
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.tasks.resetJdTaskCyclesBatch, {
+        companyId: args.companyId,
+        now: args.now,
+        cursor: page.continueCursor,
+      });
+    }
+    return { reset: page.page.length, isDone: page.isDone };
+  },
+});
+
+export const resetAndClearMissedJdCycles = internalMutation({
+  args: {
+    companyId: v.optional(v.id("companies")),
+    now: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    await ctx.scheduler.runAfter(0, internal.tasks.resetJdTaskCyclesBatch, {
+      companyId: args.companyId,
+      now: args.now,
+    });
+    await ctx.scheduler.runAfter(0, internal.tasks.clearMissedJdCyclesBatch, {
+      companyId: args.companyId,
+    });
+    return { status: "scheduled" };
+  },
+});
+
+export const countMissedJdCycles = internalQuery({
+  args: {
+    companyId: v.optional(v.id("companies")),
+  },
+  handler: async (ctx, args) => {
+    const records = args.companyId
+      ? await ctx.db
+          .query("jdTaskCycleRecords")
+          .withIndex("by_company", (q) => q.eq("companyId", args.companyId!))
+          .collect()
+      : await ctx.db.query("jdTaskCycleRecords").collect();
+    return { count: records.length };
   },
 });
 

@@ -298,5 +298,94 @@ describe("task authorization hardening", () => {
     expect(adminJdRow?.canUpdate).toBe(true);
     expect(adminJdRow?.canDelete).toBe(true);
   });
+
+  test("shared tasks filter assignees through caller's permitted scope in list and detail queries", async () => {
+    const f = await createAuthzFixture();
+
+    // In Company A: managerA manages employee1M, but does NOT manage employee2M.
+    // Create shared JD and One-time tasks assigned to both employee1M and employee2M.
+    const jdTaskId = await f.asUser("adminA").mutation(api.tasks.createJd, {
+      companyId: f.companyA,
+      title: "Shared Kitchen Duty",
+      recurrence: "daily",
+      assigneeMembershipIds: [f.employee1M, f.employee2M],
+    });
+
+    const oneTimeTaskId = await f.asUser("adminA").mutation(api.tasks.createOneTime, {
+      companyId: f.companyA,
+      title: "Shared Sprint Review",
+      priority: "medium",
+      dueDate: Date.now() + 86_400_000,
+      assigneeMembershipIds: [f.employee1M, f.employee2M],
+    });
+
+    // 1. Manager view: manager manages employee1M, so has row-level visibility,
+    // but employee2M is outside manager's scope.
+    const managerJdDetail = await f.asUser("managerA").query(api.tasks.getJd, {
+      companyId: f.companyA,
+      taskId: jdTaskId,
+    });
+    expect(managerJdDetail.task.assignees).toHaveLength(1);
+    expect(managerJdDetail.task.assignees[0].membership._id).toBe(f.employee1M);
+    expect(managerJdDetail.task.assignees.some((a) => a.membership._id === f.employee2M)).toBe(false);
+
+    const managerJdRows = await f.asUser("managerA").query(api.tasks.listJdRows, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: null, numItems: 10 },
+    });
+    const managerJdRow = managerJdRows.page.find((r) => r._id === jdTaskId);
+    expect(managerJdRow).toBeDefined();
+    expect(managerJdRow?.assignees).toHaveLength(1);
+    expect(managerJdRow?.assignees[0].membership._id).toBe(f.employee1M);
+    expect(managerJdRow?.assignees.some((a) => a.membership._id === f.employee2M)).toBe(false);
+
+    const managerOneTimeDetail = await f.asUser("managerA").query(api.tasks.getOneTime, {
+      companyId: f.companyA,
+      taskId: oneTimeTaskId,
+    });
+    expect(managerOneTimeDetail.task.assignees).toHaveLength(1);
+    expect(managerOneTimeDetail.task.assignees[0].membership._id).toBe(f.employee1M);
+    expect(managerOneTimeDetail.task.assignees.some((a) => a.membership._id === f.employee2M)).toBe(false);
+
+    const managerOneTimeRows = await f.asUser("managerA").query(api.tasks.listOneTimeRows, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: null, numItems: 10 },
+    });
+    const managerOneTimeRow = managerOneTimeRows.page.find((r) => r._id === oneTimeTaskId);
+    expect(managerOneTimeRow).toBeDefined();
+    expect(managerOneTimeRow?.assignees).toHaveLength(1);
+    expect(managerOneTimeRow?.assignees[0].membership._id).toBe(f.employee1M);
+    expect(managerOneTimeRow?.assignees.some((a) => a.membership._id === f.employee2M)).toBe(false);
+
+    // 2. Admin view: admin has view:any capability, sees both assignees
+    const adminJdDetail = await f.asUser("adminA").query(api.tasks.getJd, {
+      companyId: f.companyA,
+      taskId: jdTaskId,
+    });
+    expect(adminJdDetail.task.assignees).toHaveLength(2);
+
+    const adminOneTimeDetail = await f.asUser("adminA").query(api.tasks.getOneTime, {
+      companyId: f.companyA,
+      taskId: oneTimeTaskId,
+    });
+    expect(adminOneTimeDetail.task.assignees).toHaveLength(2);
+
+    // 3. Employee 1 view: sees self, does not see employee 2
+    const emp1JdDetail = await f.asUser("employeeA1").query(api.tasks.getJd, {
+      companyId: f.companyA,
+      taskId: jdTaskId,
+    });
+    expect(emp1JdDetail.task.assignees).toHaveLength(1);
+    expect(emp1JdDetail.task.assignees[0].membership._id).toBe(f.employee1M);
+
+    // 4. Employee 2 view: sees self, does not see employee 1
+    const emp2JdDetail = await f.asUser("employeeA2").query(api.tasks.getJd, {
+      companyId: f.companyA,
+      taskId: jdTaskId,
+    });
+    expect(emp2JdDetail.task.assignees).toHaveLength(1);
+    expect(emp2JdDetail.task.assignees[0].membership._id).toBe(f.employee2M);
+  });
 });
+
 

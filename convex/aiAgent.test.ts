@@ -280,4 +280,40 @@ describe("AI agent Convex boundaries", () => {
     const messages = await t.withIdentity(identity("admin")).query(api.aiChat.listMessages, { companyId, sessionId });
     expect(messages.some((m) => m.content === content && m.role === "assistant")).toBe(true);
   });
+
+  test("enforces ai:use capability when reading individual sessions after revocation", async () => {
+    const { t, companyId, employeeMembershipId } = await seed();
+    const sessionId = await t.withIdentity(identity("employee")).mutation(api.aiChat.createSession, { companyId });
+    await t.withIdentity(identity("employee")).mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "user", content: "Hello AI" });
+
+    // Both getSession and listMessages work before revocation
+    await expect(t.withIdentity(identity("employee")).query(api.aiChat.getSession, { companyId, sessionId })).resolves.toMatchObject({ _id: sessionId });
+    const msgsBefore = await t.withIdentity(identity("employee")).query(api.aiChat.listMessages, { companyId, sessionId });
+    expect(msgsBefore).toHaveLength(1);
+
+    // Revoke ai:use capability
+    await t.run(async (ctx) => {
+      await ctx.db.insert("permissionOverrides", {
+        companyId,
+        membershipId: employeeMembershipId,
+        capability: "ai:use",
+        effect: "deny",
+        updatedAt: Date.now(),
+      });
+    });
+
+    // listSessions returns empty array
+    const sessions = await t.withIdentity(identity("employee")).query(api.aiChat.listSessions, { companyId });
+    expect(sessions).toEqual([]);
+
+    // getSession and listMessages now reject with permission error
+    await expect(
+      t.withIdentity(identity("employee")).query(api.aiChat.getSession, { companyId, sessionId })
+    ).rejects.toThrow("You do not have permission to use AI.");
+
+    await expect(
+      t.withIdentity(identity("employee")).query(api.aiChat.listMessages, { companyId, sessionId })
+    ).rejects.toThrow("You do not have permission to use AI.");
+  });
 });
+

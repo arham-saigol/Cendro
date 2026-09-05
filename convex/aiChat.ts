@@ -18,9 +18,11 @@ const aiRateLimitConfigs = {
 
 async function assertSession(ctx: QueryCtx | MutationCtx, companyId: Id<"companies">, sessionId: Id<"aiChatSessions">) {
   const { membership, user } = await requireMembership(ctx, companyId);
+  const caps = await membershipCapabilities(ctx, membership);
+  if (!caps.has("ai:use")) throw new ConvexError("You do not have permission to use AI.");
   const session = await ctx.db.get(sessionId);
   if (!session || session.companyId !== companyId || session.membershipId !== membership._id) throw new ConvexError("Chat session not found.");
-  return { session, membership, user };
+  return { session, membership, user, caps };
 }
 
 const DELETE_MESSAGE_BATCH_SIZE = 100;
@@ -109,12 +111,8 @@ export const getOrCreateSession = mutation({
 export const authorizeSessionForAgent = query({
   args: { companyId: v.id("companies"), sessionId: v.id("aiChatSessions") },
   handler: async (ctx, args) => {
-    const { membership } = await assertSession(ctx, args.companyId, args.sessionId);
-    const capabilities = await membershipCapabilities(ctx, membership);
-    if (!capabilities.has("ai:use")) {
-      throw new ConvexError("You do not have permission to use AI.");
-    }
-    return { membershipId: membership._id, role: membership.role, capabilities: Array.from(capabilities) };
+    const { membership, caps } = await assertSession(ctx, args.companyId, args.sessionId);
+    return { membershipId: membership._id, role: membership.role, capabilities: Array.from(caps) };
   },
 });
 
@@ -137,11 +135,7 @@ export const appendMessage = mutation({
     clientMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { session, membership } = await assertSession(ctx, args.companyId, args.sessionId);
-    const caps = await membershipCapabilities(ctx, membership);
-    if (!caps.has("ai:use")) {
-      throw new ConvexError("You do not have permission to use AI.");
-    }
+    const { session } = await assertSession(ctx, args.companyId, args.sessionId);
     const content = nonEmpty(args.content, "Message");
     if (args.clientMessageId) {
       const existing = await ctx.db.query("aiChatMessages").withIndex("by_session_and_clientMessageId", (q) => q.eq("sessionId", args.sessionId).eq("clientMessageId", args.clientMessageId)).unique();
@@ -201,11 +195,7 @@ export const persistServerMessage = mutation({
       createdAt: now,
     });
 
-    const { session, membership } = await assertSession(ctx, args.companyId, args.sessionId);
-    const caps = await membershipCapabilities(ctx, membership);
-    if (!caps.has("ai:use")) {
-      throw new ConvexError("You do not have permission to use AI.");
-    }
+    const { session } = await assertSession(ctx, args.companyId, args.sessionId);
 
     if (args.clientMessageId) {
       const existing = await ctx.db

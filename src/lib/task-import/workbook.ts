@@ -419,7 +419,7 @@ function metadataRows(metadata: WorkbookMetadata): WriteSheetData {
     [textCell("Source company name"), textCell(metadata.companyName)],
     [textCell("Export timestamp"), textCell(metadata.exportedAt)],
     [],
-    [textCell("Instructions"), textCell("Edit task fields. Blank codes create tasks. Blank assignee cells preserve existing assignees; new tasks need an assignee. Status can be Pending, In Progress, or Completed.")],
+    [textCell("Instructions"), textCell("Edit task fields. Use task code to create or update tasks. If the code exists, the task is updated; if not, a new task is created with that code. Blank assignee cells preserve existing assignees; new tasks need an assignee. Status can be Pending, In Progress, or Completed.")],
     [textCell("Frequency values"), textCell(Object.entries(recurrenceLabels).map(([key, label]) => `${key} = ${label}`).join("; "))],
     [textCell("Priority values"), textCell(Object.entries(priorityLabels).map(([key, label]) => `${key} = ${label}`).join("; "))],
   ];

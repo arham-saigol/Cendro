@@ -392,7 +392,7 @@ export function TaskImportExportMenu({
                       <div>
                         <div className="flex items-center gap-2">
                           <span className="font-mono text-[12px] font-semibold text-[var(--ink)]">
-                            {row.reference ?? "New Task"}
+                            {row.reference || "Missing Code"}
                           </span>
                           <span className="text-[11px] text-[var(--ink-muted)]">
                             Row {row.sourceRow}

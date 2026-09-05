@@ -49,6 +49,12 @@ describe("task workbook pure helpers", () => {
     expect(referenceForKind("OT-001", "jd").error).toBeTruthy();
     expect(referenceForKind("TSK-001", "one_time")).toEqual({ value: "TSK-001" });
     expect(referenceForKind("OT-0001", "one_time")).toEqual({ value: "OT-0001" });
+    expect(referenceForKind("", "jd").error).toBe("Task code is required and must match JD-001.");
+    expect(referenceForKind(null, "one_time").error).toBe("Task code is required and must match TSK-001.");
+    expect(referenceForKind("INVALID", "jd").error).toBe("Code must match JD-001.");
+    expect(referenceForKind("JD-1", "jd").error).toBe("Code must match JD-001.");
+    expect(referenceForKind("JD-9007199254740992", "jd").error).toBe("Code must match JD-001.");
+    expect(referenceForKind("JD-99999999999999999999", "jd").error).toBe("Code must match JD-001.");
   });
 
   test("finds duplicate workbook references", () => {

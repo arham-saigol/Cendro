@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { membershipCapabilities, requireCapability, scopedMembershipIds } from "./permissions";
+import { getManagedMembershipIds, membershipCapabilities, requireCapability } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { currentJdCycle } from "./taskCycles";
 import { recordMissedJdCycles } from "./tasks";
@@ -121,48 +121,105 @@ function capabilitiesForImport(caps: Set<Capability>, kind: TaskKind) {
   return { canCreate, canUpdate };
 }
 
-async function buildImportAuth(ctx: Ctx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, kind: TaskKind) {
+function extractAssigneeTargets(
+  drafts: Iterable<{ assigneeEmails?: string[] }>,
+  selectedMembershipIds?: Iterable<Id<"companyMemberships">[] | null | undefined>
+) {
+  const emails = new Set<string>();
+  for (const item of drafts) {
+    if (item.assigneeEmails) {
+      for (const email of item.assigneeEmails) {
+        try {
+          emails.add(normalizeEmail(email));
+        } catch {
+          // Unparseable emails are handled during draft validation / resolution
+        }
+      }
+    }
+  }
+  const membershipIds = new Set<Id<"companyMemberships">>();
+  if (selectedMembershipIds) {
+    for (const list of selectedMembershipIds) {
+      if (list) {
+        for (const id of list) {
+          membershipIds.add(id);
+        }
+      }
+    }
+  }
+  return { emails, membershipIds };
+}
+
+async function buildImportAuth(
+  ctx: Ctx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  kind: TaskKind,
+  requestedEmails: Iterable<string>,
+  selectedMembershipIds?: Iterable<Id<"companyMemberships">>
+) {
   const caps = await membershipCapabilities(ctx, membership);
   const p = capabilityPrefix(kind);
-  const needsScope = caps.has(`${p}:update:managed` as Capability) || caps.has(`${p}:assign:managed` as Capability);
-  const scoped = needsScope ? await scopedMembershipIds(ctx, companyId, membership) : new Set<Id<"companyMemberships">>([membership._id]);
+  const canAssignAny = caps.has(`${p}:assign:any` as Capability);
+  const canAssignManaged = caps.has(`${p}:assign:managed` as Capability);
+  const canAssignSelf = caps.has(`${p}:assign:self` as Capability);
+  const needsScope = caps.has(`${p}:update:managed` as Capability) || canAssignManaged;
+  const scoped = needsScope
+    ? await getManagedMembershipIds(ctx, companyId, membership._id)
+    : new Set<Id<"companyMemberships">>([membership._id]);
 
-  const allMemberships: Doc<"companyMemberships">[] = [];
-  let cursor: string | null = null;
-  let isDone = false;
-  while (!isDone) {
-    const page = await ctx.db
-      .query("companyMemberships")
-      .withIndex("by_company", (q) => q.eq("companyId", companyId))
-      .paginate({ numItems: 500, cursor });
-    allMemberships.push(...page.page);
-    cursor = page.continueCursor;
-    isDone = page.isDone;
-  }
-  const activeMemberships = allMemberships.filter((row) => row.active);
-
-  let assignable: Set<Id<"companyMemberships">>;
-  if (caps.has(`${p}:assign:any` as Capability)) {
-    assignable = new Set(activeMemberships.map((row) => row._id));
-  } else if (caps.has(`${p}:assign:managed` as Capability)) {
-    assignable = new Set(scoped);
-  } else if (caps.has(`${p}:assign:self` as Capability)) {
-    assignable = new Set([membership._id]);
-  } else {
-    assignable = new Set();
+  function isAssignable(m: Doc<"companyMemberships">) {
+    if (!m.active || m.companyId !== companyId) return false;
+    if (canAssignAny) return true;
+    if (canAssignManaged) return scoped.has(m._id);
+    if (canAssignSelf) return m._id === membership._id;
+    return false;
   }
 
   const membershipIdsByEmail = new Map<string, Id<"companyMemberships">[]>();
   const companyMemberEmails = new Set<string>();
-  for (const candidate of activeMemberships) {
-    const user = await ctx.db.get(candidate.userId);
-    if (!user) continue;
-    const email = normalizeEmail(user.email);
-    companyMemberEmails.add(email);
-    if (assignable.has(candidate._id)) {
-      membershipIdsByEmail.set(email, [...(membershipIdsByEmail.get(email) ?? []), candidate._id]);
+  const assignable = new Set<Id<"companyMemberships">>();
+
+  if (isAssignable(membership)) {
+    assignable.add(membership._id);
+  }
+
+  for (const email of requestedEmails) {
+    const users = await ctx.db
+      .query("appUsers")
+      .withIndex("by_email", (q) => q.eq("email", email))
+      .take(10);
+
+    for (const user of users) {
+      const candidate = await ctx.db
+        .query("companyMemberships")
+        .withIndex("by_company_user", (q) => q.eq("companyId", companyId).eq("userId", user._id))
+        .unique();
+
+      if (candidate && candidate.active) {
+        companyMemberEmails.add(email);
+        if (isAssignable(candidate)) {
+          assignable.add(candidate._id);
+          const current = membershipIdsByEmail.get(email) ?? [];
+          if (!current.includes(candidate._id)) {
+            membershipIdsByEmail.set(email, [...current, candidate._id]);
+          }
+        }
+      }
     }
   }
+
+  if (selectedMembershipIds) {
+    for (const id of selectedMembershipIds) {
+      if (!assignable.has(id)) {
+        const candidate = await ctx.db.get(id);
+        if (candidate && isAssignable(candidate)) {
+          assignable.add(candidate._id);
+        }
+      }
+    }
+  }
+
   return { ...capabilitiesForImport(caps, kind), caps, membership, scoped, assignable, membershipIdsByEmail, companyMemberEmails } satisfies ImportAuth;
 }
 
@@ -239,7 +296,8 @@ export const previewTaskImport = query({
     if (args.drafts.length > MAX_PREVIEW_ROWS) fail(`Imports may contain at most ${MAX_PREVIEW_ROWS} task rows.`);
     const capability: Capability = args.kind === "jd" ? "tasks:jd:import" : "tasks:one_time:import";
     const { membership } = await requireCapability(ctx, args.companyId, capability);
-    const auth = await buildImportAuth(ctx, args.companyId, membership, args.kind);
+    const { emails } = extractAssigneeTargets(args.drafts);
+    const auth = await buildImportAuth(ctx, args.companyId, membership, args.kind, emails);
     const duplicateRefs = new Set<string>();
     const seenRefs = new Set<string>();
     const duplicateRowKeys = new Set<string>();
@@ -368,9 +426,11 @@ export const commitTaskImportBatch = mutation({
     const priorReceipts = await ctx.db.query("taskImportBatches").withIndex("by_companyId_and_importKey", (q) => q.eq("companyId", args.companyId).eq("importKey", args.importKey)).take(MAX_IMPORT_BATCHES + 1);
     if (priorReceipts.length > MAX_IMPORT_BATCHES || priorReceipts.some((receipt) => receipt.actorMembershipId !== membership._id || receipt.kind !== args.kind || receipt.source !== args.source)) fail("Import key is not available.");
     const priorReferences = new Set(priorReceipts.flatMap((receipt) => receipt.result.taskReferences));
-    if (references.some((reference) => priorReferences.has(reference))) fail("Import contains a task reference that was already committed.");
-
-    const auth = await buildImportAuth(ctx, args.companyId, membership, args.kind);
+    const { emails, membershipIds } = extractAssigneeTargets(
+      includedRows.map((row) => row.draft),
+      includedRows.map((row) => row.selectedAssigneeMembershipIds)
+    );
+    const auth = await buildImportAuth(ctx, args.companyId, membership, args.kind, emails, membershipIds);
     const prepared = [];
     for (const row of includedRows) prepared.push(await validateCommitRow(ctx, args.companyId, args.kind, auth, row));
     let created = 0;

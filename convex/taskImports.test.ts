@@ -912,5 +912,83 @@ describe("task import backend", () => {
     expect(preview.rows[0].operation).toBe("create");
     expect(preview.rows[0].proposedAssigneeMembershipIds).toEqual([member505Id]);
     expect(preview.rows[0].errors).toEqual([]);
+
+    const commitResult = await admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId,
+      kind: "jd",
+      importKey: "commit-505",
+      batchKey: "batch-1",
+      source: "cendro",
+      rows: [{
+        include: true,
+        selectedAssigneeMembershipIds: [member505Id],
+        draft: preview.rows[0].draft,
+      }],
+    });
+    expect(commitResult.created).toBe(1);
+    expect(commitResult.taskReferences).toEqual(["JD-505"]);
+  });
+
+  test("bounds assignee resolution and scopes properly when caller can only assign to self", async () => {
+    const { t, companyId } = await seed();
+    const { selfMembershipId } = await t.run(async (ctx) => {
+      const now = Date.now();
+      const userId = await ctx.db.insert("appUsers", {
+        clerkSubject: "clerk|selfonly",
+        email: "selfonly@example.com",
+        firstName: "SelfOnly",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const membershipId = await ctx.db.insert("companyMemberships", {
+        companyId,
+        userId,
+        role: "Employee",
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("permissionOverrides", { companyId, membershipId, capability: "tasks:jd:import", effect: "allow", updatedAt: now });
+      await ctx.db.insert("permissionOverrides", { companyId, membershipId, capability: "tasks:jd:create", effect: "allow", updatedAt: now });
+      await ctx.db.insert("permissionOverrides", { companyId, membershipId, capability: "tasks:jd:assign:self", effect: "allow", updatedAt: now });
+      return { selfMembershipId: membershipId };
+    });
+
+    const selfUser = t.withIdentity(identity("selfonly"));
+
+    // Preview with own email resolves to self
+    const previewSelf = await selfUser.query(api.taskImports.previewTaskImport, {
+      companyId,
+      kind: "jd",
+      drafts: [draft({ reference: "JD-001", rawAssigneeText: "selfonly@example.com", assigneeEmails: ["selfonly@example.com"] })],
+    });
+    expect(previewSelf.rows[0].operation).toBe("create");
+    expect(previewSelf.rows[0].proposedAssigneeMembershipIds).toEqual([selfMembershipId]);
+    expect(previewSelf.rows[0].errors).toEqual([]);
+
+    // Preview with someone else's email is blocked as outside assignable scope
+    const previewOther = await selfUser.query(api.taskImports.previewTaskImport, {
+      companyId,
+      kind: "jd",
+      drafts: [draft({ reference: "JD-002", rawAssigneeText: "admin@example.com", assigneeEmails: ["admin@example.com"] })],
+    });
+    expect(previewOther.rows[0].operation).toBe("blocked");
+    expect(previewOther.rows[0].errors).toContain('Assignee "admin@example.com" is outside your assignable scope.');
+
+    // Commit with self assignee succeeds
+    const commitRes = await selfUser.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId,
+      kind: "jd",
+      importKey: "self-import",
+      batchKey: "batch-1",
+      source: "cendro",
+      rows: [{
+        include: true,
+        selectedAssigneeMembershipIds: [selfMembershipId],
+        draft: previewSelf.rows[0].draft,
+      }],
+    });
+    expect(commitRes.created).toBe(1);
+    expect(commitRes.taskReferences).toEqual(["JD-001"]);
   });
 });

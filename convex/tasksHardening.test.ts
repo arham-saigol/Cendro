@@ -214,4 +214,71 @@ describe("task authorization hardening", () => {
     expect(row.assigneeEmails).toContain("employeea1@example.com");
     expect(row.assigneeEmails).not.toContain("employeea2@example.com");
   });
+
+  test("Task rows and detail return server-computed canUpdate and canDelete flags", async () => {
+    const f = await createAuthzFixture();
+
+    const jdTaskId = await f.asUser("adminA").mutation(api.tasks.createJd, {
+      companyId: f.companyA,
+      title: "Daily Store Check",
+      recurrence: "daily",
+      assigneeMembershipIds: [f.employee1M],
+    });
+
+    const oneTimeTaskId = await f.asUser("adminA").mutation(api.tasks.createOneTime, {
+      companyId: f.companyA,
+      title: "Fix lighting",
+      priority: "high",
+      assigneeMembershipIds: [f.employee1M],
+    });
+
+    // Employee view on JD task
+    const empJdDetail = await f.asUser("employeeA1").query(api.tasks.getJd, {
+      companyId: f.companyA,
+      taskId: jdTaskId,
+    });
+    expect(empJdDetail.canUpdate).toBe(true);
+    expect(empJdDetail.canDelete).toBe(false);
+
+    const empJdRows = await f.asUser("employeeA1").query(api.tasks.listJdRows, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: null, numItems: 10 },
+    });
+    const empJdRow = empJdRows.page.find((r) => r._id === jdTaskId);
+    expect(empJdRow?.canUpdate).toBe(true);
+    expect(empJdRow?.canDelete).toBe(false);
+
+    // Employee view on One-time task
+    const empOneTimeDetail = await f.asUser("employeeA1").query(api.tasks.getOneTime, {
+      companyId: f.companyA,
+      taskId: oneTimeTaskId,
+    });
+    expect(empOneTimeDetail.canUpdate).toBe(true);
+    expect(empOneTimeDetail.canDelete).toBe(false);
+
+    const empOneTimeRows = await f.asUser("employeeA1").query(api.tasks.listOneTimeRows, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: null, numItems: 10 },
+    });
+    const empOneTimeRow = empOneTimeRows.page.find((r) => r._id === oneTimeTaskId);
+    expect(empOneTimeRow?.canUpdate).toBe(true);
+    expect(empOneTimeRow?.canDelete).toBe(false);
+
+    // Admin view on JD task
+    const adminJdDetail = await f.asUser("adminA").query(api.tasks.getJd, {
+      companyId: f.companyA,
+      taskId: jdTaskId,
+    });
+    expect(adminJdDetail.canUpdate).toBe(true);
+    expect(adminJdDetail.canDelete).toBe(true);
+
+    const adminJdRows = await f.asUser("adminA").query(api.tasks.listJdRows, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: null, numItems: 10 },
+    });
+    const adminJdRow = adminJdRows.page.find((r) => r._id === jdTaskId);
+    expect(adminJdRow?.canUpdate).toBe(true);
+    expect(adminJdRow?.canDelete).toBe(true);
+  });
 });
+

@@ -329,10 +329,15 @@ export async function scopedMembershipIds(
   ctx: Ctx,
   companyId: Id<"companies">,
   m: Doc<"companyMemberships">,
-  precomputedCaps?: Set<Capability>
+  precomputedCaps?: Set<Capability>,
+  targetCapability?: Capability
 ): Promise<Set<Id<"companyMemberships">>> {
   const caps = precomputedCaps ?? (await membershipCapabilities(ctx, m));
-  if (
+  if (targetCapability) {
+    if (caps.has(targetCapability)) {
+      return await activeCompanyMembershipIds(ctx, companyId);
+    }
+  } else if (
     caps.has("analytics:view:company") ||
     caps.has("tasks:jd:view:any") ||
     caps.has("tasks:one_time:view:any") ||

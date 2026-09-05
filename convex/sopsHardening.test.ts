@@ -222,4 +222,81 @@ describe("SOP authorization hardening", () => {
     expect(managerView.canUpdate).toBe(false);
     expect(managerView.canDelete).toBe(false);
   });
+
+  test("Employee cannot view SOPs when sops:view:self is explicitly denied", async () => {
+    const f = await createAuthzFixture();
+
+    await f.asUser("adminA").mutation(api.sops.create, {
+      companyId: f.companyA,
+      title: "Company SOP",
+      content: "Important SOP",
+      scopeType: "company",
+      branchIds: [],
+      departmentIds: [],
+      userMembershipIds: [],
+    });
+
+    // By default, employee can list rows
+    const beforeRows = await f.asUser("employeeA1").query(api.sops.listRows, {
+      companyId: f.companyA,
+    });
+    expect(beforeRows.length).toBe(1);
+
+    const beforeList = await f.asUser("employeeA1").query(api.sops.list, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: null, numItems: 10 },
+    });
+    expect(beforeList.page.length).toBe(1);
+
+    // Explicitly deny sops:view:self for employeeA1
+    await f.setOverride(f.companyA, f.employee1M, "sops:view:self", "deny");
+
+    // Employee cannot list rows anymore
+    const afterRows = await f.asUser("employeeA1").query(api.sops.listRows, {
+      companyId: f.companyA,
+    });
+    expect(afterRows.length).toBe(0);
+
+    const afterList = await f.asUser("employeeA1").query(api.sops.list, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: null, numItems: 10 },
+    });
+    expect(afterList.page.length).toBe(0);
+  });
+
+  test("Task or analytics capabilities do not widen SOP managed scope or filter options", async () => {
+    const f = await createAuthzFixture();
+
+    // Grant managerA tasks:jd:view:any and analytics:view:company
+    await f.setOverride(f.companyA, f.managerM, "tasks:jd:view:any", "allow");
+    await f.setOverride(f.companyA, f.managerM, "analytics:view:company", "allow");
+
+    // Get filter options for managerA
+    const filters = await f.asUser("managerA").query(api.sops.filterOptions, {
+      companyId: f.companyA,
+    });
+
+    // Manager should only see their managed branch (branchA1) and managed department (deptA1), NOT branchA2 or deptA2
+    const branchIds = filters.branches.map((b) => b._id);
+    expect(branchIds).toContain(f.branchA1);
+    expect(branchIds).not.toContain(f.branchA2);
+
+    const deptIds = filters.departments.map((d) => d._id);
+    expect(deptIds).toContain(f.deptA1);
+    expect(deptIds).not.toContain(f.deptA2);
+
+    // Manager cannot create an SOP targeted to branchA2 (outside managed scope)
+    await expect(
+      f.asUser("managerA").mutation(api.sops.create, {
+        companyId: f.companyA,
+        title: "Unauthorized scope SOP",
+        content: "Content",
+        scopeType: "branch",
+        branchIds: [f.branchA2],
+        departmentIds: [],
+        userMembershipIds: [],
+      })
+    ).rejects.toThrow("You can only target branches in your managed scope.");
+  });
 });
+

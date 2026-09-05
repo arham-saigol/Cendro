@@ -1084,7 +1084,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                 {rows.map((sop) => {
                   const isChecked = selectedIds.has(sop._id);
                   const sopScope = sop.scopeType as ScopeType;
-                  const rowCanEdit = canManageSop(active, sopScope);
+                  const rowCanEdit = Boolean(sop.canUpdate ?? canManageSop(active, sopScope));
                   const targetName = sopTargetName(sop, active?.company.name);
                   const pending = (field: string) => pendingCell === `${sop._id}:${field}`;
                   const detailsHref = `/sops/${sop._id}`;

@@ -21,7 +21,7 @@ async function getManagedScopeTargets(ctx: MutationCtx | QueryCtx, companyId: Id
   const branchIds = new Set<Id<"branches">>();
   const managedBranches = await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(500);
   for (const row of managedBranches) branchIds.add(row.branchId);
-  const userIds = await scopedMembershipIds(ctx, companyId, membership, capabilities);
+  const userIds = await scopedMembershipIds(ctx, companyId, membership, capabilities, "sops:view:company");
   for (const userId of userIds) {
     const assignments = await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", userId)).take(500);
     for (const assignment of assignments) branchIds.add(assignment.branchId);
@@ -62,7 +62,6 @@ async function canManageSopTargets(
   const reqCap = sopManageCapability(scopeType);
   if (!caps.has(reqCap)) return false;
   if (scopeType === "company") return true;
-  if (caps.has("sops:manage:company")) return true;
   const managed = await getManagedScopeTargets(ctx, companyId, membership, caps);
   if (!managed) return true;
   for (const b of targets.branchIds) if (!managed.branchIds.has(b)) return false;
@@ -82,7 +81,6 @@ async function canDeleteSopTargets(
   const reqCap = sopDeleteCapability(scopeType);
   if (!caps.has(reqCap)) return false;
   if (scopeType === "company") return true;
-  if (caps.has("sops:delete:company")) return true;
   const managed = await getManagedScopeTargets(ctx, companyId, membership, caps);
   if (!managed) return true;
   for (const b of targets.branchIds) if (!managed.branchIds.has(b)) return false;
@@ -176,6 +174,7 @@ async function sopMatchesFilters(ctx: QueryCtx, sop: Doc<"sops">, args: { scope?
 
 async function sopVisibleForView(ctx: QueryCtx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, sop: Doc<"sops">, view: "all" | "my" | undefined, visibility: SopVisibilityContext | null, caps: Set<Capability>, canUseAllView: boolean) {
   if (view === "all" && canUseAllView) return await visibleSop(ctx, companyId, membership, sop, visibility, caps);
+  if (!caps.has("sops:view:self")) return false;
   return await visibleSopForSelf(ctx, companyId, membership, sop);
 }
 
@@ -265,13 +264,13 @@ export const filterOptions = query({
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     const caps = await membershipCapabilities(ctx, membership);
-    const canFilterManaged = caps.has("sops:manage:company") || caps.has("sops:manage:branch") || caps.has("sops:manage:department") || caps.has("sops:manage:user") || caps.has("analytics:view:managed_scope") || caps.has("analytics:view:company");
+    const canFilterManaged = caps.has("sops:view:company") || caps.has("sops:view:managed") || caps.has("sops:manage:company") || caps.has("sops:manage:branch") || caps.has("sops:manage:department") || caps.has("sops:manage:user");
     if (!canFilterManaged) return { branches: [], departments: [], users: [] };
 
     const branchIds = new Set<Id<"branches">>();
     const departmentIds = new Set<Id<"departments">>();
     let userIds: Set<Id<"companyMemberships">>;
-    if (caps.has("sops:view:company") || caps.has("sops:manage:company") || caps.has("analytics:view:company")) {
+    if (caps.has("sops:view:company") || caps.has("sops:manage:company")) {
       const [branches, departments, memberships] = await Promise.all([
         ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500),
         ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500),
@@ -282,7 +281,7 @@ export const filterOptions = query({
       userIds = new Set(memberships.filter((m) => m.active).map((m) => m._id));
     } else {
       const managed = await getManagedScopeTargets(ctx, args.companyId, membership, caps);
-      userIds = managed?.userIds ?? await scopedMembershipIds(ctx, args.companyId, membership, caps);
+      userIds = managed?.userIds ?? await scopedMembershipIds(ctx, args.companyId, membership, caps, "sops:view:company");
       for (const branchId of managed?.branchIds ?? []) branchIds.add(branchId);
       for (const departmentId of managed?.departmentIds ?? []) departmentIds.add(departmentId);
     }

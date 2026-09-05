@@ -68,14 +68,16 @@ async function managerScope(ctx: any, managerMembershipId: Id<"companyMembership
   return { branchIds, departmentIds, userMembershipIds };
 }
 
-async function clearUserManagementRows(ctx: any, membershipId: Id<"companyMemberships">) {
+async function clearUserManagementRows(ctx: any, membershipId: Id<"companyMemberships">, preserveOverrides = false) {
   for (const row of await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
   for (const row of await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
   for (const row of await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
   for (const row of await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
   for (const row of await ctx.db.query("managerUserScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
   for (const row of await ctx.db.query("managerUserScopes").withIndex("by_user", (q: any) => q.eq("userMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
-  for (const row of await ctx.db.query("permissionOverrides").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+  if (!preserveOverrides) {
+    for (const row of await ctx.db.query("permissionOverrides").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+  }
 }
 
 export const overview = query({
@@ -243,7 +245,7 @@ export const setUserActive = mutation({
         throw new ConvexError("You do not have access to deactivate a permission administrator.");
       }
       await assertPermissionManagerRemainsAfterActiveChanges(ctx, args.companyId, new Map([[args.membershipId, false]]));
-      await clearUserManagementRows(ctx, args.membershipId);
+      await clearUserManagementRows(ctx, args.membershipId, true);
       const pendingTargeted = await ctx.db
         .query("invitations")
         .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
@@ -263,6 +265,10 @@ export const setUserActive = mutation({
         createdAt: now,
       });
     } else {
+      const targetCaps = await membershipCapabilities(ctx, membership);
+      if (targetCaps.has("company:manage_permissions") && !actorCaps.has("company:manage_permissions")) {
+        throw new ConvexError("You do not have access to activate a permission administrator.");
+      }
       await ctx.db.patch(args.membershipId, { active: true, updatedAt: now });
       await ctx.db.insert("auditEvents", {
         companyId: args.companyId,
@@ -505,12 +511,12 @@ export const createInvitationRecord = internalMutation({
 
     const existingPending = await ctx.db
       .query("invitations")
-      .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
-      .take(500);
+      .withIndex("by_companyId_and_email_and_status", (q) =>
+        q.eq("companyId", args.companyId).eq("email", email).eq("status", "pending")
+      )
+      .collect();
     for (const inv of existingPending) {
-      if (inv.email.toLowerCase() === email.toLowerCase() && inv.status === "pending") {
-        await ctx.db.patch(inv._id, { status: "revoked" });
-      }
+      await ctx.db.patch(inv._id, { status: "revoked" });
     }
 
     const companyAuthVersion = company.authVersion ?? 1;

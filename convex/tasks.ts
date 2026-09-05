@@ -4,7 +4,7 @@ import { internalAction, internalMutation, internalQuery, mutation, query, type 
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { currentJdCycle, defaultTimeZone, elapsedJdCyclesSince } from "./taskCycles";
-import { assertCanAssign, assertCanDeleteTask, assertCanUpdateTask, canViewTask, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds } from "./permissions";
+import { assertCanAssign, assertCanDeleteTask, assertCanUpdateTask, canViewTask, getManagedMembershipIds, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
 import { nextReference } from "./references";
@@ -39,7 +39,7 @@ async function enrich(ctx: Ctx, ids: Id<"companyMemberships">[]) {
 async function taskVisibilityAuth(ctx: Ctx, companyId: Id<"companies">, membership: Doc<"companyMemberships">): Promise<TaskVisibilityAuth> {
   const caps = await membershipCapabilities(ctx, membership);
   let scoped: Promise<Set<Id<"companyMemberships">>> | undefined;
-  return { caps, getScopedMembershipIds: () => scoped ??= scopedMembershipIds(ctx, companyId, membership) };
+  return { caps, getScopedMembershipIds: () => scoped ??= getManagedMembershipIds(ctx, companyId, membership._id) };
 }
 
 async function visible(ctx: Ctx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, task: Pick<Doc<"jdTasks"> | Doc<"oneTimeTasks">, "assigneeMembershipIds" | "createdByMembershipId">, kind: TaskKind, auth?: TaskVisibilityAuth) {
@@ -64,16 +64,44 @@ function updateAuthTargets(task: Pick<Doc<"jdTasks"> | Doc<"oneTimeTasks">, "ass
   return task.assigneeMembershipIds.length === 0 ? [task.createdByMembershipId] : task.assigneeMembershipIds;
 }
 
-async function canUpdateTask(ctx: Ctx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, task: Pick<Doc<"jdTasks"> | Doc<"oneTimeTasks">, "assigneeMembershipIds" | "createdByMembershipId">, kind: TaskKind) {
-  const caps = await membershipCapabilities(ctx, membership);
+async function canUpdateTask(
+  ctx: Ctx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  task: Pick<Doc<"jdTasks"> | Doc<"oneTimeTasks">, "assigneeMembershipIds" | "createdByMembershipId">,
+  kind: TaskKind,
+  precomputedCaps?: Set<Capability>,
+  precomputedManagedIds?: Set<Id<"companyMemberships">>
+) {
+  const caps = precomputedCaps ?? (await membershipCapabilities(ctx, membership));
   const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   const targets = updateAuthTargets(task);
   if (caps.has(`${prefix}:update:any` as any)) return true;
   if (caps.has(`${prefix}:update:managed` as any)) {
-    const scoped = await scopedMembershipIds(ctx, companyId, membership);
+    const scoped = precomputedManagedIds ?? (await getManagedMembershipIds(ctx, companyId, membership._id));
     if (targets.every((id) => scoped.has(id))) return true;
   }
   return Boolean(caps.has(`${prefix}:update:self` as any) && targets.includes(membership._id));
+}
+
+async function canDeleteTask(
+  ctx: Ctx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  task: Pick<Doc<"jdTasks"> | Doc<"oneTimeTasks">, "assigneeMembershipIds" | "createdByMembershipId">,
+  kind: TaskKind,
+  precomputedCaps?: Set<Capability>,
+  precomputedManagedIds?: Set<Id<"companyMemberships">>
+) {
+  const caps = precomputedCaps ?? (await membershipCapabilities(ctx, membership));
+  const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
+  const targets = updateAuthTargets(task);
+  if (caps.has(`${prefix}:delete:any` as any)) return true;
+  if (caps.has(`${prefix}:delete:managed` as any)) {
+    const scoped = precomputedManagedIds ?? (await getManagedMembershipIds(ctx, companyId, membership._id));
+    if (targets.every((id) => scoped.has(id))) return true;
+  }
+  return Boolean(caps.has(`${prefix}:delete:self` as any) && targets.includes(membership._id));
 }
 
 
@@ -130,8 +158,24 @@ async function logTaskActivity(ctx: MutationCtx, args: { companyId: Id<"companie
   await ctx.db.insert("taskActivityLogs", { companyId: args.companyId, taskType: args.taskType, taskId: args.taskId, actorMembershipId: args.actorMembershipId, event: args.event, ...(args.fromStatus ? { fromStatus: args.fromStatus } : {}), ...(args.toStatus ? { toStatus: args.toStatus } : {}), createdAt: args.createdAt ?? Date.now() });
 }
 
-async function enrichedJd(ctx: Ctx, task: Doc<"jdTasks">, timeZone?: string) { return { ...task, state: await jdState(ctx, task, Date.now(), timeZone), assignees: await enrich(ctx, task.assigneeMembershipIds) }; }
-async function enrichedOneTime(ctx: Ctx, task: Doc<"oneTimeTasks">) { return { ...task, state: oneState(task), assignees: await enrich(ctx, task.assigneeMembershipIds) }; }
+async function enrichedJd(ctx: Ctx, task: Doc<"jdTasks">, timeZone?: string, canUpdate?: boolean, canDelete?: boolean) {
+  return {
+    ...task,
+    state: await jdState(ctx, task, Date.now(), timeZone),
+    assignees: await enrich(ctx, task.assigneeMembershipIds),
+    ...(canUpdate !== undefined ? { canUpdate } : {}),
+    ...(canDelete !== undefined ? { canDelete } : {}),
+  };
+}
+async function enrichedOneTime(ctx: Ctx, task: Doc<"oneTimeTasks">, canUpdate?: boolean, canDelete?: boolean) {
+  return {
+    ...task,
+    state: oneState(task),
+    assignees: await enrich(ctx, task.assigneeMembershipIds),
+    ...(canUpdate !== undefined ? { canUpdate } : {}),
+    ...(canDelete !== undefined ? { canDelete } : {}),
+  };
+}
 function matchesSearch(task: { title: string; reference: string }, search?: string) {
   const needle = search?.trim().toLowerCase();
   if (!needle) return true;
@@ -146,10 +190,15 @@ export const listJdRows = query({
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
     const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
     const rows = [];
+    const managedIds = await auth.getScopedMembershipIds();
     for (const task of page.page) {
       if (args.frequency && args.frequency !== "all" && task.recurrence !== args.frequency) continue;
       if (!matchesSearch(task, args.search)) continue;
-      if (await visible(ctx, args.companyId, membership, task, "jd", auth)) rows.push(await enrichedJd(ctx, task));
+      if (await visible(ctx, args.companyId, membership, task, "jd", auth)) {
+        const canUpdate = await canUpdateTask(ctx, args.companyId, membership, task, "jd", auth.caps, managedIds);
+        const canDelete = await canDeleteTask(ctx, args.companyId, membership, task, "jd", auth.caps, managedIds);
+        rows.push(await enrichedJd(ctx, task, undefined, canUpdate, canDelete));
+      }
     }
     return { ...page, page: rows };
   },
@@ -161,7 +210,7 @@ export const exportRows = query({
     const capability: Capability = args.kind === "jd" ? "tasks:jd:export" : "tasks:one_time:export";
     const { membership, company } = await requireCapability(ctx, args.companyId, capability);
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
-    const scoped = await auth.getScopedMembershipIds();
+    const scoped = await scopedMembershipIds(ctx, args.companyId, membership, auth.caps, args.kind === "jd" ? "tasks:jd:view:any" : "tasks:one_time:view:any");
     if (args.kind === "jd") {
       const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("asc").paginate(args.paginationOpts);
       const rows = [];
@@ -193,10 +242,15 @@ export const listOneTimeRows = query({
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
     const page = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
     const rows = [];
+    const managedIds = await auth.getScopedMembershipIds();
     for (const task of page.page) {
       if (args.priority && args.priority !== "all" && task.priority !== args.priority) continue;
       if (!matchesSearch(task, args.search)) continue;
-      if (await visible(ctx, args.companyId, membership, task, "one_time", auth)) rows.push(await enrichedOneTime(ctx, task));
+      if (await visible(ctx, args.companyId, membership, task, "one_time", auth)) {
+        const canUpdate = await canUpdateTask(ctx, args.companyId, membership, task, "one_time", auth.caps, managedIds);
+        const canDelete = await canDeleteTask(ctx, args.companyId, membership, task, "one_time", auth.caps, managedIds);
+        rows.push(await enrichedOneTime(ctx, task, canUpdate, canDelete));
+      }
     }
     return { ...page, page: rows };
   },
@@ -230,7 +284,9 @@ export const getJd = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const task = await ctx.db.get(args.taskId);
     if (!task || task.companyId !== args.companyId || !(await visible(ctx, args.companyId, membership, task, "jd"))) throw new ConvexError("Task not found.");
-    return { task: await enrichedJd(ctx, task), canUpdate: await canUpdateTask(ctx, args.companyId, membership, task, "jd") };
+    const canUpdate = await canUpdateTask(ctx, args.companyId, membership, task, "jd");
+    const canDelete = await canDeleteTask(ctx, args.companyId, membership, task, "jd");
+    return { task: await enrichedJd(ctx, task, undefined, canUpdate, canDelete), canUpdate, canDelete };
   },
 });
 
@@ -543,7 +599,9 @@ export const getOneTime = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const task = await ctx.db.get(args.taskId);
     if (!task || task.companyId !== args.companyId || !(await visible(ctx, args.companyId, membership, task, "one_time"))) throw new ConvexError("Task not found.");
-    return { task: await enrichedOneTime(ctx, task), canUpdate: await canUpdateTask(ctx, args.companyId, membership, task, "one_time") };
+    const canUpdate = await canUpdateTask(ctx, args.companyId, membership, task, "one_time");
+    const canDelete = await canDeleteTask(ctx, args.companyId, membership, task, "one_time");
+    return { task: await enrichedOneTime(ctx, task, canUpdate, canDelete), canUpdate, canDelete };
   },
 });
 
@@ -876,7 +934,7 @@ export const assignableUsers = query({
       const all = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
       ids = new Set(all.filter((m) => m.active).map((m) => m._id));
     } else if (caps.has(`${prefix}:assign:managed` as any)) {
-      ids = await scopedMembershipIds(ctx, args.companyId, membership);
+      ids = await getManagedMembershipIds(ctx, args.companyId, membership._id);
     } else if (caps.has(`${prefix}:assign:self` as any)) {
       ids = new Set([membership._id]);
     } else {
@@ -964,7 +1022,7 @@ export const aiAssignableUsers = query({
       const all = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
       ids = new Set(all.filter((m) => m.active).map((m) => m._id));
     } else if (caps.has(`${prefix}:assign:managed` as any)) {
-      ids = await scopedMembershipIds(ctx, args.companyId, membership);
+      ids = await getManagedMembershipIds(ctx, args.companyId, membership._id);
     } else if (caps.has(`${prefix}:assign:self` as any)) {
       ids = new Set([membership._id]);
     } else {

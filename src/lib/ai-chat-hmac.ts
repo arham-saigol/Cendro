@@ -11,7 +11,14 @@ export function createAiPersistencePayload(params: {
   requestId: string;
   content: string;
 }): string {
-  return `${params.companyId}:${params.sessionId}:${params.role}:${params.timestamp}:${params.requestId}:${params.content}`;
+  return JSON.stringify([
+    params.companyId,
+    params.sessionId,
+    params.role,
+    params.timestamp,
+    params.requestId,
+    params.content,
+  ]);
 }
 
 export async function signAiPersistencePayload(

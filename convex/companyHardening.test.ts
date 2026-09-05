@@ -160,4 +160,100 @@ describe("company management & invitation hardening", () => {
       })
     ).rejects.toThrow("At least one active member must be able to manage permissions.");
   });
+
+  test("Reissuing invitation revokes matching pending records even with over 500 invitations in the company", async () => {
+    const f = await createAuthzFixture();
+
+    const targetEmail = "crowded@example.com";
+    const now = Date.now();
+
+    // Insert an initial pending invitation for targetEmail
+    const oldInvite = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: targetEmail,
+      role: "Employee",
+    });
+
+    // Seed 510 dummy pending invitations for companyA so the old invite is well outside an initial 500-item scan
+    await f.t.run(async (ctx) => {
+      for (let i = 0; i < 510; i++) {
+        await ctx.db.insert("invitations", {
+          companyId: f.companyA,
+          email: `dummy${i}@example.com`,
+          role: "Employee",
+          token: `dummy-token-${i}`,
+          status: "pending",
+          expiresAt: now + 86400000,
+          createdAt: now,
+        });
+      }
+    });
+
+    // Reissue an invitation for targetEmail
+    const newInvite = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: targetEmail,
+      role: "Employee",
+    });
+
+    // Old token must be revoked
+    await expect(
+      f.t.withIdentity(identity("crowded", targetEmail, true)).mutation(api.invitations.accept, {
+        token: oldInvite.token,
+      })
+    ).rejects.toThrow("Invitation not found.");
+
+    // New token must succeed
+    await expect(
+      f.t.withIdentity(identity("crowded", targetEmail, true)).mutation(api.invitations.accept, {
+        token: newInvite.token,
+      })
+    ).resolves.toBeDefined();
+  });
+
+  test("Deactivating member preserves permission overrides, and non-permission-admin cannot reactivate a member with manage_permissions", async () => {
+    const f = await createAuthzFixture();
+
+    // Give employee1M an override: company:manage_permissions
+    await f.setOverride(f.companyA, f.employee1M, "company:manage_permissions", "allow");
+
+    // Deactivate employee1M
+    await f.asUser("adminA").mutation(api.companyManagement.setUserActive, {
+      companyId: f.companyA,
+      membershipId: f.employee1M,
+      active: false,
+    });
+
+    // Verify permission overrides are STILL preserved
+    const overrides = await f.t.run(async (ctx) => {
+      return await ctx.db
+        .query("permissionOverrides")
+        .withIndex("by_membership", (q) => q.eq("membershipId", f.employee1M))
+        .collect();
+    });
+    expect(overrides.length).toBe(1);
+    expect(overrides[0].capability).toBe("company:manage_permissions");
+
+    // Give managerA company:manage_users so managerA can activate/deactivate regular users
+    await f.setOverride(f.companyA, f.managerM, "company:manage_users", "allow");
+
+    // Manager A does NOT have company:manage_permissions, so trying to reactivate employee1M (who holds company:manage_permissions override) must fail
+    await expect(
+      f.asUser("managerA").mutation(api.companyManagement.setUserActive, {
+        companyId: f.companyA,
+        membershipId: f.employee1M,
+        active: true,
+      })
+    ).rejects.toThrow("You do not have access to activate a permission administrator.");
+
+    // Admin A (who has company:manage_permissions) CAN reactivate employee1M
+    await expect(
+      f.asUser("adminA").mutation(api.companyManagement.setUserActive, {
+        companyId: f.companyA,
+        membershipId: f.employee1M,
+        active: true,
+      })
+    ).resolves.toBeNull();
+  });
 });
+

@@ -187,6 +187,8 @@ function statusDotClass(status: ManualStatus | "overdue") { return status === "c
 function taskTypeFor(kind: Kind) { return kind === "jd" ? "jd" : "one_time"; }
 function hasAnyCapability(active: { capabilities: string[] } | null | undefined, capabilities: string[]) { return capabilities.some((capability) => active?.capabilities.includes(capability)); }
 function canCreateTasks(active: { capabilities: string[] } | null | undefined, kind: Kind) { return active?.capabilities.includes(kind === "jd" ? "tasks:jd:create" : "tasks:one_time:create") ?? false; }
+function canImportTasks(active: { capabilities: string[] } | null | undefined, kind: Kind) { return active?.capabilities.includes(kind === "jd" ? "tasks:jd:import" : "tasks:one_time:import") ?? false; }
+function canExportTasks(active: { capabilities: string[] } | null | undefined, kind: Kind) { return active?.capabilities.includes(kind === "jd" ? "tasks:jd:export" : "tasks:one_time:export") ?? false; }
 function canEditTasks(active: { capabilities: string[] } | null | undefined, kind: Kind) {
   const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   return hasAnyCapability(active, [`${prefix}:update:any`, `${prefix}:update:managed`, `${prefix}:update:self`]);
@@ -196,7 +198,14 @@ function canEditTaskRow(active: { capabilities: string[]; membership: { _id: str
   const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   if (active?.capabilities.includes(`${prefix}:update:any`)) return true;
   if (active?.capabilities.includes(`${prefix}:update:managed`)) return true;
-  return Boolean(active?.capabilities.includes(`${prefix}:update:self`) && taskHasAssignee(task, active.membership._id));
+  return Boolean(active?.capabilities.includes(`${prefix}:update:self`) && taskHasAssignee(task, active?.membership?._id));
+}
+function canDeleteTaskRow(active: { capabilities: string[]; membership: { _id: string; role: string } } | null | undefined, kind: Kind, task: any) {
+  if (task && typeof task.canDelete === "boolean") return task.canDelete;
+  const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
+  if (active?.capabilities.includes(`${prefix}:delete:any`)) return true;
+  if (active?.capabilities.includes(`${prefix}:delete:managed`)) return true;
+  return Boolean(active?.capabilities.includes(`${prefix}:delete:self`) && taskHasAssignee(task, active?.membership?._id));
 }
 function statusMatches(task: any, filter: StatusFilter) {
   if (filter === "all") return true;
@@ -1225,6 +1234,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const pageTitle = kind === "jd" ? "Job Description" : "Tasks";
   const description = kind === "jd" ? "Track and manage recurring responsibilities and scheduled duties." : "Track and manage assignments, action items, and upcoming deadlines.";
   const canCreate = canCreateTasks(active, kind);
+  const canImport = canImportTasks(active, kind);
+  const canExport = canExportTasks(active, kind);
   const frequencyFilterActive = kind === "jd" && frequency !== "all";
   const priorityFilterActive = kind === "one" && priorityFilter !== "all";
   const frequencyViewActive = kind === "jd" && personalFrequencyView !== "all";
@@ -1262,7 +1273,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const allVisibleSelected = visibleTasks.length > 0 && selectedVisibleCount === visibleTasks.length;
   const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
   const selectionCount = selectedIds.size;
-  const canDeleteSelection = selectionCount > 0 && !deleting;
+  const canDeleteSelection = selectionCount > 0 && !deleting && Array.from(selectedIds).every((id) => canDeleteTaskRow(active, kind, (tasks ?? visibleTasks).find((task: any) => task._id === id)));
   const selectedTaskId = selectionCount === 1 ? Array.from(selectedIds)[0] : null;
   const selectedTask = selectedTaskId ? (tasks ?? visibleTasks).find((task: any) => task._id === selectedTaskId) ?? null : null;
   const canEditSelectedTask = Boolean(selectedTask && canEditTaskRow(active, kind, selectedTask));
@@ -1559,7 +1570,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             onPriorityChange={changePriorityFilter}
             onAssigneeChange={setAssigneeFilter}
           />
-          {canCreate && (
+          {(canImport || canExport) && (
             <TaskImportExportMenu kind={kind} onNotification={(notif) => setImportBanner(notif)} />
           )}
           {canCreate && <Button variant="primary" size="sm" className="whitespace-nowrap" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />New task</Button>}
@@ -1619,7 +1630,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                   </button>
                 </>
               )}
-              {canCreate && (
+              {canExport && (
                 <>
                   <span className="task-selection-pill-divider" aria-hidden="true" />
                   <button type="button" className="task-selection-pill-btn" onClick={() => void handleExportSelection()} disabled={exportingSelection || deleting} aria-label={selectionCount === 1 ? "Export selected task" : `Export ${selectionCount} selected tasks`} title="Export selected">

@@ -118,8 +118,7 @@ export async function POST(req: Request) {
       onFinish: async ({ responseMessage, isAborted, finishReason }) => {
         if (isAborted || finishReason === "length" || finishReason === "error" || !finalTextOfAssistantMessage(responseMessage).trim()) return;
         const content = serializeAssistantMessage(responseMessage);
-        const secret = process.env.AI_CHAT_PERSISTENCE_SECRET;
-        if (!secret) return;
+        const secret = env.data.AI_CHAT_PERSISTENCE_SECRET;
         const timestamp = Date.now();
         const requestId = crypto.randomUUID();
         const payload = createAiPersistencePayload({

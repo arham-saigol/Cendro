@@ -67,6 +67,9 @@ export function TaskImportExportMenu({
   onNotification?: (notification: { type: "success" | "error"; message: string }) => void;
 }) {
   const { activeCompanyId, active } = useCompany();
+  const kindPrefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
+  const canImport = active?.capabilities.includes(`${kindPrefix}:import`) ?? false;
+  const canExport = active?.capabilities.includes(`${kindPrefix}:export`) ?? false;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const convex = useConvex();
   const commit = useMutation(api.taskImports.commitTaskImportBatch);
@@ -308,22 +311,26 @@ export function TaskImportExportMenu({
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
           <DropdownMenu.Content align="end" sideOffset={6} className="task-menu min-w-44">
-            <DropdownMenu.Item
-              className="task-menu-item"
-              disabled={isBusy}
-              onSelect={() => fileInputRef.current?.click()}
-            >
-              <Upload className="h-4 w-4" />
-              <span>Import tasks</span>
-            </DropdownMenu.Item>
-            <DropdownMenu.Item
-              className="task-menu-item"
-              disabled={isBusy}
-              onSelect={() => setExportRequested(true)}
-            >
-              <Download className="h-4 w-4" />
-              <span>Export tasks</span>
-            </DropdownMenu.Item>
+            {canImport && (
+              <DropdownMenu.Item
+                className="task-menu-item"
+                disabled={isBusy}
+                onSelect={() => fileInputRef.current?.click()}
+              >
+                <Upload className="h-4 w-4" />
+                <span>Import tasks</span>
+              </DropdownMenu.Item>
+            )}
+            {canExport && (
+              <DropdownMenu.Item
+                className="task-menu-item"
+                disabled={isBusy}
+                onSelect={() => setExportRequested(true)}
+              >
+                <Download className="h-4 w-4" />
+                <span>Export tasks</span>
+              </DropdownMenu.Item>
+            )}
           </DropdownMenu.Content>
         </DropdownMenu.Portal>
       </DropdownMenu.Root>

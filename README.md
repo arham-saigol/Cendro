@@ -6,9 +6,12 @@ Cendro is a Notion-like internal operations workspace for company-scoped tasks, 
 
 1. Install dependencies: `npm install`
 2. Copy `.env.example` to `.env.local` and fill in Clerk, Convex, Resend, AI Gateway, Voyage, and platform admin values.
-3. Configure Clerk Google OAuth and a Clerk JWT template named `convex` with audience/application ID `convex`.
+3. Configure Clerk Google OAuth and a Clerk JWT template named `convex` with audience/application ID `convex` and the `email_verified` claim (`email_verified: {{user.email_verified}}`) so invitation acceptance can verify email status.
 4. Create/connect a Convex deployment: `npx convex dev`.
-5. Before deploying/generating Convex functions, set Convex environment variables: `CLERK_JWT_ISSUER_DOMAIN` is required by `convex/auth.config.ts`; also set `PLATFORM_ADMIN_CLERK_USER_IDS` (comma-separated Clerk user IDs, e.g. `user_2...`), `AI_CHAT_PERSISTENCE_SECRET`, `RESEND_API_KEY`, `RESEND_FROM`, `APP_URL`, `VOYAGE_API_KEY`, and `VOYAGE_EMBEDDING_MODEL`.
+5. Before deploying/generating Convex functions, configure runtime environment variables:
+   - `CLERK_JWT_ISSUER_DOMAIN` is required by `convex/auth.config.ts`.
+   - Set `PLATFORM_ADMIN_CLERK_USER_IDS` (comma-separated Clerk user IDs, e.g. `user_2...`) and `AI_CHAT_PERSISTENCE_SECRET` in both the Convex deployment environment and the Next.js host environment (`.env.local`).
+   - Also set `RESEND_API_KEY`, `RESEND_FROM`, `APP_URL`, `VOYAGE_API_KEY`, and `VOYAGE_EMBEDDING_MODEL` in Convex.
 6. Run the app: `npm run dev`.
 
 ## Validation

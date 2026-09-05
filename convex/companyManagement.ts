@@ -69,14 +69,42 @@ async function managerScope(ctx: any, managerMembershipId: Id<"companyMembership
 }
 
 async function clearUserManagementRows(ctx: any, membershipId: Id<"companyMemberships">, preserveOverrides = false) {
-  for (const row of await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
-  for (const row of await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
-  for (const row of await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
-  for (const row of await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
-  for (const row of await ctx.db.query("managerUserScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
-  for (const row of await ctx.db.query("managerUserScopes").withIndex("by_user", (q: any) => q.eq("userMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+  while (true) {
+    const rows = await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500);
+    if (!rows.length) break;
+    for (const row of rows) await ctx.db.delete(row._id);
+  }
+  while (true) {
+    const rows = await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500);
+    if (!rows.length) break;
+    for (const row of rows) await ctx.db.delete(row._id);
+  }
+  while (true) {
+    const rows = await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500);
+    if (!rows.length) break;
+    for (const row of rows) await ctx.db.delete(row._id);
+  }
+  while (true) {
+    const rows = await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500);
+    if (!rows.length) break;
+    for (const row of rows) await ctx.db.delete(row._id);
+  }
+  while (true) {
+    const rows = await ctx.db.query("managerUserScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500);
+    if (!rows.length) break;
+    for (const row of rows) await ctx.db.delete(row._id);
+  }
+  while (true) {
+    const rows = await ctx.db.query("managerUserScopes").withIndex("by_user", (q: any) => q.eq("userMembershipId", membershipId)).take(500);
+    if (!rows.length) break;
+    for (const row of rows) await ctx.db.delete(row._id);
+  }
   if (!preserveOverrides) {
-    for (const row of await ctx.db.query("permissionOverrides").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+    while (true) {
+      const rows = await ctx.db.query("permissionOverrides").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500);
+      if (!rows.length) break;
+      for (const row of rows) await ctx.db.delete(row._id);
+    }
   }
 }
 

@@ -4,7 +4,7 @@ import { internal } from "./_generated/api";
 import { action, internalAction, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { Capability } from "../src/lib/permissions";
-import { buildSopVisibilityContext, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds, sopDeleteCapability, sopManageCapability, visibleSop, visibleSopForSelf, type SopVisibilityContext } from "./permissions";
+import { buildSopVisibilityContext, getManagedMembershipIds, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds, sopDeleteCapability, sopManageCapability, visibleSop, visibleSopForSelf, type SopVisibilityContext } from "./permissions";
 import { nonEmpty } from "./validation";
 import { nextReference } from "./references";
 
@@ -21,7 +21,7 @@ async function getManagedScopeTargets(ctx: MutationCtx | QueryCtx, companyId: Id
   const branchIds = new Set<Id<"branches">>();
   const managedBranches = await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(500);
   for (const row of managedBranches) branchIds.add(row.branchId);
-  const userIds = await scopedMembershipIds(ctx, companyId, membership, capabilities, "sops:view:company");
+  const userIds = await getManagedMembershipIds(ctx, companyId, membership._id);
   for (const userId of userIds) {
     const assignments = await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", userId)).take(500);
     for (const assignment of assignments) branchIds.add(assignment.branchId);

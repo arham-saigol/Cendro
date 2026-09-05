@@ -10,7 +10,7 @@ Cendro is a Notion-like internal operations workspace for company-scoped tasks, 
 4. Create/connect a Convex deployment: `npx convex dev`.
 5. Before deploying/generating Convex functions, configure runtime environment variables:
    - `CLERK_JWT_ISSUER_DOMAIN` is required by `convex/auth.config.ts`.
-   - Set `PLATFORM_ADMIN_CLERK_USER_IDS` (comma-separated Clerk user IDs, e.g. `user_2...`) and `AI_CHAT_PERSISTENCE_SECRET` in both the Convex deployment environment and the Next.js host environment (`.env.local`).
+   - Set `PLATFORM_ADMIN_CLERK_USER_IDS` and `AI_CHAT_PERSISTENCE_SECRET` with identical effective values in both the Convex deployment environment and the Next.js host environment (`.env.local`): the same administrator user-ID set for `PLATFORM_ADMIN_CLERK_USER_IDS` (comma-separated Clerk user IDs, e.g. `user_2...`) and the same value for `AI_CHAT_PERSISTENCE_SECRET`.
    - Also set `RESEND_API_KEY`, `RESEND_FROM`, `APP_URL`, `VOYAGE_API_KEY`, and `VOYAGE_EMBEDDING_MODEL` in Convex.
 6. Run the app: `npm run dev`.
 

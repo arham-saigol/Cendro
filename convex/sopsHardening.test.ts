@@ -298,5 +298,51 @@ describe("SOP authorization hardening", () => {
       })
     ).rejects.toThrow("You can only target branches in your managed scope.");
   });
+
+  test("Manager with sops:view:company and sops:manage:user cannot target users outside manager scope", async () => {
+    const f = await createAuthzFixture();
+
+    // Grant managerA sops:view:company and sops:manage:user
+    await f.setOverride(f.companyA, f.managerM, "sops:view:company", "allow");
+    await f.setOverride(f.companyA, f.managerM, "sops:manage:user", "allow");
+
+    // Manager can target employee1M (within manager scope)
+    const validUserSopId = await f.asUser("managerA").mutation(api.sops.create, {
+      companyId: f.companyA,
+      title: "Employee 1 SOP",
+      content: "Content",
+      scopeType: "user",
+      branchIds: [],
+      departmentIds: [],
+      userMembershipIds: [f.employee1M],
+    });
+    expect(validUserSopId).toBeDefined();
+
+    // Manager CANNOT target employee2M (outside manager scope), even with sops:view:company
+    await expect(
+      f.asUser("managerA").mutation(api.sops.create, {
+        companyId: f.companyA,
+        title: "Employee 2 SOP",
+        content: "Content",
+        scopeType: "user",
+        branchIds: [],
+        departmentIds: [],
+        userMembershipIds: [f.employee2M],
+      })
+    ).rejects.toThrow("You can only target users in your managed scope.");
+
+    // Manager with sops:manage:company bypass CAN target any user
+    await f.setOverride(f.companyA, f.managerM, "sops:manage:company", "allow");
+    const bypassUserSopId = await f.asUser("managerA").mutation(api.sops.create, {
+      companyId: f.companyA,
+      title: "Employee 2 SOP (bypassed)",
+      content: "Content",
+      scopeType: "user",
+      branchIds: [],
+      departmentIds: [],
+      userMembershipIds: [f.employee2M],
+    });
+    expect(bypassUserSopId).toBeDefined();
+  });
 });
 

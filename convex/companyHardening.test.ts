@@ -255,5 +255,46 @@ describe("company management & invitation hardening", () => {
       })
     ).resolves.toBeNull();
   });
+
+  test("clearUserManagementRows deletes all matching rows across multiple batches", async () => {
+    const f = await createAuthzFixture();
+
+    // Insert 505 managerUserScopes rows for managerM
+    await f.t.run(async (ctx) => {
+      const now = Date.now();
+      for (let i = 0; i < 505; i++) {
+        await ctx.db.insert("managerUserScopes", {
+          companyId: f.companyA,
+          managerMembershipId: f.managerM,
+          userMembershipId: f.employee1M,
+          updatedAt: now,
+        });
+      }
+    });
+
+    const countBefore = await f.t.run(async (ctx) => {
+      const rows = await ctx.db
+        .query("managerUserScopes")
+        .withIndex("by_manager", (q) => q.eq("managerMembershipId", f.managerM))
+        .collect();
+      return rows.length;
+    });
+    expect(countBefore).toBeGreaterThan(500);
+
+    // Remove managerM via removeUsers (which calls clearUserManagementRows)
+    await f.asUser("adminA").mutation(api.companyManagement.removeUsers, {
+      companyId: f.companyA,
+      membershipIds: [f.managerM],
+    });
+
+    const countAfter = await f.t.run(async (ctx) => {
+      const rows = await ctx.db
+        .query("managerUserScopes")
+        .withIndex("by_manager", (q) => q.eq("managerMembershipId", f.managerM))
+        .collect();
+      return rows.length;
+    });
+    expect(countAfter).toBe(0);
+  });
 });
 

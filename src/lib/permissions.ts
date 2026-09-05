@@ -143,7 +143,6 @@ export const defaultRoleCapabilities: Record<Role, Capability[]> = {
     "tasks:one_time:update:self",
     "tasks:comment",
     "tasks:attachment:add",
-    "tasks:attachment:delete:own",
     "sops:view:self",
     "ai:use",
   ],

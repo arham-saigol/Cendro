@@ -157,7 +157,25 @@ describe("task authorization hardening", () => {
       size: 10,
     });
 
-    // Employee 1 CAN delete their OWN attachment
+    // Employee 1 CANNOT delete their OWN attachment by default (disabled for Employee by default)
+    await expect(
+      f.asUser("employeeA1").mutation(api.tasks.deleteAttachment, {
+        companyId: f.companyA,
+        attachmentId: emp1AttachmentId,
+      })
+    ).rejects.toThrow("You do not have access to delete this attachment.");
+
+    // With explicit allow override for tasks:attachment:delete:own, Employee 1 can delete their own attachment
+    await f.t.run(async (ctx) => {
+      await ctx.db.insert("permissionOverrides", {
+        companyId: f.companyA,
+        membershipId: f.employee1M,
+        capability: "tasks:attachment:delete:own",
+        effect: "allow",
+        updatedAt: Date.now(),
+      });
+    });
+
     await expect(
       f.asUser("employeeA1").mutation(api.tasks.deleteAttachment, {
         companyId: f.companyA,

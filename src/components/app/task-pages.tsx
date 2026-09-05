@@ -2036,19 +2036,22 @@ function InlinePropertyText({ value, placeholder = "—", ariaLabel, onSave, inp
   );
 }
 
-function AttachmentList({ attachments, canDelete, onDelete }: { attachments: any[]; canDelete: boolean; onDelete: (id: Id<"taskAttachments">) => void }) {
+function AttachmentList({ attachments, canDelete, onDelete }: { attachments: any[]; canDelete: boolean | ((attachment: any) => boolean); onDelete: (id: Id<"taskAttachments">) => void }) {
   if (attachments.length === 0) return <div className="text-[13px] text-[var(--ink-faint)]">No attachments.</div>;
   return (
     <div className="grid gap-1.5">
-      {attachments.map((attachment) => (
-        <div key={attachment._id} className="task-attachment-item group">
-          <Paperclip className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
-          <a className="min-w-0 flex-1 truncate hover:text-[var(--ink)]" href={attachment.url ?? "#"} target="_blank" rel="noreferrer" title={`${attachment.fileName} · ${humanSize(attachment.size)}${attachment.createdAt ? ` · ${formatDate(attachment.createdAt)}` : ""}`}>
-            {attachment.fileName}
-          </a>
-          {canDelete && <button type="button" className="task-icon-btn h-7 w-7 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100" onClick={() => onDelete(attachment._id)} aria-label={`Delete ${attachment.fileName}`}><Trash2 className="h-3.5 w-3.5" /></button>}
-        </div>
-      ))}
+      {attachments.map((attachment) => {
+        const showDelete = typeof canDelete === "function" ? canDelete(attachment) : canDelete;
+        return (
+          <div key={attachment._id} className="task-attachment-item group">
+            <Paperclip className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
+            <a className="min-w-0 flex-1 truncate hover:text-[var(--ink)]" href={attachment.url ?? "#"} target="_blank" rel="noreferrer" title={`${attachment.fileName} · ${humanSize(attachment.size)}${attachment.createdAt ? ` · ${formatDate(attachment.createdAt)}` : ""}`}>
+              {attachment.fileName}
+            </a>
+            {showDelete && <button type="button" className="task-icon-btn h-7 w-7 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100" onClick={() => onDelete(attachment._id)} aria-label={`Delete ${attachment.fileName}`}><Trash2 className="h-3.5 w-3.5" /></button>}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -2115,7 +2118,9 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const previousEditingCommentIdRef = useRef<Id<"taskComments"> | null>(null);
 
   const activityItems = useMemo(() => [...((activity?.items ?? []).slice().reverse()).filter((activityRow) => activityRow.kind !== "comment" || !optimisticDeletedCommentIds.includes(activityRow._id)).map((activityRow) => activityRow.kind === "comment" ? { ...activityRow, body: optimisticCommentBodies[activityRow._id] ?? activityRow.body } : activityRow), ...optimisticComments], [activity?.items, optimisticCommentBodies, optimisticComments, optimisticDeletedCommentIds]);
-  const canManageAttachments = active?.capabilities.includes("tasks:attachment:add") ?? false;
+  const canAddAttachments = active?.capabilities.includes("tasks:attachment:add") ?? false;
+  const canDeleteAnyAttachment = active?.capabilities.includes("tasks:attachment:delete:any") ?? false;
+  const canDeleteOwnAttachment = active?.capabilities.includes("tasks:attachment:delete:own") ?? false;
   const canComment = active?.capabilities.includes("tasks:comment") ?? false;
   const canEdit = Boolean(data?.canUpdate);
 
@@ -2365,9 +2370,20 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
           <h2 className="task-section-title !mb-0">Attachments</h2>
           {attachmentsQuery.status === "CanLoadMore" && <Button size="sm" variant="ghost" onClick={() => attachmentsQuery.loadMore(25)}>Load more</Button>}
         </div>
-        <AttachmentList attachments={attachments ?? []} canDelete={canManageAttachments} onDelete={(attachmentId) => deleteAttachment({ companyId: activeCompanyId as Id<"companies">, attachmentId })} />
+        <AttachmentList
+          attachments={attachments ?? []}
+          canDelete={(attachment) =>
+            canDeleteAnyAttachment ||
+            (canDeleteOwnAttachment && attachment.createdByMembershipId === active?.membership._id)
+          }
+          onDelete={(attachmentId) =>
+            deleteAttachment({ companyId: activeCompanyId as Id<"companies">, attachmentId }).catch((err) => {
+              setActionError(err instanceof Error ? err.message : "Could not delete attachment.");
+            })
+          }
+        />
         {uploadError && <p className="alert-error mt-3 rounded-md p-2 text-[13px]">{uploadError}</p>}
-        {canManageAttachments && (
+        {canAddAttachments && (
           <div className="task-attachment-add-row">
             <label className="task-attachment-add inline-flex cursor-pointer items-center gap-1.5">
               <input className="sr-only" type="file" disabled={uploading} onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); event.currentTarget.value = ""; }} />

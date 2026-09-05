@@ -70,13 +70,14 @@ describe("permissions catalog and defaults", () => {
       "tasks:one_time:update:self",
       "tasks:comment",
       "tasks:attachment:add",
-      "tasks:attachment:delete:own",
       "sops:view:self",
       "ai:use",
     ]);
 
     const actual = new Set(defaultRoleCapabilities.Employee);
     expect(actual).toEqual(expectedEmployeeCaps);
+    expect(actual.has("tasks:attachment:delete:own")).toBe(false);
+    expect(actual.has("tasks:attachment:delete:any")).toBe(false);
   });
 });
 

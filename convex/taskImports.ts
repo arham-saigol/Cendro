@@ -5,7 +5,7 @@ import { membershipCapabilities, requireCapability, scopedMembershipIds } from "
 import type { Capability } from "../src/lib/permissions";
 import { currentJdCycle } from "./taskCycles";
 import { recordMissedJdCycles } from "./tasks";
-import { nextReference } from "./references";
+import { syncReferenceCounter } from "./references";
 import { normalizeEmail, nonEmpty } from "./validation";
 
 const kindValidator = v.union(v.literal("jd"), v.literal("one_time"));
@@ -82,6 +82,7 @@ type ImportAuth = {
   scoped: Set<Id<"companyMemberships">>;
   assignable: Set<Id<"companyMemberships">>;
   membershipIdsByEmail: Map<string, Id<"companyMemberships">[]>;
+  companyMemberEmails: Set<string>;
 };
 
 function prefix(kind: TaskKind) { return kind === "jd" ? "JD" : "TSK"; }
@@ -99,7 +100,7 @@ async function fingerprintRows(rows: ReviewedRow[]) {
 
 function parseReference(reference: string | null, kind: TaskKind) {
   const normalized = normalizedReference(reference);
-  if (!normalized) return { value: null as string | null };
+  if (!normalized) return { value: null as string | null, error: `Task code is required and must match ${prefix(kind)}-001.` };
   const valid = kind === "jd"
     ? /^JD-\d{3,}$/.test(normalized)
     : /^(?:TSK|OT)-\d{3,}$/.test(normalized);
@@ -107,9 +108,9 @@ function parseReference(reference: string | null, kind: TaskKind) {
   return { value: normalized };
 }
 
-function validateReference(reference: string | null, kind: TaskKind) {
+function validateReference(reference: string | null, kind: TaskKind): string {
   const parsed = parseReference(reference, kind);
-  if (parsed.error) fail(parsed.error);
+  if (parsed.error || !parsed.value) fail(parsed.error ?? `Task code is required and must match ${prefix(kind)}-001.`);
   return parsed.value;
 }
 
@@ -125,24 +126,33 @@ async function buildImportAuth(ctx: Ctx, companyId: Id<"companies">, membership:
   const p = capabilityPrefix(kind);
   const needsScope = caps.has(`${p}:update:managed` as Capability) || caps.has(`${p}:assign:managed` as Capability);
   const scoped = needsScope ? await scopedMembershipIds(ctx, companyId, membership) : new Set<Id<"companyMemberships">>([membership._id]);
+
+  const allMemberships = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(500);
+  const activeMemberships = allMemberships.filter((row) => row.active);
+
   let assignable: Set<Id<"companyMemberships">>;
   if (caps.has(`${p}:assign:any` as Capability)) {
-    const memberships = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(500);
-    assignable = new Set(memberships.filter((row) => row.active).map((row) => row._id));
-  } else if (caps.has(`${p}:assign:managed` as Capability)) assignable = new Set(scoped);
-  else if (caps.has(`${p}:assign:self` as Capability)) assignable = new Set([membership._id]);
-  else assignable = new Set();
+    assignable = new Set(activeMemberships.map((row) => row._id));
+  } else if (caps.has(`${p}:assign:managed` as Capability)) {
+    assignable = new Set(scoped);
+  } else if (caps.has(`${p}:assign:self` as Capability)) {
+    assignable = new Set([membership._id]);
+  } else {
+    assignable = new Set();
+  }
 
   const membershipIdsByEmail = new Map<string, Id<"companyMemberships">[]>();
-  for (const membershipId of assignable) {
-    const candidate = await ctx.db.get(membershipId);
-    if (!candidate || candidate.companyId !== companyId || !candidate.active) continue;
+  const companyMemberEmails = new Set<string>();
+  for (const candidate of activeMemberships) {
     const user = await ctx.db.get(candidate.userId);
     if (!user) continue;
     const email = normalizeEmail(user.email);
-    membershipIdsByEmail.set(email, [...(membershipIdsByEmail.get(email) ?? []), membershipId]);
+    companyMemberEmails.add(email);
+    if (assignable.has(candidate._id)) {
+      membershipIdsByEmail.set(email, [...(membershipIdsByEmail.get(email) ?? []), candidate._id]);
+    }
   }
-  return { ...capabilitiesForImport(caps, kind), caps, membership, scoped, assignable, membershipIdsByEmail } satisfies ImportAuth;
+  return { ...capabilitiesForImport(caps, kind), caps, membership, scoped, assignable, membershipIdsByEmail, companyMemberEmails } satisfies ImportAuth;
 }
 
 async function taskByReference(ctx: Ctx, companyId: Id<"companies">, kind: TaskKind, reference: string) {
@@ -160,7 +170,7 @@ function taskCanUpdate(auth: ImportAuth, task: Task, kind: TaskKind) {
 }
 
 function validateDraftValues(row: Draft, kind: TaskKind) {
-  const errors = row.warnings.filter((warning) => /^(Quantity must|Numeric due dates|Ambiguous due date|Due date must|Invalid (spreadsheet )?date|Invalid due date|Formula-like text|Frequency is not|Priority is not|Status ")/.test(warning));
+  const errors = row.warnings.filter((warning) => /^(Quantity must|Numeric due dates|Ambiguous due date|Due date must|Invalid (spreadsheet )?date|Invalid due date|Formula-like text|Frequency is not|Priority is not|Status "|Task code |Code must )/.test(warning));
   if (row.kind !== kind) errors.push("Wrong task kind.");
   if (!row.rowKey.trim() || row.rowKey.length > 200 || !row.sourceSheet.trim() || row.sourceSheet.length > 200 || !Number.isInteger(row.sourceRow) || row.sourceRow < 1 || row.sourceRow > 1_000_000) errors.push("Import row source is invalid.");
   if (row.reference !== null && row.reference.length > 200) errors.push("Reference is too long.");
@@ -188,20 +198,27 @@ function validateDraftValues(row: Draft, kind: TaskKind) {
 function resolveAssignees(auth: ImportAuth, draft: Draft, selected: Id<"companyMemberships">[] | null, existing: Task | null) {
   const hints: string[] = [];
   const autoMatched: Id<"companyMemberships">[] = [];
+  const errors: string[] = [];
   for (const email of draft.assigneeEmails) {
     let normalized: string;
     try { normalized = normalizeEmail(email); } catch { hints.push(email); continue; }
     const matches = auth.membershipIdsByEmail.get(normalized) ?? [];
-    if (matches.length !== 1) hints.push(email);
-    else autoMatched.push(matches[0]);
+    if (matches.length === 1) autoMatched.push(matches[0]);
+    else if (matches.length > 1) hints.push(email);
+    else {
+      if (auth.companyMemberEmails.has(normalized)) {
+        errors.push(`Assignee "${email}" is outside your assignable scope.`);
+      } else {
+        hints.push(email);
+      }
+    }
   }
   const proposed = selected ?? (hasAssigneeValue(draft) ? autoMatched : existing?.assigneeMembershipIds ?? []);
   const unique = Array.from(new Set(proposed));
-  const errors: string[] = [];
   if (selected && unique.some((id) => !auth.assignable.has(id))) errors.push("One or more selected assignees are outside your assignable scope.");
   if (selected && unique.length === 0) errors.push("Tasks need at least one assignee.");
   if (!selected && hasAssigneeValue(draft) && hints.length > 0) errors.push("Review unresolved assignee hints before importing.");
-  if (!selected && hasAssigneeValue(draft) && unique.length === 0 && !existing) errors.push("New tasks need at least one resolved assignee.");
+  if (!selected && hasAssigneeValue(draft) && unique.length === 0 && !existing && errors.length === 0) errors.push("New tasks need at least one resolved assignee.");
   return { membershipIds: unique, hints, errors };
 }
 
@@ -236,21 +253,31 @@ export const previewTaskImport = query({
       if (duplicateRowKeys.has(draft.rowKey)) errors.push("Duplicate source row in workbook.");
       if (reference) {
         const candidateTask = await taskByReference(ctx, args.companyId, args.kind, reference);
-        if (!candidateTask || !taskCanUpdate(auth, candidateTask, args.kind)) errors.push("Reference is unavailable or not updatable.");
-        else {
-          task = candidateTask;
-          operation = "update";
-          if (args.kind === "one_time") {
-            const oneTime = task as Doc<"oneTimeTasks">;
-            const isOverdue = Boolean(oneTime.overdueAt) || Boolean(oneTime.dueDate && oneTime.status !== "completed" && oneTime.dueDate < Date.now());
-            if (isOverdue && hasField(draft, "status") && draft.status !== "due") errors.push("Overdue tasks are locked and cannot be changed back.");
+        if (candidateTask) {
+          if (!taskCanUpdate(auth, candidateTask, args.kind)) {
+            errors.push("Task code belongs to an existing task that you do not have permission to edit.");
+          } else {
+            task = candidateTask;
+            operation = "update";
+            if (args.kind === "one_time") {
+              const oneTime = task as Doc<"oneTimeTasks">;
+              const isOverdue = Boolean(oneTime.overdueAt) || Boolean(oneTime.dueDate && oneTime.status !== "completed" && oneTime.dueDate < Date.now());
+              if (isOverdue && hasField(draft, "status") && draft.status !== "due") errors.push("Overdue tasks are locked and cannot be changed back.");
+            }
+          }
+        } else {
+          if (!auth.canCreate) {
+            errors.push("You do not have permission to create tasks for this task kind.");
+          } else {
+            operation = "create";
           }
         }
-      } else if (auth.canCreate) operation = "create";
-      else errors.push("You do not have create permission for this task kind.");
+      }
       const assignees = resolveAssignees(auth, draft, null, task);
       errors.push(...assignees.errors);
-      if (operation === "create" && assignees.membershipIds.length === 0) errors.push("New tasks need at least one assignee.");
+      if (operation === "create" && assignees.membershipIds.length === 0 && !assignees.errors.some((e) => e.includes("assignee"))) {
+        errors.push("New tasks need at least one assignee.");
+      }
       if (hasAssigneeValue(draft) && assignees.hints.length > 0) warnings.push(`Unresolved assignee hints: ${assignees.hints.join(", ")}`);
       if (operation === "create" && !draft.title?.trim()) errors.push("Title is required for new tasks.");
       if (operation === "create" && args.kind === "jd" && !draft.recurrence) errors.push("Frequency is required for new JD tasks.");
@@ -272,10 +299,22 @@ function editableSnapshot(task: Task, kind: TaskKind) {
 async function validateCommitRow(ctx: MutationCtx, companyId: Id<"companies">, kind: TaskKind, auth: ImportAuth, row: ReviewedRow) {
   const draft = row.draft;
   const reference = validateReference(draft.reference, kind);
-  const task = reference ? await taskByReference(ctx, companyId, kind, reference) : null;
-  if (reference && (!task || !taskCanUpdate(auth, task, kind))) fail("One or more import rows became unavailable. Re-preview and try again.");
-  if (task && (row.expectedUpdatedAt === undefined || task.updatedAt !== row.expectedUpdatedAt)) fail("One or more import rows changed since preview. Re-preview and try again.");
-  if (!reference && !auth.canCreate) fail("Create permission changed. Re-preview and try again.");
+  const task = await taskByReference(ctx, companyId, kind, reference);
+  if (task) {
+    if (!taskCanUpdate(auth, task, kind)) {
+      fail("Task code belongs to an existing task that you do not have permission to edit.");
+    }
+    if (row.expectedUpdatedAt === undefined || task.updatedAt !== row.expectedUpdatedAt) {
+      fail("One or more import rows changed since preview. Re-preview and try again.");
+    }
+  } else {
+    if (!auth.canCreate) {
+      fail("You do not have permission to create tasks for this task kind.");
+    }
+    if (row.expectedUpdatedAt !== undefined) {
+      fail("One or more import rows became unavailable. Re-preview and try again.");
+    }
+  }
   const errors = validateDraftValues(draft, kind);
   if (errors.length) fail(errors[0]);
   if (kind === "one_time" && task && hasField(draft, "status") && draft.status !== "due") {
@@ -291,7 +330,7 @@ async function validateCommitRow(ctx: MutationCtx, companyId: Id<"companies">, k
   if (!task && resolved.membershipIds.length === 0) fail("New tasks need an assignee.");
   const assigneePatchRequested = row.selectedAssigneeMembershipIds !== null || hasAssigneeValue(draft);
   if (assigneePatchRequested && resolved.membershipIds.length === 0) fail("Tasks need at least one assignee.");
-  return { draft, task, assigneeMembershipIds: resolved.membershipIds, assigneePatchRequested };
+  return { draft, task, reference, assigneeMembershipIds: resolved.membershipIds, assigneePatchRequested };
 }
 
 export const commitTaskImportBatch = mutation({
@@ -313,7 +352,7 @@ export const commitTaskImportBatch = mutation({
     if (includedRows.length === 0) fail("Import batches need at least one included row.");
     const rowKeys = includedRows.map((row) => row.draft.rowKey);
     if (new Set(rowKeys).size !== rowKeys.length) fail("Import batch contains duplicate source rows.");
-    const references = includedRows.map((row) => validateReference(row.draft.reference, args.kind)).filter((reference): reference is string => reference !== null);
+    const references = includedRows.map((row) => validateReference(row.draft.reference, args.kind));
     if (new Set(references).size !== references.length) fail("Import batch contains duplicate task references.");
     const priorReceipts = await ctx.db.query("taskImportBatches").withIndex("by_companyId_and_importKey", (q) => q.eq("companyId", args.companyId).eq("importKey", args.importKey)).take(MAX_IMPORT_BATCHES + 1);
     if (priorReceipts.length > MAX_IMPORT_BATCHES || priorReceipts.some((receipt) => receipt.actorMembershipId !== membership._id || receipt.kind !== args.kind || receipt.source !== args.source)) fail("Import key is not available.");
@@ -440,7 +479,8 @@ export const commitTaskImportBatch = mutation({
         updated += 1;
         taskReferences.push(item.task.reference);
       } else {
-        const reference = await nextReference(ctx, args.companyId, args.kind);
+        const reference = item.reference;
+        await syncReferenceCounter(ctx, args.companyId, args.kind, reference);
         if (args.kind === "jd") {
           const cycle = currentJdCycle(item.draft.recurrence!, now, company.timeZone);
           const initialStatus = hasField(item.draft, "status") && item.draft.status ? item.draft.status : "due";

@@ -1,3 +1,4 @@
+import { ConvexError } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 
@@ -15,21 +16,25 @@ const padLengths: Record<ReferenceKind, number> = {
   sop: 3,
 };
 
+export const MAX_REFERENCE_NUMBER = 999_999_999_999_999;
+
 /** Allocates a company-scoped, human-readable reference inside the caller's transaction. */
 export async function nextReference(ctx: MutationCtx, companyId: Id<"companies">, kind: ReferenceKind) {
   const counter = await ctx.db
     .query("referenceCounters")
     .withIndex("by_companyId_and_kind", (q) => q.eq("companyId", companyId).eq("kind", kind))
     .unique();
-  const number = (counter?.lastNumber ?? 0) + 1;
+  const current = Math.max(0, counter?.lastNumber ?? 0);
+  if (current >= MAX_REFERENCE_NUMBER) {
+    throw new ConvexError(`Reference limit reached for ${kind}.`);
+  }
+  const number = current + 1;
 
   if (counter) await ctx.db.patch(counter._id, { lastNumber: number });
   else await ctx.db.insert("referenceCounters", { companyId, kind, lastNumber: number });
 
   return `${prefixes[kind]}-${String(number).padStart(padLengths[kind], "0")}`;
 }
-
-export const MAX_REFERENCE_NUMBER = 999_999_999_999_999;
 
 /**
  * Ensures the company-scoped reference counter is at least as large as the numeric part

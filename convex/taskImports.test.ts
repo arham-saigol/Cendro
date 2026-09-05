@@ -5,7 +5,7 @@ import { describe, expect, test } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 import { currentJdCycle, defaultTimeZone } from "./taskCycles";
-import { syncReferenceCounter } from "./references";
+import { MAX_REFERENCE_NUMBER, nextReference, syncReferenceCounter } from "./references";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -733,6 +733,84 @@ describe("task import backend", () => {
         .unique();
       expect(counter).toBeNull();
     });
+  });
+
+  test("importing the largest accepted code advances counter and caps manual allocation before 16-digit overflow", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+
+    // 1. Preview and commit largest valid 15-digit code JD-999999999999999
+    const maxRef = `JD-${MAX_REFERENCE_NUMBER}`;
+    const preview = await admin.query(api.taskImports.previewTaskImport, {
+      companyId,
+      kind: "jd",
+      drafts: [draft({ reference: maxRef, title: "Max Code Task" })],
+    });
+    expect(preview.rows[0].operation).toBe("create");
+    expect(preview.rows[0].errors).toEqual([]);
+
+    const commitRes = await admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId,
+      kind: "jd",
+      importKey: "max-code-commit",
+      batchKey: "batch-1",
+      source: "cendro",
+      rows: [{
+        include: true,
+        selectedAssigneeMembershipIds: [adminMembershipId],
+        draft: draft({ reference: maxRef, title: "Max Code Task" }),
+      }],
+    });
+    expect(commitRes.taskReferences).toEqual([maxRef]);
+
+    // Counter must have synced to MAX_REFERENCE_NUMBER
+    const counter = await t.run(async (ctx) => {
+      return await ctx.db
+        .query("referenceCounters")
+        .withIndex("by_companyId_and_kind", (q) => q.eq("companyId", companyId).eq("kind", "jd"))
+        .unique();
+    });
+    expect(counter?.lastNumber).toBe(MAX_REFERENCE_NUMBER);
+
+    // 2. Re-import of the max-code task succeeds (round trip invariant preserved)
+    const reimportPreview = await admin.query(api.taskImports.previewTaskImport, {
+      companyId,
+      kind: "jd",
+      drafts: [draft({ reference: maxRef, title: "Max Code Task" })],
+    });
+    expect(reimportPreview.rows[0].operation).toBe("update");
+    expect(reimportPreview.rows[0].errors).toEqual([]);
+
+    // 3. Attempting subsequent manual creation caps allocation and throws instead of generating invalid 16-digit code JD-1000000000000000
+    await expect(admin.mutation(api.tasks.createJd, {
+      companyId,
+      title: "Overflow Task",
+      recurrence: "daily",
+      assigneeMembershipIds: [adminMembershipId],
+    })).rejects.toThrow(/Reference limit reached for jd/);
+
+    // 4. Directly calling nextReference also throws when capped
+    await expect(t.run(async (ctx) => {
+      return await nextReference(ctx, companyId, "jd");
+    })).rejects.toThrow(/Reference limit reached for jd/);
+
+    // 5. Capping also applies to one_time and sop
+    await expect(t.run(async (ctx) => {
+      await ctx.db.insert("referenceCounters", { companyId, kind: "one_time", lastNumber: MAX_REFERENCE_NUMBER });
+      return await nextReference(ctx, companyId, "one_time");
+    })).rejects.toThrow(/Reference limit reached for one_time/);
+
+    await expect(t.run(async (ctx) => {
+      await ctx.db.insert("referenceCounters", { companyId, kind: "sop", lastNumber: MAX_REFERENCE_NUMBER });
+      return await nextReference(ctx, companyId, "sop");
+    })).rejects.toThrow(/Reference limit reached for sop/);
+
+    // 6. When counter is at MAX_REFERENCE_NUMBER - 1, nextReference successfully allocates MAX_REFERENCE_NUMBER
+    const atBoundary = await t.run(async (ctx) => {
+      await ctx.db.patch(counter!._id, { lastNumber: MAX_REFERENCE_NUMBER - 1 });
+      return await nextReference(ctx, companyId, "jd");
+    });
+    expect(atBoundary).toBe(maxRef);
   });
 
   test("importing an update syncs reference counter ahead of stale counter to prevent collision", async () => {

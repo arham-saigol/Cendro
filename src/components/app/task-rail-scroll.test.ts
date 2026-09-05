@@ -258,7 +258,6 @@ describe("useTaskRailAutoScroll hook", () => {
     // Reset scroll position to test re-trigger
     railElement.scrollLeft = 0;
     railElement.dataset.scrollStart = "false";
-    const initialObservedCount = observedElements.length;
 
     // Switch company to "company-beta" with SAME role (canUseAllTasks: true),
     // SAME option count (ownFilterCount: 3), and SAME activeView ("all")

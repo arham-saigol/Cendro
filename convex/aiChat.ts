@@ -5,6 +5,7 @@ import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { membershipCapabilities, requireMembership } from "./permissions";
 import { nonEmpty } from "./validation";
+import { createAiPersistencePayload, verifyAiPersistenceSignature } from "../src/lib/ai-chat-hmac";
 
 function safeTitle(value: string) {
   return value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
@@ -17,9 +18,11 @@ const aiRateLimitConfigs = {
 
 async function assertSession(ctx: QueryCtx | MutationCtx, companyId: Id<"companies">, sessionId: Id<"aiChatSessions">) {
   const { membership, user } = await requireMembership(ctx, companyId);
+  const caps = await membershipCapabilities(ctx, membership);
+  if (!caps.has("ai:use")) throw new ConvexError("You do not have permission to use AI.");
   const session = await ctx.db.get(sessionId);
   if (!session || session.companyId !== companyId || session.membershipId !== membership._id) throw new ConvexError("Chat session not found.");
-  return { session, membership, user };
+  return { session, membership, user, caps };
 }
 
 const DELETE_MESSAGE_BATCH_SIZE = 100;
@@ -62,6 +65,8 @@ export const listSessions = query({
   args: { companyId: v.id("companies") },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
+    const caps = await membershipCapabilities(ctx, membership);
+    if (!caps.has("ai:use")) return [];
     const rows = await ctx.db.query("aiChatSessions").withIndex("by_membership_and_updatedAt", (q) => q.eq("membershipId", membership._id)).order("desc").take(50);
     return rows
       .filter((row) => row.companyId === args.companyId && row.hasMessages !== false)
@@ -73,6 +78,8 @@ export const createSession = mutation({
   args: { companyId: v.id("companies") },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
+    const caps = await membershipCapabilities(ctx, membership);
+    if (!caps.has("ai:use")) throw new ConvexError("You do not have permission to use AI.");
     const now = Date.now();
     return await ctx.db.insert("aiChatSessions", { companyId: args.companyId, membershipId: membership._id, hasMessages: false, createdAt: now, updatedAt: now });
   },
@@ -90,6 +97,8 @@ export const getOrCreateSession = mutation({
   args: { companyId: v.id("companies"), sessionId: v.optional(v.id("aiChatSessions")) },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
+    const caps = await membershipCapabilities(ctx, membership);
+    if (!caps.has("ai:use")) throw new ConvexError("You do not have permission to use AI.");
     if (args.sessionId) {
       const existing = await ctx.db.get(args.sessionId);
       if (existing && existing.companyId === args.companyId && existing.membershipId === membership._id) return existing._id;
@@ -102,9 +111,8 @@ export const getOrCreateSession = mutation({
 export const authorizeSessionForAgent = query({
   args: { companyId: v.id("companies"), sessionId: v.id("aiChatSessions") },
   handler: async (ctx, args) => {
-    const { membership } = await assertSession(ctx, args.companyId, args.sessionId);
-    const capabilities = await membershipCapabilities(ctx, membership);
-    return { membershipId: membership._id, role: membership.role, capabilities: Array.from(capabilities) };
+    const { membership, caps } = await assertSession(ctx, args.companyId, args.sessionId);
+    return { membershipId: membership._id, role: membership.role, capabilities: Array.from(caps) };
   },
 });
 
@@ -119,7 +127,13 @@ export const listMessages = query({
 });
 
 export const appendMessage = mutation({
-  args: { companyId: v.id("companies"), sessionId: v.id("aiChatSessions"), role: v.union(v.literal("user"), v.literal("assistant"), v.literal("tool")), content: v.string(), clientMessageId: v.optional(v.string()) },
+  args: {
+    companyId: v.id("companies"),
+    sessionId: v.id("aiChatSessions"),
+    role: v.literal("user"),
+    content: v.string(),
+    clientMessageId: v.optional(v.string()),
+  },
   handler: async (ctx, args) => {
     const { session } = await assertSession(ctx, args.companyId, args.sessionId);
     const content = nonEmpty(args.content, "Message");
@@ -128,7 +142,78 @@ export const appendMessage = mutation({
       if (existing) return existing._id;
     }
     const now = Date.now();
-    const id = await ctx.db.insert("aiChatMessages", { sessionId: args.sessionId, role: args.role, content, clientMessageId: args.clientMessageId, createdAt: now });
+    const id = await ctx.db.insert("aiChatMessages", { sessionId: args.sessionId, role: "user", content, clientMessageId: args.clientMessageId, createdAt: now });
+    await ctx.db.patch(session._id, { hasMessages: true, updatedAt: now });
+    return id;
+  },
+});
+
+export const persistServerMessage = mutation({
+  args: {
+    companyId: v.id("companies"),
+    sessionId: v.id("aiChatSessions"),
+    role: v.union(v.literal("assistant"), v.literal("tool")),
+    content: v.string(),
+    clientMessageId: v.optional(v.string()),
+    timestamp: v.number(),
+    requestId: v.string(),
+    signature: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const secret = process.env.AI_CHAT_PERSISTENCE_SECRET;
+    if (!secret) {
+      throw new ConvexError("AI persistence secret is not configured.");
+    }
+    const now = Date.now();
+    if (Math.abs(now - args.timestamp) > 5 * 60 * 1000) {
+      throw new ConvexError("Persistence request expired.");
+    }
+
+    const existingReq = await ctx.db
+      .query("aiChatPersistenceRequests")
+      .withIndex("by_requestId", (q) => q.eq("requestId", args.requestId))
+      .unique();
+    if (existingReq) {
+      throw new ConvexError("Replay detected: request ID already used.");
+    }
+
+    const payload = createAiPersistencePayload({
+      companyId: args.companyId,
+      sessionId: args.sessionId,
+      role: args.role,
+      timestamp: args.timestamp,
+      requestId: args.requestId,
+      content: args.content,
+    });
+    const isValid = await verifyAiPersistenceSignature(secret, payload, args.signature);
+    if (!isValid) {
+      throw new ConvexError("Invalid persistence signature.");
+    }
+
+    await ctx.db.insert("aiChatPersistenceRequests", {
+      requestId: args.requestId,
+      createdAt: now,
+    });
+
+    const { session } = await assertSession(ctx, args.companyId, args.sessionId);
+
+    if (args.clientMessageId) {
+      const existing = await ctx.db
+        .query("aiChatMessages")
+        .withIndex("by_session_and_clientMessageId", (q) =>
+          q.eq("sessionId", args.sessionId).eq("clientMessageId", args.clientMessageId)
+        )
+        .unique();
+      if (existing) return existing._id;
+    }
+
+    const id = await ctx.db.insert("aiChatMessages", {
+      sessionId: args.sessionId,
+      role: args.role,
+      content: args.content,
+      clientMessageId: args.clientMessageId,
+      createdAt: now,
+    });
     await ctx.db.patch(session._id, { hasMessages: true, updatedAt: now });
     return id;
   },

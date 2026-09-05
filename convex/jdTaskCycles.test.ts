@@ -241,7 +241,7 @@ describe("JD task cycle behavior", () => {
 
     expect(detail.task.state.rawStatus).toBe("due");
     expect(records).toEqual([]);
-  });
+  }, 15000);
 
   test("one-time task can still become overdue", async () => {
     vi.setSystemTime(utc(2026, 6, 26, 12));

@@ -771,7 +771,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   const [pendingCell, setPendingCell] = useState<string | null>(null);
   const [optimisticRows, setOptimisticRows] = useState<Record<string, Record<string, unknown>>>({});
   const debouncedSearch = useDebouncedValue(search);
-  const canUseAllSops = active?.membership.role === "Admin" || active?.membership.role === "Manager";
+  const canUseAllSops = Boolean(active?.capabilities.some((c) => c === "sops:view:company" || c === "sops:view:managed"));
   const effectiveSopView: SopView = canUseAllSops ? sopView : "my";
   const sops = useQuery(api.sops.listRows, activeCompanyId ? {
     companyId: activeCompanyId,
@@ -796,10 +796,10 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   const allVisibleSelected = rows.length > 0 && selectedVisibleCount === rows.length;
   const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
   const selectionCount = selectedIds.size;
-  const canDeleteSelection = selectionCount > 0 && !deleting;
+  const canDeleteSelection = selectionCount > 0 && !deleting && Array.from(selectedIds).every((id) => rows.find((s) => s._id === id)?.canDelete !== false);
   const selectedSopId = selectionCount === 1 ? Array.from(selectedIds)[0] : null;
   const selectedSop = selectedSopId ? rows.find((sop) => sop._id === selectedSopId) ?? null : null;
-  const canEditSelectedSop = Boolean(selectedSop && canManageSop(active, selectedSop.scopeType as ScopeType));
+  const canEditSelectedSop = Boolean(selectedSop && (selectedSop.canUpdate ?? canManageSop(active, selectedSop.scopeType as ScopeType)));
 
   useEffect(() => { if (searchOpen) searchInputRef.current?.focus(); }, [searchOpen]);
 
@@ -1084,7 +1084,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                 {rows.map((sop) => {
                   const isChecked = selectedIds.has(sop._id);
                   const sopScope = sop.scopeType as ScopeType;
-                  const rowCanEdit = canManageSop(active, sopScope);
+                  const rowCanEdit = Boolean(sop.canUpdate ?? canManageSop(active, sopScope));
                   const targetName = sopTargetName(sop, active?.company.name);
                   const pending = (field: string) => pendingCell === `${sop._id}:${field}`;
                   const detailsHref = `/sops/${sop._id}`;
@@ -1286,7 +1286,7 @@ function SopDetailNotFound({ onBack }: { onBack: () => void }) {
 export function SopDetail({ id }: { id: string }) {
   const router = useRouter();
   const { activeCompanyId, active } = useCompany();
-  const canShowScopeProperties = Boolean((active?.membership.role === "Admin" || active?.membership.role === "Manager") && canCreateSops(active));
+  const canShowScopeProperties = Boolean(canCreateSops(active) || canLoadSopScopeOptions(active));
   const serverSopResult = useQuery_experimental({ query: api.sops.get, args: activeCompanyId ? { companyId: activeCompanyId, sopId: id as Id<"sops"> } : "skip" });
   const serverSop = serverSopResult.status === "success" ? (serverSopResult.data as any) : undefined;
   const scopeOptions = useQuery(api.sops.scopeOptions, activeCompanyId && canShowScopeProperties && canLoadSopScopeOptions(active) ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
@@ -1307,7 +1307,7 @@ export function SopDetail({ id }: { id: string }) {
   const sop = optimisticSop ? { ...serverSop, ...optimisticSop } : serverSop;
   const sopScope = sop.scopeType as ScopeType;
   const editableScope = editableScopeTypes.includes(sopScope as EditableScopeType) ? sopScope as EditableScopeType : null;
-  const canEdit = canManageSop(active, sopScope);
+  const canEdit = Boolean(serverSop.canUpdate ?? canManageSop(active, sopScope));
   const targetName = sopTargetName(sop, active?.company.name);
 
   async function saveText(patch: { title?: string; body?: string }) {

@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "convex:codegen": "convex codegen",
-    "test": "vitest run"
+    "test": "vitest run",
+    "audit:authz": "node scripts/audit-convex-authz.mjs"
   },
   "dependencies": {
     "@ai-sdk/fireworks": "^2.0.57",

@@ -4,25 +4,24 @@ import { internal } from "./_generated/api";
 import { action, internalAction, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { Capability } from "../src/lib/permissions";
-import { buildSopVisibilityContext, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds, visibleSop, visibleSopForSelf, type SopVisibilityContext } from "./permissions";
+import { buildSopVisibilityContext, getManagedMembershipIds, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds, sopDeleteCapability, sopManageCapability, visibleSop, visibleSopForSelf, type SopVisibilityContext } from "./permissions";
 import { nonEmpty } from "./validation";
 import { nextReference } from "./references";
 
-const unnamedUserDisplay = "Unnamed user";
-function firstName(user: Doc<"appUsers">) { return user.firstName.trim() || user.secondName?.trim() || unnamedUserDisplay; }
-function fullName(user: Doc<"appUsers">) { return [user.firstName.trim(), user.secondName?.trim()].filter(Boolean).join(" ") || unnamedUserDisplay; }
 
 async function assertTargets(ctx: any, companyId: Id<"companies">, args: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
   for (const branchId of args.branchIds) { const branch = await ctx.db.get(branchId); if (!branch || branch.companyId !== companyId) throw new ConvexError("Branch not found."); }
   for (const departmentId of args.departmentIds) { const department = await ctx.db.get(departmentId); if (!department || department.companyId !== companyId) throw new ConvexError("Department not found."); }
   for (const membershipId of args.userMembershipIds) { const membership = await ctx.db.get(membershipId); if (!membership || membership.companyId !== companyId || !membership.active) throw new ConvexError("User not found."); }
 }
-async function getManagedScopeTargets(ctx: MutationCtx | QueryCtx, companyId: Id<"companies">, membership: Doc<"companyMemberships">) {
-  if (membership.role === "Admin") return null;
+
+async function getManagedScopeTargets(ctx: MutationCtx | QueryCtx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, caps?: Set<Capability>) {
+  const capabilities = caps ?? (await membershipCapabilities(ctx, membership));
+  if (capabilities.has("sops:manage:company")) return null;
   const branchIds = new Set<Id<"branches">>();
   const managedBranches = await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(500);
   for (const row of managedBranches) branchIds.add(row.branchId);
-  const userIds = await scopedMembershipIds(ctx, companyId, membership);
+  const userIds = await getManagedMembershipIds(ctx, companyId, membership._id);
   for (const userId of userIds) {
     const assignments = await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", userId)).take(500);
     for (const assignment of assignments) branchIds.add(assignment.branchId);
@@ -36,20 +35,59 @@ async function getManagedScopeTargets(ctx: MutationCtx | QueryCtx, companyId: Id
   }
   return { branchIds, departmentIds, userIds };
 }
-async function assertManagedTargets(ctx: MutationCtx | QueryCtx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, args: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
-  const managed = await getManagedScopeTargets(ctx, companyId, membership);
+
+async function assertManagedTargets(ctx: MutationCtx | QueryCtx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, args: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }, caps?: Set<Capability>) {
+  const managed = await getManagedScopeTargets(ctx, companyId, membership, caps);
   if (!managed) return;
   for (const branchId of args.branchIds) if (!managed.branchIds.has(branchId)) throw new ConvexError("You can only target branches in your managed scope.");
   for (const departmentId of args.departmentIds) if (!managed.departmentIds.has(departmentId)) throw new ConvexError("You can only target departments in your managed scope.");
   for (const userId of args.userMembershipIds) if (!managed.userIds.has(userId)) throw new ConvexError("You can only target users in your managed scope.");
 }
+
 function assertScopeSelection(args: { scopeType: "company" | "branch" | "department" | "user"; branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
   if (args.scopeType === "company" && (args.branchIds.length || args.departmentIds.length || args.userMembershipIds.length)) throw new ConvexError("Company-wide SOPs cannot target a branch, department, or user.");
   if (args.scopeType === "branch" && (args.branchIds.length !== 1 || args.departmentIds.length || args.userMembershipIds.length)) throw new ConvexError("Select one branch for branch scope.");
   if (args.scopeType === "department" && (args.departmentIds.length !== 1 || args.branchIds.length || args.userMembershipIds.length)) throw new ConvexError("Select one department for department scope.");
   if (args.scopeType === "user" && (args.userMembershipIds.length !== 1 || args.branchIds.length || args.departmentIds.length)) throw new ConvexError("Select one user for user scope.");
 }
-function manageCapability(scopeType: "company" | "branch" | "department" | "user"): Capability { return scopeType === "company" ? "sops:manage:company" : scopeType === "branch" ? "sops:manage:branch" : scopeType === "department" ? "sops:manage:department" : "sops:manage:user"; }
+
+async function canManageSopTargets(
+  ctx: MutationCtx | QueryCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  scopeType: Doc<"sops">["scopeType"],
+  targets: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] },
+  caps: Set<Capability>
+): Promise<boolean> {
+  const reqCap = sopManageCapability(scopeType);
+  if (!caps.has(reqCap)) return false;
+  if (scopeType === "company") return true;
+  const managed = await getManagedScopeTargets(ctx, companyId, membership, caps);
+  if (!managed) return true;
+  for (const b of targets.branchIds) if (!managed.branchIds.has(b)) return false;
+  for (const d of targets.departmentIds) if (!managed.departmentIds.has(d)) return false;
+  for (const u of targets.userMembershipIds) if (!managed.userIds.has(u)) return false;
+  return true;
+}
+
+async function canDeleteSopTargets(
+  ctx: MutationCtx | QueryCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  scopeType: Doc<"sops">["scopeType"],
+  targets: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] },
+  caps: Set<Capability>
+): Promise<boolean> {
+  const reqCap = sopDeleteCapability(scopeType);
+  if (!caps.has(reqCap)) return false;
+  if (scopeType === "company") return true;
+  const managed = await getManagedScopeTargets(ctx, companyId, membership, caps);
+  if (!managed) return true;
+  for (const b of targets.branchIds) if (!managed.branchIds.has(b)) return false;
+  for (const d of targets.departmentIds) if (!managed.departmentIds.has(d)) return false;
+  for (const u of targets.userMembershipIds) if (!managed.userIds.has(u)) return false;
+  return true;
+}
 const sopViewValidator = v.union(v.literal("all"), v.literal("my"));
 const sopScopeFilterValidator = v.union(v.literal("all"), v.literal("company"), v.literal("branch"), v.literal("department"), v.literal("user"));
 async function deleteEmbeddings(ctx: any, sopId: Id<"sops">) {
@@ -81,7 +119,7 @@ async function insertScopeRows(ctx: MutationCtx, companyId: Id<"companies">, sop
   for (const departmentId of args.departmentIds) await ctx.db.insert("sopDepartmentScopes", { companyId, sopId, departmentId });
   for (const userMembershipId of args.userMembershipIds) await ctx.db.insert("sopUserScopes", { companyId, sopId, userMembershipId });
 }
-async function withScopes(ctx: QueryCtx, sop: Doc<"sops">, companyName?: string) {
+async function withScopes(ctx: QueryCtx, sop: Doc<"sops">, membership: Doc<"companyMemberships">, companyName?: string, precomputedCaps?: Set<Capability>) {
   const branchIds = (await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500)).map((row) => row.branchId);
   const departmentIds = (await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500)).map((row) => row.departmentId);
   const userMembershipIds = (await ctx.db.query("sopUserScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500)).map((row) => row.userMembershipId);
@@ -94,16 +132,19 @@ async function withScopes(ctx: QueryCtx, sop: Doc<"sops">, companyName?: string)
     const department = departmentIds[0] ? await ctx.db.get(departmentIds[0]) : null;
     scopeTargetName = department?.companyId === sop.companyId ? department.name : "Unknown department";
   } else if (sop.scopeType === "user") {
-    const membership = userMembershipIds[0] ? await ctx.db.get(userMembershipIds[0]) : null;
-    const user = membership?.companyId === sop.companyId ? await ctx.db.get(membership.userId) : null;
+    const userMembership = userMembershipIds[0] ? await ctx.db.get(userMembershipIds[0]) : null;
+    const user = userMembership?.companyId === sop.companyId ? await ctx.db.get(userMembership.userId) : null;
     if (user) {
-      scopeTargetName = memberFullName(membership, user);
-      scopeTargetUser = { firstName: memberFirstName(membership, user), name: scopeTargetName, imageUrl: user.imageUrl ?? null };
+      scopeTargetName = memberFullName(userMembership, user);
+      scopeTargetUser = { firstName: memberFirstName(userMembership, user), name: scopeTargetName, imageUrl: user.imageUrl ?? null };
     } else {
       scopeTargetName = "Unknown user";
     }
   }
-  return { ...sop, branchIds, departmentIds, userMembershipIds, scopeTargetName, scopeTargetUser };
+  const caps = precomputedCaps ?? (await membershipCapabilities(ctx, membership));
+  const canUpdate = await canManageSopTargets(ctx, sop.companyId, membership, sop.scopeType, { branchIds, departmentIds, userMembershipIds }, caps);
+  const canDelete = await canDeleteSopTargets(ctx, sop.companyId, membership, sop.scopeType, { branchIds, departmentIds, userMembershipIds }, caps);
+  return { ...sop, branchIds, departmentIds, userMembershipIds, scopeTargetName, scopeTargetUser, canUpdate, canDelete };
 }
 
 async function sopMatchesFilters(ctx: QueryCtx, sop: Doc<"sops">, args: { scope?: "all" | Doc<"sops">["scopeType"]; branchId?: Id<"branches">; userMembershipId?: Id<"companyMemberships"> }) {
@@ -133,6 +174,7 @@ async function sopMatchesFilters(ctx: QueryCtx, sop: Doc<"sops">, args: { scope?
 
 async function sopVisibleForView(ctx: QueryCtx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, sop: Doc<"sops">, view: "all" | "my" | undefined, visibility: SopVisibilityContext | null, caps: Set<Capability>, canUseAllView: boolean) {
   if (view === "all" && canUseAllView) return await visibleSop(ctx, companyId, membership, sop, visibility, caps);
+  if (!caps.has("sops:view:self")) return false;
   return await visibleSopForSelf(ctx, companyId, membership, sop);
 }
 
@@ -141,7 +183,7 @@ async function filteredSopRows(ctx: QueryCtx, args: { companyId: Id<"companies">
   const company = await ctx.db.get(args.companyId);
   const caps = await membershipCapabilities(ctx, membership);
   const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
-  const canUseAllView = membership.role === "Admin" || caps.has("sops:manage:company") || caps.has("sops:manage:branch") || caps.has("sops:manage:department") || caps.has("sops:manage:user");
+  const canUseAllView = caps.has("sops:view:company") || caps.has("sops:view:managed");
   const out = [];
   const search = args.search?.trim().toLowerCase();
   for await (const sop of ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc")) {
@@ -149,7 +191,7 @@ async function filteredSopRows(ctx: QueryCtx, args: { companyId: Id<"companies">
     if (!(await sopVisibleForView(ctx, args.companyId, membership, sop, args.view, visibility, caps, canUseAllView))) continue;
     if (!(await sopMatchesFilters(ctx, sop, args))) continue;
     if (search && !sop.reference.toLowerCase().includes(search) && !sop.title.toLowerCase().includes(search) && !sop.content.toLowerCase().includes(search)) continue;
-    out.push(await withScopes(ctx, sop, company?.name));
+    out.push(await withScopes(ctx, sop, membership, company?.name, caps));
   }
   return out;
 }
@@ -161,7 +203,7 @@ export const list = query({
     const company = await ctx.db.get(args.companyId);
     const caps = await membershipCapabilities(ctx, membership);
     const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
-    const canUseAllView = membership.role === "Admin" || caps.has("sops:manage:company") || caps.has("sops:manage:branch") || caps.has("sops:manage:department") || caps.has("sops:manage:user");
+    const canUseAllView = caps.has("sops:view:company") || caps.has("sops:view:managed");
     // Visibility/search filtering happens after database pagination, so pages may contain fewer items than requested; continuation tokens still advance correctly.
     const page = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
     const out = [];
@@ -170,7 +212,7 @@ export const list = query({
       if (!(await sopVisibleForView(ctx, args.companyId, membership, sop, args.view, visibility, caps, canUseAllView))) continue;
       if (!(await sopMatchesFilters(ctx, sop, args))) continue;
       if (search && !sop.reference.toLowerCase().includes(search) && !sop.title.toLowerCase().includes(search) && !sop.content.toLowerCase().includes(search)) continue;
-      out.push(await withScopes(ctx, sop, company?.name));
+      out.push(await withScopes(ctx, sop, membership, company?.name, caps));
     }
     return { ...page, page: out };
   },
@@ -181,7 +223,7 @@ export const listRows = query({
   handler: async (ctx, args) => await filteredSopRows(ctx, { ...args, limit: 200 }),
 });
 
-export const get = query({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found."); const company = await ctx.db.get(args.companyId); return await withScopes(ctx, sop, company?.name); } });
+export const get = query({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found."); const company = await ctx.db.get(args.companyId); return await withScopes(ctx, sop, membership, company?.name); } });
 
 const scopeOptionCapabilities: Capability[] = ["sops:manage:branch", "sops:manage:department", "sops:manage:user"];
 
@@ -222,13 +264,13 @@ export const filterOptions = query({
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     const caps = await membershipCapabilities(ctx, membership);
-    const canFilterManaged = membership.role === "Admin" || caps.has("sops:manage:company") || caps.has("sops:manage:branch") || caps.has("sops:manage:department") || caps.has("sops:manage:user") || caps.has("analytics:view:managed_scope") || caps.has("analytics:view:company");
+    const canFilterManaged = caps.has("sops:view:company") || caps.has("sops:view:managed") || caps.has("sops:manage:company") || caps.has("sops:manage:branch") || caps.has("sops:manage:department") || caps.has("sops:manage:user");
     if (!canFilterManaged) return { branches: [], departments: [], users: [] };
 
     const branchIds = new Set<Id<"branches">>();
     const departmentIds = new Set<Id<"departments">>();
     let userIds: Set<Id<"companyMemberships">>;
-    if (membership.role === "Admin" || caps.has("sops:manage:company") || caps.has("analytics:view:company")) {
+    if (caps.has("sops:view:company") || caps.has("sops:manage:company")) {
       const [branches, departments, memberships] = await Promise.all([
         ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500),
         ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500),
@@ -238,8 +280,8 @@ export const filterOptions = query({
       for (const department of departments) departmentIds.add(department._id);
       userIds = new Set(memberships.filter((m) => m.active).map((m) => m._id));
     } else {
-      const managed = await getManagedScopeTargets(ctx, args.companyId, membership);
-      userIds = managed?.userIds ?? await scopedMembershipIds(ctx, args.companyId, membership);
+      const managed = await getManagedScopeTargets(ctx, args.companyId, membership, caps);
+      userIds = managed?.userIds ?? await scopedMembershipIds(ctx, args.companyId, membership, caps, "sops:view:company");
       for (const branchId of managed?.branchIds ?? []) branchIds.add(branchId);
       for (const departmentId of managed?.departmentIds ?? []) departmentIds.add(departmentId);
     }
@@ -273,7 +315,7 @@ export const create = mutation({
   args: { companyId: v.id("companies"), title: v.string(), content: v.optional(v.string()), scopeType: v.union(v.literal("company"), v.literal("branch"), v.literal("department"), v.literal("user")), branchIds: v.array(v.id("branches")), departmentIds: v.array(v.id("departments")), userMembershipIds: v.array(v.id("companyMemberships")) },
   handler: async (ctx, args) => {
     const { membership } = await requireCapability(ctx, args.companyId, "sops:create");
-    await requireCapability(ctx, args.companyId, manageCapability(args.scopeType));
+    await requireCapability(ctx, args.companyId, sopManageCapability(args.scopeType));
     const title = nonEmpty(args.title, "Title");
     const content = args.content?.trim() ?? "";
     assertScopeSelection(args);
@@ -287,6 +329,17 @@ export const create = mutation({
     return id;
   },
 });
+
+async function currentSopTargets(ctx: MutationCtx | QueryCtx, sopId: Id<"sops">) {
+  const branchScopes = await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(500);
+  const departmentScopes = await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(500);
+  const userScopes = await ctx.db.query("sopUserScopes").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(500);
+  return {
+    branchIds: branchScopes.map((r) => r.branchId),
+    departmentIds: departmentScopes.map((r) => r.departmentId),
+    userMembershipIds: userScopes.map((r) => r.userMembershipId),
+  };
+}
 
 export const update = mutation({
   args: {
@@ -303,7 +356,9 @@ export const update = mutation({
     const { membership } = await requireMembership(ctx, args.companyId);
     const sop = await ctx.db.get(args.sopId);
     if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found.");
-    await requireCapability(ctx, args.companyId, manageCapability(sop.scopeType));
+    await requireCapability(ctx, args.companyId, sopManageCapability(sop.scopeType));
+    const currentTargets = await currentSopTargets(ctx, args.sopId);
+    await assertManagedTargets(ctx, args.companyId, membership, currentTargets);
 
     const patch: {
       title?: string;
@@ -320,7 +375,7 @@ export const update = mutation({
     if (args.content !== undefined) patch.content = args.content.trim();
 
     if (args.scopeType !== undefined) {
-      await requireCapability(ctx, args.companyId, manageCapability(args.scopeType));
+      await requireCapability(ctx, args.companyId, sopManageCapability(args.scopeType));
       const scopeArgs = { scopeType: args.scopeType, branchIds: args.branchIds ?? [], departmentIds: args.departmentIds ?? [], userMembershipIds: args.userMembershipIds ?? [] };
       assertScopeSelection(scopeArgs);
       await assertTargets(ctx, args.companyId, scopeArgs);
@@ -332,6 +387,7 @@ export const update = mutation({
 
     await ctx.db.patch(args.sopId, patch);
     await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: args.sopId });
+    return null;
   },
 });
 
@@ -341,8 +397,11 @@ export const updateScope = mutation({
     const { membership } = await requireMembership(ctx, args.companyId);
     const sop = await ctx.db.get(args.sopId);
     if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found.");
-    await requireCapability(ctx, args.companyId, manageCapability(sop.scopeType));
-    await requireCapability(ctx, args.companyId, manageCapability(args.scopeType));
+    await requireCapability(ctx, args.companyId, sopManageCapability(sop.scopeType));
+    const currentTargets = await currentSopTargets(ctx, args.sopId);
+    await assertManagedTargets(ctx, args.companyId, membership, currentTargets);
+
+    await requireCapability(ctx, args.companyId, sopManageCapability(args.scopeType));
     const scopeArgs = { scopeType: args.scopeType, branchIds: args.branchIds, departmentIds: args.departmentIds ?? [], userMembershipIds: args.userMembershipIds };
     assertScopeSelection(scopeArgs);
     await assertTargets(ctx, args.companyId, scopeArgs);
@@ -351,22 +410,27 @@ export const updateScope = mutation({
     await ctx.db.patch(args.sopId, { scopeType: args.scopeType, updatedByMembershipId: membership._id, updatedAt: Date.now() });
     await insertScopeRows(ctx, args.companyId, args.sopId, scopeArgs);
     await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: args.sopId });
+    return null;
   },
 });
 
 async function purgeSop(ctx: MutationCtx, companyId: Id<"companies">, sopId: Id<"sops">) {
-  const { membership } = await requireMembership(ctx, companyId);
+  const { membership, user } = await requireMembership(ctx, companyId);
   const sop = await ctx.db.get(sopId);
   if (!sop || sop.companyId !== companyId || !(await visibleSop(ctx, companyId, membership, sop))) throw new ConvexError("SOP not found.");
-  await requireCapability(ctx, companyId, manageCapability(sop.scopeType));
+  await requireCapability(ctx, companyId, sopDeleteCapability(sop.scopeType));
+  const currentTargets = await currentSopTargets(ctx, sopId);
+  await assertManagedTargets(ctx, companyId, membership, currentTargets);
   await deleteEmbeddings(ctx, sopId);
   await deleteScopeRows(ctx, sopId);
   await ctx.db.delete(sopId);
+  await ctx.db.insert("auditEvents", { companyId, actorUserId: user._id, action: "sop.delete", targetType: "sop", targetId: sopId, createdAt: Date.now() });
+  return null;
 }
 
-export const remove = mutation({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { await purgeSop(ctx, args.companyId, args.sopId); } });
+export const remove = mutation({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { await purgeSop(ctx, args.companyId, args.sopId); return null; } });
 
-export const removeBulk = mutation({ args: { companyId: v.id("companies"), sopIds: v.array(v.id("sops")) }, handler: async (ctx, args) => { for (const sopId of args.sopIds) await purgeSop(ctx, args.companyId, sopId); } });
+export const removeBulk = mutation({ args: { companyId: v.id("companies"), sopIds: v.array(v.id("sops")) }, handler: async (ctx, args) => { for (const sopId of args.sopIds) await purgeSop(ctx, args.companyId, sopId); return null; } });
 
 async function textSearch(ctx: any, args: { companyId: Id<"companies">; query: string }) {
   const { membership } = await requireMembership(ctx, args.companyId);

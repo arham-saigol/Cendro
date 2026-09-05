@@ -256,15 +256,6 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
     },
   },
   {
-    name: "list_people_in_scope",
-    description: "List people visible in the current user's scope. Use for non-sensitive workspace people questions, not role changes.",
-    inputSchema: z.object({ limit: z.number().int().min(1).max(50).default(20) }),
-    activityLabel: cendroAiActivityLabels.list_people_in_scope,
-    permission: "member",
-    risk: "read",
-    execute: async (input, ctx) => ({ ok: true, people: (await ctx.client.query(api.aiWorkspace.peopleInScope, { companyId: ctx.companyId, limit: input.limit })).map((row: any) => memberOut(ctx, row)) }),
-  },
-  {
     name: "get_analytics_summary",
     description: "Get a permission-scoped analytics summary for this workspace.",
     inputSchema: z.object({}),

@@ -187,17 +187,26 @@ function statusDotClass(status: ManualStatus | "overdue") { return status === "c
 function taskTypeFor(kind: Kind) { return kind === "jd" ? "jd" : "one_time"; }
 function hasAnyCapability(active: { capabilities: string[] } | null | undefined, capabilities: string[]) { return capabilities.some((capability) => active?.capabilities.includes(capability)); }
 function canCreateTasks(active: { capabilities: string[] } | null | undefined, kind: Kind) { return active?.capabilities.includes(kind === "jd" ? "tasks:jd:create" : "tasks:one_time:create") ?? false; }
+function canImportTasks(active: { capabilities: string[] } | null | undefined, kind: Kind) { return active?.capabilities.includes(kind === "jd" ? "tasks:jd:import" : "tasks:one_time:import") ?? false; }
+function canExportTasks(active: { capabilities: string[] } | null | undefined, kind: Kind) { return active?.capabilities.includes(kind === "jd" ? "tasks:jd:export" : "tasks:one_time:export") ?? false; }
 function canEditTasks(active: { capabilities: string[] } | null | undefined, kind: Kind) {
   const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   return hasAnyCapability(active, [`${prefix}:update:any`, `${prefix}:update:managed`, `${prefix}:update:self`]);
 }
 function canEditTaskRow(active: { capabilities: string[]; membership: { _id: string; role: string } } | null | undefined, kind: Kind, task: any) {
+  if (task && typeof task.canUpdate === "boolean") return task.canUpdate;
   const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   if (active?.capabilities.includes(`${prefix}:update:any`)) return true;
   if (active?.capabilities.includes(`${prefix}:update:managed`)) return true;
-  return Boolean(active?.capabilities.includes(`${prefix}:update:self`) && taskHasAssignee(task, active.membership._id));
+  return Boolean(active?.capabilities.includes(`${prefix}:update:self`) && taskHasAssignee(task, active?.membership?._id));
 }
-function canEditPriority(active: { membership: { role: string } } | null | undefined) { return active?.membership.role === "Admin" || active?.membership.role === "Manager"; }
+function canDeleteTaskRow(active: { capabilities: string[]; membership: { _id: string; role: string } } | null | undefined, kind: Kind, task: any) {
+  if (task && typeof task.canDelete === "boolean") return task.canDelete;
+  const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
+  if (active?.capabilities.includes(`${prefix}:delete:any`)) return true;
+  if (active?.capabilities.includes(`${prefix}:delete:managed`)) return true;
+  return Boolean(active?.capabilities.includes(`${prefix}:delete:self`) && taskHasAssignee(task, active?.membership?._id));
+}
 function statusMatches(task: any, filter: StatusFilter) {
   if (filter === "all") return true;
   const raw = rawStatus(task);
@@ -1188,7 +1197,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [pendingCell, setPendingCell] = useState<string | null>(null);
-  const canUseAllTasks = active?.membership.role === "Admin" || active?.membership.role === "Manager";
+  const taskPrefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
+  const canUseAllTasks = Boolean(active?.capabilities.some((c) => c === `${taskPrefix}:view:any` || c === `${taskPrefix}:view:managed`));
   const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip") as any[] | undefined;
   const filterableAssignees = useQuery(api.tasks.filterableAssignees, activeCompanyId && canUseAllTasks ? { companyId: activeCompanyId } : "skip") as any[] | undefined;
   const queryArgs = useMemo(() => {
@@ -1224,6 +1234,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const pageTitle = kind === "jd" ? "Job Description" : "Tasks";
   const description = kind === "jd" ? "Track and manage recurring responsibilities and scheduled duties." : "Track and manage assignments, action items, and upcoming deadlines.";
   const canCreate = canCreateTasks(active, kind);
+  const canImport = canImportTasks(active, kind);
+  const canExport = canExportTasks(active, kind);
   const frequencyFilterActive = kind === "jd" && frequency !== "all";
   const priorityFilterActive = kind === "one" && priorityFilter !== "all";
   const frequencyViewActive = kind === "jd" && personalFrequencyView !== "all";
@@ -1261,7 +1273,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const allVisibleSelected = visibleTasks.length > 0 && selectedVisibleCount === visibleTasks.length;
   const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
   const selectionCount = selectedIds.size;
-  const canDeleteSelection = selectionCount > 0 && !deleting;
+  const canDeleteSelection = selectionCount > 0 && !deleting && Array.from(selectedIds).every((id) => canDeleteTaskRow(active, kind, (tasks ?? visibleTasks).find((task: any) => task._id === id)));
   const selectedTaskId = selectionCount === 1 ? Array.from(selectedIds)[0] : null;
   const selectedTask = selectedTaskId ? (tasks ?? visibleTasks).find((task: any) => task._id === selectedTaskId) ?? null : null;
   const canEditSelectedTask = Boolean(selectedTask && canEditTaskRow(active, kind, selectedTask));
@@ -1297,7 +1309,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const ownFilterCount = kind === "jd" ? ownFrequencyValues.length : ownPriorityValues.length;
   const activeView = kind === "jd" ? personalFrequencyView : personalPriorityView;
 
-  const { syncToggleScrollState, canScrollStart, canScrollEnd, scrollRail } = useTaskRailAutoScroll({
+  const { syncToggleScrollState } = useTaskRailAutoScroll({
     railRef: viewToggleRef,
     activeCompanyId,
     canUseAllTasks,
@@ -1558,7 +1570,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             onPriorityChange={changePriorityFilter}
             onAssigneeChange={setAssigneeFilter}
           />
-          {canCreate && (
+          {(canImport || canExport) && (
             <TaskImportExportMenu kind={kind} onNotification={(notif) => setImportBanner(notif)} />
           )}
           {canCreate && <Button variant="primary" size="sm" className="whitespace-nowrap" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />New task</Button>}
@@ -1618,7 +1630,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                   </button>
                 </>
               )}
-              {canCreate && (
+              {canExport && (
                 <>
                   <span className="task-selection-pill-divider" aria-hidden="true" />
                   <button type="button" className="task-selection-pill-btn" onClick={() => void handleExportSelection()} disabled={exportingSelection || deleting} aria-label={selectionCount === 1 ? "Export selected task" : `Export ${selectionCount} selected tasks`} title="Export selected">
@@ -1775,7 +1787,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                       ) : (
                         showPriorityColumn && (
                           <td>
-                            {rowCanEdit && canEditPriority(active) ? (
+                            {rowCanEdit ? (
                               <InlineSelectCell
                                 value={task.priority as Priority}
                                 options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))}
@@ -2024,19 +2036,22 @@ function InlinePropertyText({ value, placeholder = "—", ariaLabel, onSave, inp
   );
 }
 
-function AttachmentList({ attachments, canDelete, onDelete }: { attachments: any[]; canDelete: boolean; onDelete: (id: Id<"taskAttachments">) => void }) {
+function AttachmentList({ attachments, canDelete, onDelete }: { attachments: any[]; canDelete: boolean | ((attachment: any) => boolean); onDelete: (id: Id<"taskAttachments">) => void }) {
   if (attachments.length === 0) return <div className="text-[13px] text-[var(--ink-faint)]">No attachments.</div>;
   return (
     <div className="grid gap-1.5">
-      {attachments.map((attachment) => (
-        <div key={attachment._id} className="task-attachment-item group">
-          <Paperclip className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
-          <a className="min-w-0 flex-1 truncate hover:text-[var(--ink)]" href={attachment.url ?? "#"} target="_blank" rel="noreferrer" title={`${attachment.fileName} · ${humanSize(attachment.size)}${attachment.createdAt ? ` · ${formatDate(attachment.createdAt)}` : ""}`}>
-            {attachment.fileName}
-          </a>
-          {canDelete && <button type="button" className="task-icon-btn h-7 w-7 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100" onClick={() => onDelete(attachment._id)} aria-label={`Delete ${attachment.fileName}`}><Trash2 className="h-3.5 w-3.5" /></button>}
-        </div>
-      ))}
+      {attachments.map((attachment) => {
+        const showDelete = typeof canDelete === "function" ? canDelete(attachment) : canDelete;
+        return (
+          <div key={attachment._id} className="task-attachment-item group">
+            <Paperclip className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
+            <a className="min-w-0 flex-1 truncate hover:text-[var(--ink)]" href={attachment.url ?? "#"} target="_blank" rel="noreferrer" title={`${attachment.fileName} · ${humanSize(attachment.size)}${attachment.createdAt ? ` · ${formatDate(attachment.createdAt)}` : ""}`}>
+              {attachment.fileName}
+            </a>
+            {showDelete && <button type="button" className="task-icon-btn h-7 w-7 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100" onClick={() => onDelete(attachment._id)} aria-label={`Delete ${attachment.fileName}`}><Trash2 className="h-3.5 w-3.5" /></button>}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -2103,7 +2118,9 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const previousEditingCommentIdRef = useRef<Id<"taskComments"> | null>(null);
 
   const activityItems = useMemo(() => [...((activity?.items ?? []).slice().reverse()).filter((activityRow) => activityRow.kind !== "comment" || !optimisticDeletedCommentIds.includes(activityRow._id)).map((activityRow) => activityRow.kind === "comment" ? { ...activityRow, body: optimisticCommentBodies[activityRow._id] ?? activityRow.body } : activityRow), ...optimisticComments], [activity?.items, optimisticCommentBodies, optimisticComments, optimisticDeletedCommentIds]);
-  const canManageAttachments = active?.capabilities.includes("tasks:attachment:add") ?? false;
+  const canAddAttachments = active?.capabilities.includes("tasks:attachment:add") ?? false;
+  const canDeleteAnyAttachment = active?.capabilities.includes("tasks:attachment:delete:any") ?? false;
+  const canDeleteOwnAttachment = active?.capabilities.includes("tasks:attachment:delete:own") ?? false;
   const canComment = active?.capabilities.includes("tasks:comment") ?? false;
   const canEdit = Boolean(data?.canUpdate);
 
@@ -2305,7 +2322,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
             </PropertyRow>
           ) : (
             <PropertyRow icon={<Flag className="h-3.5 w-3.5" />} label="Priority">
-              {canEdit && canEditPriority(active) ? (
+              {canEdit ? (
                 <InlineSelectCell
                   value={task.priority as Priority}
                   options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))}
@@ -2353,9 +2370,20 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
           <h2 className="task-section-title !mb-0">Attachments</h2>
           {attachmentsQuery.status === "CanLoadMore" && <Button size="sm" variant="ghost" onClick={() => attachmentsQuery.loadMore(25)}>Load more</Button>}
         </div>
-        <AttachmentList attachments={attachments ?? []} canDelete={canManageAttachments} onDelete={(attachmentId) => deleteAttachment({ companyId: activeCompanyId as Id<"companies">, attachmentId })} />
+        <AttachmentList
+          attachments={attachments ?? []}
+          canDelete={(attachment) =>
+            canDeleteAnyAttachment ||
+            (canDeleteOwnAttachment && attachment.createdByMembershipId === active?.membership._id)
+          }
+          onDelete={(attachmentId) =>
+            deleteAttachment({ companyId: activeCompanyId as Id<"companies">, attachmentId }).catch((err) => {
+              setActionError(err instanceof Error ? err.message : "Could not delete attachment.");
+            })
+          }
+        />
         {uploadError && <p className="alert-error mt-3 rounded-md p-2 text-[13px]">{uploadError}</p>}
-        {canManageAttachments && (
+        {canAddAttachments && (
           <div className="task-attachment-add-row">
             <label className="task-attachment-add inline-flex cursor-pointer items-center gap-1.5">
               <input className="sr-only" type="file" disabled={uploading} onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); event.currentTarget.value = ""; }} />

@@ -83,8 +83,8 @@ export function referenceForKind(value: unknown, kind: TaskImportKind) {
   const prefix = kind === "jd" ? "JD" : "TSK";
   if (!reference) return { value: null as string | null, error: `Task code is required and must match ${prefix}-001.` };
   const valid = kind === "jd"
-    ? /^JD-\d{3,}$/.test(reference)
-    : /^(?:TSK|OT)-\d{3,}$/.test(reference);
+    ? /^JD-\d{3,15}$/.test(reference)
+    : /^(?:TSK|OT)-\d{3,15}$/.test(reference);
   if (!valid) return { value: reference, error: `Code must match ${prefix}-001.` };
   return { value: reference };
 }

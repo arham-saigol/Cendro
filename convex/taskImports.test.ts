@@ -5,6 +5,7 @@ import { describe, expect, test } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 import { currentJdCycle, defaultTimeZone } from "./taskCycles";
+import { syncReferenceCounter } from "./references";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -691,5 +692,147 @@ describe("task import backend", () => {
     const titles = tasks.page.map((p) => p.title);
     expect(titles).toContain("Task 1 (Updated)");
     expect(titles).toContain("Task 2 (Updated)");
+  });
+
+  test("rejects unsafe numeric reference suffixes during preview, commit, and counter sync", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+
+    // Preview with unsafe numeric suffix
+    const preview = await admin.query(api.taskImports.previewTaskImport, {
+      companyId,
+      kind: "jd",
+      drafts: [draft({ reference: "JD-9007199254740992" }), draft({ rowKey: "JD Tasks:3", reference: "JD-99999999999999999999" })],
+    });
+    expect(preview.rows[0].operation).toBe("blocked");
+    expect(preview.rows[0].errors).toContain("Code must match JD-001.");
+    expect(preview.rows[1].operation).toBe("blocked");
+    expect(preview.rows[1].errors).toContain("Code must match JD-001.");
+
+    // Commit with unsafe numeric suffix fails
+    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId,
+      kind: "jd",
+      importKey: "unsafe-code-commit",
+      batchKey: "batch-1",
+      source: "cendro",
+      rows: [{
+        include: true,
+        selectedAssigneeMembershipIds: [adminMembershipId],
+        draft: draft({ reference: "JD-9007199254740992" }),
+      }],
+    })).rejects.toThrow(/Code must match JD-001/);
+
+    // Direct call to syncReferenceCounter ignores unsafe numbers without polluting counter
+    await t.run(async (ctx) => {
+      await syncReferenceCounter(ctx, companyId, "jd", "JD-9007199254740992");
+      await syncReferenceCounter(ctx, companyId, "jd", "JD-99999999999999999999");
+      const counter = await ctx.db
+        .query("referenceCounters")
+        .withIndex("by_companyId_and_kind", (q) => q.eq("companyId", companyId).eq("kind", "jd"))
+        .unique();
+      expect(counter).toBeNull();
+    });
+  });
+
+  test("importing an update syncs reference counter ahead of stale counter to prevent collision", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+
+    // Insert task directly with JD-100 and counter at 10
+    const { updatedAt } = await t.run(async (ctx) => {
+      const now = Date.now();
+      await ctx.db.insert("referenceCounters", { companyId, kind: "jd", lastNumber: 10 });
+      const taskId = await ctx.db.insert("jdTasks", {
+        companyId,
+        reference: "JD-100",
+        title: "Legacy Task",
+        recurrence: "daily",
+        cycleStartedAt: now,
+        status: "due",
+        statusCycleStart: now,
+        assigneeMembershipIds: [adminMembershipId],
+        createdByMembershipId: adminMembershipId,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { taskId, updatedAt: now };
+    });
+
+    // Import an update for JD-100
+    const result = await admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId,
+      kind: "jd",
+      importKey: "sync-on-update",
+      batchKey: "batch-1",
+      source: "cendro",
+      rows: [{
+        include: true,
+        expectedUpdatedAt: updatedAt,
+        selectedAssigneeMembershipIds: null,
+        draft: draft({ reference: "JD-100", title: "Updated Legacy Task", presentFields: ["reference", "title"], rawAssigneeText: "", assigneeEmails: [] }),
+      }],
+    });
+    expect(result.updated).toBe(1);
+
+    // Counter must have synced to 100
+    const counter = await t.run(async (ctx) => {
+      return await ctx.db
+        .query("referenceCounters")
+        .withIndex("by_companyId_and_kind", (q) => q.eq("companyId", companyId).eq("kind", "jd"))
+        .unique();
+    });
+    expect(counter?.lastNumber).toBe(100);
+
+    // Subsequent manual creation should allocate JD-101 without collision
+    const nextManualId = await admin.mutation(api.tasks.createJd, {
+      companyId,
+      title: "New Manual Task",
+      recurrence: "daily",
+      assigneeMembershipIds: [adminMembershipId],
+    });
+    const nextManual = await admin.query(api.tasks.getJd, { companyId, taskId: nextManualId });
+    expect(nextManual.task.reference).toBe("JD-101");
+  });
+
+  test("resolves assignees past the first 500 company memberships", async () => {
+    const { t, companyId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+
+    // Insert 505 memberships in the company
+    const { member505Id } = await t.run(async (ctx) => {
+      const now = Date.now();
+      let targetId: any = null;
+      for (let i = 3; i <= 505; i++) {
+        const email = `user${i}@example.com`;
+        const userId = await ctx.db.insert("appUsers", {
+          clerkSubject: `clerk|user${i}`,
+          email,
+          firstName: `User${i}`,
+          createdAt: now,
+          updatedAt: now,
+        });
+        const mId = await ctx.db.insert("companyMemberships", {
+          companyId,
+          userId,
+          role: "Employee",
+          active: true,
+          createdAt: now,
+          updatedAt: now,
+        });
+        if (i === 505) targetId = mId;
+      }
+      return { member505Id: targetId };
+    });
+
+    const preview = await admin.query(api.taskImports.previewTaskImport, {
+      companyId,
+      kind: "jd",
+      drafts: [draft({ reference: "JD-505", rawAssigneeText: "user505@example.com", assigneeEmails: ["user505@example.com"] })],
+    });
+
+    expect(preview.rows[0].operation).toBe("create");
+    expect(preview.rows[0].proposedAssigneeMembershipIds).toEqual([member505Id]);
+    expect(preview.rows[0].errors).toEqual([]);
   });
 });

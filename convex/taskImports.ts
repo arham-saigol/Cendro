@@ -102,8 +102,8 @@ function parseReference(reference: string | null, kind: TaskKind) {
   const normalized = normalizedReference(reference);
   if (!normalized) return { value: null as string | null, error: `Task code is required and must match ${prefix(kind)}-001.` };
   const valid = kind === "jd"
-    ? /^JD-\d{3,}$/.test(normalized)
-    : /^(?:TSK|OT)-\d{3,}$/.test(normalized);
+    ? /^JD-\d{3,15}$/.test(normalized)
+    : /^(?:TSK|OT)-\d{3,15}$/.test(normalized);
   if (!valid) return { value: normalized, error: `Code must match ${prefix(kind)}-001.` };
   return { value: normalized };
 }
@@ -127,7 +127,18 @@ async function buildImportAuth(ctx: Ctx, companyId: Id<"companies">, membership:
   const needsScope = caps.has(`${p}:update:managed` as Capability) || caps.has(`${p}:assign:managed` as Capability);
   const scoped = needsScope ? await scopedMembershipIds(ctx, companyId, membership) : new Set<Id<"companyMemberships">>([membership._id]);
 
-  const allMemberships = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(500);
+  const allMemberships: Doc<"companyMemberships">[] = [];
+  let cursor: string | null = null;
+  let isDone = false;
+  while (!isDone) {
+    const page = await ctx.db
+      .query("companyMemberships")
+      .withIndex("by_company", (q) => q.eq("companyId", companyId))
+      .paginate({ numItems: 500, cursor });
+    allMemberships.push(...page.page);
+    cursor = page.continueCursor;
+    isDone = page.isDone;
+  }
   const activeMemberships = allMemberships.filter((row) => row.active);
 
   let assignable: Set<Id<"companyMemberships">>;
@@ -367,6 +378,7 @@ export const commitTaskImportBatch = mutation({
     const taskReferences: string[] = [];
     for (const item of prepared) {
       const now = Date.now();
+      await syncReferenceCounter(ctx, args.companyId, args.kind, item.reference);
       if (item.task) {
         if (args.kind === "jd") {
           const task = item.task as Doc<"jdTasks">;
@@ -480,7 +492,6 @@ export const commitTaskImportBatch = mutation({
         taskReferences.push(item.task.reference);
       } else {
         const reference = item.reference;
-        await syncReferenceCounter(ctx, args.companyId, args.kind, reference);
         if (args.kind === "jd") {
           const cycle = currentJdCycle(item.draft.recurrence!, now, company.timeZone);
           const initialStatus = hasField(item.draft, "status") && item.draft.status ? item.draft.status : "due";

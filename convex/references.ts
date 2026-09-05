@@ -29,6 +29,8 @@ export async function nextReference(ctx: MutationCtx, companyId: Id<"companies">
   return `${prefixes[kind]}-${String(number).padStart(padLengths[kind], "0")}`;
 }
 
+export const MAX_REFERENCE_NUMBER = 999_999_999_999_999;
+
 /**
  * Ensures the company-scoped reference counter is at least as large as the numeric part
  * of an explicitly assigned reference (e.g. from an imported task).
@@ -42,7 +44,7 @@ export async function syncReferenceCounter(
   const match = /-0*(\d+)$/.exec(reference);
   if (!match) return;
   const num = parseInt(match[1], 10);
-  if (!Number.isFinite(num) || num <= 0) return;
+  if (!Number.isSafeInteger(num) || num <= 0 || num > MAX_REFERENCE_NUMBER) return;
 
   const counter = await ctx.db
     .query("referenceCounters")

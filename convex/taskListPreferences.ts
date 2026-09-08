@@ -49,6 +49,25 @@ export const taskListPreferenceValidator = v.union(
   }),
 );
 
+export const taskListOrderEntryValidator = v.union(
+  v.object({
+    companyId: v.id("companies"),
+    membershipId: v.id("companyMemberships"),
+    taskType: v.literal("jd"),
+    taskId: v.id("jdTasks"),
+    orderKey: v.string(),
+    updatedAt: v.number(),
+  }),
+  v.object({
+    companyId: v.id("companies"),
+    membershipId: v.id("companyMemberships"),
+    taskType: v.literal("one_time"),
+    taskId: v.id("oneTimeTasks"),
+    orderKey: v.string(),
+    updatedAt: v.number(),
+  }),
+);
+
 export const taskListPreferenceResultValidator = v.union(
   v.object({
     taskType: v.literal("jd"),

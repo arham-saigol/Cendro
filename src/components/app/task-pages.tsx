@@ -46,11 +46,12 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
-  mergeFilteredTaskListOrder,
   moveTaskListId,
   restoreTaskListCustomOrder,
   sameTaskListOrder,
   sortTaskListRows,
+  taskListCustomOrderKeys,
+  taskListOrderKeyBetween,
   type TaskListOrderingRow,
 } from "@/lib/task-list-order";
 import {
@@ -120,6 +121,7 @@ type TaskRow = TaskListOrderingRow & {
   } | string;
   canUpdate?: boolean;
   canDelete?: boolean;
+  customOrderKey?: string;
 };
 
 type TaskListPreferenceState = {
@@ -135,6 +137,7 @@ type TaskDragSnapshot = {
   visibleIds: string[];
   fullOrderIds: string[];
 };
+type OptimisticTaskOrderKeys = { scope: string; keys: Record<string, string> };
 
 function sameTaskListSort(left: TaskListSort, right: TaskListSort) {
   if (left.mode !== right.mode) return false;
@@ -154,7 +157,6 @@ const frequencies: { value: Frequency; label: string }[] = [
 ];
 const priorities: Priority[] = ["low", "medium", "high"];
 const TASK_PAGE_SIZE = 200;
-const TASK_LIST_ORDER_LIMIT = 2_000;
 const manualStatuses: { value: ManualStatus; label: string }[] = [
   { value: "due", label: "Pending" },
   { value: "in_progress", label: "In Progress" },
@@ -718,13 +720,11 @@ function TaskSortMenu({
   taskType,
   sort,
   disabled,
-  customDisabled,
   onSelect,
 }: {
   taskType: TaskListTaskType;
   sort: TaskListSort;
   disabled: boolean;
-  customDisabled: boolean;
   onSelect: (sort: TaskListSort) => void;
 }) {
   return (
@@ -748,7 +748,7 @@ function TaskSortMenu({
             <span className="flex-1">Default</span>
             {sort.mode === "default" && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
           </DropdownMenu.Item>
-          <DropdownMenu.Item disabled={customDisabled} onSelect={() => onSelect({ mode: "custom" })} className="task-menu-item">
+          <DropdownMenu.Item onSelect={() => onSelect({ mode: "custom" })} className="task-menu-item">
             <span className="flex-1">Custom</span>
             {sort.mode === "custom" && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
           </DropdownMenu.Item>
@@ -1485,6 +1485,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [renderedCount, setRenderedCount] = useState(TASK_PAGE_SIZE);
   const [sortOverride, setSortOverride] = useState<{ scope: string; sort: TaskListSort } | null>(null);
   const [optimisticPreference, setOptimisticPreference] = useState<(TaskListPreferenceState & { scope: string }) | null>(null);
+  const [optimisticTaskOrderKeys, setOptimisticTaskOrderKeys] = useState<OptimisticTaskOrderKeys | null>(null);
   const [preferencePending, setPreferencePending] = useState(false);
   const [dragSnapshot, setDragSnapshot] = useState<TaskDragSnapshot | null>(null);
   const dragHandleRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -1510,7 +1511,6 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   );
   const tasks = taskPageStatus === "LoadingFirstPage" ? undefined : taskPageResults as TaskRow[];
   const allTasks = useMemo<TaskRow[]>(() => tasks ?? [], [tasks]);
-  const canSaveCustomTaskOrder = allTasks.length <= TASK_LIST_ORDER_LIMIT;
   const preferenceResult = useQuery(
     api.tasks.getListPreference,
     activeCompanyId ? { companyId: activeCompanyId, taskType } : "skip",
@@ -1530,7 +1530,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const deleteOneTime = useMutation(api.tasks.deleteOneTime);
   const deleteOneTimeBulk = useMutation(api.tasks.deleteOneTimeBulk);
   const setListSort = useMutation(api.tasks.setListSort);
-  const saveListOrder = useMutation(api.tasks.saveListOrder);
+  const moveListOrderTask = useMutation(api.tasks.moveListOrderTask);
   const base = kind === "jd" ? "/jd-tasks" : "/one-time-tasks";
   const pageTitle = kind === "jd" ? "Job Description" : "Tasks";
   const description = kind === "jd" ? "Track and manage recurring responsibilities and scheduled duties." : "Track and manage assignments, action items, and upcoming deadlines.";
@@ -1553,6 +1553,16 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       : activePreference?.sort ?? { mode: "default" },
     [activePreference?.sort, preferenceScope, sortOverride],
   );
+  const taskOrderKeys = useMemo(() => {
+    const keys = new Map<string, string>();
+    for (const task of allTasks) {
+      if (task.customOrderKey) keys.set(task._id, task.customOrderKey);
+    }
+    if (optimisticTaskOrderKeys?.scope === preferenceScope) {
+      for (const [id, key] of Object.entries(optimisticTaskOrderKeys.keys)) keys.set(id, key);
+    }
+    return keys;
+  }, [allTasks, optimisticTaskOrderKeys, preferenceScope]);
   const dataReady = Boolean(activeCompanyId && subscribedPreference && taskPageStatus === "Exhausted");
   const ownFrequencyValues = useMemo(() => {
     if (kind !== "jd") return [] as Frequency[];
@@ -1569,10 +1579,10 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const showPriorityColumn = kind === "one" && !priorityFilterActive;
   const orderedTasks = useMemo(() => {
     if (activeSort.mode === "custom") {
-      return restoreTaskListCustomOrder(allTasks, taskType, activePreference?.customOrder);
+      return restoreTaskListCustomOrder(allTasks, taskType, activePreference?.customOrder, taskOrderKeys);
     }
     return sortTaskListRows(allTasks, taskType, activeSort);
-  }, [activePreference?.customOrder, activeSort, allTasks, taskType]);
+  }, [activePreference?.customOrder, activeSort, allTasks, taskOrderKeys, taskType]);
   const filteredTasks = useMemo(() => (
     orderedTasks.filter((task) => {
       const needle = search.trim().toLowerCase();
@@ -1604,7 +1614,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const selectedTask = selectedTaskId ? allTasks.find((task) => task._id === selectedTaskId) ?? null : null;
   const canEditSelectedTask = Boolean(selectedTask && canEditTaskRow(active, kind, selectedTask));
   const hasMoreRenderedTasks = dataReady && renderedTasks.length < displayedTasks.length;
-  const dragDisabled = !dataReady || preferencePending || !canSaveCustomTaskOrder;
+  const dragDisabled = !dataReady || preferencePending;
 
   useEffect(() => {
     if (!activeCompanyId) return;
@@ -1642,6 +1652,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     setRenderedCount(TASK_PAGE_SIZE);
     setSortOverride(null);
     setOptimisticPreference(null);
+    setOptimisticTaskOrderKeys(null);
     setPreferencePending(false);
     setDragSnapshot(null);
     dragHandleRefs.current.clear();
@@ -1653,6 +1664,18 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       setOptimisticPreference(null);
     }
   }, [optimisticPreference, preferenceScope, subscribedPreference]);
+
+  useEffect(() => {
+    if (!optimisticTaskOrderKeys || optimisticTaskOrderKeys.scope !== preferenceScope) return;
+    const persistedKeys = new Map(allTasks.map((task) => [task._id, task.customOrderKey]));
+    const remaining = Object.fromEntries(
+      Object.entries(optimisticTaskOrderKeys.keys).filter(([id, key]) => persistedKeys.get(id) !== key),
+    );
+    if (Object.keys(remaining).length === Object.keys(optimisticTaskOrderKeys.keys).length) return;
+    setOptimisticTaskOrderKeys(Object.keys(remaining).length > 0
+      ? { scope: preferenceScope, keys: remaining }
+      : null);
+  }, [allTasks, optimisticTaskOrderKeys, preferenceScope]);
 
   useEffect(() => {
     if (!dragSnapshot) return;
@@ -1860,12 +1883,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
 
   async function selectTaskSort(nextSort: TaskListSort) {
     if (!activeCompanyId || !dataReady || !activePreference || preferencePending) return;
-    if (nextSort.mode === "custom" && !canSaveCustomTaskOrder) return;
     if (sameTaskListSort(activeSort, nextSort)) return;
-    if (nextSort.mode === "custom" && activePreference.customOrder === null) {
-      setSortOverride({ scope: preferenceScope, sort: nextSort });
-      return;
-    }
 
     const operationScope = preferenceScope;
     const expectedRevision = activePreference.revision;
@@ -1909,23 +1927,56 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   }
 
   async function saveCustomTaskOrder(orderedIds: string[], sourceId: string) {
-    if (!activeCompanyId || !dataReady || !activePreference || preferencePending || !canSaveCustomTaskOrder || orderedIds.length > TASK_LIST_ORDER_LIMIT) return;
+    if (!activeCompanyId || !dataReady || !activePreference || preferencePending) return;
+    const sourceIndex = orderedIds.indexOf(sourceId);
+    if (sourceIndex < 0) return;
+    const orderKeys = taskListCustomOrderKeys(allTasks, taskType, activePreference.customOrder, taskOrderKeys);
+    const beforeId = orderedIds[sourceIndex - 1];
+    const afterId = orderedIds[sourceIndex + 1];
+    const beforeKey = beforeId ? orderKeys.get(beforeId) : null;
+    const afterKey = afterId ? orderKeys.get(afterId) : null;
+    if ((beforeId && !beforeKey) || (afterId && !afterKey)) {
+      setInlineError("Could not calculate a position for this task. Refresh and try again.");
+      return;
+    }
+    let orderKey: string;
+    try {
+      orderKey = taskListOrderKeyBetween(beforeKey, afterKey);
+    } catch (error) {
+      setInlineError(error instanceof Error ? error.message : "Could not calculate a position for this task.");
+      return;
+    }
+
     const operationScope = preferenceScope;
     const expectedRevision = activePreference.revision;
+    const previousOptimisticPreference = optimisticPreference?.scope === operationScope
+      ? optimisticPreference
+      : null;
+    const previousOptimisticOrderKey = optimisticTaskOrderKeys?.scope === operationScope
+      ? optimisticTaskOrderKeys.keys[sourceId]
+      : undefined;
     setPreferencePending(true);
     setInlineError(null);
     setSortOverride(null);
+    setOptimisticTaskOrderKeys((current) => ({
+      scope: operationScope,
+      keys: {
+        ...(current?.scope === operationScope ? current.keys : {}),
+        [sourceId]: orderKey,
+      },
+    }));
     setOptimisticPreference({
       scope: operationScope,
       sort: { mode: "custom" },
-      customOrder: orderedIds,
+      customOrder: activePreference.customOrder,
       revision: expectedRevision + 1,
     });
     try {
-      const saved = await saveListOrder({
+      const saved = await moveListOrderTask({
         companyId: activeCompanyId,
         taskType,
-        orderedIds,
+        taskId: sourceId,
+        orderKey,
         expectedRevision,
       });
       if (preferenceScopeRef.current !== operationScope) return;
@@ -1938,7 +1989,14 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       focusDragHandle(sourceId);
     } catch (error) {
       if (preferenceScopeRef.current !== operationScope) return;
-      setOptimisticPreference(null);
+      setOptimisticPreference(previousOptimisticPreference);
+      setOptimisticTaskOrderKeys((current) => {
+        if (!current || current.scope !== operationScope) return current;
+        const keys = { ...current.keys };
+        if (previousOptimisticOrderKey) keys[sourceId] = previousOptimisticOrderKey;
+        else delete keys[sourceId];
+        return Object.keys(keys).length > 0 ? { scope: operationScope, keys } : null;
+      });
       setSortOverride(null);
       setInlineError(error instanceof Error ? error.message : "Could not save task order. Refresh and try again.");
     } finally {
@@ -1963,7 +2021,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   function handleTaskDragEnd(event: DragEndEvent) {
     const snapshot = dragSnapshot;
     setDragSnapshot(null);
-    if (event.canceled || !snapshot || snapshot.scope !== preferenceScope || preferencePending || !canSaveCustomTaskOrder) return;
+    if (event.canceled || !snapshot || snapshot.scope !== preferenceScope || preferencePending) return;
     const { source, target } = event.operation;
     if (!source || !target || !isSortable(source) || !isSortable(target)) return;
     if (
@@ -1979,10 +2037,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     const currentIds = new Set(allTasks.map((task) => task._id));
     const visibleIds = snapshot.visibleIds.filter((id) => currentIds.has(id));
     if (!visibleIds.includes(sourceId) || !visibleIds.includes(targetId)) return;
-    const nextVisibleIds = moveTaskListId(visibleIds, sourceId, targetId);
-    if (sameTaskListOrder(visibleIds, nextVisibleIds)) return;
     const reconciledFullOrder = restoreTaskListCustomOrder(allTasks, taskType, snapshot.fullOrderIds).map((task) => task._id);
-    const nextOrder = mergeFilteredTaskListOrder(reconciledFullOrder, visibleIds, nextVisibleIds);
+    const nextOrder = moveTaskListId(reconciledFullOrder, sourceId, targetId);
     if (sameTaskListOrder(reconciledFullOrder, nextOrder)) return;
     void saveCustomTaskOrder(nextOrder, sourceId);
   }
@@ -2062,7 +2118,6 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             taskType={taskType}
             sort={activeSort}
             disabled={!dataReady || preferencePending}
-            customDisabled={!canSaveCustomTaskOrder}
             onSelect={(sort) => void selectTaskSort(sort)}
           />
           <TaskFilterMenu

@@ -46,6 +46,14 @@ const priorityRanks = new Map<string, number>([
   ["high", 2],
 ]);
 
+const customOrderKeyPattern = /^(?:0|-[1-9]\d*|[1-9]\d*)\/[1-9]\d*$/;
+const customOrderKeyGap = 1_024n;
+
+type ParsedCustomOrderKey = {
+  numerator: bigint;
+  denominator: bigint;
+};
+
 function normalizedText(value: string | null | undefined) {
   const text = value?.trim();
   return text || null;
@@ -119,6 +127,104 @@ function numberValue(value: number | null | undefined) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function greatestCommonDivisor(left: bigint, right: bigint) {
+  let a = left < 0n ? -left : left;
+  let b = right < 0n ? -right : right;
+  while (b !== 0n) {
+    const remainder = a % b;
+    a = b;
+    b = remainder;
+  }
+  return a;
+}
+
+function formatCustomOrderKey(numerator: bigint, denominator: bigint) {
+  if (denominator <= 0n) throw new Error("A custom task order key needs a positive denominator.");
+  const divisor = greatestCommonDivisor(numerator, denominator);
+  return `${numerator / divisor}/${denominator / divisor}`;
+}
+
+function parseCustomOrderKey(value: string): ParsedCustomOrderKey | null {
+  if (!customOrderKeyPattern.test(value)) return null;
+  const [numerator, denominator] = value.split("/");
+  try {
+    return { numerator: BigInt(numerator), denominator: BigInt(denominator) };
+  } catch {
+    return null;
+  }
+}
+
+function compareCustomOrderKeys(left: ParsedCustomOrderKey, right: ParsedCustomOrderKey) {
+  const difference = left.numerator * right.denominator - right.numerator * left.denominator;
+  return difference < 0n ? -1 : difference > 0n ? 1 : 0;
+}
+
+function customOrderKeyAt(position: number) {
+  if (!Number.isSafeInteger(position) || position < 0) {
+    throw new Error("A custom task order position must be a non-negative safe integer.");
+  }
+  return formatCustomOrderKey(BigInt(position) * customOrderKeyGap, 1n);
+}
+
+function restoreTaskListCustomOrderBase<TRow extends TaskListOrderingRow>(
+  rows: readonly TRow[],
+  taskType: TaskListTaskType,
+  customOrder: readonly string[] | null | undefined,
+) {
+  const rowById = new Map(rows.map((row) => [row._id, row]));
+  const restored: TRow[] = [];
+  const included = new Set<string>();
+
+  for (const id of customOrder ?? []) {
+    const row = rowById.get(id);
+    if (row && !included.has(id)) {
+      restored.push(row);
+      included.add(id);
+    }
+  }
+
+  const missing = rows.filter((row) => !included.has(row._id));
+  return [...restored, ...sortTaskListRows(missing, taskType, { mode: "default" })];
+}
+
+export function taskListCustomOrderKeys<TRow extends TaskListOrderingRow>(
+  rows: readonly TRow[],
+  taskType: TaskListTaskType,
+  customOrder: readonly string[] | null | undefined,
+  persistedKeys?: ReadonlyMap<string, string>,
+) {
+  const keys = new Map<string, string>();
+  for (const [index, row] of restoreTaskListCustomOrderBase(rows, taskType, customOrder).entries()) {
+    const persistedKey = persistedKeys?.get(row._id);
+    keys.set(row._id, persistedKey && parseCustomOrderKey(persistedKey) ? persistedKey : customOrderKeyAt(index));
+  }
+  return keys;
+}
+
+export function taskListOrderKeyBetween(
+  before: string | null | undefined,
+  after: string | null | undefined,
+) {
+  const previous = before ? parseCustomOrderKey(before) : null;
+  const next = after ? parseCustomOrderKey(after) : null;
+  if (before && !previous) throw new Error("The preceding custom task order key is invalid.");
+  if (after && !next) throw new Error("The following custom task order key is invalid.");
+  if (previous && next && compareCustomOrderKeys(previous, next) >= 0) {
+    throw new Error("The custom task order keys are not ordered.");
+  }
+  if (!previous && !next) return formatCustomOrderKey(0n, 1n);
+  if (!previous && next) {
+    return formatCustomOrderKey(next.numerator - customOrderKeyGap * next.denominator, next.denominator);
+  }
+  if (previous && !next) {
+    return formatCustomOrderKey(previous.numerator + customOrderKeyGap * previous.denominator, previous.denominator);
+  }
+  return formatCustomOrderKey(
+    previous!.numerator * next!.denominator + next!.numerator * previous!.denominator,
+    2n * previous!.denominator * next!.denominator,
+  );
+}
+
 export function compareTaskListRows(
   taskType: TaskListTaskType,
   sort: TaskListSort,
@@ -186,21 +292,26 @@ export function restoreTaskListCustomOrder<TRow extends TaskListOrderingRow>(
   rows: readonly TRow[],
   taskType: TaskListTaskType,
   customOrder: readonly string[] | null | undefined,
+  persistedKeys?: ReadonlyMap<string, string>,
 ) {
-  const rowById = new Map(rows.map((row) => [row._id, row]));
-  const restored: TRow[] = [];
-  const included = new Set<string>();
+  const baseOrder = restoreTaskListCustomOrderBase(rows, taskType, customOrder);
+  if (!persistedKeys?.size) return baseOrder;
 
-  for (const id of customOrder ?? []) {
-    const row = rowById.get(id);
-    if (row && !included.has(id)) {
-      restored.push(row);
-      included.add(id);
+  const baseIndexById = new Map(baseOrder.map((row, index) => [row._id, index]));
+  const keys = taskListCustomOrderKeys(rows, taskType, customOrder, persistedKeys);
+  const parsedKeys = new Map(
+    Array.from(keys, ([id, key]) => [id, parseCustomOrderKey(key)]),
+  );
+
+  return [...baseOrder].sort((left, right) => {
+    const leftKey = parsedKeys.get(left._id);
+    const rightKey = parsedKeys.get(right._id);
+    if (leftKey && rightKey) {
+      const compared = compareCustomOrderKeys(leftKey, rightKey);
+      if (compared !== 0) return compared;
     }
-  }
-
-  const missing = rows.filter((row) => !included.has(row._id));
-  return [...restored, ...sortTaskListRows(missing, taskType, { mode: "default" })];
+    return (baseIndexById.get(left._id) ?? 0) - (baseIndexById.get(right._id) ?? 0);
+  });
 }
 
 export function moveTaskListId(

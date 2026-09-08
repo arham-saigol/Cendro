@@ -26,6 +26,8 @@ export type TaskListOrderingRow = {
 };
 
 const collator = new Intl.Collator("en", { sensitivity: "base", numeric: true });
+const jdReferencePattern = /^JD-(\d+)$/i;
+const oneTimeReferencePattern = /^TSK-(\d+)$/i;
 
 const frequencyRanks = new Map<string, number>([
   ["daily", 0],
@@ -63,8 +65,7 @@ function comparePresent<T>(
 }
 
 function parseReference(taskType: TaskListTaskType, reference: string | null | undefined) {
-  const prefix = taskType === "jd" ? "JD" : "TSK";
-  const match = new RegExp(`^${prefix}-(\\d+)$`, "i").exec(reference?.trim() ?? "");
+  const match = (taskType === "jd" ? jdReferencePattern : oneTimeReferencePattern).exec(reference?.trim() ?? "");
   if (!match) return null;
   const value = Number(match[1]);
   return Number.isSafeInteger(value) && value > 0 ? value : null;

@@ -154,6 +154,7 @@ const frequencies: { value: Frequency; label: string }[] = [
 ];
 const priorities: Priority[] = ["low", "medium", "high"];
 const TASK_PAGE_SIZE = 200;
+const TASK_LIST_ORDER_LIMIT = 2_000;
 const manualStatuses: { value: ManualStatus; label: string }[] = [
   { value: "due", label: "Pending" },
   { value: "in_progress", label: "In Progress" },
@@ -717,11 +718,13 @@ function TaskSortMenu({
   taskType,
   sort,
   disabled,
+  customDisabled,
   onSelect,
 }: {
   taskType: TaskListTaskType;
   sort: TaskListSort;
   disabled: boolean;
+  customDisabled: boolean;
   onSelect: (sort: TaskListSort) => void;
 }) {
   return (
@@ -745,7 +748,7 @@ function TaskSortMenu({
             <span className="flex-1">Default</span>
             {sort.mode === "default" && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
           </DropdownMenu.Item>
-          <DropdownMenu.Item onSelect={() => onSelect({ mode: "custom" })} className="task-menu-item">
+          <DropdownMenu.Item disabled={customDisabled} onSelect={() => onSelect({ mode: "custom" })} className="task-menu-item">
             <span className="flex-1">Custom</span>
             {sort.mode === "custom" && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
           </DropdownMenu.Item>
@@ -1507,6 +1510,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   );
   const tasks = taskPageStatus === "LoadingFirstPage" ? undefined : taskPageResults as TaskRow[];
   const allTasks = useMemo<TaskRow[]>(() => tasks ?? [], [tasks]);
+  const canSaveCustomTaskOrder = allTasks.length <= TASK_LIST_ORDER_LIMIT;
   const preferenceResult = useQuery(
     api.tasks.getListPreference,
     activeCompanyId ? { companyId: activeCompanyId, taskType } : "skip",
@@ -1600,7 +1604,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const selectedTask = selectedTaskId ? allTasks.find((task) => task._id === selectedTaskId) ?? null : null;
   const canEditSelectedTask = Boolean(selectedTask && canEditTaskRow(active, kind, selectedTask));
   const hasMoreRenderedTasks = dataReady && renderedTasks.length < displayedTasks.length;
-  const dragDisabled = !dataReady || preferencePending;
+  const dragDisabled = !dataReady || preferencePending || !canSaveCustomTaskOrder;
 
   useEffect(() => {
     if (!activeCompanyId) return;
@@ -1856,6 +1860,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
 
   async function selectTaskSort(nextSort: TaskListSort) {
     if (!activeCompanyId || !dataReady || !activePreference || preferencePending) return;
+    if (nextSort.mode === "custom" && !canSaveCustomTaskOrder) return;
     if (sameTaskListSort(activeSort, nextSort)) return;
     if (nextSort.mode === "custom" && activePreference.customOrder === null) {
       setSortOverride({ scope: preferenceScope, sort: nextSort });
@@ -1892,14 +1897,19 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   }
 
   function selectTaskSortField(field: TaskListSortField) {
-    const nextSort: TaskListSort = activeSort.mode === "field" && activeSort.field === field
-      ? { mode: "field", field, direction: activeSort.direction === "asc" ? "desc" : "asc" }
-      : { mode: "field", field, direction: initialTaskListSortDirection(field) };
+    const direction = taskSortDirectionForField(taskType, activeSort, field);
+    const nextSort: TaskListSort = {
+      mode: "field",
+      field,
+      direction: direction === null
+        ? initialTaskListSortDirection(field)
+        : direction === "asc" ? "desc" : "asc",
+    };
     void selectTaskSort(nextSort);
   }
 
   async function saveCustomTaskOrder(orderedIds: string[], sourceId: string) {
-    if (!activeCompanyId || !dataReady || !activePreference || preferencePending) return;
+    if (!activeCompanyId || !dataReady || !activePreference || preferencePending || !canSaveCustomTaskOrder || orderedIds.length > TASK_LIST_ORDER_LIMIT) return;
     const operationScope = preferenceScope;
     const expectedRevision = activePreference.revision;
     setPreferencePending(true);
@@ -1953,7 +1963,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   function handleTaskDragEnd(event: DragEndEvent) {
     const snapshot = dragSnapshot;
     setDragSnapshot(null);
-    if (event.canceled || !snapshot || snapshot.scope !== preferenceScope || preferencePending) return;
+    if (event.canceled || !snapshot || snapshot.scope !== preferenceScope || preferencePending || !canSaveCustomTaskOrder) return;
     const { source, target } = event.operation;
     if (!source || !target || !isSortable(source) || !isSortable(target)) return;
     if (
@@ -2052,6 +2062,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             taskType={taskType}
             sort={activeSort}
             disabled={!dataReady || preferencePending}
+            customDisabled={!canSaveCustomTaskOrder}
             onSelect={(sort) => void selectTaskSort(sort)}
           />
           <TaskFilterMenu

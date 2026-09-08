@@ -8,6 +8,12 @@ import { assertCanAssign, assertCanDeleteTask, assertCanUpdateTask, canViewTask,
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
 import { nextReference } from "./references";
+import {
+  assertTaskListSort,
+  taskListPreferenceResultValidator,
+  taskListSortValidator,
+  taskListTaskTypeValidator,
+} from "./taskListPreferences";
 
 type ManualStatus = "due" | "in_progress" | "completed";
 type TaskKind = "jd" | "one_time";
@@ -18,6 +24,8 @@ const recurrenceValidator = v.union(v.literal("daily"), v.literal("every_other_d
 const priorityValidator = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
 const statusValidator = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
 const jdFrequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("quarterly"), v.literal("semiannually"), v.literal("annually"));
+const TASK_LIST_ORDER_LIMIT = 2_000;
+const TASK_LIST_ORDER_MAX_SERIALIZED_BYTES = 128 * 1024;
 function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Pending" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
 function cleanOptionalText(value?: string) { const text = value?.trim(); return text ? text : undefined; }
 function cleanOptionalQuantity(value?: number) { return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined; }
@@ -184,6 +192,115 @@ function matchesSearch(task: { title: string; reference: string }, search?: stri
   return task.title.toLowerCase().includes(needle) || task.reference.toLowerCase().includes(needle);
 }
 
+async function getTaskListPreference(
+  ctx: Ctx,
+  companyId: Id<"companies">,
+  membershipId: Id<"companyMemberships">,
+  taskType: TaskKind,
+) {
+  return await ctx.db
+    .query("taskListPreferences")
+    .withIndex("by_companyId_and_membershipId_and_taskType", (q) =>
+      q.eq("companyId", companyId).eq("membershipId", membershipId).eq("taskType", taskType),
+    )
+    .unique();
+}
+
+function taskListPreferenceResult(
+  taskType: TaskKind,
+  preference: Doc<"taskListPreferences"> | null,
+) {
+  if (taskType === "jd") {
+    return {
+      taskType: "jd" as const,
+      sort: preference?.sort ?? { mode: "default" as const },
+      customOrder: preference?.taskType === "jd" ? preference.customOrder ?? null : null,
+      revision: preference?.revision ?? 0,
+      updatedAt: preference?.updatedAt ?? null,
+    };
+  }
+  return {
+    taskType: "one_time" as const,
+    sort: preference?.sort ?? { mode: "default" as const },
+    customOrder: preference?.taskType === "one_time" ? preference.customOrder ?? null : null,
+    revision: preference?.revision ?? 0,
+    updatedAt: preference?.updatedAt ?? null,
+  };
+}
+
+function assertExpectedPreferenceRevision(
+  preference: Doc<"taskListPreferences"> | null,
+  expectedRevision: number,
+) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw new ConvexError("Task list preference revision is invalid.");
+  }
+  if ((preference?.revision ?? 0) !== expectedRevision) {
+    throw new ConvexError("Task list preference was updated. Refresh and try again.");
+  }
+}
+
+function assertTaskListOrderInput(orderedIds: string[]) {
+  if (orderedIds.length > TASK_LIST_ORDER_LIMIT) {
+    throw new ConvexError(`Task list order can contain at most ${TASK_LIST_ORDER_LIMIT} tasks.`);
+  }
+  if (new Set(orderedIds).size !== orderedIds.length) {
+    throw new ConvexError("Task list order contains duplicate task IDs.");
+  }
+  if (JSON.stringify(orderedIds).length > TASK_LIST_ORDER_MAX_SERIALIZED_BYTES) {
+    throw new ConvexError("Task list order is too large to save.");
+  }
+}
+
+async function validateTaskListOrder(
+  ctx: MutationCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  taskType: "jd",
+  orderedIds: string[],
+): Promise<Id<"jdTasks">[]>;
+async function validateTaskListOrder(
+  ctx: MutationCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  taskType: "one_time",
+  orderedIds: string[],
+): Promise<Id<"oneTimeTasks">[]>;
+async function validateTaskListOrder(
+  ctx: MutationCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  taskType: TaskKind,
+  orderedIds: string[],
+) {
+  const auth = await taskVisibilityAuth(ctx, companyId, membership);
+  if (taskType === "jd") {
+    const normalized: Id<"jdTasks">[] = [];
+    for (const rawId of orderedIds) {
+      const id = ctx.db.normalizeId("jdTasks", rawId);
+      if (!id) throw new ConvexError("Task not found.");
+      const task = await ctx.db.get(id);
+      if (!task || task.companyId !== companyId || !(await visible(ctx, companyId, membership, task, "jd", auth))) {
+        throw new ConvexError("Task not found.");
+      }
+      normalized.push(id);
+    }
+    return normalized;
+  }
+
+  const normalized: Id<"oneTimeTasks">[] = [];
+  for (const rawId of orderedIds) {
+    const id = ctx.db.normalizeId("oneTimeTasks", rawId);
+    if (!id) throw new ConvexError("Task not found.");
+    const task = await ctx.db.get(id);
+    if (!task || task.companyId !== companyId || !(await visible(ctx, companyId, membership, task, "one_time", auth))) {
+      throw new ConvexError("Task not found.");
+    }
+    normalized.push(id);
+  }
+  return normalized;
+}
+
 export const listJdRows = query({
   args: { companyId: v.id("companies"), search: v.optional(v.string()), frequency: v.optional(jdFrequencyFilterValidator), paginationOpts: paginationOptsValidator },
   returns: paginationResultValidator(v.any()),
@@ -257,6 +374,122 @@ export const listOneTimeRows = query({
       }
     }
     return { ...page, page: rows };
+  },
+});
+
+export const getListPreference = query({
+  args: {
+    companyId: v.id("companies"),
+    taskType: taskListTaskTypeValidator,
+  },
+  returns: taskListPreferenceResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const preference = await getTaskListPreference(ctx, args.companyId, membership._id, args.taskType);
+    return taskListPreferenceResult(args.taskType, preference);
+  },
+});
+
+export const setListSort = mutation({
+  args: {
+    companyId: v.id("companies"),
+    taskType: taskListTaskTypeValidator,
+    sort: taskListSortValidator,
+    expectedRevision: v.number(),
+  },
+  returns: taskListPreferenceResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    assertTaskListSort(args.taskType, args.sort);
+    const preference = await getTaskListPreference(ctx, args.companyId, membership._id, args.taskType);
+    assertExpectedPreferenceRevision(preference, args.expectedRevision);
+    const now = Date.now();
+    const revision = args.expectedRevision + 1;
+    let preferenceId: Id<"taskListPreferences">;
+
+    if (preference) {
+      await ctx.db.patch(preference._id, { sort: args.sort, revision, updatedAt: now });
+      preferenceId = preference._id;
+    } else if (args.taskType === "jd") {
+      preferenceId = await ctx.db.insert("taskListPreferences", {
+        companyId: args.companyId,
+        membershipId: membership._id,
+        taskType: "jd",
+        sort: args.sort,
+        revision,
+        updatedAt: now,
+      });
+    } else {
+      preferenceId = await ctx.db.insert("taskListPreferences", {
+        companyId: args.companyId,
+        membershipId: membership._id,
+        taskType: "one_time",
+        sort: args.sort,
+        revision,
+        updatedAt: now,
+      });
+    }
+
+    const saved = await ctx.db.get(preferenceId);
+    if (!saved) throw new ConvexError("Task list preference was not saved.");
+    return taskListPreferenceResult(args.taskType, saved);
+  },
+});
+
+export const saveListOrder = mutation({
+  args: {
+    companyId: v.id("companies"),
+    taskType: taskListTaskTypeValidator,
+    orderedIds: v.array(v.string()),
+    expectedRevision: v.number(),
+  },
+  returns: taskListPreferenceResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    assertTaskListOrderInput(args.orderedIds);
+    const preference = await getTaskListPreference(ctx, args.companyId, membership._id, args.taskType);
+    assertExpectedPreferenceRevision(preference, args.expectedRevision);
+    const now = Date.now();
+    const revision = args.expectedRevision + 1;
+    let preferenceId: Id<"taskListPreferences">;
+
+    if (args.taskType === "jd") {
+      const customOrder = await validateTaskListOrder(ctx, args.companyId, membership, "jd", args.orderedIds);
+      if (preference) {
+        await ctx.db.patch(preference._id, { sort: { mode: "custom" }, customOrder, revision, updatedAt: now });
+        preferenceId = preference._id;
+      } else {
+        preferenceId = await ctx.db.insert("taskListPreferences", {
+          companyId: args.companyId,
+          membershipId: membership._id,
+          taskType: "jd",
+          sort: { mode: "custom" },
+          customOrder,
+          revision,
+          updatedAt: now,
+        });
+      }
+    } else {
+      const customOrder = await validateTaskListOrder(ctx, args.companyId, membership, "one_time", args.orderedIds);
+      if (preference) {
+        await ctx.db.patch(preference._id, { sort: { mode: "custom" }, customOrder, revision, updatedAt: now });
+        preferenceId = preference._id;
+      } else {
+        preferenceId = await ctx.db.insert("taskListPreferences", {
+          companyId: args.companyId,
+          membershipId: membership._id,
+          taskType: "one_time",
+          sort: { mode: "custom" },
+          customOrder,
+          revision,
+          updatedAt: now,
+        });
+      }
+    }
+
+    const saved = await ctx.db.get(preferenceId);
+    if (!saved) throw new ConvexError("Task list preference was not saved.");
+    return taskListPreferenceResult(args.taskType, saved);
   },
 });
 
@@ -1357,4 +1590,3 @@ export const migrateTaskCodes = internalAction({
     };
   },
 });
-

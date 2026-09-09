@@ -362,36 +362,39 @@ async function applyTaskListOrderKeyUpdates(
       q.eq("companyId", companyId).eq("membershipId", membership._id).eq("taskType", taskType),
     )
     .take(TASK_LIST_ORDER_LIMIT + 1);
-  if (entries.length > TASK_LIST_ORDER_LIMIT) {
+  const entryByTaskId = new Map(entries.map((entry) => [entry.taskId, entry]));
+  const missingEntryCount = taskIds.filter((taskId) => !entryByTaskId.has(taskId)).length;
+  if (entries.length + missingEntryCount > TASK_LIST_ORDER_LIMIT) {
     throw new ConvexError("Task list order is too large to save.");
   }
-  const entryByTaskId = new Map(entries.map((entry) => [entry.taskId, entry]));
 
+  const writes: Promise<unknown>[] = [];
   for (const [index, taskId] of taskIds.entries()) {
     const { orderKey } = orderKeyUpdates[index];
     const entry = entryByTaskId.get(taskId);
     if (entry) {
-      await ctx.db.patch(entry._id, { orderKey, updatedAt: now });
+      writes.push(ctx.db.patch(entry._id, { orderKey, updatedAt: now }));
     } else if (taskType === "jd") {
-      await ctx.db.insert("taskListOrderEntries", {
+      writes.push(ctx.db.insert("taskListOrderEntries", {
         companyId,
         membershipId: membership._id,
         taskType: "jd",
         taskId: taskId as Id<"jdTasks">,
         orderKey,
         updatedAt: now,
-      });
+      }));
     } else {
-      await ctx.db.insert("taskListOrderEntries", {
+      writes.push(ctx.db.insert("taskListOrderEntries", {
         companyId,
         membershipId: membership._id,
         taskType: "one_time",
         taskId: taskId as Id<"oneTimeTasks">,
         orderKey,
         updatedAt: now,
-      });
+      }));
     }
   }
+  await Promise.all(writes);
 }
 
 export const listJdRows = query({

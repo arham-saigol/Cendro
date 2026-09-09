@@ -8,6 +8,12 @@ import { assertCanAssign, assertCanDeleteTask, assertCanUpdateTask, canViewTask,
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
 import { nextReference } from "./references";
+import {
+  assertTaskListSort,
+  taskListPreferenceResultValidator,
+  taskListSortValidator,
+  taskListTaskTypeValidator,
+} from "./taskListPreferences";
 
 type ManualStatus = "due" | "in_progress" | "completed";
 type TaskKind = "jd" | "one_time";
@@ -18,6 +24,10 @@ const recurrenceValidator = v.union(v.literal("daily"), v.literal("every_other_d
 const priorityValidator = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
 const statusValidator = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
 const jdFrequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("quarterly"), v.literal("semiannually"), v.literal("annually"));
+const TASK_LIST_ORDER_LIMIT = 2_000;
+const TASK_LIST_ORDER_MAX_SERIALIZED_BYTES = 128 * 1024;
+const TASK_LIST_ORDER_KEY_MAX_LENGTH = 512;
+const taskListOrderKeyPattern = /^(?:0|-[1-9]\d*|[1-9]\d*)\/[1-9]\d*$/;
 function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Pending" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
 function cleanOptionalText(value?: string) { const text = value?.trim(); return text ? text : undefined; }
 function cleanOptionalQuantity(value?: number) { return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined; }
@@ -158,7 +168,7 @@ async function logTaskActivity(ctx: MutationCtx, args: { companyId: Id<"companie
   await ctx.db.insert("taskActivityLogs", { companyId: args.companyId, taskType: args.taskType, taskId: args.taskId, actorMembershipId: args.actorMembershipId, event: args.event, ...(args.fromStatus ? { fromStatus: args.fromStatus } : {}), ...(args.toStatus ? { toStatus: args.toStatus } : {}), createdAt: args.createdAt ?? Date.now() });
 }
 
-async function enrichedJd(ctx: Ctx, task: Doc<"jdTasks">, timeZone?: string, canUpdate?: boolean, canDelete?: boolean, scopedMembershipIds?: Set<Id<"companyMemberships">>) {
+async function enrichedJd(ctx: Ctx, task: Doc<"jdTasks">, timeZone?: string, canUpdate?: boolean, canDelete?: boolean, scopedMembershipIds?: Set<Id<"companyMemberships">>, customOrderKey?: string) {
   const visibleAssigneeIds = scopedMembershipIds ? task.assigneeMembershipIds.filter((id) => scopedMembershipIds.has(id)) : task.assigneeMembershipIds;
   return {
     ...task,
@@ -166,9 +176,10 @@ async function enrichedJd(ctx: Ctx, task: Doc<"jdTasks">, timeZone?: string, can
     assignees: await enrich(ctx, visibleAssigneeIds),
     ...(canUpdate !== undefined ? { canUpdate } : {}),
     ...(canDelete !== undefined ? { canDelete } : {}),
+    ...(customOrderKey ? { customOrderKey } : {}),
   };
 }
-async function enrichedOneTime(ctx: Ctx, task: Doc<"oneTimeTasks">, canUpdate?: boolean, canDelete?: boolean, scopedMembershipIds?: Set<Id<"companyMemberships">>) {
+async function enrichedOneTime(ctx: Ctx, task: Doc<"oneTimeTasks">, canUpdate?: boolean, canDelete?: boolean, scopedMembershipIds?: Set<Id<"companyMemberships">>, customOrderKey?: string) {
   const visibleAssigneeIds = scopedMembershipIds ? task.assigneeMembershipIds.filter((id) => scopedMembershipIds.has(id)) : task.assigneeMembershipIds;
   return {
     ...task,
@@ -176,12 +187,214 @@ async function enrichedOneTime(ctx: Ctx, task: Doc<"oneTimeTasks">, canUpdate?: 
     assignees: await enrich(ctx, visibleAssigneeIds),
     ...(canUpdate !== undefined ? { canUpdate } : {}),
     ...(canDelete !== undefined ? { canDelete } : {}),
+    ...(customOrderKey ? { customOrderKey } : {}),
   };
 }
 function matchesSearch(task: { title: string; reference: string }, search?: string) {
   const needle = search?.trim().toLowerCase();
   if (!needle) return true;
   return task.title.toLowerCase().includes(needle) || task.reference.toLowerCase().includes(needle);
+}
+
+async function getTaskListPreference(
+  ctx: Ctx,
+  companyId: Id<"companies">,
+  membershipId: Id<"companyMemberships">,
+  taskType: TaskKind,
+) {
+  return await ctx.db
+    .query("taskListPreferences")
+    .withIndex("by_companyId_and_membershipId_and_taskType", (q) =>
+      q.eq("companyId", companyId).eq("membershipId", membershipId).eq("taskType", taskType),
+    )
+    .unique();
+}
+
+async function getJdTaskListOrderKey(
+  ctx: Ctx,
+  companyId: Id<"companies">,
+  membershipId: Id<"companyMemberships">,
+  taskId: Id<"jdTasks">,
+) {
+  return (await ctx.db
+    .query("taskListOrderEntries")
+    .withIndex("by_companyId_and_membershipId_and_taskType_and_taskId", (q) =>
+      q.eq("companyId", companyId)
+        .eq("membershipId", membershipId)
+        .eq("taskType", "jd")
+        .eq("taskId", taskId),
+    )
+    .unique())?.orderKey;
+}
+
+async function getOneTimeTaskListOrderKey(
+  ctx: Ctx,
+  companyId: Id<"companies">,
+  membershipId: Id<"companyMemberships">,
+  taskId: Id<"oneTimeTasks">,
+) {
+  return (await ctx.db
+    .query("taskListOrderEntries")
+    .withIndex("by_companyId_and_membershipId_and_taskType_and_taskId", (q) =>
+      q.eq("companyId", companyId)
+        .eq("membershipId", membershipId)
+        .eq("taskType", "one_time")
+        .eq("taskId", taskId),
+    )
+    .unique())?.orderKey;
+}
+
+function taskListPreferenceResult(
+  taskType: TaskKind,
+  preference: Doc<"taskListPreferences"> | null,
+) {
+  if (taskType === "jd") {
+    return {
+      taskType: "jd" as const,
+      sort: preference?.sort ?? { mode: "default" as const },
+      customOrder: preference?.taskType === "jd" ? preference.customOrder ?? null : null,
+      revision: preference?.revision ?? 0,
+      updatedAt: preference?.updatedAt ?? null,
+    };
+  }
+  return {
+    taskType: "one_time" as const,
+    sort: preference?.sort ?? { mode: "default" as const },
+    customOrder: preference?.taskType === "one_time" ? preference.customOrder ?? null : null,
+    revision: preference?.revision ?? 0,
+    updatedAt: preference?.updatedAt ?? null,
+  };
+}
+
+function assertExpectedPreferenceRevision(
+  preference: Doc<"taskListPreferences"> | null,
+  expectedRevision: number,
+) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw new ConvexError("Task list preference revision is invalid.");
+  }
+  if ((preference?.revision ?? 0) !== expectedRevision) {
+    throw new ConvexError("Task list preference was updated. Refresh and try again.");
+  }
+}
+
+function assertTaskListOrderInput(orderedIds: string[]) {
+  if (orderedIds.length > TASK_LIST_ORDER_LIMIT) {
+    throw new ConvexError(`Task list order can contain at most ${TASK_LIST_ORDER_LIMIT} tasks.`);
+  }
+  if (new Set(orderedIds).size !== orderedIds.length) {
+    throw new ConvexError("Task list order contains duplicate task IDs.");
+  }
+  if (JSON.stringify(orderedIds).length > TASK_LIST_ORDER_MAX_SERIALIZED_BYTES) {
+    throw new ConvexError("Task list order is too large to save.");
+  }
+}
+
+function assertTaskListOrderKey(orderKey: string) {
+  if (orderKey.length > TASK_LIST_ORDER_KEY_MAX_LENGTH || !taskListOrderKeyPattern.test(orderKey)) {
+    throw new ConvexError("Task list order position is invalid.");
+  }
+}
+
+async function validateTaskListOrder(
+  ctx: MutationCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  taskType: "jd",
+  orderedIds: string[],
+): Promise<Id<"jdTasks">[]>;
+async function validateTaskListOrder(
+  ctx: MutationCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  taskType: "one_time",
+  orderedIds: string[],
+): Promise<Id<"oneTimeTasks">[]>;
+async function validateTaskListOrder(
+  ctx: MutationCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  taskType: TaskKind,
+  orderedIds: string[],
+) {
+  const auth = await taskVisibilityAuth(ctx, companyId, membership);
+  if (taskType === "jd") {
+    const normalized: Id<"jdTasks">[] = [];
+    for (const rawId of orderedIds) {
+      const id = ctx.db.normalizeId("jdTasks", rawId);
+      if (!id) throw new ConvexError("Task not found.");
+      const task = await ctx.db.get(id);
+      if (!task || task.companyId !== companyId || !(await visible(ctx, companyId, membership, task, "jd", auth))) {
+        throw new ConvexError("Task not found.");
+      }
+      normalized.push(id);
+    }
+    return normalized;
+  }
+
+  const normalized: Id<"oneTimeTasks">[] = [];
+  for (const rawId of orderedIds) {
+    const id = ctx.db.normalizeId("oneTimeTasks", rawId);
+    if (!id) throw new ConvexError("Task not found.");
+    const task = await ctx.db.get(id);
+    if (!task || task.companyId !== companyId || !(await visible(ctx, companyId, membership, task, "one_time", auth))) {
+      throw new ConvexError("Task not found.");
+    }
+    normalized.push(id);
+  }
+  return normalized;
+}
+
+async function applyTaskListOrderKeyUpdates(
+  ctx: MutationCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  taskType: TaskKind,
+  orderKeyUpdates: { taskId: string; orderKey: string }[],
+  now: number,
+) {
+  const taskIds = taskType === "jd"
+    ? await validateTaskListOrder(ctx, companyId, membership, "jd", orderKeyUpdates.map(({ taskId }) => taskId))
+    : await validateTaskListOrder(ctx, companyId, membership, "one_time", orderKeyUpdates.map(({ taskId }) => taskId));
+  const entries = await ctx.db
+    .query("taskListOrderEntries")
+    .withIndex("by_companyId_and_membershipId_and_taskType_and_taskId", (q) =>
+      q.eq("companyId", companyId).eq("membershipId", membership._id).eq("taskType", taskType),
+    )
+    .take(TASK_LIST_ORDER_LIMIT + 1);
+  const entryByTaskId = new Map(entries.map((entry) => [entry.taskId, entry]));
+  const missingEntryCount = taskIds.filter((taskId) => !entryByTaskId.has(taskId)).length;
+  if (entries.length + missingEntryCount > TASK_LIST_ORDER_LIMIT) {
+    throw new ConvexError("Task list order is too large to save.");
+  }
+
+  const writes: Promise<unknown>[] = [];
+  for (const [index, taskId] of taskIds.entries()) {
+    const { orderKey } = orderKeyUpdates[index];
+    const entry = entryByTaskId.get(taskId);
+    if (entry) {
+      writes.push(ctx.db.patch(entry._id, { orderKey, updatedAt: now }));
+    } else if (taskType === "jd") {
+      writes.push(ctx.db.insert("taskListOrderEntries", {
+        companyId,
+        membershipId: membership._id,
+        taskType: "jd",
+        taskId: taskId as Id<"jdTasks">,
+        orderKey,
+        updatedAt: now,
+      }));
+    } else {
+      writes.push(ctx.db.insert("taskListOrderEntries", {
+        companyId,
+        membershipId: membership._id,
+        taskType: "one_time",
+        taskId: taskId as Id<"oneTimeTasks">,
+        orderKey,
+        updatedAt: now,
+      }));
+    }
+  }
+  await Promise.all(writes);
 }
 
 export const listJdRows = query({
@@ -191,6 +404,8 @@ export const listJdRows = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
     const scoped = await scopedMembershipIds(ctx, args.companyId, membership, auth.caps, "tasks:jd:view:any");
+    const preference = await getTaskListPreference(ctx, args.companyId, membership._id, "jd");
+    const includeCustomOrderKeys = preference?.sort.mode === "custom";
     const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
     const rows = [];
     const managedIds = await auth.getScopedMembershipIds();
@@ -200,7 +415,10 @@ export const listJdRows = query({
       if (await visible(ctx, args.companyId, membership, task, "jd", auth)) {
         const canUpdate = await canUpdateTask(ctx, args.companyId, membership, task, "jd", auth.caps, managedIds);
         const canDelete = await canDeleteTask(ctx, args.companyId, membership, task, "jd", auth.caps, managedIds);
-        rows.push(await enrichedJd(ctx, task, undefined, canUpdate, canDelete, scoped));
+        const customOrderKey = includeCustomOrderKeys
+          ? await getJdTaskListOrderKey(ctx, args.companyId, membership._id, task._id)
+          : undefined;
+        rows.push(await enrichedJd(ctx, task, undefined, canUpdate, canDelete, scoped, customOrderKey));
       }
     }
     return { ...page, page: rows };
@@ -244,6 +462,8 @@ export const listOneTimeRows = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
     const scoped = await scopedMembershipIds(ctx, args.companyId, membership, auth.caps, "tasks:one_time:view:any");
+    const preference = await getTaskListPreference(ctx, args.companyId, membership._id, "one_time");
+    const includeCustomOrderKeys = preference?.sort.mode === "custom";
     const page = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
     const rows = [];
     const managedIds = await auth.getScopedMembershipIds();
@@ -253,10 +473,190 @@ export const listOneTimeRows = query({
       if (await visible(ctx, args.companyId, membership, task, "one_time", auth)) {
         const canUpdate = await canUpdateTask(ctx, args.companyId, membership, task, "one_time", auth.caps, managedIds);
         const canDelete = await canDeleteTask(ctx, args.companyId, membership, task, "one_time", auth.caps, managedIds);
-        rows.push(await enrichedOneTime(ctx, task, canUpdate, canDelete, scoped));
+        const customOrderKey = includeCustomOrderKeys
+          ? await getOneTimeTaskListOrderKey(ctx, args.companyId, membership._id, task._id)
+          : undefined;
+        rows.push(await enrichedOneTime(ctx, task, canUpdate, canDelete, scoped, customOrderKey));
       }
     }
     return { ...page, page: rows };
+  },
+});
+
+export const getListPreference = query({
+  args: {
+    companyId: v.id("companies"),
+    taskType: taskListTaskTypeValidator,
+  },
+  returns: taskListPreferenceResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const preference = await getTaskListPreference(ctx, args.companyId, membership._id, args.taskType);
+    return taskListPreferenceResult(args.taskType, preference);
+  },
+});
+
+export const setListSort = mutation({
+  args: {
+    companyId: v.id("companies"),
+    taskType: taskListTaskTypeValidator,
+    sort: taskListSortValidator,
+    expectedRevision: v.number(),
+  },
+  returns: taskListPreferenceResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    assertTaskListSort(args.taskType, args.sort);
+    const preference = await getTaskListPreference(ctx, args.companyId, membership._id, args.taskType);
+    assertExpectedPreferenceRevision(preference, args.expectedRevision);
+    const now = Date.now();
+    const revision = args.expectedRevision + 1;
+    let preferenceId: Id<"taskListPreferences">;
+
+    if (preference) {
+      await ctx.db.patch(preference._id, { sort: args.sort, revision, updatedAt: now });
+      preferenceId = preference._id;
+    } else if (args.taskType === "jd") {
+      preferenceId = await ctx.db.insert("taskListPreferences", {
+        companyId: args.companyId,
+        membershipId: membership._id,
+        taskType: "jd",
+        sort: args.sort,
+        revision,
+        updatedAt: now,
+      });
+    } else {
+      preferenceId = await ctx.db.insert("taskListPreferences", {
+        companyId: args.companyId,
+        membershipId: membership._id,
+        taskType: "one_time",
+        sort: args.sort,
+        revision,
+        updatedAt: now,
+      });
+    }
+
+    const saved = await ctx.db.get(preferenceId);
+    if (!saved) throw new ConvexError("Task list preference was not saved.");
+    return taskListPreferenceResult(args.taskType, saved);
+  },
+});
+
+export const saveListOrder = mutation({
+  args: {
+    companyId: v.id("companies"),
+    taskType: taskListTaskTypeValidator,
+    orderedIds: v.array(v.string()),
+    expectedRevision: v.number(),
+  },
+  returns: taskListPreferenceResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    assertTaskListOrderInput(args.orderedIds);
+    const preference = await getTaskListPreference(ctx, args.companyId, membership._id, args.taskType);
+    assertExpectedPreferenceRevision(preference, args.expectedRevision);
+    const now = Date.now();
+    const revision = args.expectedRevision + 1;
+    let preferenceId: Id<"taskListPreferences">;
+
+    if (args.taskType === "jd") {
+      const customOrder = await validateTaskListOrder(ctx, args.companyId, membership, "jd", args.orderedIds);
+      if (preference) {
+        await ctx.db.patch(preference._id, { sort: { mode: "custom" }, customOrder, revision, updatedAt: now });
+        preferenceId = preference._id;
+      } else {
+        preferenceId = await ctx.db.insert("taskListPreferences", {
+          companyId: args.companyId,
+          membershipId: membership._id,
+          taskType: "jd",
+          sort: { mode: "custom" },
+          customOrder,
+          revision,
+          updatedAt: now,
+        });
+      }
+    } else {
+      const customOrder = await validateTaskListOrder(ctx, args.companyId, membership, "one_time", args.orderedIds);
+      if (preference) {
+        await ctx.db.patch(preference._id, { sort: { mode: "custom" }, customOrder, revision, updatedAt: now });
+        preferenceId = preference._id;
+      } else {
+        preferenceId = await ctx.db.insert("taskListPreferences", {
+          companyId: args.companyId,
+          membershipId: membership._id,
+          taskType: "one_time",
+          sort: { mode: "custom" },
+          customOrder,
+          revision,
+          updatedAt: now,
+        });
+      }
+    }
+
+    const saved = await ctx.db.get(preferenceId);
+    if (!saved) throw new ConvexError("Task list preference was not saved.");
+    return taskListPreferenceResult(args.taskType, saved);
+  },
+});
+
+export const moveListOrderTask = mutation({
+  args: {
+    companyId: v.id("companies"),
+    taskType: taskListTaskTypeValidator,
+    taskId: v.string(),
+    orderKey: v.string(),
+    rebalancedOrderKeys: v.optional(v.array(v.object({ taskId: v.string(), orderKey: v.string() }))),
+    expectedRevision: v.number(),
+  },
+  returns: taskListPreferenceResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const orderKeyUpdates = args.rebalancedOrderKeys ?? [{ taskId: args.taskId, orderKey: args.orderKey }];
+    assertTaskListOrderInput(orderKeyUpdates.map(({ taskId }) => taskId));
+    for (const { orderKey } of orderKeyUpdates) assertTaskListOrderKey(orderKey);
+    if (!orderKeyUpdates.some(({ taskId, orderKey }) => taskId === args.taskId && orderKey === args.orderKey)) {
+      throw new ConvexError("Task list order position is invalid.");
+    }
+    const preference = await getTaskListPreference(ctx, args.companyId, membership._id, args.taskType);
+    assertExpectedPreferenceRevision(preference, args.expectedRevision);
+    const now = Date.now();
+    const revision = args.expectedRevision + 1;
+    let preferenceId: Id<"taskListPreferences">;
+
+    await applyTaskListOrderKeyUpdates(ctx, args.companyId, membership, args.taskType, orderKeyUpdates, now);
+    if (args.taskType === "jd") {
+      if (preference) {
+        await ctx.db.patch(preference._id, { sort: { mode: "custom" }, revision, updatedAt: now });
+        preferenceId = preference._id;
+      } else {
+        preferenceId = await ctx.db.insert("taskListPreferences", {
+          companyId: args.companyId,
+          membershipId: membership._id,
+          taskType: "jd",
+          sort: { mode: "custom" },
+          revision,
+          updatedAt: now,
+        });
+      }
+    } else {
+      if (preference) {
+        await ctx.db.patch(preference._id, { sort: { mode: "custom" }, revision, updatedAt: now });
+        preferenceId = preference._id;
+      } else {
+        preferenceId = await ctx.db.insert("taskListPreferences", {
+          companyId: args.companyId,
+          membershipId: membership._id,
+          taskType: "one_time",
+          sort: { mode: "custom" },
+          revision,
+          updatedAt: now,
+        });
+      }
+    }
+
+    const saved = await ctx.db.get(preferenceId);
+    if (!saved) throw new ConvexError("Task list preference was not saved.");
+    return taskListPreferenceResult(args.taskType, saved);
   },
 });
 
@@ -1357,4 +1757,3 @@ export const migrateTaskCodes = internalAction({
     };
   },
 });
-

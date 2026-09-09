@@ -1,5 +1,6 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
+import { taskListOrderEntryValidator, taskListPreferenceValidator } from "./taskListPreferences";
 
 const role = v.union(v.literal("Admin"), v.literal("Manager"), v.literal("Employee"));
 const priority = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
@@ -46,6 +47,8 @@ export default defineSchema({
   jdTaskCompletions: defineTable({ companyId: v.id("companies"), jdTaskId: v.id("jdTasks"), cycleStart: v.number(), completedByMembershipId: v.id("companyMemberships"), completedAt: v.number(), note: v.optional(v.string()) }).index("by_task", ["jdTaskId"]).index("by_task_and_cycleStart", ["jdTaskId", "cycleStart"]).index("by_task_and_completedAt", ["jdTaskId", "completedAt"]),
   jdTaskCycleRecords: defineTable({ companyId: v.id("companies"), jdTaskId: v.id("jdTasks"), cycleStart: v.number(), cycleEnd: v.number(), status: v.literal("missed"), recordedAt: v.number() }).index("by_company", ["companyId"]).index("by_task", ["jdTaskId"]).index("by_task_and_cycleStart", ["jdTaskId", "cycleStart"]),
   oneTimeTasks: defineTable({ companyId: v.id("companies"), reference: v.string(), title: v.string(), description: v.optional(v.string()), notes: v.optional(v.string()), dueDate: v.optional(v.number()), time: v.optional(v.string()), quantity: v.optional(v.number()), assigneeMembershipIds: v.array(v.id("companyMemberships")), createdByMembershipId: v.id("companyMemberships"), priority, status: taskStatus, overdueAt: v.optional(v.number()), completedAt: v.optional(v.number()), completedByMembershipId: v.optional(v.id("companyMemberships")), createdAt: v.number(), updatedAt: v.number() }).index("by_company", ["companyId"]).index("by_companyId_and_reference", ["companyId", "reference"]),
+  taskListPreferences: defineTable(taskListPreferenceValidator).index("by_companyId_and_membershipId_and_taskType", ["companyId", "membershipId", "taskType"]),
+  taskListOrderEntries: defineTable(taskListOrderEntryValidator).index("by_companyId_and_membershipId_and_taskType_and_taskId", ["companyId", "membershipId", "taskType", "taskId"]),
   taskComments: defineTable({ companyId: v.id("companies"), taskType, taskId: v.string(), authorMembershipId: v.id("companyMemberships"), body: v.string(), createdAt: v.number() }).index("by_task", ["taskType", "taskId"]).index("by_company", ["companyId"]),
   taskActivityLogs: defineTable({ companyId: v.id("companies"), taskType, taskId: v.string(), actorMembershipId: v.id("companyMemberships"), event: v.union(v.literal("created"), v.literal("status_changed")), fromStatus: v.optional(taskStatus), toStatus: v.optional(taskStatus), createdAt: v.number() }).index("by_task", ["taskType", "taskId"]).index("by_company", ["companyId"]),
   taskAttachments: defineTable({ companyId: v.id("companies"), taskType, taskId: v.string(), fileName: v.string(), contentType: v.string(), size: v.number(), storageId: v.id("_storage"), createdByMembershipId: v.id("companyMemberships"), createdAt: v.number() }).index("by_task", ["taskType", "taskId"]).index("by_company", ["companyId"]).index("by_storageId", ["storageId"]),

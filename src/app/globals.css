@@ -304,6 +304,95 @@ button:disabled { cursor: not-allowed; }
 .task-table tbody tr[data-checked="true"] td { background: color-mix(in srgb, var(--primary) 5%, var(--surface)); }
 .task-table tbody tr:last-child td { border-bottom: 0; }
 
+/* Task lists keep their controls in the table so cell centers always follow real row height. */
+.task-list-table-wrap { overflow-x: auto; }
+.task-list-table .task-list-controls-header,
+.task-list-table .task-list-controls {
+  box-sizing: border-box;
+  width: 64px;
+  min-width: 64px;
+  max-width: 64px;
+  padding-inline: 8px;
+  text-align: center;
+}
+.task-list-table .task-list-controls { vertical-align: middle; }
+.task-list-controls-inner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.task-list-handle-spacer,
+.task-list-drag-handle {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  place-items: center;
+}
+.task-list-drag-handle {
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: grab;
+  transition: background-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+}
+.task-list-drag-handle:active { cursor: grabbing; }
+.task-list-drag-handle:hover:not(:disabled),
+.task-list-drag-handle:focus-visible {
+  background: var(--surface-muted);
+  color: var(--ink);
+  outline: none;
+}
+.task-list-drag-handle:disabled { cursor: default; }
+.task-list-table .task-list-row-control { opacity: 0; transition: opacity 0.12s ease; }
+.task-list-table tbody tr:hover .task-list-row-control,
+.task-list-table tbody tr:focus-within .task-list-row-control,
+.task-list-table tbody tr[data-checked="true"] .task-list-row-control,
+.task-list-table .task-list-row-control:focus-within { opacity: 1; }
+.task-list-table .task-list-header-checkbox { opacity: 0; transition: opacity 0.12s ease; }
+.task-list-table thead tr:hover .task-list-header-checkbox,
+.task-list-table thead tr:focus-within .task-list-header-checkbox,
+.task-list-table:has(tbody tr[data-checked="true"]) .task-list-header-checkbox,
+.task-list-table .task-list-header-checkbox:focus-visible { opacity: 1; }
+.task-list-table tbody tr[data-selected="true"] td:first-child { box-shadow: none; }
+.task-list-table tbody tr[data-selected="true"] td:nth-child(2) { box-shadow: inset 2px 0 0 var(--primary); }
+.task-list-table tbody tr[data-dragging="true"] td { opacity: 0.55; }
+
+.task-sort-header { padding-inline: 0 !important; }
+.task-sort-header-button {
+  display: flex;
+  width: 100%;
+  height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  padding-inline: 14px;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+}
+.task-sort-header-button:hover:not(:disabled),
+.task-sort-header-button:focus-visible,
+.task-sort-header-button[data-active="true"] { color: var(--ink); outline: none; }
+.task-sort-header-button:disabled { cursor: default; }
+.task-sort-icon {
+  display: inline-grid;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  place-items: center;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.task-sort-header:hover .task-sort-icon,
+.task-sort-header:focus-within .task-sort-icon,
+.task-sort-header-button[data-active="true"] .task-sort-icon { opacity: 1; }
+
 .task-table .col-task { font-weight: 500; color: var(--ink); }
 .task-title-cell {
   position: relative;
@@ -1156,6 +1245,35 @@ button:disabled { cursor: not-allowed; }
 }
 .task-toolbar-icon:hover,
 .task-toolbar-icon[data-active="true"] { background: var(--surface-muted); color: var(--ink); }
+.task-sort-trigger {
+  display: inline-flex;
+  height: 30px;
+  max-width: 220px;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  padding: 0 8px;
+  color: var(--ink-muted);
+  font-size: 12.5px;
+  transition: background-color 0.12s ease, color 0.12s ease;
+  white-space: nowrap;
+}
+.task-sort-trigger:hover:not(:disabled),
+.task-sort-trigger:focus-visible,
+.task-sort-trigger[data-active="true"] { background: var(--surface-muted); color: var(--ink); outline: none; }
+.task-sort-trigger:disabled { cursor: default; opacity: 0.6; }
+@media (hover: none), (pointer: coarse) {
+  .task-list-table .task-list-row-control,
+  .task-list-table .task-list-header-checkbox { opacity: 1; }
+}
+@media (max-width: 640px) {
+  .task-sort-trigger { width: 30px; padding: 0; justify-content: center; }
+  .task-sort-trigger > span { display: none; }
+  .task-sort-trigger > svg:last-child { display: none; }
+}
 .task-toolbar-badge {
   position: absolute;
   right: -4px;
@@ -1685,4 +1803,3 @@ button:disabled { cursor: not-allowed; }
 .dash-filter-pill-btn:active {
   transform: scale(0.97);
 }
-

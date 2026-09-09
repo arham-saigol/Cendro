@@ -3,6 +3,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
+  ArrowDown,
   ArrowUp,
   CalendarClock,
   CalendarDays,
@@ -14,6 +15,7 @@ import {
   Clock,
   Download,
   Flag,
+  GripVertical,
   Hash,
   Inbox,
   PanelRight,
@@ -29,7 +31,9 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { DragDropProvider, type DragEndEvent, type DragStartEvent } from "@dnd-kit/react";
+import { isSortable, useSortable } from "@dnd-kit/react/sortable";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
@@ -41,6 +45,28 @@ import { downloadBlob, exportTaskWorkbook } from "@/lib/task-import/workbook";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import {
+  moveTaskListId,
+  restoreTaskListCustomOrder,
+  sameTaskListOrder,
+  sortTaskListRows,
+  taskListCustomOrderKeys,
+  taskListOrderPositionForMove,
+  type TaskListOrderKeyUpdate,
+  type TaskListOrderingRow,
+} from "@/lib/task-list-order";
+import {
+  defaultTaskListSortDirection,
+  defaultTaskListSortField,
+  initialTaskListSortDirection,
+  taskListSortFieldLabel,
+  taskListSortFields,
+  taskListSortLabel,
+  type TaskListSort,
+  type TaskListSortDirection,
+  type TaskListSortField,
+  type TaskListTaskType,
+} from "@/lib/task-list-sort";
 import { cn, formatDate, initials } from "@/lib/utils";
 
 type Kind = "jd" | "one";
@@ -65,6 +91,61 @@ type TaskFormValues = {
   files: File[];
 };
 
+type TaskRowAssignee = {
+  membership: { _id: string; role: string };
+  user: {
+    name: string | null;
+    firstName?: string | null;
+    secondName?: string | null;
+    fullName?: string | null;
+    email: string;
+    imageUrl?: string | null;
+  };
+};
+
+type TaskRow = TaskListOrderingRow & {
+  reference: string;
+  title: string;
+  description?: string | null;
+  notes?: string | null;
+  time?: string | null;
+  quantity?: number | null;
+  recurrence?: Frequency;
+  priority?: Priority;
+  dueDate?: number | null;
+  createdAt: number;
+  assigneeMembershipIds: string[];
+  assignees: TaskRowAssignee[];
+  state?: {
+    status?: string;
+    rawStatus?: ManualStatus | "overdue";
+  } | string;
+  canUpdate?: boolean;
+  canDelete?: boolean;
+  customOrderKey?: string;
+};
+
+type TaskListPreferenceState = {
+  sort: TaskListSort;
+  customOrder: string[] | null;
+  revision: number;
+};
+
+type TaskSortableData = { kind: "task"; scope: string };
+type TaskDragSnapshot = {
+  scope: string;
+  sourceId: string;
+  visibleIds: string[];
+  fullOrderIds: string[];
+};
+type OptimisticTaskOrderKeys = { scope: string; keys: Record<string, string> };
+
+function sameTaskListSort(left: TaskListSort, right: TaskListSort) {
+  if (left.mode !== right.mode) return false;
+  if (left.mode !== "field" || right.mode !== "field") return true;
+  return left.field === right.field && left.direction === right.direction;
+}
+
 const frequencies: { value: Frequency; label: string }[] = [
   { value: "daily", label: "Daily" },
   { value: "every_other_day", label: "Alternate days" },
@@ -75,9 +156,9 @@ const frequencies: { value: Frequency; label: string }[] = [
   { value: "semiannually", label: "Bi-yearly" },
   { value: "annually", label: "Yearly" },
 ];
-const frequencyRank = new Map<Frequency, number>(frequencies.map((frequency, index) => [frequency.value, index]));
 const priorities: Priority[] = ["low", "medium", "high"];
 const TASK_PAGE_SIZE = 200;
+const TASK_LIST_ORDER_LIMIT = 2_000;
 const manualStatuses: { value: ManualStatus; label: string }[] = [
   { value: "due", label: "Pending" },
   { value: "in_progress", label: "In Progress" },
@@ -178,7 +259,6 @@ function fromDateInput(value: string) {
 }
 function quantityFromInput(value: string) { const parsed = Number(value); return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined; }
 function frequencyLabel(value?: Frequency) { return frequencies.find((frequency) => frequency.value === value)?.label ?? "—"; }
-function compareFrequency(a?: Frequency, b?: Frequency) { return (frequencyRank.get(a as Frequency) ?? Number.MAX_SAFE_INTEGER) - (frequencyRank.get(b as Frequency) ?? Number.MAX_SAFE_INTEGER); }
 function priorityLabel(value?: Priority) { return value ? value[0].toUpperCase() + value.slice(1) : "—"; }
 function statusText(task: any) { return typeof task.state === "string" ? task.state : task.state?.status ?? "Pending"; }
 function rawStatus(task: any): ManualStatus | "overdue" { return task.state?.rawStatus ?? (statusText(task) === "Completed" ? "completed" : statusText(task) === "In Progress" ? "in_progress" : statusText(task) === "Overdue" ? "overdue" : statusText(task) === "Pending" ? "due" : "due"); }
@@ -579,6 +659,215 @@ function TaskFilterMenu({
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
+  );
+}
+
+function taskSortDirectionForField(
+  taskType: TaskListTaskType,
+  sort: TaskListSort,
+  field: TaskListSortField,
+): TaskListSortDirection | null {
+  if (sort.mode === "field" && sort.field === field) return sort.direction;
+  if (sort.mode === "default" && defaultTaskListSortField(taskType) === field) {
+    return defaultTaskListSortDirection(taskType);
+  }
+  return null;
+}
+
+function TaskSortHeader({
+  taskType,
+  field,
+  label,
+  icon,
+  sort,
+  disabled,
+  className,
+  onSelect,
+}: {
+  taskType: TaskListTaskType;
+  field: TaskListSortField;
+  label: string;
+  icon: ReactNode;
+  sort: TaskListSort;
+  disabled: boolean;
+  className?: string;
+  onSelect: (field: TaskListSortField) => void;
+}) {
+  const direction = taskSortDirectionForField(taskType, sort, field);
+  const nextDirection = direction === "asc" ? "descending" : "ascending";
+  return (
+    <th
+      scope="col"
+      aria-sort={direction === "asc" ? "ascending" : direction === "desc" ? "descending" : "none"}
+      className={cn("task-sort-header", className)}
+    >
+      <button
+        type="button"
+        className="task-sort-header-button"
+        data-active={direction ? "true" : undefined}
+        disabled={disabled}
+        onClick={() => onSelect(field)}
+        aria-label={direction ? `Sort by ${label}, currently ${direction === "asc" ? "ascending" : "descending"}. Activate to sort ${nextDirection}.` : `Sort by ${label} ascending.`}
+      >
+        <span className="inline-flex min-w-0 items-center gap-1.5">{icon}{label}</span>
+        <span className="task-sort-icon" aria-hidden="true">
+          {direction === "desc" ? <ArrowDown className="h-3.5 w-3.5" /> : <ArrowUp className="h-3.5 w-3.5" />}
+        </span>
+      </button>
+    </th>
+  );
+}
+
+function TaskSortMenu({
+  taskType,
+  sort,
+  disabled,
+  customOrderingEnabled,
+  onSelect,
+}: {
+  taskType: TaskListTaskType;
+  sort: TaskListSort;
+  disabled: boolean;
+  customOrderingEnabled: boolean;
+  onSelect: (sort: TaskListSort) => void;
+}) {
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type="button"
+          className="task-sort-trigger"
+          data-active={sort.mode !== "default" ? "true" : undefined}
+          disabled={disabled}
+          aria-label={`Sort tasks: ${taskListSortLabel(taskType, sort)}`}
+        >
+          <SlidersHorizontal className="h-4 w-4" />
+          <span>Sort: {taskListSortLabel(taskType, sort)}</span>
+          <ChevronDown className="h-3.5 w-3.5 text-[var(--ink-faint)]" />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content align="end" sideOffset={6} className="task-menu min-w-52" aria-label="Task sorting">
+          <DropdownMenu.Item onSelect={() => onSelect({ mode: "default" })} className="task-menu-item">
+            <span className="flex-1">Default</span>
+            {sort.mode === "default" && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
+          </DropdownMenu.Item>
+          <DropdownMenu.Item disabled={!customOrderingEnabled} onSelect={() => onSelect({ mode: "custom" })} className="task-menu-item">
+            <span className="flex-1">Custom</span>
+            {sort.mode === "custom" && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
+          </DropdownMenu.Item>
+          <div className="my-1 h-px bg-[var(--hairline)]" />
+          {taskListSortFields(taskType).map((field) => (
+            <DropdownMenu.Sub key={field}>
+              <DropdownMenu.SubTrigger className="task-menu-item">
+                <span className="flex-1">{taskListSortFieldLabel(field)}</span>
+                {sort.mode === "field" && sort.field === field && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
+                <ChevronRight className="h-3.5 w-3.5" />
+              </DropdownMenu.SubTrigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.SubContent sideOffset={7} alignOffset={-5} className="task-menu min-w-40">
+                  {(["asc", "desc"] as const).map((direction) => (
+                    <DropdownMenu.Item key={direction} onSelect={() => onSelect({ mode: "field", field, direction })} className="task-menu-item">
+                      <span className="flex-1">{direction === "asc" ? "Ascending" : "Descending"}</span>
+                      {sort.mode === "field" && sort.field === field && sort.direction === direction && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
+                    </DropdownMenu.Item>
+                  ))}
+                </DropdownMenu.SubContent>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Sub>
+          ))}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
+function SortableTaskRow({
+  task,
+  index,
+  scope,
+  dragDisabled,
+  checked,
+  selected,
+  rowCanEdit,
+  onToggle,
+  onOpenDetails,
+  onHandleElement,
+  children,
+}: {
+  task: TaskRow;
+  index: number;
+  scope: string;
+  dragDisabled: boolean;
+  checked: boolean;
+  selected: boolean;
+  rowCanEdit: boolean;
+  onToggle: () => void;
+  onOpenDetails: () => void;
+  onHandleElement: (id: string, element: HTMLButtonElement | null) => void;
+  children: ReactNode;
+}) {
+  const { ref, handleRef, isDragging } = useSortable<TaskSortableData>({
+    id: task._id,
+    index,
+    group: scope,
+    type: "task",
+    accept: "task",
+    disabled: dragDisabled,
+    data: { kind: "task", scope },
+  });
+  const setHandleRef = useCallback((element: HTMLButtonElement | null) => {
+    handleRef(element);
+    onHandleElement(task._id, element);
+  }, [handleRef, onHandleElement, task._id]);
+
+  return (
+    <tr
+      ref={ref}
+      data-row="task"
+      data-clickable={!rowCanEdit ? "true" : undefined}
+      data-selected={selected ? "true" : undefined}
+      data-checked={checked ? "true" : undefined}
+      data-dragging={isDragging ? "true" : undefined}
+      tabIndex={!rowCanEdit ? 0 : undefined}
+      onClick={(event) => {
+        if (rowCanEdit) return;
+        if ((event.target as HTMLElement).closest("[data-interactive='true']")) return;
+        onOpenDetails();
+      }}
+      onKeyDown={(event) => {
+        if (rowCanEdit || (event.target as HTMLElement).closest("[data-interactive='true']")) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpenDetails();
+        }
+      }}
+      className="group/row"
+    >
+      <td className="task-list-controls" data-interactive="true" onClick={(event) => event.stopPropagation()}>
+        <div className="task-list-controls-inner">
+          <button
+            ref={setHandleRef}
+            type="button"
+            className="task-list-row-control task-list-drag-handle"
+            disabled={dragDisabled}
+            data-interactive="true"
+            onClick={(event) => event.stopPropagation()}
+            aria-label={`Reorder ${task.reference}: ${task.title}`}
+          >
+            <GripVertical className="h-3.5 w-3.5" />
+          </button>
+          <span className="task-list-row-control" data-interactive="true" onClick={(event) => event.stopPropagation()}>
+            <Checkbox
+              checked={checked}
+              onCheckedChange={onToggle}
+              aria-label={checked ? `Unselect ${task.title}` : `Select ${task.title}`}
+            />
+          </span>
+        </div>
+      </td>
+      {children}
+    </tr>
   );
 }
 
@@ -1197,39 +1486,55 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [pendingCell, setPendingCell] = useState<string | null>(null);
+  const [renderedCount, setRenderedCount] = useState(TASK_PAGE_SIZE);
+  const [sortOverride, setSortOverride] = useState<{ scope: string; sort: TaskListSort } | null>(null);
+  const [optimisticPreference, setOptimisticPreference] = useState<(TaskListPreferenceState & { scope: string }) | null>(null);
+  const [optimisticTaskOrderKeys, setOptimisticTaskOrderKeys] = useState<OptimisticTaskOrderKeys | null>(null);
+  const [preferencePending, setPreferencePending] = useState(false);
+  const [dragSnapshot, setDragSnapshot] = useState<TaskDragSnapshot | null>(null);
+  const dragHandleRefs = useRef(new Map<string, HTMLButtonElement>());
+  const preferenceScopeRef = useRef("");
   const taskPrefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   const canUseAllTasks = Boolean(active?.capabilities.some((c) => c === `${taskPrefix}:view:any` || c === `${taskPrefix}:view:managed`));
   const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip") as any[] | undefined;
   const filterableAssignees = useQuery(api.tasks.filterableAssignees, activeCompanyId && canUseAllTasks ? { companyId: activeCompanyId } : "skip") as any[] | undefined;
-  const queryArgs = useMemo(() => {
-    if (!activeCompanyId) return "skip" as const;
-    const cleanSearch = search.trim() || undefined;
-    if (kind === "jd") {
-      return {
-        companyId: activeCompanyId,
-        search: cleanSearch,
-        frequency: frequency !== "all" ? frequency : undefined,
-      };
-    }
-    return {
-      companyId: activeCompanyId,
-      search: cleanSearch,
-      priority: priorityFilter !== "all" ? priorityFilter : undefined,
-    };
-  }, [activeCompanyId, kind, search, frequency, priorityFilter]);
+  const taskType: TaskListTaskType = taskTypeFor(kind);
+  const queryArgs = useMemo(
+    () => (activeCompanyId ? { companyId: activeCompanyId } : "skip" as const),
+    [activeCompanyId],
+  );
 
-  const taskPages = usePaginatedQuery(
+  const {
+    status: taskPageStatus,
+    results: taskPageResults,
+    loadMore: loadMoreTaskPage,
+  } = usePaginatedQuery(
     kind === "jd" ? api.tasks.listJdRows : api.tasks.listOneTimeRows,
     queryArgs,
     { initialNumItems: TASK_PAGE_SIZE }
   );
-  const tasks = taskPages.status === "LoadingFirstPage" ? undefined : taskPages.results as any[];
+  const tasks = taskPageStatus === "LoadingFirstPage" ? undefined : taskPageResults as TaskRow[];
+  const allTasks = useMemo<TaskRow[]>(() => tasks ?? [], [tasks]);
+  const preferenceResult = useQuery(
+    api.tasks.getListPreference,
+    activeCompanyId ? { companyId: activeCompanyId, taskType } : "skip",
+  );
+  const subscribedPreference = useMemo<TaskListPreferenceState | undefined>(() => {
+    if (!preferenceResult) return undefined;
+    return {
+      sort: preferenceResult.sort as TaskListSort,
+      customOrder: preferenceResult.customOrder?.map(String) ?? null,
+      revision: preferenceResult.revision,
+    };
+  }, [preferenceResult]);
   const updateJd = useMutation(api.tasks.updateJd);
   const updateOneTime = useMutation(api.tasks.updateOneTime);
   const deleteJd = useMutation(api.tasks.deleteJd);
   const deleteJdBulk = useMutation(api.tasks.deleteJdBulk);
   const deleteOneTime = useMutation(api.tasks.deleteOneTime);
   const deleteOneTimeBulk = useMutation(api.tasks.deleteOneTimeBulk);
+  const setListSort = useMutation(api.tasks.setListSort);
+  const moveListOrderTask = useMutation(api.tasks.moveListOrderTask);
   const base = kind === "jd" ? "/jd-tasks" : "/one-time-tasks";
   const pageTitle = kind === "jd" ? "Job Description" : "Tasks";
   const description = kind === "jd" ? "Track and manage recurring responsibilities and scheduled duties." : "Track and manage assignments, action items, and upcoming deadlines.";
@@ -1242,22 +1547,49 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const priorityViewActive = kind === "one" && personalPriorityView !== "all";
   const effectiveTaskView: TaskView = canUseAllTasks ? taskView : "my";
   const currentMembershipId = active?.membership._id as string | undefined;
-  const personalOptions = useQuery(api.tasks.personalFilterOptions, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip");
+  const preferenceScope = `${activeCompanyId ?? "none"}:${active?.membership._id ?? "none"}:${taskType}`;
+  const activePreference = optimisticPreference?.scope === preferenceScope
+    ? optimisticPreference
+    : subscribedPreference;
+  const activeSort = useMemo<TaskListSort>(
+    () => sortOverride?.scope === preferenceScope
+      ? sortOverride.sort
+      : activePreference?.sort ?? { mode: "default" },
+    [activePreference?.sort, preferenceScope, sortOverride],
+  );
+  const taskOrderKeys = useMemo(() => {
+    const keys = new Map<string, string>();
+    for (const task of allTasks) {
+      if (task.customOrderKey) keys.set(task._id, task.customOrderKey);
+    }
+    if (optimisticTaskOrderKeys?.scope === preferenceScope) {
+      for (const [id, key] of Object.entries(optimisticTaskOrderKeys.keys)) keys.set(id, key);
+    }
+    return keys;
+  }, [allTasks, optimisticTaskOrderKeys, preferenceScope]);
+  const dataReady = Boolean(activeCompanyId && subscribedPreference && taskPageStatus === "Exhausted");
+  const customOrderingEnabled = dataReady && allTasks.length <= TASK_LIST_ORDER_LIMIT;
   const ownFrequencyValues = useMemo(() => {
-    if (kind !== "jd" || !personalOptions) return [] as Frequency[];
-    const set = new Set(personalOptions.values as Frequency[]);
+    if (kind !== "jd") return [] as Frequency[];
+    const set = new Set(allTasks.filter((task) => taskHasAssignee(task, currentMembershipId)).map((task) => task.recurrence).filter((value): value is Frequency => Boolean(value)));
     return frequencies.map((option) => option.value).filter((value) => set.has(value));
-  }, [kind, personalOptions]);
+  }, [allTasks, currentMembershipId, kind]);
   const ownPriorityValues = useMemo(() => {
-    if (kind !== "one" || !personalOptions) return [] as Priority[];
-    const set = new Set(personalOptions.values as Priority[]);
+    if (kind !== "one") return [] as Priority[];
+    const set = new Set(allTasks.filter((task) => taskHasAssignee(task, currentMembershipId)).map((task) => task.priority).filter((value): value is Priority => Boolean(value)));
     return priorities.filter((priority) => set.has(priority));
-  }, [kind, personalOptions]);
+  }, [allTasks, currentMembershipId, kind]);
   const showAssigneeColumn = canUseAllTasks && effectiveTaskView === "all";
   const showFrequencyColumn = kind === "jd" && !frequencyFilterActive;
   const showPriorityColumn = kind === "one" && !priorityFilterActive;
-  const visibleTasks = (tasks ?? [])
-    .filter((task) => {
+  const orderedTasks = useMemo(() => {
+    if (activeSort.mode === "custom") {
+      return restoreTaskListCustomOrder(allTasks, taskType, activePreference?.customOrder, taskOrderKeys);
+    }
+    return sortTaskListRows(allTasks, taskType, activeSort);
+  }, [activePreference?.customOrder, activeSort, allTasks, taskOrderKeys, taskType]);
+  const filteredTasks = useMemo(() => (
+    orderedTasks.filter((task) => {
       const needle = search.trim().toLowerCase();
       if (needle && !task.title.toLowerCase().includes(needle) && !task.reference.toLowerCase().includes(needle)) return false;
       if (effectiveTaskView === "my" && !taskHasAssignee(task, currentMembershipId)) return false;
@@ -1267,16 +1599,27 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       if (assigneeFilter !== "all" && !taskHasAssignee(task, assigneeFilter)) return false;
       return true;
     })
-    .sort((a, b) => kind === "jd" ? compareFrequency(a.recurrence, b.recurrence) || (b.createdAt ?? 0) - (a.createdAt ?? 0) : 0);
-  const visibleIds = visibleTasks.map((task) => task._id);
+  ), [assigneeFilter, currentMembershipId, effectiveTaskView, frequency, kind, orderedTasks, priorityFilter, search, statusFilter]);
+  const displayedTasks = useMemo(() => {
+    if (!dragSnapshot || dragSnapshot.scope !== preferenceScope) return filteredTasks;
+    const taskById = new Map(filteredTasks.map((task) => [task._id, task]));
+    return dragSnapshot.visibleIds.flatMap((id) => {
+      const task = taskById.get(id);
+      return task ? [task] : [];
+    });
+  }, [dragSnapshot, filteredTasks, preferenceScope]);
+  const renderedTasks = displayedTasks.slice(0, renderedCount);
+  const visibleIds = renderedTasks.map((task) => task._id);
   const selectedVisibleCount = visibleIds.reduce((count, id) => count + (selectedIds.has(id) ? 1 : 0), 0);
-  const allVisibleSelected = visibleTasks.length > 0 && selectedVisibleCount === visibleTasks.length;
+  const allVisibleSelected = renderedTasks.length > 0 && selectedVisibleCount === renderedTasks.length;
   const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
   const selectionCount = selectedIds.size;
-  const canDeleteSelection = selectionCount > 0 && !deleting && Array.from(selectedIds).every((id) => canDeleteTaskRow(active, kind, (tasks ?? visibleTasks).find((task: any) => task._id === id)));
+  const canDeleteSelection = selectionCount > 0 && !deleting && Array.from(selectedIds).every((id) => canDeleteTaskRow(active, kind, allTasks.find((task) => task._id === id)));
   const selectedTaskId = selectionCount === 1 ? Array.from(selectedIds)[0] : null;
-  const selectedTask = selectedTaskId ? (tasks ?? visibleTasks).find((task: any) => task._id === selectedTaskId) ?? null : null;
+  const selectedTask = selectedTaskId ? allTasks.find((task) => task._id === selectedTaskId) ?? null : null;
   const canEditSelectedTask = Boolean(selectedTask && canEditTaskRow(active, kind, selectedTask));
+  const hasMoreRenderedTasks = dataReady && renderedTasks.length < displayedTasks.length;
+  const dragDisabled = !customOrderingEnabled || preferencePending;
 
   useEffect(() => {
     if (!activeCompanyId) return;
@@ -1291,20 +1634,63 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   }, [effectiveTaskView, assigneeFilter]);
 
   useEffect(() => {
-    if (kind !== "jd" || personalFrequencyView === "all" || !personalOptions) return;
+    if (!dataReady || kind !== "jd" || personalFrequencyView === "all") return;
     if (!ownFrequencyValues.includes(personalFrequencyView)) {
       setPersonalFrequencyView("all");
       setFrequency((current) => current === personalFrequencyView ? "all" : current);
     }
-  }, [kind, ownFrequencyValues, personalFrequencyView, personalOptions]);
+  }, [dataReady, kind, ownFrequencyValues, personalFrequencyView]);
 
   useEffect(() => {
-    if (kind !== "one" || personalPriorityView === "all" || !personalOptions) return;
+    if (!dataReady || kind !== "one" || personalPriorityView === "all") return;
     if (!ownPriorityValues.includes(personalPriorityView)) {
       setPersonalPriorityView("all");
       setPriorityFilter((current) => current === personalPriorityView ? "all" : current);
     }
-  }, [kind, ownPriorityValues, personalPriorityView, personalOptions]);
+  }, [dataReady, kind, ownPriorityValues, personalPriorityView]);
+
+  useEffect(() => {
+    preferenceScopeRef.current = preferenceScope;
+  }, [preferenceScope]);
+
+  useEffect(() => {
+    setRenderedCount(TASK_PAGE_SIZE);
+    setSortOverride(null);
+    setOptimisticPreference(null);
+    setOptimisticTaskOrderKeys(null);
+    setPreferencePending(false);
+    setDragSnapshot(null);
+    dragHandleRefs.current.clear();
+  }, [preferenceScope]);
+
+  useEffect(() => {
+    if (!optimisticPreference || optimisticPreference.scope !== preferenceScope || !subscribedPreference) return;
+    if (subscribedPreference.revision >= optimisticPreference.revision) {
+      setOptimisticPreference(null);
+    }
+  }, [optimisticPreference, preferenceScope, subscribedPreference]);
+
+  useEffect(() => {
+    if (!optimisticTaskOrderKeys || optimisticTaskOrderKeys.scope !== preferenceScope) return;
+    const persistedKeys = new Map(allTasks.map((task) => [task._id, task.customOrderKey]));
+    const remaining = Object.fromEntries(
+      Object.entries(optimisticTaskOrderKeys.keys).filter(([id, key]) => persistedKeys.get(id) !== key),
+    );
+    if (Object.keys(remaining).length === Object.keys(optimisticTaskOrderKeys.keys).length) return;
+    setOptimisticTaskOrderKeys(Object.keys(remaining).length > 0
+      ? { scope: preferenceScope, keys: remaining }
+      : null);
+  }, [allTasks, optimisticTaskOrderKeys, preferenceScope]);
+
+  useEffect(() => {
+    if (!dragSnapshot) return;
+    if (
+      dragSnapshot.scope !== preferenceScope ||
+      !allTasks.some((task) => task._id === dragSnapshot.sourceId)
+    ) {
+      setDragSnapshot(null);
+    }
+  }, [allTasks, dragSnapshot, preferenceScope]);
 
   const ownFilterCount = kind === "jd" ? ownFrequencyValues.length : ownPriorityValues.length;
   const activeView = kind === "jd" ? personalFrequencyView : personalPriorityView;
@@ -1323,26 +1709,32 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   }, [searchOpen]);
 
   useEffect(() => {
+    if (taskPageStatus === "CanLoadMore") loadMoreTaskPage(TASK_PAGE_SIZE);
+  }, [loadMoreTaskPage, taskPageStatus]);
+
+  useEffect(() => {
     const node = loadMoreRef.current;
-    if (!node || taskPages.status !== "CanLoadMore") return;
+    if (!node || !hasMoreRenderedTasks) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry.isIntersecting) taskPages.loadMore(TASK_PAGE_SIZE);
+        if (entry.isIntersecting) {
+          setRenderedCount((current) => Math.min(current + TASK_PAGE_SIZE, displayedTasks.length));
+        }
       },
       { rootMargin: "400px 0px" }
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [taskPages]);
+  }, [displayedTasks.length, hasMoreRenderedTasks]);
 
   useEffect(() => {
     if (tasks && selectedIds.size > 0) {
       const valid = new Set<string>();
-      const known = new Set((tasks ?? []).map((task) => task._id));
+      const known = new Set(allTasks.map((task) => task._id));
       for (const id of selectedIds) if (known.has(id)) valid.add(id);
       if (valid.size !== selectedIds.size) setSelectedIds(valid);
     }
-  }, [tasks, selectedIds]);
+  }, [allTasks, selectedIds, tasks]);
 
   useEffect(() => {
     if (!createOpen) return;
@@ -1485,8 +1877,166 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     setPersonalPriorityView("all");
   }
 
-  const jdColumns = 5 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional frequency + optional assignee + status + time + quantity
-  const oneColumns = 5 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional priority + optional assignee + status + date assigned + due
+  const registerDragHandle = useCallback((id: string, element: HTMLButtonElement | null) => {
+    if (element) dragHandleRefs.current.set(id, element);
+    else dragHandleRefs.current.delete(id);
+  }, []);
+
+  function focusDragHandle(id: string) {
+    requestAnimationFrame(() => dragHandleRefs.current.get(id)?.focus());
+  }
+
+  async function selectTaskSort(nextSort: TaskListSort) {
+    if (!activeCompanyId || !dataReady || !activePreference || preferencePending) return;
+    if (sameTaskListSort(activeSort, nextSort)) return;
+
+    const operationScope = preferenceScope;
+    const expectedRevision = activePreference.revision;
+    setSortOverride({ scope: operationScope, sort: nextSort });
+    setPreferencePending(true);
+    setInlineError(null);
+    try {
+      const saved = await setListSort({
+        companyId: activeCompanyId,
+        taskType,
+        sort: nextSort,
+        expectedRevision,
+      });
+      if (preferenceScopeRef.current !== operationScope) return;
+      setOptimisticPreference({
+        scope: operationScope,
+        sort: saved.sort as TaskListSort,
+        customOrder: saved.customOrder?.map(String) ?? null,
+        revision: saved.revision,
+      });
+      setSortOverride(null);
+    } catch (error) {
+      if (preferenceScopeRef.current !== operationScope) return;
+      setSortOverride(null);
+      setInlineError(error instanceof Error ? error.message : "Could not update task sorting.");
+    } finally {
+      if (preferenceScopeRef.current === operationScope) setPreferencePending(false);
+    }
+  }
+
+  function selectTaskSortField(field: TaskListSortField) {
+    const direction = taskSortDirectionForField(taskType, activeSort, field);
+    const nextSort: TaskListSort = {
+      mode: "field",
+      field,
+      direction: direction === null
+        ? initialTaskListSortDirection(field)
+        : direction === "asc" ? "desc" : "asc",
+    };
+    void selectTaskSort(nextSort);
+  }
+
+  async function saveCustomTaskOrder(orderedIds: string[], sourceId: string) {
+    if (!activeCompanyId || !customOrderingEnabled || !activePreference || preferencePending) return;
+    const orderKeys = taskListCustomOrderKeys(allTasks, taskType, activePreference.customOrder, taskOrderKeys);
+    let orderKey: string;
+    let rebalancedOrderKeys: TaskListOrderKeyUpdate[] | null;
+    try {
+      ({ orderKey, rebalancedOrderKeys } = taskListOrderPositionForMove(orderedIds, sourceId, orderKeys));
+    } catch (error) {
+      setInlineError(error instanceof Error ? error.message : "Could not calculate a position for this task.");
+      return;
+    }
+
+    const operationScope = preferenceScope;
+    const expectedRevision = activePreference.revision;
+    const previousOptimisticPreference = optimisticPreference?.scope === operationScope
+      ? optimisticPreference
+      : null;
+    const previousOptimisticTaskOrderKeys = optimisticTaskOrderKeys?.scope === operationScope
+      ? optimisticTaskOrderKeys
+      : null;
+    const orderKeyUpdates = rebalancedOrderKeys ?? [{ taskId: sourceId, orderKey }];
+    setPreferencePending(true);
+    setInlineError(null);
+    setSortOverride(null);
+    setOptimisticTaskOrderKeys((current) => ({
+      scope: operationScope,
+      keys: {
+        ...(current?.scope === operationScope ? current.keys : {}),
+        ...Object.fromEntries(orderKeyUpdates.map(({ taskId, orderKey }) => [taskId, orderKey])),
+      },
+    }));
+    setOptimisticPreference({
+      scope: operationScope,
+      sort: { mode: "custom" },
+      customOrder: activePreference.customOrder,
+      revision: expectedRevision + 1,
+    });
+    try {
+      const saved = await moveListOrderTask({
+        companyId: activeCompanyId,
+        taskType,
+        taskId: sourceId,
+        orderKey,
+        ...(rebalancedOrderKeys ? { rebalancedOrderKeys } : {}),
+        expectedRevision,
+      });
+      if (preferenceScopeRef.current !== operationScope) return;
+      setOptimisticPreference({
+        scope: operationScope,
+        sort: saved.sort as TaskListSort,
+        customOrder: saved.customOrder?.map(String) ?? null,
+        revision: saved.revision,
+      });
+      focusDragHandle(sourceId);
+    } catch (error) {
+      if (preferenceScopeRef.current !== operationScope) return;
+      setOptimisticPreference(previousOptimisticPreference);
+      setOptimisticTaskOrderKeys(previousOptimisticTaskOrderKeys);
+      setSortOverride(null);
+      setInlineError(error instanceof Error ? error.message : "Could not save task order. Refresh and try again.");
+    } finally {
+      if (preferenceScopeRef.current === operationScope) setPreferencePending(false);
+    }
+  }
+
+  function handleTaskDragStart(event: DragStartEvent) {
+    if (dragDisabled) return;
+    const source = event.operation.source;
+    if (!source || !isSortable(source) || source.data?.kind !== "task" || source.group !== preferenceScope) return;
+    const sourceId = String(source.id);
+    if (!displayedTasks.some((task) => task._id === sourceId)) return;
+    setDragSnapshot({
+      scope: preferenceScope,
+      sourceId,
+      visibleIds: filteredTasks.map((task) => task._id),
+      fullOrderIds: orderedTasks.map((task) => task._id),
+    });
+  }
+
+  function handleTaskDragEnd(event: DragEndEvent) {
+    const snapshot = dragSnapshot;
+    setDragSnapshot(null);
+    if (event.canceled || !snapshot || snapshot.scope !== preferenceScope || preferencePending) return;
+    const { source, target } = event.operation;
+    if (!source || !target || !isSortable(source) || !isSortable(target)) return;
+    if (
+      source.data?.kind !== "task" ||
+      target.data?.kind !== "task" ||
+      source.group !== preferenceScope ||
+      target.group !== preferenceScope
+    ) return;
+    const sourceId = String(source.id);
+    const targetId = String(target.id);
+    if (sourceId !== snapshot.sourceId || sourceId === targetId) return;
+
+    const currentIds = new Set(allTasks.map((task) => task._id));
+    const visibleIds = snapshot.visibleIds.filter((id) => currentIds.has(id));
+    if (!visibleIds.includes(sourceId) || !visibleIds.includes(targetId)) return;
+    const reconciledFullOrder = restoreTaskListCustomOrder(allTasks, taskType, snapshot.fullOrderIds).map((task) => task._id);
+    const nextOrder = moveTaskListId(reconciledFullOrder, sourceId, targetId);
+    if (sameTaskListOrder(reconciledFullOrder, nextOrder)) return;
+    void saveCustomTaskOrder(nextOrder, sourceId);
+  }
+
+  const jdColumns = 6 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // controls + reference + title + optional frequency + optional assignee + status + time + quantity
+  const oneColumns = 6 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // controls + reference + title + optional priority + optional assignee + status + date assigned + due
   const filterCount = [statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
   const hasActiveFilters = filterCount > 0 || search.trim() !== "";
 
@@ -1556,6 +2106,13 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               {search ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
             </button>
           </div>
+          <TaskSortMenu
+            taskType={taskType}
+            sort={activeSort}
+            disabled={!dataReady || preferencePending}
+            customOrderingEnabled={customOrderingEnabled}
+            onSelect={(sort) => void selectTaskSort(sort)}
+          />
           <TaskFilterMenu
             kind={kind}
             statusFilter={statusFilter}
@@ -1647,60 +2204,60 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
           </div>
         )}
 
-        <div className="task-table-wrap relative -ml-11 w-[calc(100%+2.75rem)] overflow-x-auto pl-11">
-        {visibleTasks.length > 0 && (
-          <div className="task-checkbox-rail pointer-events-none absolute left-0 top-0 z-10 flex w-11 flex-col pr-2">
-            <div className="flex h-9 items-center justify-end group/head pointer-events-auto">
-              <Checkbox
-                checked={allVisibleSelected}
-                indeterminate={someVisibleSelected}
-                onCheckedChange={toggleAllVisible}
-                disabled={visibleTasks.length === 0}
-                aria-label={allVisibleSelected ? "Unselect all tasks" : "Select all tasks"}
-                className={cn("transition-opacity", selectionCount > 0 ? "opacity-100" : "opacity-0 group-hover/head:opacity-100")}
-              />
-            </div>
-            {visibleTasks.map((task) => {
-              const isChecked = selectedIds.has(task._id);
-              return (
-                <div key={`rail-${task._id}`} className="group/rail flex h-[41px] items-center justify-end pointer-events-auto">
-                  <Checkbox
-                    checked={isChecked}
-                    onCheckedChange={() => toggleOne(task._id)}
-                    aria-label={isChecked ? `Unselect ${task.title}` : `Select ${task.title}`}
-                    className={cn("transition-opacity", isChecked ? "opacity-100" : "opacity-0 group-hover/row:opacity-100 group-hover/rail:opacity-100 focus-visible:opacity-100")}
-                  />
-                </div>
-              );
-            })}
-          </div>
-        )}
-        <table className="task-table">
+        <div className="task-table-wrap task-list-table-wrap relative overflow-x-auto">
+        <DragDropProvider onDragStart={handleTaskDragStart} onDragEnd={handleTaskDragEnd}>
+        <table className="task-table task-list-table">
           <thead>
             {kind === "jd" ? (
               <tr className="group/head">
-                <th className="w-[92px] whitespace-nowrap"><span className="inline-flex items-center gap-1.5"><Hash className="h-3.5 w-3.5" />CODE</span></th>
-                <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
-                {showFrequencyColumn && <th><span className="inline-flex items-center gap-1.5"><FrequencyIcon className="h-3.5 w-3.5" />FREQUENCY</span></th>}
-                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNED TO</span></th>}
+                <th scope="col" className="task-list-controls-header">
+                  <div className="task-list-controls-inner">
+                    <span className="task-list-handle-spacer" aria-hidden="true" />
+                    <Checkbox
+                      checked={allVisibleSelected}
+                      indeterminate={someVisibleSelected}
+                      onCheckedChange={toggleAllVisible}
+                      disabled={!dataReady || renderedTasks.length === 0}
+                      aria-label={allVisibleSelected ? "Unselect all rendered tasks" : "Select all rendered tasks"}
+                      className="task-list-header-checkbox"
+                    />
+                  </div>
+                </th>
+                <TaskSortHeader taskType={taskType} field="code" label="CODE" icon={<Hash className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="w-[92px] whitespace-nowrap" />
+                <TaskSortHeader taskType={taskType} field="title" label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="min-w-[200px] max-w-[250px]" />
+                {showFrequencyColumn && <TaskSortHeader taskType={taskType} field="frequency" label="FREQUENCY" icon={<FrequencyIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />}
+                {showAssigneeColumn && <TaskSortHeader taskType={taskType} field="user" label="ASSIGNED TO" icon={<UsersIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />}
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />TIME</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><QuantityIcon className="h-3.5 w-3.5" />QUANTITY</span></th>
+                <TaskSortHeader taskType={taskType} field="quantity" label="QUANTITY" icon={<QuantityIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />
               </tr>
             ) : (
               <tr className="group/head">
-                <th className="w-[92px] whitespace-nowrap"><span className="inline-flex items-center gap-1.5"><Hash className="h-3.5 w-3.5" />CODE</span></th>
-                <th className="min-w-[200px] max-w-[250px]"><span className="inline-flex items-center gap-1.5"><TaskIcon className="h-3.5 w-3.5" />TITLE</span></th>
-                {showPriorityColumn && <th><span className="inline-flex items-center gap-1.5"><Tag className="h-3.5 w-3.5" />PRIORITY</span></th>}
-                {showAssigneeColumn && <th><span className="inline-flex items-center gap-1.5"><UsersIcon className="h-3.5 w-3.5" />ASSIGNED TO</span></th>}
+                <th scope="col" className="task-list-controls-header">
+                  <div className="task-list-controls-inner">
+                    <span className="task-list-handle-spacer" aria-hidden="true" />
+                    <Checkbox
+                      checked={allVisibleSelected}
+                      indeterminate={someVisibleSelected}
+                      onCheckedChange={toggleAllVisible}
+                      disabled={!dataReady || renderedTasks.length === 0}
+                      aria-label={allVisibleSelected ? "Unselect all rendered tasks" : "Select all rendered tasks"}
+                      className="task-list-header-checkbox"
+                    />
+                  </div>
+                </th>
+                <TaskSortHeader taskType={taskType} field="code" label="CODE" icon={<Hash className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="w-[92px] whitespace-nowrap" />
+                <TaskSortHeader taskType={taskType} field="title" label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="min-w-[200px] max-w-[250px]" />
+                {showPriorityColumn && <TaskSortHeader taskType={taskType} field="priority" label="PRIORITY" icon={<Tag className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />}
+                {showAssigneeColumn && <TaskSortHeader taskType={taskType} field="user" label="ASSIGNED TO" icon={<UsersIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />}
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><CalendarClock className="h-3.5 w-3.5" />DATE ASSIGNED</span></th>
-                <th><span className="inline-flex items-center gap-1.5"><CalendarDays className="h-3.5 w-3.5" />DUE DATE</span></th>
+                <TaskSortHeader taskType={taskType} field="dateAssigned" label="DATE ASSIGNED" icon={<CalendarClock className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />
+                <TaskSortHeader taskType={taskType} field="dueDate" label="DUE DATE" icon={<CalendarDays className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />
               </tr>
             )}
           </thead>
           <tbody>
-            {!tasks || (visibleTasks.length === 0 && (taskPages.status === "CanLoadMore" || taskPages.status === "LoadingMore")) ? (
+            {!dataReady ? (
               Array.from({ length: 6 }).map((_, index) => (
                 <tr key={`skel-${index}`}>
                   <td colSpan={kind === "jd" ? jdColumns : oneColumns} className="pl-4">
@@ -1711,14 +2268,14 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                   </td>
                 </tr>
               ))
-            ) : visibleTasks.length === 0 ? (
+            ) : renderedTasks.length === 0 ? (
               <tr>
                 <td colSpan={kind === "jd" ? jdColumns : oneColumns} className="!h-auto py-2">
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
-                    <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{!hasActiveFilters && tasks.length === 0 ? "No tasks yet" : "No matching tasks"}</div>
-                    <p className="mt-1 max-w-[280px] text-[13px] text-[var(--ink-muted)]">{!hasActiveFilters && tasks.length === 0 ? "Create your first task to get started." : "Try adjusting your search or filters."}</p>
-                    {canCreate && !hasActiveFilters && tasks.length === 0 && (
+                    <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{!hasActiveFilters && allTasks.length === 0 ? "No tasks yet" : "No matching tasks"}</div>
+                    <p className="mt-1 max-w-[280px] text-[13px] text-[var(--ink-muted)]">{!hasActiveFilters && allTasks.length === 0 ? "Create your first task to get started." : "Try adjusting your search or filters."}</p>
+                    {canCreate && !hasActiveFilters && allTasks.length === 0 && (
                       <Button className="mt-4" size="sm" variant="primary" onClick={() => setCreateOpen(true)}>
                         <Plus className="h-3.5 w-3.5" />New task
                       </Button>
@@ -1731,28 +2288,24 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               </tr>
             ) : (
               <>
-                {visibleTasks.map((task) => {
+                {renderedTasks.map((task, index) => {
                   const isChecked = selectedIds.has(task._id);
                   const rowCanEdit = canEditTaskRow(active, kind, task);
                   const pending = (field: string) => pendingCell === `${task._id}:${field}`;
                   const openDetails = () => router.push(`${base}/${task._id}`);
                   return (
-                    <tr
+                    <SortableTaskRow
                       key={task._id}
-                      data-row="task"
-                      data-clickable={!rowCanEdit ? "true" : undefined}
-                      data-selected={task._id === selectedId}
-                      data-checked={isChecked ? "true" : undefined}
-                      tabIndex={!rowCanEdit ? 0 : undefined}
-                      onClick={(event) => {
-                        if (rowCanEdit) return;
-                        if ((event.target as HTMLElement).closest("[data-interactive='true']")) return;
-                        openDetails();
-                      }}
-                      onKeyDown={(event) => {
-                        if (!rowCanEdit && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openDetails(); }
-                      }}
-                      className="group/row"
+                      task={task}
+                      index={index}
+                      scope={preferenceScope}
+                      dragDisabled={dragDisabled}
+                      checked={isChecked}
+                      selected={task._id === selectedId}
+                      rowCanEdit={rowCanEdit}
+                      onToggle={() => toggleOne(task._id)}
+                      onOpenDetails={openDetails}
+                      onHandleElement={registerDragHandle}
                     >
                       <td className="w-[92px] whitespace-nowrap font-mono text-[12px] text-[var(--ink-muted)]">{task.reference}</td>
                       <td className="col-task max-w-[250px]">
@@ -1797,7 +2350,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                                 renderValue={(option) => <span className={cn("priority-chip", priorityChipClasses((option?.value ?? task.priority) as Priority))}>{option?.label ?? priorityLabel(task.priority)}</span>}
                               />
                             ) : (
-                              <span className={cn("priority-chip", priorityChipClasses(task.priority))}>{priorityLabel(task.priority)}</span>
+                              <span className={cn("priority-chip", priorityChipClasses(task.priority as Priority))}>{priorityLabel(task.priority)}</span>
                             )}
                           </td>
                         )
@@ -1832,7 +2385,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                           </td>
                         </>
                       )}
-                    </tr>
+                    </SortableTaskRow>
                   );
                 })}
                 {canCreate && (
@@ -1848,11 +2401,12 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             )}
           </tbody>
         </table>
+        </DragDropProvider>
         </div>
         <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center py-2" aria-live="polite">
-          {taskPages.status === "LoadingMore" && <span className="text-[12px] text-[var(--ink-muted)]">Loading more tasks…</span>}
-          {taskPages.status === "CanLoadMore" && (
-            <Button size="sm" variant="ghost" onClick={() => taskPages.loadMore(TASK_PAGE_SIZE)}>Load more tasks</Button>
+          {!dataReady && <span className="text-[12px] text-[var(--ink-muted)]">Loading all tasks…</span>}
+          {hasMoreRenderedTasks && (
+            <Button size="sm" variant="ghost" onClick={() => setRenderedCount((current) => Math.min(current + TASK_PAGE_SIZE, displayedTasks.length))}>Load more tasks</Button>
           )}
         </div>
       </div>

@@ -83,10 +83,10 @@ describe("WP-07: Query budgets and silent incompleteness prevention", () => {
       const adminUser = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin", email: "admin@example.com", firstName: "Admin", createdAt: now, updatedAt: now });
       await ctx.db.insert("companyMemberships", { companyId, userId: adminUser, role: "Admin", active: true, createdAt: now, updatedAt: now });
 
-      // Insert 500 other members
+      // An inactive member inside the first 500 must not hide the overflow flag.
       for (let i = 1; i <= 500; i++) {
         const u = await ctx.db.insert("appUsers", { clerkSubject: `clerk|user${i}`, email: `user${i}@example.com`, firstName: `User${i}`, createdAt: now, updatedAt: now });
-        await ctx.db.insert("companyMemberships", { companyId, userId: u, role: "Employee", active: true, createdAt: now, updatedAt: now });
+        await ctx.db.insert("companyMemberships", { companyId, userId: u, role: "Employee", active: i !== 499, createdAt: now, updatedAt: now });
       }
 
       // Member 501: special unique name
@@ -103,16 +103,24 @@ describe("WP-07: Query budgets and silent incompleteness prevention", () => {
       return { companyId, targetUserM };
     });
 
-    // Admin searches for "Zoe" in assignableUsers
+    const initial = await t.withIdentity(identity("admin")).query(api.tasks.assignableUsers, {
+      companyId,
+      kind: "one_time",
+    });
+    expect(initial.users).toHaveLength(499);
+    expect(initial.isTruncated).toBe(true);
+
+    // Admin searches for "Zoe" in assignableUsers.
     const results = await t.withIdentity(identity("admin")).query(api.tasks.assignableUsers, {
       companyId,
       kind: "one_time",
       search: "Zoe",
     });
 
-    expect(results.length).toBeGreaterThanOrEqual(1);
-    expect(results.some((r) => r.membership._id === targetUserM)).toBe(true);
-    expect(results.find((r) => r.membership._id === targetUserM)?.user.fullName).toBe("Zoe Beyond");
+    expect(results.isTruncated).toBe(false);
+    expect(results.users.length).toBeGreaterThanOrEqual(1);
+    expect(results.users.some((r) => r.membership._id === targetUserM)).toBe(true);
+    expect(results.users.find((r) => r.membership._id === targetUserM)?.user.fullName).toBe("Zoe Beyond");
   });
 
   test("companyManagement.overview detects truncated membership list when >500 members", async () => {
@@ -137,28 +145,73 @@ describe("WP-07: Query budgets and silent incompleteness prevention", () => {
     expect(ov.truncated?.users).toBe(true);
   });
 
-  test("manager branch-scope overflow marks analytics summaries incomplete", async () => {
+  test("manager search reaches members beyond the initial scope cache", async () => {
     const t = convexTest(schema, modules);
     const now = Date.now();
 
-    const { companyId } = await t.run(async (ctx) => {
+    const { companyId, targetMembershipId } = await t.run(async (ctx) => {
       const companyId = await ctx.db.insert("companies", { name: "Scoped Corp", createdAt: now });
       const managerUser = await ctx.db.insert("appUsers", { clerkSubject: "clerk|manager", email: "manager@example.com", firstName: "Manager", createdAt: now, updatedAt: now });
       const managerMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: managerUser, role: "Manager", active: true, createdAt: now, updatedAt: now });
       const branchId = await ctx.db.insert("branches", { companyId, name: "Operations", order: 0, createdAt: now, updatedAt: now });
       await ctx.db.insert("managerBranchScopes", { companyId, managerMembershipId, branchId, updatedAt: now });
 
+      let targetMembershipId;
       for (let i = 1; i <= 501; i++) {
-        const userId = await ctx.db.insert("appUsers", { clerkSubject: `clerk|scoped${i}`, email: `scoped${i}@example.com`, firstName: `Scoped${i}`, createdAt: now, updatedAt: now });
+        const target = i === 501;
+        const userId = await ctx.db.insert("appUsers", { clerkSubject: `clerk|scoped${i}`, email: target ? "zoescoped@example.com" : `scoped${i}@example.com`, firstName: target ? "Zoe" : `Scoped${i}`, createdAt: now, updatedAt: now });
         const membershipId = await ctx.db.insert("companyMemberships", { companyId, userId, role: "Employee", active: true, createdAt: now, updatedAt: now });
         await ctx.db.insert("userBranchAssignments", { companyId, membershipId, branchId });
+        if (target) targetMembershipId = membershipId;
       }
 
-      return { companyId };
+      return { companyId, targetMembershipId };
     });
 
     const summary = await t.withIdentity(identity("manager")).query(api.analytics.summary, { companyId });
     expect(summary.isTruncated).toBe(true);
     expect(summary.isComplete).toBe(false);
+
+    const initial = await t.withIdentity(identity("manager")).query(api.tasks.assignableUsers, { companyId, kind: "one_time" });
+    expect(initial.isTruncated).toBe(true);
+
+    const broadSearch = await t.withIdentity(identity("manager")).query(api.tasks.assignableUsers, { companyId, kind: "one_time", search: "Scoped" });
+    expect(broadSearch.users).toHaveLength(50);
+    expect(broadSearch.isTruncated).toBe(true);
+
+    const searched = await t.withIdentity(identity("manager")).query(api.tasks.assignableUsers, { companyId, kind: "one_time", search: "Zoe" });
+    expect(searched.isTruncated).toBe(false);
+    expect(searched.users.some((row) => row.membership._id === targetMembershipId)).toBe(true);
+
+    await expect(t.withIdentity(identity("manager")).mutation(api.tasks.createOneTime, {
+      companyId,
+      title: "Scoped task",
+      assigneeMembershipIds: [targetMembershipId!],
+      priority: "medium",
+    })).resolves.toEqual(expect.any(String));
+  });
+
+  test("assignable search flags scans beyond 1,000 memberships", async () => {
+    const t = convexTest(schema, modules);
+    const now = Date.now();
+
+    const { companyId } = await t.run(async (ctx) => {
+      const companyId = await ctx.db.insert("companies", { name: "Search Cap Corp", createdAt: now });
+      const adminUser = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin", email: "admin@example.com", firstName: "Admin", createdAt: now, updatedAt: now });
+      await ctx.db.insert("companyMemberships", { companyId, userId: adminUser, role: "Admin", active: true, createdAt: now, updatedAt: now });
+      for (let i = 0; i < 1_000; i++) {
+        const overflowUser = await ctx.db.insert("appUsers", { clerkSubject: `clerk|overflow${i}`, email: `overflow${i}@example.com`, firstName: "Overflow", createdAt: now, updatedAt: now });
+        await ctx.db.insert("companyMemberships", { companyId, userId: overflowUser, role: "Employee", active: true, createdAt: now, updatedAt: now });
+      }
+      return { companyId };
+    });
+
+    const result = await t.withIdentity(identity("admin")).query(api.tasks.assignableUsers, {
+      companyId,
+      kind: "one_time",
+      search: "Needle",
+    });
+    expect(result.users).toEqual([]);
+    expect(result.isTruncated).toBe(true);
   });
 });

@@ -1,0 +1,1 @@
+export const ASSIGNEE_SEARCH_MAX_LENGTH = 100;

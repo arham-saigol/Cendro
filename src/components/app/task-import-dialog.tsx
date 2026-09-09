@@ -83,10 +83,11 @@ export function TaskImportExportMenu({
   const [exportRequested, setExportRequested] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
 
-  const assignable = useQuery(
+  const assignableResult = useQuery(
     api.tasks.assignableUsers,
     activeCompanyId ? { companyId: activeCompanyId, kind: taskKind(kind) } : "skip"
-  );
+  ) as { users: any[]; isTruncated: boolean } | undefined;
+  const assignable = assignableResult?.users;
 
   const pages = usePaginatedQuery(
     api.tasks.exportRows,

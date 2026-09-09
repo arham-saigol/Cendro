@@ -4,9 +4,11 @@ import { internalAction, internalMutation, internalQuery, mutation, query, type 
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { currentJdCycle, defaultTimeZone, elapsedJdCyclesSince } from "./taskCycles";
-import { assertCanAssign, assertCanDeleteTask, assertCanUpdateTask, canViewTask, getManagedMembershipIds, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds } from "./permissions";
+import { assertCanAssign, assertCanDeleteTask, assertCanUpdateTask, canViewTask, getManagedMembershipIds, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scanManagedMembershipIds, scopedMembershipIds } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
+import { DEFAULT_QUERY_LIMIT, takeWithOverflow } from "./queryLimits";
+import { ASSIGNEE_SEARCH_MAX_LENGTH } from "../src/lib/assignee-search";
 import { nextReference } from "./references";
 import {
   assertTaskListSort,
@@ -27,9 +29,11 @@ const jdFrequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"),
 const TASK_LIST_ORDER_LIMIT = 2_000;
 const TASK_LIST_ORDER_MAX_SERIALIZED_BYTES = 128 * 1024;
 const TASK_LIST_ORDER_KEY_MAX_LENGTH = 512;
+const ASSIGNABLE_USER_INITIAL_LIMIT = DEFAULT_QUERY_LIMIT;
 const ASSIGNABLE_USER_SEARCH_MIN_LENGTH = 3;
 const ASSIGNABLE_USER_SEARCH_SCAN_LIMIT = 1_000;
 const ASSIGNABLE_USER_SEARCH_RESULT_LIMIT = 50;
+const ASSIGNABLE_USER_SEARCH_USER_BATCH_SIZE = 50;
 const taskListOrderKeyPattern = /^(?:0|-[1-9]\d*|[1-9]\d*)\/[1-9]\d*$/;
 function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Pending" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
 function cleanOptionalText(value?: string) { const text = value?.trim(); return text ? text : undefined; }
@@ -201,21 +205,53 @@ function matchesSearch(task: { title: string; reference: string }, search?: stri
 
 async function filterAssignableUsersBySearch(
   ctx: QueryCtx,
+  companyId: Id<"companies">,
   memberships: Doc<"companyMemberships">[],
   search: string,
 ) {
   const needle = search.toLowerCase();
   const matches: Id<"companyMemberships">[] = [];
-  for (const membership of memberships) {
-    if (!membership.active) continue;
-    const user = await ctx.db.get(membership.userId);
-    if (!user) continue;
-    const searchable = `${memberFullName(membership, user)} ${user.email} ${membership.role}`.toLowerCase();
-    if (!searchable.includes(needle)) continue;
-    matches.push(membership._id);
-    if (matches.length === ASSIGNABLE_USER_SEARCH_RESULT_LIMIT) break;
+  const activeMemberships = memberships.filter(
+    (membership) => membership.companyId === companyId && membership.active,
+  );
+  for (let start = 0; start < activeMemberships.length; start += ASSIGNABLE_USER_SEARCH_USER_BATCH_SIZE) {
+    const batch = activeMemberships.slice(start, start + ASSIGNABLE_USER_SEARCH_USER_BATCH_SIZE);
+    const users = await Promise.all(batch.map((membership) => ctx.db.get(membership.userId)));
+    for (let index = 0; index < batch.length; index += 1) {
+      const membership = batch[index];
+      const user = users[index];
+      if (!user) continue;
+      const searchable = `${memberFullName(membership, user)} ${user.email} ${membership.role}`.toLowerCase();
+      if (!searchable.includes(needle)) continue;
+      matches.push(membership._id);
+      if (matches.length > ASSIGNABLE_USER_SEARCH_RESULT_LIMIT) {
+        return {
+          ids: matches.slice(0, ASSIGNABLE_USER_SEARCH_RESULT_LIMIT),
+          isTruncated: true,
+        };
+      }
+    }
   }
-  return matches;
+  return { ids: matches, isTruncated: false };
+}
+
+async function loadMembershipsById(ctx: QueryCtx, ids: Id<"companyMemberships">[]) {
+  const memberships: Doc<"companyMemberships">[] = [];
+  for (let start = 0; start < ids.length; start += ASSIGNABLE_USER_SEARCH_USER_BATCH_SIZE) {
+    const batch = await Promise.all(
+      ids.slice(start, start + ASSIGNABLE_USER_SEARCH_USER_BATCH_SIZE).map((id) => ctx.db.get(id)),
+    );
+    for (const membership of batch) if (membership) memberships.push(membership);
+  }
+  return memberships;
+}
+
+async function assignableUsersResult(
+  ctx: QueryCtx,
+  ids: Id<"companyMemberships">[],
+  isTruncated: boolean,
+) {
+  return { users: await enrich(ctx, ids), isTruncated };
 }
 
 async function getTaskListPreference(
@@ -1364,40 +1400,71 @@ export const assignableUsers = query({
     const caps = await membershipCapabilities(ctx, membership);
     const prefix = args.kind === "jd" ? "tasks:jd" : "tasks:one_time";
     const canCreateOrUpdate = caps.has(`${prefix}:create` as any) || caps.has(`${prefix}:update:any` as any) || caps.has(`${prefix}:update:managed` as any) || caps.has(`${prefix}:update:self` as any);
-    if (!canCreateOrUpdate) return [];
+    if (!canCreateOrUpdate) return { users: [], isTruncated: false };
 
     const search = args.search?.trim();
     if (search && search.length < ASSIGNABLE_USER_SEARCH_MIN_LENGTH) {
       throw new ConvexError(`Enter at least ${ASSIGNABLE_USER_SEARCH_MIN_LENGTH} characters to search assignees.`);
     }
-    if (search && search.length > 100) throw new ConvexError("Assignee search is too long.");
+    if (search && search.length > ASSIGNEE_SEARCH_MAX_LENGTH) throw new ConvexError("Assignee search is too long.");
 
     if (caps.has(`${prefix}:assign:any` as any)) {
       if (search) {
-        const candidates = await ctx.db
-          .query("companyMemberships")
-          .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
-          .take(ASSIGNABLE_USER_SEARCH_SCAN_LIMIT);
-        const matches = await filterAssignableUsersBySearch(ctx, candidates, search);
-        return await enrich(ctx, matches);
+        const candidates = await takeWithOverflow(
+          (limit) => ctx.db
+            .query("companyMemberships")
+            .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
+            .take(limit),
+          ASSIGNABLE_USER_SEARCH_SCAN_LIMIT,
+        );
+        const matches = await filterAssignableUsersBySearch(ctx, args.companyId, candidates.rows, search);
+        return await assignableUsersResult(ctx, matches.ids, candidates.isTruncated || matches.isTruncated);
       }
 
-      const all = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
-      return await enrich(ctx, all.filter((candidate) => candidate.active).map((candidate) => candidate._id));
+      const initial = await takeWithOverflow(
+        (limit) => ctx.db
+          .query("companyMemberships")
+          .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
+          .take(limit),
+        ASSIGNABLE_USER_INITIAL_LIMIT,
+      );
+      return await assignableUsersResult(
+        ctx,
+        initial.rows.filter((candidate) => candidate.active).map((candidate) => candidate._id),
+        initial.isTruncated,
+      );
     }
 
-    let ids: Set<Id<"companyMemberships">>;
-    if (caps.has(`${prefix}:assign:managed` as any)) {
-      ids = await getManagedMembershipIds(ctx, args.companyId, membership._id);
-    } else if (caps.has(`${prefix}:assign:self` as any)) {
-      ids = new Set([membership._id]);
-    } else {
-      return [];
+    const canAssignManaged = caps.has(`${prefix}:assign:managed` as any);
+    const canAssignSelf = caps.has(`${prefix}:assign:self` as any);
+    if (!search) {
+      if (canAssignManaged) {
+        let isTruncated = false;
+        const ids = await getManagedMembershipIds(ctx, args.companyId, membership._id, () => {
+          isTruncated = true;
+        });
+        return await assignableUsersResult(ctx, Array.from(ids), isTruncated);
+      }
+      if (canAssignSelf) return await assignableUsersResult(ctx, [membership._id], false);
+      return { users: [], isTruncated: false };
     }
-    if (!search) return await enrich(ctx, Array.from(ids));
 
-    const candidates = (await Promise.all(Array.from(ids, (id) => ctx.db.get(id)))).filter(Boolean) as Doc<"companyMemberships">[];
-    return await enrich(ctx, await filterAssignableUsersBySearch(ctx, candidates, search));
+    if (canAssignManaged) {
+      const managedCandidates = await scanManagedMembershipIds(
+        ctx,
+        args.companyId,
+        membership._id,
+        ASSIGNABLE_USER_SEARCH_SCAN_LIMIT,
+      );
+      const candidates = await loadMembershipsById(ctx, managedCandidates.ids);
+      const matches = await filterAssignableUsersBySearch(ctx, args.companyId, candidates, search);
+      return await assignableUsersResult(ctx, matches.ids, managedCandidates.isTruncated || matches.isTruncated);
+    }
+    if (canAssignSelf) {
+      const matches = await filterAssignableUsersBySearch(ctx, args.companyId, [membership], search);
+      return await assignableUsersResult(ctx, matches.ids, matches.isTruncated);
+    }
+    return { users: [], isTruncated: false };
   },
 });
 

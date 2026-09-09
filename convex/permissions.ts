@@ -9,7 +9,7 @@ import {
 } from "../src/lib/permissions";
 import { isPlatformAdmin } from "../src/lib/platform-admin";
 import { normalizeEmail } from "./validation";
-import { takeWithOverflow } from "./queryLimits";
+import { DEFAULT_QUERY_LIMIT, takeWithOverflow } from "./queryLimits";
 
 type Ctx = MutationCtx | QueryCtx;
 type TruncationObserver = () => void;
@@ -18,7 +18,7 @@ async function takeScopeRows<T>(
   take: (limit: number) => Promise<T[]>,
   onTruncated?: TruncationObserver,
 ) {
-  if (!onTruncated) return await take(500);
+  if (!onTruncated) return await take(DEFAULT_QUERY_LIMIT);
   const result = await takeWithOverflow(take);
   if (result.isTruncated) onTruncated();
   return result.rows;
@@ -360,6 +360,64 @@ export async function getManagedMembershipIds(
   return ids;
 }
 
+/**
+ * Scans a manager's scope without the default 500-row authorization cache.
+ * The scan stops after one extra scope or membership row, so callers can
+ * disclose that a bounded result may omit additional people.
+ */
+export async function scanManagedMembershipIds(
+  ctx: QueryCtx,
+  companyId: Id<"companies">,
+  managerMembershipId: Id<"companyMemberships">,
+  limit: number,
+): Promise<{ ids: Id<"companyMemberships">[]; isTruncated: boolean }> {
+  const ids = new Set<Id<"companyMemberships">>([managerMembershipId]);
+  let scopeRows = 0;
+  let membershipRows = 0;
+  const result = (isTruncated: boolean) => ({ ids: Array.from(ids), isTruncated });
+  const nextScopeRow = () => ++scopeRows <= limit;
+  const addMembership = (membershipId: Id<"companyMemberships">, belongsToCompany: boolean) => {
+    membershipRows += 1;
+    if (membershipRows > limit || (belongsToCompany && !ids.has(membershipId) && ids.size >= limit)) {
+      return false;
+    }
+    if (belongsToCompany) ids.add(membershipId);
+    return true;
+  };
+
+  for await (const row of ctx.db
+    .query("managerUserScopes")
+    .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))) {
+    if (!nextScopeRow() || !addMembership(row.userMembershipId, row.companyId === companyId)) return result(true);
+  }
+
+  for await (const scope of ctx.db
+    .query("managerBranchScopes")
+    .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))) {
+    if (!nextScopeRow()) return result(true);
+    if (scope.companyId !== companyId) continue;
+    for await (const assignment of ctx.db
+      .query("userBranchAssignments")
+      .withIndex("by_branch", (q) => q.eq("branchId", scope.branchId))) {
+      if (!addMembership(assignment.membershipId, assignment.companyId === companyId)) return result(true);
+    }
+  }
+
+  for await (const scope of ctx.db
+    .query("managerDepartmentScopes")
+    .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))) {
+    if (!nextScopeRow()) return result(true);
+    if (scope.companyId !== companyId) continue;
+    for await (const assignment of ctx.db
+      .query("userDepartmentAssignments")
+      .withIndex("by_department", (q) => q.eq("departmentId", scope.departmentId))) {
+      if (!addMembership(assignment.membershipId, assignment.companyId === companyId)) return result(true);
+    }
+  }
+
+  return result(false);
+}
+
 export async function scopedMembershipIds(
   ctx: Ctx,
   companyId: Id<"companies">,
@@ -457,6 +515,54 @@ export async function canViewTask(
   return false;
 }
 
+async function isManagedMembership(
+  ctx: Ctx,
+  companyId: Id<"companies">,
+  managerMembershipId: Id<"companyMemberships">,
+  membershipId: Id<"companyMemberships">,
+) {
+  if (membershipId === managerMembershipId) return true;
+  const directScope = await ctx.db
+    .query("managerUserScopes")
+    .withIndex("by_managerMembershipId_and_userMembershipId", (q) =>
+      q.eq("managerMembershipId", managerMembershipId).eq("userMembershipId", membershipId),
+    )
+    .first();
+  if (directScope?.companyId === companyId) return true;
+
+  const [branchAssignments, departmentAssignments] = await Promise.all([
+    ctx.db
+      .query("userBranchAssignments")
+      .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))
+      .take(DEFAULT_QUERY_LIMIT),
+    ctx.db
+      .query("userDepartmentAssignments")
+      .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))
+      .take(DEFAULT_QUERY_LIMIT),
+  ]);
+  for (const assignment of branchAssignments) {
+    if (assignment.companyId !== companyId) continue;
+    const scope = await ctx.db
+      .query("managerBranchScopes")
+      .withIndex("by_managerMembershipId_and_branchId", (q) =>
+        q.eq("managerMembershipId", managerMembershipId).eq("branchId", assignment.branchId),
+      )
+      .first();
+    if (scope?.companyId === companyId) return true;
+  }
+  for (const assignment of departmentAssignments) {
+    if (assignment.companyId !== companyId) continue;
+    const scope = await ctx.db
+      .query("managerDepartmentScopes")
+      .withIndex("by_managerMembershipId_and_departmentId", (q) =>
+        q.eq("managerMembershipId", managerMembershipId).eq("departmentId", assignment.departmentId),
+      )
+      .first();
+    if (scope?.companyId === companyId) return true;
+  }
+  return false;
+}
+
 export async function assertCanAssign(
   ctx: Ctx,
   companyId: Id<"companies">,
@@ -470,7 +576,14 @@ export async function assertCanAssign(
   if (caps.has(`${prefix}:assign:any` as Capability)) return;
   if (caps.has(`${prefix}:assign:managed` as Capability)) {
     const scoped = await getManagedMembershipIds(ctx, companyId, m._id);
-    if (assignees.every((id) => scoped.has(id))) return;
+    let allManaged = true;
+    for (const assignee of assignees) {
+      if (!scoped.has(assignee) && !(await isManagedMembership(ctx, companyId, m._id, assignee))) {
+        allManaged = false;
+        break;
+      }
+    }
+    if (allManaged) return;
   }
   if (caps.has(`${prefix}:assign:self` as Capability) && assignees.length > 0 && assignees.every((id) => id === m._id))
     return;

@@ -1,5 +1,5 @@
 import { ConvexError, v } from "convex/values";
-import { action, internalMutation, mutation, query } from "./_generated/server";
+import { action, internalMutation, mutation, query, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
@@ -64,20 +64,20 @@ async function validatePermissionOverrides(overrides: { capability: string }[], 
 }
 
 async function managerScope(
-  ctx: any,
+  ctx: QueryCtx,
   managerMembershipId: Id<"companyMemberships">,
   onTruncated?: () => void,
 ) {
   const [branches, departments, users] = await Promise.all([
-    takeWithOverflow((limit) => ctx.db.query("managerBranchScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
-    takeWithOverflow((limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
-    takeWithOverflow((limit) => ctx.db.query("managerUserScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
+    takeWithOverflow((limit) => ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
+    takeWithOverflow((limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
+    takeWithOverflow((limit) => ctx.db.query("managerUserScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
   ]);
   if (branches.isTruncated || departments.isTruncated || users.isTruncated) onTruncated?.();
   return {
-    branchIds: branches.rows.map((row: any) => row.branchId),
-    departmentIds: departments.rows.map((row: any) => row.departmentId),
-    userMembershipIds: users.rows.map((row: any) => row.userMembershipId),
+    branchIds: branches.rows.map((row) => row.branchId),
+    departmentIds: departments.rows.map((row) => row.departmentId),
+    userMembershipIds: users.rows.map((row) => row.userMembershipId),
   };
 }
 

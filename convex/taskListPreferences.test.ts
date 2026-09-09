@@ -98,6 +98,44 @@ describe("task list preferences", () => {
     })).resolves.toMatchObject({ revision: 0, sort: { mode: "default" }, customOrder: null });
   });
 
+  test("updates every compacted custom-order key in one move", async () => {
+    const f = await createAuthzFixture();
+    const admin = f.asUser("adminA");
+    const first = await admin.mutation(api.tasks.createJd, {
+      companyId: f.companyA,
+      title: "First task",
+      recurrence: "daily",
+      assigneeMembershipIds: [f.adminM],
+    });
+    const second = await admin.mutation(api.tasks.createJd, {
+      companyId: f.companyA,
+      title: "Second task",
+      recurrence: "weekly",
+      assigneeMembershipIds: [f.adminM],
+    });
+
+    await expect(admin.mutation(api.tasks.moveListOrderTask, {
+      companyId: f.companyA,
+      taskType: "jd",
+      taskId: second,
+      orderKey: "1024/1",
+      rebalancedOrderKeys: [
+        { taskId: first, orderKey: "0/1" },
+        { taskId: second, orderKey: "1024/1" },
+      ],
+      expectedRevision: 0,
+    })).resolves.toMatchObject({ sort: { mode: "custom" }, revision: 1 });
+
+    const rows = await admin.query(api.tasks.listJdRows, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: null, numItems: 10 },
+    });
+    expect(rows.page).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _id: first, customOrderKey: "0/1" }),
+      expect.objectContaining({ _id: second, customOrderKey: "1024/1" }),
+    ]));
+  });
+
   test("validates the saved vector and rejects stale writes without changing state", async () => {
     const f = await createAuthzFixture();
     const adminA = f.asUser("adminA");

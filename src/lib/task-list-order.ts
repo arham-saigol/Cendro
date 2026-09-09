@@ -48,11 +48,19 @@ const priorityRanks = new Map<string, number>([
 
 const customOrderKeyPattern = /^(?:0|-[1-9]\d*|[1-9]\d*)\/[1-9]\d*$/;
 const customOrderKeyGap = 1_024n;
+export const taskListOrderKeyMaxLength = 512;
 
 type ParsedCustomOrderKey = {
   numerator: bigint;
   denominator: bigint;
 };
+
+export type TaskListOrderKeyUpdate = {
+  taskId: string;
+  orderKey: string;
+};
+
+class TaskListOrderRebalanceRequired extends Error {}
 
 function normalizedText(value: string | null | undefined) {
   const text = value?.trim();
@@ -141,7 +149,9 @@ function greatestCommonDivisor(left: bigint, right: bigint) {
 function formatCustomOrderKey(numerator: bigint, denominator: bigint) {
   if (denominator <= 0n) throw new Error("A custom task order key needs a positive denominator.");
   const divisor = greatestCommonDivisor(numerator, denominator);
-  return `${numerator / divisor}/${denominator / divisor}`;
+  const key = `${numerator / divisor}/${denominator / divisor}`;
+  if (key.length > taskListOrderKeyMaxLength) throw new TaskListOrderRebalanceRequired();
+  return key;
 }
 
 function parseCustomOrderKey(value: string): ParsedCustomOrderKey | null {
@@ -223,6 +233,41 @@ export function taskListOrderKeyBetween(
     previous!.numerator * next!.denominator + next!.numerator * previous!.denominator,
     2n * previous!.denominator * next!.denominator,
   );
+}
+
+export function taskListOrderPositionForMove(
+  orderedIds: readonly string[],
+  sourceId: string,
+  orderKeys: ReadonlyMap<string, string>,
+) {
+  const sourceIndex = orderedIds.indexOf(sourceId);
+  if (sourceIndex < 0) throw new Error("The task is not in the custom task order.");
+  if (new Set(orderedIds).size !== orderedIds.length) throw new Error("The custom task order contains duplicate tasks.");
+
+  const beforeId = orderedIds[sourceIndex - 1];
+  const afterId = orderedIds[sourceIndex + 1];
+  const beforeKey = beforeId ? orderKeys.get(beforeId) : null;
+  const afterKey = afterId ? orderKeys.get(afterId) : null;
+  if ((beforeId && !beforeKey) || (afterId && !afterKey)) {
+    throw new Error("Could not calculate a position for this task. Refresh and try again.");
+  }
+
+  try {
+    return {
+      orderKey: taskListOrderKeyBetween(beforeKey, afterKey),
+      rebalancedOrderKeys: null,
+    };
+  } catch (error) {
+    if (!(error instanceof TaskListOrderRebalanceRequired)) throw error;
+    const rebalancedOrderKeys = orderedIds.map((taskId, index) => ({
+      taskId,
+      orderKey: customOrderKeyAt(index),
+    }));
+    return {
+      orderKey: rebalancedOrderKeys[sourceIndex].orderKey,
+      rebalancedOrderKeys,
+    };
+  }
 }
 
 export function compareTaskListRows(

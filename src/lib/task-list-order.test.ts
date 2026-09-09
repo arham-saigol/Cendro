@@ -5,6 +5,8 @@ import {
   restoreTaskListCustomOrder,
   sameTaskListOrder,
   sortTaskListRows,
+  taskListOrderKeyMaxLength,
+  taskListOrderPositionForMove,
   type TaskListOrderingRow,
 } from "./task-list-order";
 
@@ -120,5 +122,37 @@ describe("task list ordering", () => {
     expect(moved).toEqual(["C", "A", "B"]);
     expect(mergeFilteredTaskListOrder(full, visible, moved)).toEqual(["C", "X", "A", "Y", "B"]);
     expect(sameTaskListOrder(visible, moveTaskListId(visible, "A", "A"))).toBe(true);
+  });
+
+  test("rebalances repeated inserts into the same interval before producing an invalid position", () => {
+    const rows = [row("start"), row("end")];
+    const orderedIds = ["start", "end"];
+    let orderKeys = new Map([
+      ["start", "0/1"],
+      ["end", "1/1"],
+    ]);
+    let rebalanceCount = 0;
+
+    for (let index = 0; index < 1_800; index += 1) {
+      const taskId = `insert-${index}`;
+      rows.splice(1, 0, row(taskId));
+      orderedIds.splice(1, 0, taskId);
+      const position = taskListOrderPositionForMove(orderedIds, taskId, orderKeys);
+      if (position.rebalancedOrderKeys) {
+        rebalanceCount += 1;
+        orderKeys = new Map(position.rebalancedOrderKeys.map(({ taskId, orderKey }) => [taskId, orderKey]));
+      } else {
+        orderKeys.set(taskId, position.orderKey);
+      }
+      expect(position.orderKey).toMatch(/^(?:0|-[1-9]\d*|[1-9]\d*)\/[1-9]\d*$/);
+      expect(position.orderKey.length).toBeLessThanOrEqual(taskListOrderKeyMaxLength);
+    }
+
+    expect(rebalanceCount).toBeGreaterThan(0);
+    for (const orderKey of orderKeys.values()) {
+      expect(orderKey).toMatch(/^(?:0|-[1-9]\d*|[1-9]\d*)\/[1-9]\d*$/);
+      expect(orderKey.length).toBeLessThanOrEqual(taskListOrderKeyMaxLength);
+    }
+    expect(restoreTaskListCustomOrder(rows, "jd", orderedIds, orderKeys).map((task) => task._id)).toEqual(orderedIds);
   });
 });

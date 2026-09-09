@@ -51,7 +51,8 @@ import {
   sameTaskListOrder,
   sortTaskListRows,
   taskListCustomOrderKeys,
-  taskListOrderKeyBetween,
+  taskListOrderPositionForMove,
+  type TaskListOrderKeyUpdate,
   type TaskListOrderingRow,
 } from "@/lib/task-list-order";
 import {
@@ -157,6 +158,7 @@ const frequencies: { value: Frequency; label: string }[] = [
 ];
 const priorities: Priority[] = ["low", "medium", "high"];
 const TASK_PAGE_SIZE = 200;
+const TASK_LIST_ORDER_LIMIT = 2_000;
 const manualStatuses: { value: ManualStatus; label: string }[] = [
   { value: "due", label: "Pending" },
   { value: "in_progress", label: "In Progress" },
@@ -720,11 +722,13 @@ function TaskSortMenu({
   taskType,
   sort,
   disabled,
+  customOrderingEnabled,
   onSelect,
 }: {
   taskType: TaskListTaskType;
   sort: TaskListSort;
   disabled: boolean;
+  customOrderingEnabled: boolean;
   onSelect: (sort: TaskListSort) => void;
 }) {
   return (
@@ -748,7 +752,7 @@ function TaskSortMenu({
             <span className="flex-1">Default</span>
             {sort.mode === "default" && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
           </DropdownMenu.Item>
-          <DropdownMenu.Item onSelect={() => onSelect({ mode: "custom" })} className="task-menu-item">
+          <DropdownMenu.Item disabled={!customOrderingEnabled} onSelect={() => onSelect({ mode: "custom" })} className="task-menu-item">
             <span className="flex-1">Custom</span>
             {sort.mode === "custom" && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
           </DropdownMenu.Item>
@@ -1564,6 +1568,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     return keys;
   }, [allTasks, optimisticTaskOrderKeys, preferenceScope]);
   const dataReady = Boolean(activeCompanyId && subscribedPreference && taskPageStatus === "Exhausted");
+  const customOrderingEnabled = dataReady && allTasks.length <= TASK_LIST_ORDER_LIMIT;
   const ownFrequencyValues = useMemo(() => {
     if (kind !== "jd") return [] as Frequency[];
     const set = new Set(allTasks.filter((task) => taskHasAssignee(task, currentMembershipId)).map((task) => task.recurrence).filter((value): value is Frequency => Boolean(value)));
@@ -1614,7 +1619,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const selectedTask = selectedTaskId ? allTasks.find((task) => task._id === selectedTaskId) ?? null : null;
   const canEditSelectedTask = Boolean(selectedTask && canEditTaskRow(active, kind, selectedTask));
   const hasMoreRenderedTasks = dataReady && renderedTasks.length < displayedTasks.length;
-  const dragDisabled = !dataReady || preferencePending;
+  const dragDisabled = !customOrderingEnabled || preferencePending;
 
   useEffect(() => {
     if (!activeCompanyId) return;
@@ -1927,21 +1932,12 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   }
 
   async function saveCustomTaskOrder(orderedIds: string[], sourceId: string) {
-    if (!activeCompanyId || !dataReady || !activePreference || preferencePending) return;
-    const sourceIndex = orderedIds.indexOf(sourceId);
-    if (sourceIndex < 0) return;
+    if (!activeCompanyId || !customOrderingEnabled || !activePreference || preferencePending) return;
     const orderKeys = taskListCustomOrderKeys(allTasks, taskType, activePreference.customOrder, taskOrderKeys);
-    const beforeId = orderedIds[sourceIndex - 1];
-    const afterId = orderedIds[sourceIndex + 1];
-    const beforeKey = beforeId ? orderKeys.get(beforeId) : null;
-    const afterKey = afterId ? orderKeys.get(afterId) : null;
-    if ((beforeId && !beforeKey) || (afterId && !afterKey)) {
-      setInlineError("Could not calculate a position for this task. Refresh and try again.");
-      return;
-    }
     let orderKey: string;
+    let rebalancedOrderKeys: TaskListOrderKeyUpdate[] | null;
     try {
-      orderKey = taskListOrderKeyBetween(beforeKey, afterKey);
+      ({ orderKey, rebalancedOrderKeys } = taskListOrderPositionForMove(orderedIds, sourceId, orderKeys));
     } catch (error) {
       setInlineError(error instanceof Error ? error.message : "Could not calculate a position for this task.");
       return;
@@ -1952,9 +1948,10 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     const previousOptimisticPreference = optimisticPreference?.scope === operationScope
       ? optimisticPreference
       : null;
-    const previousOptimisticOrderKey = optimisticTaskOrderKeys?.scope === operationScope
-      ? optimisticTaskOrderKeys.keys[sourceId]
-      : undefined;
+    const previousOptimisticTaskOrderKeys = optimisticTaskOrderKeys?.scope === operationScope
+      ? optimisticTaskOrderKeys
+      : null;
+    const orderKeyUpdates = rebalancedOrderKeys ?? [{ taskId: sourceId, orderKey }];
     setPreferencePending(true);
     setInlineError(null);
     setSortOverride(null);
@@ -1962,7 +1959,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       scope: operationScope,
       keys: {
         ...(current?.scope === operationScope ? current.keys : {}),
-        [sourceId]: orderKey,
+        ...Object.fromEntries(orderKeyUpdates.map(({ taskId, orderKey }) => [taskId, orderKey])),
       },
     }));
     setOptimisticPreference({
@@ -1977,6 +1974,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
         taskType,
         taskId: sourceId,
         orderKey,
+        ...(rebalancedOrderKeys ? { rebalancedOrderKeys } : {}),
         expectedRevision,
       });
       if (preferenceScopeRef.current !== operationScope) return;
@@ -1990,13 +1988,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     } catch (error) {
       if (preferenceScopeRef.current !== operationScope) return;
       setOptimisticPreference(previousOptimisticPreference);
-      setOptimisticTaskOrderKeys((current) => {
-        if (!current || current.scope !== operationScope) return current;
-        const keys = { ...current.keys };
-        if (previousOptimisticOrderKey) keys[sourceId] = previousOptimisticOrderKey;
-        else delete keys[sourceId];
-        return Object.keys(keys).length > 0 ? { scope: operationScope, keys } : null;
-      });
+      setOptimisticTaskOrderKeys(previousOptimisticTaskOrderKeys);
       setSortOverride(null);
       setInlineError(error instanceof Error ? error.message : "Could not save task order. Refresh and try again.");
     } finally {
@@ -2118,6 +2110,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             taskType={taskType}
             sort={activeSort}
             disabled={!dataReady || preferencePending}
+            customOrderingEnabled={customOrderingEnabled}
             onSelect={(sort) => void selectTaskSort(sort)}
           />
           <TaskFilterMenu

@@ -7,6 +7,7 @@ import {
   assertCanUpdateTask,
   assertCanDeleteTask,
   canViewTask,
+  isManagedMembership,
   assertPermissionManagerRemains,
   assertPlatformAdmin,
 } from "./permissions";
@@ -101,6 +102,113 @@ describe("backend permissions hardening", () => {
         await assertCanDeleteTask(ctx, f.companyA, auth.membership, [f.employee1M], "jd", auth.capabilities);
       })
     ).rejects.toThrow("You do not have access to delete this task.");
+  });
+
+  test("targeted managed checks scan every branch assignment", async () => {
+    const f = await createAuthzFixture();
+    const targetMembershipId = await f.t.run(async (ctx) => {
+      const now = Date.now();
+      const userId = await ctx.db.insert("appUsers", {
+        clerkSubject: "clerk|many-branches",
+        email: "many-branches@example.com",
+        firstName: "Many",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const membershipId = await ctx.db.insert("companyMemberships", {
+        companyId: f.companyA,
+        userId,
+        role: "Employee",
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      for (let index = 0; index <= 500; index += 1) {
+        const branchId = await ctx.db.insert("branches", {
+          companyId: f.companyA,
+          name: `Branch ${index}`,
+          order: index + 10,
+          createdAt: now,
+          updatedAt: now,
+        });
+        await ctx.db.insert("userBranchAssignments", {
+          companyId: f.companyA,
+          membershipId,
+          branchId,
+        });
+        if (index === 500) {
+          await ctx.db.insert("managerBranchScopes", {
+            companyId: f.companyA,
+            managerMembershipId: f.managerM,
+            branchId,
+            updatedAt: now,
+          });
+        }
+      }
+      return membershipId;
+    });
+
+    await expect(
+      f.asUser("managerA").run(async (ctx) => {
+        const auth = await requireCompanyAccess(ctx, f.companyA);
+        return await isManagedMembership(ctx, f.companyA, auth.membership._id, targetMembershipId);
+      }),
+    ).resolves.toBe(true);
+  });
+
+  test("targeted managed checks scan every department assignment", async () => {
+    const f = await createAuthzFixture();
+    const targetMembershipId = await f.t.run(async (ctx) => {
+      const now = Date.now();
+      const userId = await ctx.db.insert("appUsers", {
+        clerkSubject: "clerk|many-departments",
+        email: "many-departments@example.com",
+        firstName: "Many",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const membershipId = await ctx.db.insert("companyMemberships", {
+        companyId: f.companyA,
+        userId,
+        role: "Employee",
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      for (let index = 0; index <= 500; index += 1) {
+        const departmentId = await ctx.db.insert("departments", {
+          companyId: f.companyA,
+          branchId: f.branchA1,
+          name: `Department ${index}`,
+          order: index + 10,
+          createdAt: now,
+          updatedAt: now,
+        });
+        await ctx.db.insert("userDepartmentAssignments", {
+          companyId: f.companyA,
+          membershipId,
+          departmentId,
+        });
+        if (index === 500) {
+          await ctx.db.insert("managerDepartmentScopes", {
+            companyId: f.companyA,
+            managerMembershipId: f.managerM,
+            departmentId,
+            updatedAt: now,
+          });
+        }
+      }
+      return membershipId;
+    });
+
+    await expect(
+      f.asUser("managerA").run(async (ctx) => {
+        const auth = await requireCompanyAccess(ctx, f.companyA);
+        return await isManagedMembership(ctx, f.companyA, auth.membership._id, targetMembershipId);
+      }),
+    ).resolves.toBe(true);
   });
 
   test("Manager can update and delete task within managed scope, but not outside managed scope", async () => {

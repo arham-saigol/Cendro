@@ -145,12 +145,14 @@ describe("WP-07: Query budgets and silent incompleteness prevention", () => {
     expect(ov.truncated?.users).toBe(true);
   });
 
-  test("manager search reaches members beyond the initial scope cache", async () => {
+  test("manager operations reach members beyond the initial scope cache", async () => {
     const t = convexTest(schema, modules);
     const now = Date.now();
 
-    const { companyId, targetMembershipId } = await t.run(async (ctx) => {
+    const { companyId, adminMembershipId, targetMembershipId } = await t.run(async (ctx) => {
       const companyId = await ctx.db.insert("companies", { name: "Scoped Corp", createdAt: now });
+      const adminUser = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin", email: "admin@example.com", firstName: "Admin", createdAt: now, updatedAt: now });
+      const adminMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: adminUser, role: "Admin", active: true, createdAt: now, updatedAt: now });
       const managerUser = await ctx.db.insert("appUsers", { clerkSubject: "clerk|manager", email: "manager@example.com", firstName: "Manager", createdAt: now, updatedAt: now });
       const managerMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: managerUser, role: "Manager", active: true, createdAt: now, updatedAt: now });
       const branchId = await ctx.db.insert("branches", { companyId, name: "Operations", order: 0, createdAt: now, updatedAt: now });
@@ -165,7 +167,7 @@ describe("WP-07: Query budgets and silent incompleteness prevention", () => {
         if (target) targetMembershipId = membershipId;
       }
 
-      return { companyId, targetMembershipId };
+      return { companyId, adminMembershipId, targetMembershipId };
     });
 
     const summary = await t.withIdentity(identity("manager")).query(api.analytics.summary, { companyId });
@@ -189,6 +191,31 @@ describe("WP-07: Query budgets and silent incompleteness prevention", () => {
       assigneeMembershipIds: [targetMembershipId!],
       priority: "medium",
     })).resolves.toEqual(expect.any(String));
+
+    const taskId = await t.run(async (ctx) => await ctx.db.insert("oneTimeTasks", {
+      companyId,
+      reference: "TSK-MANAGED-501",
+      title: "Managed task",
+      priority: "medium",
+      status: "due",
+      assigneeMembershipIds: [targetMembershipId!],
+      createdByMembershipId: adminMembershipId,
+      createdAt: now,
+      updatedAt: now,
+    }));
+    const manager = t.withIdentity(identity("manager"));
+    await expect(manager.query(api.tasks.getOneTime, { companyId, taskId })).resolves.toMatchObject({
+      canUpdate: true,
+      canDelete: true,
+    });
+    await expect(manager.mutation(api.tasks.updateOneTime, {
+      companyId,
+      taskId,
+      title: "Managed task updated",
+      assigneeMembershipIds: [targetMembershipId!],
+      priority: "medium",
+    })).resolves.toBeNull();
+    await expect(manager.mutation(api.tasks.deleteOneTime, { companyId, taskId })).resolves.toBeNull();
   });
 
   test("assignable search flags scans beyond 1,000 memberships", async () => {

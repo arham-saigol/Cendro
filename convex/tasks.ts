@@ -4,7 +4,7 @@ import { internalAction, internalMutation, internalQuery, mutation, query, type 
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { currentJdCycle, defaultTimeZone, elapsedJdCyclesSince } from "./taskCycles";
-import { assertCanAssign, assertCanDeleteTask, assertCanUpdateTask, canViewTask, getManagedMembershipIds, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scanManagedMembershipIds, scopedMembershipIds } from "./permissions";
+import { assertCanAssign, assertCanDeleteTask, assertCanUpdateTask, canViewTask, getManagedMembershipIds, hasAllManagedMemberships, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scanManagedMembershipIds, scopedMembershipIds } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
 import { DEFAULT_QUERY_LIMIT, takeWithOverflow } from "./queryLimits";
@@ -96,7 +96,7 @@ async function canUpdateTask(
   if (caps.has(`${prefix}:update:any` as any)) return true;
   if (caps.has(`${prefix}:update:managed` as any)) {
     const scoped = precomputedManagedIds ?? (await getManagedMembershipIds(ctx, companyId, membership._id));
-    if (targets.every((id) => scoped.has(id))) return true;
+    if (await hasAllManagedMemberships(ctx, companyId, membership._id, targets, scoped)) return true;
   }
   return Boolean(caps.has(`${prefix}:update:self` as any) && targets.includes(membership._id));
 }
@@ -116,7 +116,7 @@ async function canDeleteTask(
   if (caps.has(`${prefix}:delete:any` as any)) return true;
   if (caps.has(`${prefix}:delete:managed` as any)) {
     const scoped = precomputedManagedIds ?? (await getManagedMembershipIds(ctx, companyId, membership._id));
-    if (targets.every((id) => scoped.has(id))) return true;
+    if (await hasAllManagedMemberships(ctx, companyId, membership._id, targets, scoped)) return true;
   }
   return Boolean(caps.has(`${prefix}:delete:self` as any) && targets.includes(membership._id));
 }

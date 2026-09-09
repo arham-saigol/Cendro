@@ -507,7 +507,7 @@ export async function canViewTask(
     task.assigneeMembershipIds.length > 0 ? task.assigneeMembershipIds : [task.createdByMembershipId];
   if (caps.has(`${prefix}:view:managed` as Capability)) {
     const managed = cachedManagedIds ?? (await getManagedMembershipIds(ctx, companyId, m._id));
-    if (targets.some((id) => managed.has(id))) return true;
+    if (await hasAnyManagedMembership(ctx, companyId, m._id, targets, managed)) return true;
   }
   if (caps.has(`${prefix}:view:self` as Capability)) {
     if (targets.includes(m._id) || task.createdByMembershipId === m._id) return true;
@@ -515,32 +515,33 @@ export async function canViewTask(
   return false;
 }
 
-async function isManagedMembership(
+export async function isManagedMembership(
   ctx: Ctx,
   companyId: Id<"companies">,
   managerMembershipId: Id<"companyMemberships">,
   membershipId: Id<"companyMemberships">,
+  cachedManagedIds?: Set<Id<"companyMemberships">>,
 ) {
-  if (membershipId === managerMembershipId) return true;
+  if (cachedManagedIds?.has(membershipId) || membershipId === managerMembershipId) return true;
+  const membership = await ctx.db.get(membershipId);
+  if (!membership || membership.companyId !== companyId || !membership.active) return false;
+
   const directScope = await ctx.db
     .query("managerUserScopes")
     .withIndex("by_managerMembershipId_and_userMembershipId", (q) =>
       q.eq("managerMembershipId", managerMembershipId).eq("userMembershipId", membershipId),
     )
     .first();
-  if (directScope?.companyId === companyId) return true;
+  if (directScope?.companyId === companyId) {
+    cachedManagedIds?.add(membershipId);
+    return true;
+  }
 
-  const [branchAssignments, departmentAssignments] = await Promise.all([
-    ctx.db
-      .query("userBranchAssignments")
-      .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))
-      .take(DEFAULT_QUERY_LIMIT),
-    ctx.db
-      .query("userDepartmentAssignments")
-      .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))
-      .take(DEFAULT_QUERY_LIMIT),
-  ]);
-  for (const assignment of branchAssignments) {
+  // This is the authoritative fallback for an individual target, so it must
+  // inspect every assignment rather than reuse the bounded scope cache.
+  for await (const assignment of ctx.db
+    .query("userBranchAssignments")
+    .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))) {
     if (assignment.companyId !== companyId) continue;
     const scope = await ctx.db
       .query("managerBranchScopes")
@@ -548,9 +549,14 @@ async function isManagedMembership(
         q.eq("managerMembershipId", managerMembershipId).eq("branchId", assignment.branchId),
       )
       .first();
-    if (scope?.companyId === companyId) return true;
+    if (scope?.companyId === companyId) {
+      cachedManagedIds?.add(membershipId);
+      return true;
+    }
   }
-  for (const assignment of departmentAssignments) {
+  for await (const assignment of ctx.db
+    .query("userDepartmentAssignments")
+    .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))) {
     if (assignment.companyId !== companyId) continue;
     const scope = await ctx.db
       .query("managerDepartmentScopes")
@@ -558,9 +564,38 @@ async function isManagedMembership(
         q.eq("managerMembershipId", managerMembershipId).eq("departmentId", assignment.departmentId),
       )
       .first();
-    if (scope?.companyId === companyId) return true;
+    if (scope?.companyId === companyId) {
+      cachedManagedIds?.add(membershipId);
+      return true;
+    }
   }
   return false;
+}
+
+export async function hasAnyManagedMembership(
+  ctx: Ctx,
+  companyId: Id<"companies">,
+  managerMembershipId: Id<"companyMemberships">,
+  membershipIds: readonly Id<"companyMemberships">[],
+  cachedManagedIds?: Set<Id<"companyMemberships">>,
+) {
+  for (const membershipId of membershipIds) {
+    if (await isManagedMembership(ctx, companyId, managerMembershipId, membershipId, cachedManagedIds)) return true;
+  }
+  return false;
+}
+
+export async function hasAllManagedMemberships(
+  ctx: Ctx,
+  companyId: Id<"companies">,
+  managerMembershipId: Id<"companyMemberships">,
+  membershipIds: readonly Id<"companyMemberships">[],
+  cachedManagedIds?: Set<Id<"companyMemberships">>,
+) {
+  for (const membershipId of membershipIds) {
+    if (!(await isManagedMembership(ctx, companyId, managerMembershipId, membershipId, cachedManagedIds))) return false;
+  }
+  return true;
 }
 
 export async function assertCanAssign(
@@ -576,14 +611,7 @@ export async function assertCanAssign(
   if (caps.has(`${prefix}:assign:any` as Capability)) return;
   if (caps.has(`${prefix}:assign:managed` as Capability)) {
     const scoped = await getManagedMembershipIds(ctx, companyId, m._id);
-    let allManaged = true;
-    for (const assignee of assignees) {
-      if (!scoped.has(assignee) && !(await isManagedMembership(ctx, companyId, m._id, assignee))) {
-        allManaged = false;
-        break;
-      }
-    }
-    if (allManaged) return;
+    if (await hasAllManagedMemberships(ctx, companyId, m._id, assignees, scoped)) return;
   }
   if (caps.has(`${prefix}:assign:self` as Capability) && assignees.length > 0 && assignees.every((id) => id === m._id))
     return;
@@ -603,7 +631,7 @@ export async function assertCanUpdateTask(
   if (caps.has(`${prefix}:update:any` as Capability)) return;
   if (caps.has(`${prefix}:update:managed` as Capability)) {
     const scoped = await getManagedMembershipIds(ctx, companyId, m._id);
-    if (targets.every((id) => scoped.has(id))) return;
+    if (await hasAllManagedMemberships(ctx, companyId, m._id, targets, scoped)) return;
   }
   if (caps.has(`${prefix}:update:self` as Capability) && targets.includes(m._id)) return;
   throw new ConvexError("You cannot update this task.");
@@ -622,7 +650,7 @@ export async function assertCanDeleteTask(
   if (caps.has(`${prefix}:delete:any` as Capability)) return;
   if (caps.has(`${prefix}:delete:managed` as Capability)) {
     const scoped = await getManagedMembershipIds(ctx, companyId, m._id);
-    if (targets.every((id) => scoped.has(id))) return;
+    if (await hasAllManagedMemberships(ctx, companyId, m._id, targets, scoped)) return;
   }
   if (caps.has(`${prefix}:delete:self` as Capability) && targets.includes(m._id)) return;
   throw new ConvexError("You do not have access to delete this task.");

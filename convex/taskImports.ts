@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { getManagedMembershipIds, membershipCapabilities, requireCapability } from "./permissions";
+import { getManagedMembershipIds, hasAllManagedMemberships, isManagedMembership, membershipCapabilities, requireCapability } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { currentJdCycle } from "./taskCycles";
 import { recordMissedJdCycles } from "./tasks";
@@ -168,10 +168,10 @@ async function buildImportAuth(
     ? await getManagedMembershipIds(ctx, companyId, membership._id)
     : new Set<Id<"companyMemberships">>([membership._id]);
 
-  function isAssignable(m: Doc<"companyMemberships">) {
+  async function isAssignable(m: Doc<"companyMemberships">) {
     if (!m.active || m.companyId !== companyId) return false;
     if (canAssignAny) return true;
-    if (canAssignManaged) return scoped.has(m._id);
+    if (canAssignManaged) return await isManagedMembership(ctx, companyId, membership._id, m._id, scoped);
     if (canAssignSelf) return m._id === membership._id;
     return false;
   }
@@ -180,7 +180,7 @@ async function buildImportAuth(
   const companyMemberEmails = new Set<string>();
   const assignable = new Set<Id<"companyMemberships">>();
 
-  if (isAssignable(membership)) {
+  if (await isAssignable(membership)) {
     assignable.add(membership._id);
   }
 
@@ -198,7 +198,7 @@ async function buildImportAuth(
 
       if (candidate && candidate.active) {
         companyMemberEmails.add(email);
-        if (isAssignable(candidate)) {
+        if (await isAssignable(candidate)) {
           assignable.add(candidate._id);
           const current = membershipIdsByEmail.get(email) ?? [];
           if (!current.includes(candidate._id)) {
@@ -213,7 +213,7 @@ async function buildImportAuth(
     for (const id of selectedMembershipIds) {
       if (!assignable.has(id)) {
         const candidate = await ctx.db.get(id);
-        if (candidate && isAssignable(candidate)) {
+        if (candidate && (await isAssignable(candidate))) {
           assignable.add(candidate._id);
         }
       }
@@ -229,11 +229,11 @@ async function taskByReference(ctx: Ctx, companyId: Id<"companies">, kind: TaskK
     : await ctx.db.query("oneTimeTasks").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).eq("reference", reference)).unique();
 }
 
-function taskCanUpdate(auth: ImportAuth, task: Task, kind: TaskKind) {
+async function taskCanUpdate(ctx: Ctx, companyId: Id<"companies">, auth: ImportAuth, task: Task, kind: TaskKind) {
   const p = capabilityPrefix(kind);
   if (auth.caps.has(`${p}:update:any` as Capability)) return true;
   const targets = task.assigneeMembershipIds.length ? task.assigneeMembershipIds : [task.createdByMembershipId];
-  if (auth.caps.has(`${p}:update:managed` as Capability) && targets.every((id) => auth.scoped.has(id))) return true;
+  if (auth.caps.has(`${p}:update:managed` as Capability) && await hasAllManagedMemberships(ctx, companyId, auth.membership._id, targets, auth.scoped)) return true;
   return auth.caps.has(`${p}:update:self` as Capability) && targets.includes(auth.membership._id);
 }
 
@@ -323,7 +323,7 @@ export const previewTaskImport = query({
       if (reference) {
         const candidateTask = await taskByReference(ctx, args.companyId, args.kind, reference);
         if (candidateTask) {
-          if (!taskCanUpdate(auth, candidateTask, args.kind)) {
+          if (!(await taskCanUpdate(ctx, args.companyId, auth, candidateTask, args.kind))) {
             errors.push("Task code belongs to an existing task that you do not have permission to edit.");
           } else {
             task = candidateTask;
@@ -370,7 +370,7 @@ async function validateCommitRow(ctx: MutationCtx, companyId: Id<"companies">, k
   const reference = validateReference(draft.reference, kind);
   const task = await taskByReference(ctx, companyId, kind, reference);
   if (task) {
-    if (!taskCanUpdate(auth, task, kind)) {
+    if (!(await taskCanUpdate(ctx, companyId, auth, task, kind))) {
       fail("Task code belongs to an existing task that you do not have permission to edit.");
     }
     if (row.expectedUpdatedAt === undefined || task.updatedAt !== row.expectedUpdatedAt) {

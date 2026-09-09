@@ -227,6 +227,110 @@ describe("task import backend", () => {
     expect(outOfScopePreview.rows[0].errors).toContain('Assignee "empb@example.com" is outside your assignable scope.');
   });
 
+  test("manager imports and updates targets beyond the managed-scope cache", async () => {
+    const t = convexTest(schema, modules);
+    const { companyId, targetMembershipId } = await t.run(async (ctx) => {
+      const now = Date.now();
+      const companyId = await ctx.db.insert("companies", { name: "Large Scope Corp", createdAt: now });
+      const managerUserId = await ctx.db.insert("appUsers", {
+        clerkSubject: "clerk|large-scope-manager",
+        email: "large-scope-manager@example.com",
+        firstName: "Manager",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const managerMembershipId = await ctx.db.insert("companyMemberships", {
+        companyId,
+        userId: managerUserId,
+        role: "Manager",
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const branchId = await ctx.db.insert("branches", {
+        companyId,
+        name: "Operations",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("managerBranchScopes", { companyId, managerMembershipId, branchId, updatedAt: now });
+
+      let targetMembershipId;
+      for (let index = 1; index <= 501; index += 1) {
+        const target = index === 501;
+        const userId = await ctx.db.insert("appUsers", {
+          clerkSubject: `clerk|large-scope-${index}`,
+          email: target ? "target@example.com" : `large-scope-${index}@example.com`,
+          firstName: target ? "Target" : `Member ${index}`,
+          createdAt: now,
+          updatedAt: now,
+        });
+        const membershipId = await ctx.db.insert("companyMemberships", {
+          companyId,
+          userId,
+          role: "Employee",
+          active: true,
+          createdAt: now,
+          updatedAt: now,
+        });
+        await ctx.db.insert("userBranchAssignments", { companyId, membershipId, branchId });
+        if (target) targetMembershipId = membershipId;
+      }
+      return { companyId, targetMembershipId };
+    });
+    const manager = t.withIdentity(identity("large-scope-manager", "large-scope-manager@example.com"));
+    const createDraft = draft({
+      reference: "JD-501",
+      rawAssigneeText: "target@example.com",
+      assigneeEmails: ["target@example.com"],
+    });
+
+    const createPreview = await manager.query(api.taskImports.previewTaskImport, {
+      companyId,
+      kind: "jd",
+      drafts: [createDraft],
+    });
+    expect(createPreview.rows[0]).toMatchObject({
+      operation: "create",
+      proposedAssigneeMembershipIds: [targetMembershipId],
+    });
+    await expect(manager.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId,
+      kind: "jd",
+      importKey: "large-scope-create",
+      batchKey: "batch-1",
+      source: "cendro",
+      rows: [{ include: true, selectedAssigneeMembershipIds: [targetMembershipId!], draft: createDraft }],
+    })).resolves.toMatchObject({ created: 1, updated: 0 });
+
+    const updateDraft = draft({
+      reference: "JD-501",
+      title: "Updated by manager",
+      rawAssigneeText: "",
+      assigneeEmails: [],
+      presentFields: ["reference", "title"],
+    });
+    const updatePreview = await manager.query(api.taskImports.previewTaskImport, {
+      companyId,
+      kind: "jd",
+      drafts: [updateDraft],
+    });
+    expect(updatePreview.rows[0]).toMatchObject({ operation: "update" });
+    await expect(manager.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId,
+      kind: "jd",
+      importKey: "large-scope-update",
+      batchKey: "batch-1",
+      source: "cendro",
+      rows: [{
+        include: true,
+        expectedUpdatedAt: updatePreview.rows[0].current?.updatedAt,
+        selectedAssigneeMembershipIds: null,
+        draft: updateDraft,
+      }],
+    })).resolves.toMatchObject({ created: 0, updated: 1 });
+  });
+
   test("preserves exported overdue status but rejects changing an overdue one-time task", async () => {
     const { t, companyId, adminMembershipId } = await seed();
     const admin = t.withIdentity(identity("admin"));

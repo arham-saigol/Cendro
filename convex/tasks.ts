@@ -345,6 +345,55 @@ async function validateTaskListOrder(
   return normalized;
 }
 
+async function applyTaskListOrderKeyUpdates(
+  ctx: MutationCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  taskType: TaskKind,
+  orderKeyUpdates: { taskId: string; orderKey: string }[],
+  now: number,
+) {
+  const taskIds = taskType === "jd"
+    ? await validateTaskListOrder(ctx, companyId, membership, "jd", orderKeyUpdates.map(({ taskId }) => taskId))
+    : await validateTaskListOrder(ctx, companyId, membership, "one_time", orderKeyUpdates.map(({ taskId }) => taskId));
+  const entries = await ctx.db
+    .query("taskListOrderEntries")
+    .withIndex("by_companyId_and_membershipId_and_taskType_and_taskId", (q) =>
+      q.eq("companyId", companyId).eq("membershipId", membership._id).eq("taskType", taskType),
+    )
+    .take(TASK_LIST_ORDER_LIMIT + 1);
+  if (entries.length > TASK_LIST_ORDER_LIMIT) {
+    throw new ConvexError("Task list order is too large to save.");
+  }
+  const entryByTaskId = new Map(entries.map((entry) => [entry.taskId, entry]));
+
+  for (const [index, taskId] of taskIds.entries()) {
+    const { orderKey } = orderKeyUpdates[index];
+    const entry = entryByTaskId.get(taskId);
+    if (entry) {
+      await ctx.db.patch(entry._id, { orderKey, updatedAt: now });
+    } else if (taskType === "jd") {
+      await ctx.db.insert("taskListOrderEntries", {
+        companyId,
+        membershipId: membership._id,
+        taskType: "jd",
+        taskId: taskId as Id<"jdTasks">,
+        orderKey,
+        updatedAt: now,
+      });
+    } else {
+      await ctx.db.insert("taskListOrderEntries", {
+        companyId,
+        membershipId: membership._id,
+        taskType: "one_time",
+        taskId: taskId as Id<"oneTimeTasks">,
+        orderKey,
+        updatedAt: now,
+      });
+    }
+  }
+}
+
 export const listJdRows = query({
   args: { companyId: v.id("companies"), search: v.optional(v.string()), frequency: v.optional(jdFrequencyFilterValidator), paginationOpts: paginationOptsValidator },
   returns: paginationResultValidator(v.any()),
@@ -571,30 +620,8 @@ export const moveListOrderTask = mutation({
     const revision = args.expectedRevision + 1;
     let preferenceId: Id<"taskListPreferences">;
 
+    await applyTaskListOrderKeyUpdates(ctx, args.companyId, membership, args.taskType, orderKeyUpdates, now);
     if (args.taskType === "jd") {
-      const taskIds = await validateTaskListOrder(ctx, args.companyId, membership, "jd", orderKeyUpdates.map(({ taskId }) => taskId));
-      for (const [index, taskId] of taskIds.entries()) {
-        const { orderKey } = orderKeyUpdates[index];
-        const entry = await ctx.db
-          .query("taskListOrderEntries")
-          .withIndex("by_companyId_and_membershipId_and_taskType_and_taskId", (q) =>
-            q.eq("companyId", args.companyId)
-              .eq("membershipId", membership._id)
-              .eq("taskType", "jd")
-              .eq("taskId", taskId),
-          )
-          .unique();
-        if (entry) await ctx.db.patch(entry._id, { orderKey, updatedAt: now });
-        else await ctx.db.insert("taskListOrderEntries", {
-          companyId: args.companyId,
-          membershipId: membership._id,
-          taskType: "jd",
-          taskId,
-          orderKey,
-          updatedAt: now,
-        });
-      }
-
       if (preference) {
         await ctx.db.patch(preference._id, { sort: { mode: "custom" }, revision, updatedAt: now });
         preferenceId = preference._id;
@@ -609,29 +636,6 @@ export const moveListOrderTask = mutation({
         });
       }
     } else {
-      const taskIds = await validateTaskListOrder(ctx, args.companyId, membership, "one_time", orderKeyUpdates.map(({ taskId }) => taskId));
-      for (const [index, taskId] of taskIds.entries()) {
-        const { orderKey } = orderKeyUpdates[index];
-        const entry = await ctx.db
-          .query("taskListOrderEntries")
-          .withIndex("by_companyId_and_membershipId_and_taskType_and_taskId", (q) =>
-            q.eq("companyId", args.companyId)
-              .eq("membershipId", membership._id)
-              .eq("taskType", "one_time")
-              .eq("taskId", taskId),
-          )
-          .unique();
-        if (entry) await ctx.db.patch(entry._id, { orderKey, updatedAt: now });
-        else await ctx.db.insert("taskListOrderEntries", {
-          companyId: args.companyId,
-          membershipId: membership._id,
-          taskType: "one_time",
-          taskId,
-          orderKey,
-          updatedAt: now,
-        });
-      }
-
       if (preference) {
         await ctx.db.patch(preference._id, { sort: { mode: "custom" }, revision, updatedAt: now });
         preferenceId = preference._id;

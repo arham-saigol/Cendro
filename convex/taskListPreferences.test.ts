@@ -119,6 +119,27 @@ describe("task list preferences", () => {
       taskType: "jd",
       taskId: second,
       orderKey: "1024/1",
+      rebalancedOrderKeys: [{ taskId: first, orderKey: "0/1" }],
+      expectedRevision: 0,
+    })).rejects.toThrow("Task list order position is invalid.");
+
+    await expect(admin.mutation(api.tasks.moveListOrderTask, {
+      companyId: f.companyA,
+      taskType: "jd",
+      taskId: second,
+      orderKey: "1024/1",
+      rebalancedOrderKeys: [
+        { taskId: first, orderKey: "0/1" },
+        { taskId: second, orderKey: "1/0" },
+      ],
+      expectedRevision: 0,
+    })).rejects.toThrow("Task list order position is invalid.");
+
+    await expect(admin.mutation(api.tasks.moveListOrderTask, {
+      companyId: f.companyA,
+      taskType: "jd",
+      taskId: second,
+      orderKey: "1024/1",
       rebalancedOrderKeys: [
         { taskId: first, orderKey: "0/1" },
         { taskId: second, orderKey: "1024/1" },

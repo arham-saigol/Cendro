@@ -15,7 +15,7 @@ import {
   Clock,
   Download,
   Flag,
-  GripVertical,
+  Grip,
   Hash,
   Inbox,
   PanelRight,
@@ -31,9 +31,10 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
-import { DragDropProvider, type DragEndEvent, type DragStartEvent } from "@dnd-kit/react";
+import { DragDropProvider, type DragEndEvent, type DragMoveEvent, type DragStartEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { OptimisticSortingPlugin } from "@dnd-kit/dom/sortable";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
@@ -59,9 +60,6 @@ import {
   defaultTaskListSortDirection,
   defaultTaskListSortField,
   initialTaskListSortDirection,
-  taskListSortFieldLabel,
-  taskListSortFields,
-  taskListSortLabel,
   type TaskListSort,
   type TaskListSortDirection,
   type TaskListSortField,
@@ -138,7 +136,30 @@ type TaskDragSnapshot = {
   visibleIds: string[];
   fullOrderIds: string[];
 };
+type TaskDragPreview = { sourceIndex: number; targetIndex: number };
 type OptimisticTaskOrderKeys = { scope: string; keys: Record<string, string> };
+
+// Task rows are fixed-height (task-table td and the rail rows); the drag preview shifts
+// rows by this multiple.
+const TASK_ROW_HEIGHT = 41;
+
+// Visual shift for a row while a drag preview is active. Rows between the source and the
+// projected drop slot move one row height toward the source's slot, which opens the drop
+// gap at targetIndex. Rows are only transformed - the DOM order stays owned by React.
+function taskRowShift(index: number, preview: TaskDragPreview | null) {
+  if (!preview) return 0;
+  const { sourceIndex, targetIndex } = preview;
+  if (index === sourceIndex || sourceIndex === targetIndex) return 0;
+  if (sourceIndex < targetIndex) {
+    return index > sourceIndex && index <= targetIndex ? -TASK_ROW_HEIGHT : 0;
+  }
+  return index >= targetIndex && index < sourceIndex ? TASK_ROW_HEIGHT : 0;
+}
+
+function taskRowShiftTransform(index: number, preview: TaskDragPreview | null): CSSProperties | undefined {
+  const shift = taskRowShift(index, preview);
+  return shift ? { transform: `translateY(${shift}px)` } : undefined;
+}
 
 function sameTaskListSort(left: TaskListSort, right: TaskListSort) {
   if (left.mode !== right.mode) return false;
@@ -718,70 +739,6 @@ function TaskSortHeader({
   );
 }
 
-function TaskSortMenu({
-  taskType,
-  sort,
-  disabled,
-  customOrderingEnabled,
-  onSelect,
-}: {
-  taskType: TaskListTaskType;
-  sort: TaskListSort;
-  disabled: boolean;
-  customOrderingEnabled: boolean;
-  onSelect: (sort: TaskListSort) => void;
-}) {
-  return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>
-        <button
-          type="button"
-          className="task-sort-trigger"
-          data-active={sort.mode !== "default" ? "true" : undefined}
-          disabled={disabled}
-          aria-label={`Sort tasks: ${taskListSortLabel(taskType, sort)}`}
-        >
-          <SlidersHorizontal className="h-4 w-4" />
-          <span>Sort: {taskListSortLabel(taskType, sort)}</span>
-          <ChevronDown className="h-3.5 w-3.5 text-[var(--ink-faint)]" />
-        </button>
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content align="end" sideOffset={6} className="task-menu min-w-52" aria-label="Task sorting">
-          <DropdownMenu.Item onSelect={() => onSelect({ mode: "default" })} className="task-menu-item">
-            <span className="flex-1">Default</span>
-            {sort.mode === "default" && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
-          </DropdownMenu.Item>
-          <DropdownMenu.Item disabled={!customOrderingEnabled} onSelect={() => onSelect({ mode: "custom" })} className="task-menu-item">
-            <span className="flex-1">Custom</span>
-            {sort.mode === "custom" && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
-          </DropdownMenu.Item>
-          <div className="my-1 h-px bg-[var(--hairline)]" />
-          {taskListSortFields(taskType).map((field) => (
-            <DropdownMenu.Sub key={field}>
-              <DropdownMenu.SubTrigger className="task-menu-item">
-                <span className="flex-1">{taskListSortFieldLabel(field)}</span>
-                {sort.mode === "field" && sort.field === field && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
-                <ChevronRight className="h-3.5 w-3.5" />
-              </DropdownMenu.SubTrigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.SubContent sideOffset={7} alignOffset={-5} className="task-menu min-w-40">
-                  {(["asc", "desc"] as const).map((direction) => (
-                    <DropdownMenu.Item key={direction} onSelect={() => onSelect({ mode: "field", field, direction })} className="task-menu-item">
-                      <span className="flex-1">{direction === "asc" ? "Ascending" : "Descending"}</span>
-                      {sort.mode === "field" && sort.field === field && sort.direction === direction && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
-                    </DropdownMenu.Item>
-                  ))}
-                </DropdownMenu.SubContent>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Sub>
-          ))}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
-  );
-}
-
 function SortableTaskRow({
   task,
   index,
@@ -790,9 +747,9 @@ function SortableTaskRow({
   checked,
   selected,
   rowCanEdit,
-  onToggle,
+  railHandleRef,
+  shift,
   onOpenDetails,
-  onHandleElement,
   children,
 }: {
   task: TaskRow;
@@ -802,12 +759,17 @@ function SortableTaskRow({
   checked: boolean;
   selected: boolean;
   rowCanEdit: boolean;
-  onToggle: () => void;
+  railHandleRef: RefObject<HTMLButtonElement | null>;
+  shift: number;
   onOpenDetails: () => void;
-  onHandleElement: (id: string, element: HTMLButtonElement | null) => void;
   children: ReactNode;
 }) {
-  const { ref, handleRef, isDragging } = useSortable<TaskSortableData>({
+  // The drag handle and row checkbox live in the rail beside the table; dnd-kit syncs
+  // the handle from railHandleRef once the rail button mounts. OptimisticSortingPlugin
+  // is disabled because it reorders <tr> nodes directly during dragover, leaving the DOM
+  // out of sync with React's row order; this list is owned by React (order keys come from
+  // Convex and can legitimately differ from the naive previewed move).
+  const { ref, isDragging } = useSortable<TaskSortableData>({
     id: task._id,
     index,
     group: scope,
@@ -815,11 +777,9 @@ function SortableTaskRow({
     accept: "task",
     disabled: dragDisabled,
     data: { kind: "task", scope },
+    handle: railHandleRef,
+    plugins: (defaults) => defaults.filter((plugin) => plugin !== OptimisticSortingPlugin),
   });
-  const setHandleRef = useCallback((element: HTMLButtonElement | null) => {
-    handleRef(element);
-    onHandleElement(task._id, element);
-  }, [handleRef, onHandleElement, task._id]);
 
   return (
     <tr
@@ -829,6 +789,7 @@ function SortableTaskRow({
       data-selected={selected ? "true" : undefined}
       data-checked={checked ? "true" : undefined}
       data-dragging={isDragging ? "true" : undefined}
+      style={shift ? { transform: `translateY(${shift}px)` } : undefined}
       tabIndex={!rowCanEdit ? 0 : undefined}
       onClick={(event) => {
         if (rowCanEdit) return;
@@ -842,30 +803,7 @@ function SortableTaskRow({
           onOpenDetails();
         }
       }}
-      className="group/row"
     >
-      <td className="task-list-controls" data-interactive="true" onClick={(event) => event.stopPropagation()}>
-        <div className="task-list-controls-inner">
-          <button
-            ref={setHandleRef}
-            type="button"
-            className="task-list-row-control task-list-drag-handle"
-            disabled={dragDisabled}
-            data-interactive="true"
-            onClick={(event) => event.stopPropagation()}
-            aria-label={`Reorder ${task.reference}: ${task.title}`}
-          >
-            <GripVertical className="h-3.5 w-3.5" />
-          </button>
-          <span className="task-list-row-control" data-interactive="true" onClick={(event) => event.stopPropagation()}>
-            <Checkbox
-              checked={checked}
-              onCheckedChange={onToggle}
-              aria-label={checked ? `Unselect ${task.title}` : `Select ${task.title}`}
-            />
-          </span>
-        </div>
-      </td>
       {children}
     </tr>
   );
@@ -1511,7 +1449,9 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [optimisticPreference, setOptimisticPreference] = useState<(TaskListPreferenceState & { scope: string }) | null>(null);
   const [optimisticTaskOrderKeys, setOptimisticTaskOrderKeys] = useState<OptimisticTaskOrderKeys | null>(null);
   const [preferencePending, setPreferencePending] = useState(false);
+  const taskTableBodyRef = useRef<HTMLTableSectionElement>(null);
   const [dragSnapshot, setDragSnapshot] = useState<TaskDragSnapshot | null>(null);
+  const [dragPreview, setDragPreview] = useState<TaskDragPreview | null>(null);
   const dragHandleRefs = useRef(new Map<string, HTMLButtonElement>());
   const preferenceScopeRef = useRef("");
   const taskPrefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
@@ -1897,10 +1837,14 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     setPersonalPriorityView("all");
   }
 
-  const registerDragHandle = useCallback((id: string, element: HTMLButtonElement | null) => {
-    if (element) dragHandleRefs.current.set(id, element);
-    else dragHandleRefs.current.delete(id);
-  }, []);
+  const railHandleRefs = useMemo(() => {
+    const refs = new Map<string, RefObject<HTMLButtonElement | null>>();
+    for (const task of allTasks) refs.set(task._id, { current: null });
+    return refs;
+  }, [allTasks]);
+  function railHandleRef(id: string) {
+    return railHandleRefs.get(id) ?? { current: null };
+  }
 
   function focusDragHandle(id: string) {
     requestAnimationFrame(() => dragHandleRefs.current.get(id)?.focus());
@@ -2022,6 +1966,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     if (!source || !isSortable(source) || source.data?.kind !== "task" || source.group !== preferenceScope) return;
     const sourceId = String(source.id);
     if (!displayedTasks.some((task) => task._id === sourceId)) return;
+    setDragPreview(null);
     setDragSnapshot({
       scope: preferenceScope,
       sourceId,
@@ -2030,9 +1975,43 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     });
   }
 
+  // Projects the drop position from the pointer against the table's own geometry instead
+  // of dnd-kit's collision target, so the preview and the eventual drop always agree and
+  // shifting rows (which changes their rects) cannot feed back into the projection.
+  // Returns null when the projection is unavailable, or targetIndex null for "no move".
+  function taskDropProjection(sourceId: string, pointerY: number): { sourceIndex: number; targetIndex: number | null } | null {
+    const tbody = taskTableBodyRef.current;
+    if (!tbody) return null;
+    const sourceIndex = renderedTasks.findIndex((task) => task._id === sourceId);
+    if (sourceIndex < 0) return null;
+    const tbodyTop = tbody.getBoundingClientRect().top;
+    const slot = Math.floor((pointerY - tbodyTop) / TASK_ROW_HEIGHT);
+    const targetIndex = Math.min(Math.max(slot, 0), renderedTasks.length - 1);
+    return { sourceIndex, targetIndex: targetIndex === sourceIndex ? null : targetIndex };
+  }
+
+  function handleTaskDragMove(event: DragMoveEvent) {
+    const snapshot = dragSnapshot;
+    if (!snapshot || snapshot.scope !== preferenceScope || !event.operation.target) return;
+    const projection = taskDropProjection(snapshot.sourceId, event.operation.position.current.y);
+    if (!projection || projection.targetIndex == null) {
+      if (dragPreview) setDragPreview(null);
+      return;
+    }
+    const { sourceIndex } = projection;
+    const targetIndex: number = projection.targetIndex;
+    setDragPreview((current) =>
+      current && current.sourceIndex === sourceIndex && current.targetIndex === targetIndex
+        ? current
+        : { sourceIndex, targetIndex },
+    );
+  }
+
   function handleTaskDragEnd(event: DragEndEvent) {
     const snapshot = dragSnapshot;
+    const preview = dragPreview;
     setDragSnapshot(null);
+    setDragPreview(null);
     if (event.canceled || !snapshot || snapshot.scope !== preferenceScope || preferencePending) return;
     const { source, target } = event.operation;
     if (!source || !target || !isSortable(source) || !isSortable(target)) return;
@@ -2043,7 +2022,15 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       target.group !== preferenceScope
     ) return;
     const sourceId = String(source.id);
-    const targetId = String(target.id);
+    // Recompute the slot from the final pointer position (position.current is accurate at
+    // drag end; the preview state can trail the last pointer move by one event). Releasing
+    // over the source's own slot means no move; only fall back to the collision target if
+    // the geometry projection is unavailable.
+    const projection = taskDropProjection(sourceId, event.operation.position.current.y);
+    if (projection && projection.targetIndex == null) return;
+    const projectedId = projection?.targetIndex != null ? renderedTasks[projection.targetIndex]?._id : undefined;
+    const previewId = preview && renderedTasks[preview.sourceIndex]?._id === sourceId ? renderedTasks[preview.targetIndex]?._id : undefined;
+    const targetId = projectedId ?? previewId ?? String(target.id);
     if (sourceId !== snapshot.sourceId || sourceId === targetId) return;
 
     const currentIds = new Set(allTasks.map((task) => task._id));
@@ -2055,8 +2042,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     void saveCustomTaskOrder(nextOrder, sourceId);
   }
 
-  const jdColumns = 6 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // controls + reference + title + optional frequency + optional assignee + status + time + quantity
-  const oneColumns = 6 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // controls + reference + title + optional priority + optional assignee + status + date assigned + due
+  const jdColumns = 5 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional frequency + optional assignee + status + time + quantity
+  const oneColumns = 5 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional priority + optional assignee + status + date assigned + due
   const filterCount = [statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
   const hasActiveFilters = filterCount > 0 || search.trim() !== "";
 
@@ -2126,13 +2113,6 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               {search ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
             </button>
           </div>
-          <TaskSortMenu
-            taskType={taskType}
-            sort={activeSort}
-            disabled={!dataReady || preferencePending}
-            customOrderingEnabled={customOrderingEnabled}
-            onSelect={(sort) => void selectTaskSort(sort)}
-          />
           <TaskFilterMenu
             kind={kind}
             statusFilter={statusFilter}
@@ -2224,25 +2204,51 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
           </div>
         )}
 
-        <div className="task-table-wrap task-list-table-wrap relative overflow-x-auto">
-        <DragDropProvider onDragStart={handleTaskDragStart} onDragEnd={handleTaskDragEnd}>
-        <table className="task-table task-list-table">
+        <div className="task-table-wrap task-list-table-wrap relative -ml-14 w-[calc(100%+3.5rem)] overflow-x-auto pl-14">
+        <DragDropProvider onDragStart={handleTaskDragStart} onDragMove={handleTaskDragMove} onDragEnd={handleTaskDragEnd}>
+        {renderedTasks.length > 0 && (
+          <div className="task-checkbox-rail pointer-events-none absolute left-0 top-0 z-10 flex w-14 flex-col pr-2">
+            <div className="task-list-rail-row pointer-events-auto flex h-9 items-center justify-end" data-active={selectionCount > 0 ? "true" : undefined}>
+              <Checkbox
+                checked={allVisibleSelected}
+                indeterminate={someVisibleSelected}
+                onCheckedChange={toggleAllVisible}
+                aria-label={allVisibleSelected ? "Unselect all rendered tasks" : "Select all rendered tasks"}
+                className="task-list-rail-control"
+              />
+            </div>
+            {renderedTasks.map((task, railIndex) => {
+              const isChecked = selectedIds.has(task._id);
+              return (
+                <div key={`rail-${task._id}`} className="task-list-rail-row pointer-events-auto flex h-[41px] items-center justify-end gap-1" data-active={isChecked ? "true" : undefined} style={taskRowShiftTransform(railIndex, dragPreview)}>
+                  <button
+                    type="button"
+                    className="task-list-rail-control task-list-drag-handle"
+                    disabled={dragDisabled}
+                    aria-label={`Reorder ${task.reference}: ${task.title}`}
+                    ref={(element) => {
+                      railHandleRef(task._id).current = element;
+                      if (element) dragHandleRefs.current.set(task._id, element);
+                      else dragHandleRefs.current.delete(task._id);
+                    }}
+                  >
+                    <Grip className="h-4 w-4" />
+                  </button>
+                  <Checkbox
+                    className="task-list-rail-control"
+                    checked={isChecked}
+                    onCheckedChange={() => toggleOne(task._id)}
+                    aria-label={isChecked ? `Unselect ${task.title}` : `Select ${task.title}`}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <table className="task-table">
           <thead>
             {kind === "jd" ? (
-              <tr className="group/head">
-                <th scope="col" className="task-list-controls-header">
-                  <div className="task-list-controls-inner">
-                    <span className="task-list-handle-spacer" aria-hidden="true" />
-                    <Checkbox
-                      checked={allVisibleSelected}
-                      indeterminate={someVisibleSelected}
-                      onCheckedChange={toggleAllVisible}
-                      disabled={!dataReady || renderedTasks.length === 0}
-                      aria-label={allVisibleSelected ? "Unselect all rendered tasks" : "Select all rendered tasks"}
-                      className="task-list-header-checkbox"
-                    />
-                  </div>
-                </th>
+              <tr>
                 <TaskSortHeader taskType={taskType} field="code" label="CODE" icon={<Hash className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="w-[92px] whitespace-nowrap" />
                 <TaskSortHeader taskType={taskType} field="title" label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="min-w-[200px] max-w-[250px]" />
                 {showFrequencyColumn && <TaskSortHeader taskType={taskType} field="frequency" label="FREQUENCY" icon={<FrequencyIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />}
@@ -2252,20 +2258,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                 <TaskSortHeader taskType={taskType} field="quantity" label="QUANTITY" icon={<QuantityIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />
               </tr>
             ) : (
-              <tr className="group/head">
-                <th scope="col" className="task-list-controls-header">
-                  <div className="task-list-controls-inner">
-                    <span className="task-list-handle-spacer" aria-hidden="true" />
-                    <Checkbox
-                      checked={allVisibleSelected}
-                      indeterminate={someVisibleSelected}
-                      onCheckedChange={toggleAllVisible}
-                      disabled={!dataReady || renderedTasks.length === 0}
-                      aria-label={allVisibleSelected ? "Unselect all rendered tasks" : "Select all rendered tasks"}
-                      className="task-list-header-checkbox"
-                    />
-                  </div>
-                </th>
+              <tr>
                 <TaskSortHeader taskType={taskType} field="code" label="CODE" icon={<Hash className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="w-[92px] whitespace-nowrap" />
                 <TaskSortHeader taskType={taskType} field="title" label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="min-w-[200px] max-w-[250px]" />
                 {showPriorityColumn && <TaskSortHeader taskType={taskType} field="priority" label="PRIORITY" icon={<Tag className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />}
@@ -2276,7 +2269,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               </tr>
             )}
           </thead>
-          <tbody>
+          <tbody ref={taskTableBodyRef}>
             {!dataReady ? (
               Array.from({ length: 6 }).map((_, index) => (
                 <tr key={`skel-${index}`}>
@@ -2323,9 +2316,9 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                       checked={isChecked}
                       selected={task._id === selectedId}
                       rowCanEdit={rowCanEdit}
-                      onToggle={() => toggleOne(task._id)}
+                      railHandleRef={railHandleRef(task._id)}
+                      shift={taskRowShift(index, dragPreview)}
                       onOpenDetails={openDetails}
-                      onHandleElement={registerDragHandle}
                     >
                       <td className="w-[92px] whitespace-nowrap font-mono text-[12px] text-[var(--ink-muted)]">{task.reference}</td>
                       <td className="col-task max-w-[250px]">

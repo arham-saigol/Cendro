@@ -34,7 +34,7 @@ import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { DragDropProvider, type DragEndEvent, type DragMoveEvent, type DragStartEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import { OptimisticSortingPlugin } from "@dnd-kit/dom/sortable";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
@@ -753,7 +753,7 @@ function SortableTaskRow({
   checked,
   selected,
   rowCanEdit,
-  railHandleRef,
+  onRegisterHandle,
   shift,
   onOpenDetails,
   children,
@@ -765,17 +765,16 @@ function SortableTaskRow({
   checked: boolean;
   selected: boolean;
   rowCanEdit: boolean;
-  railHandleRef: RefObject<HTMLButtonElement | null>;
+  onRegisterHandle: (id: string, handleRef: ((element: Element | null) => void) | null) => void;
   shift: number;
   onOpenDetails: () => void;
   children: ReactNode;
 }) {
-  // The drag handle and row checkbox live in the rail beside the table; dnd-kit syncs
-  // the handle from railHandleRef once the rail button mounts. OptimisticSortingPlugin
-  // is disabled because it reorders <tr> nodes directly during dragover, leaving the DOM
-  // out of sync with React's row order; this list is owned by React (order keys come from
-  // Convex and can legitimately differ from the naive previewed move).
-  const { ref, isDragging } = useSortable<TaskSortableData>({
+  // The drag handle lives in the rail beside the table. Register dnd-kit's callback
+  // ref with the parent so it can be attached to that sibling after both nodes mount.
+  // OptimisticSortingPlugin is disabled because it reorders <tr> nodes directly during
+  // dragover, leaving the DOM out of sync with React's row order.
+  const { ref, handleRef, isDragging } = useSortable<TaskSortableData>({
     id: task._id,
     index,
     group: scope,
@@ -783,9 +782,13 @@ function SortableTaskRow({
     accept: "task",
     disabled: dragDisabled,
     data: { kind: "task", scope },
-    handle: railHandleRef,
     plugins: (defaults) => defaults.filter((plugin) => plugin !== OptimisticSortingPlugin),
   });
+
+  useLayoutEffect(() => {
+    onRegisterHandle(task._id, handleRef);
+    return () => onRegisterHandle(task._id, null);
+  }, [handleRef, onRegisterHandle, task._id]);
 
   return (
     <tr
@@ -1463,6 +1466,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [dragSnapshot, setDragSnapshot] = useState<TaskDragSnapshot | null>(null);
   const [dragPreview, setDragPreview] = useState<TaskDragPreview | null>(null);
   const dragHandleRefs = useRef(new Map<string, HTMLButtonElement>());
+  const sortableHandleRefs = useRef(new Map<string, (element: Element | null) => void>());
   const preferenceScopeRef = useRef("");
   const taskPrefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   const canUseAllTasks = Boolean(active?.capabilities.some((c) => c === `${taskPrefix}:view:any` || c === `${taskPrefix}:view:managed`));
@@ -1848,14 +1852,20 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     setPersonalPriorityView("all");
   }
 
-  const railHandleRefs = useMemo(() => {
-    const refs = new Map<string, RefObject<HTMLButtonElement | null>>();
-    for (const task of allTasks) refs.set(task._id, { current: null });
-    return refs;
-  }, [allTasks]);
-  function railHandleRef(id: string) {
-    return railHandleRefs.get(id) ?? { current: null };
-  }
+  const registerSortableHandle = useCallback((id: string, handleRef: ((element: Element | null) => void) | null) => {
+    if (!handleRef) {
+      sortableHandleRefs.current.delete(id);
+      return;
+    }
+    sortableHandleRefs.current.set(id, handleRef);
+    handleRef(dragHandleRefs.current.get(id) ?? null);
+  }, []);
+
+  const setDragHandleElement = useCallback((id: string, element: HTMLButtonElement | null) => {
+    if (element) dragHandleRefs.current.set(id, element);
+    else dragHandleRefs.current.delete(id);
+    sortableHandleRefs.current.get(id)?.(element);
+  }, []);
 
   function focusDragHandle(id: string) {
     requestAnimationFrame(() => dragHandleRefs.current.get(id)?.focus());
@@ -2003,7 +2013,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
 
   function handleTaskDragMove(event: DragMoveEvent) {
     const snapshot = dragSnapshot;
-    if (!snapshot || snapshot.scope !== preferenceScope || !event.operation.target) return;
+    if (!snapshot || snapshot.scope !== preferenceScope) return;
     const projection = taskDropProjection(snapshot.sourceId, event.operation.position.current.y);
     if (!projection || projection.targetIndex == null) {
       if (dragPreview) setDragPreview(null);
@@ -2025,13 +2035,11 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     setDragPreview(null);
     if (event.canceled || !snapshot || snapshot.scope !== preferenceScope || preferencePending) return;
     const { source, target } = event.operation;
-    if (!source || !target || !isSortable(source) || !isSortable(target)) return;
-    if (
-      source.data?.kind !== "task" ||
-      target.data?.kind !== "task" ||
-      source.group !== preferenceScope ||
-      target.group !== preferenceScope
-    ) return;
+    if (!source || !isSortable(source)) return;
+    if (source.data?.kind !== "task" || source.group !== preferenceScope) return;
+    // The handle sits beside the table, so its pointer can be outside every row's
+    // droppable rect. Use the table projection when there is no collision target.
+    if (target && (!isSortable(target) || target.data?.kind !== "task" || target.group !== preferenceScope)) return;
     const sourceId = String(source.id);
     // Recompute the slot from the final pointer position (position.current is accurate at
     // drag end; the preview state can trail the last pointer move by one event). Releasing
@@ -2041,8 +2049,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     if (projection && projection.targetIndex == null) return;
     const projectedId = projection?.targetIndex != null ? renderedTasks[projection.targetIndex]?._id : undefined;
     const previewId = preview && renderedTasks[preview.sourceIndex]?._id === sourceId ? renderedTasks[preview.targetIndex]?._id : undefined;
-    const targetId = projectedId ?? previewId ?? String(target.id);
-    if (sourceId !== snapshot.sourceId || sourceId === targetId) return;
+    const targetId = projectedId ?? previewId ?? (target ? String(target.id) : undefined);
+    if (sourceId !== snapshot.sourceId || !targetId || sourceId === targetId) return;
 
     const currentIds = new Set(allTasks.map((task) => task._id));
     const visibleIds = snapshot.visibleIds.filter((id) => currentIds.has(id));
@@ -2290,7 +2298,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                       checked={isChecked}
                       selected={task._id === selectedId}
                       rowCanEdit={rowCanEdit}
-                      railHandleRef={railHandleRef(task._id)}
+                      onRegisterHandle={registerSortableHandle}
                       shift={taskRowShift(index, dragPreview)}
                       onOpenDetails={openDetails}
                     >
@@ -2409,11 +2417,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                     className="task-list-rail-control task-list-drag-handle"
                     disabled={dragDisabled}
                     aria-label={`Reorder ${task.reference}: ${task.title}`}
-                    ref={(element) => {
-                      railHandleRef(task._id).current = element;
-                      if (element) dragHandleRefs.current.set(task._id, element);
-                      else dragHandleRefs.current.delete(task._id);
-                    }}
+                    ref={(element) => setDragHandleElement(task._id, element)}
                   >
                     <Grip className="h-4 w-4" />
                   </button>

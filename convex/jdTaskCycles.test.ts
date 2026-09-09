@@ -125,6 +125,33 @@ describe("JD task cycle behavior", () => {
     expect(records).toMatchObject([{ cycleStart: utc(2026, 6, 22), cycleEnd: utc(2026, 6, 29), status: "missed" }]);
   });
 
+  test("reads legacy missed-cycle records that carry a schedule generation", async () => {
+    vi.setSystemTime(utc(2026, 6, 25, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, {
+      companyId,
+      title: "Legacy record task",
+      recurrence: "daily",
+      assigneeMembershipIds: [adminMembershipId],
+    });
+
+    await t.run(async (ctx) => {
+      await ctx.db.insert("jdTaskCycleRecords", {
+        companyId,
+        jdTaskId: taskId,
+        cycleStart: utc(2026, 6, 24),
+        cycleEnd: utc(2026, 6, 25),
+        status: "missed",
+        recordedAt: utc(2026, 6, 25, 12),
+        scheduleGeneration: 1,
+      });
+    });
+
+    await expect(t.withIdentity(identity("admin")).query(api.tasks.listJdCycleRecords, { companyId, taskId })).resolves.toEqual([
+      expect.objectContaining({ scheduleGeneration: 1 }),
+    ]);
+  });
+
   test("recordMissedJdCyclesBatch records overdue cycles without changing task status", async () => {
     vi.setSystemTime(utc(2026, 1, 1, 12));
     const { t, companyId, adminMembershipId } = await seedCompany();

@@ -14,10 +14,12 @@ import {
 import { capabilities, companyManagementCapabilities, type Capability } from "../src/lib/permissions";
 import { defaultTimeZone } from "./taskCycles";
 import { nonEmpty, normalizeEmail } from "./validation";
+import { takeWithOverflow } from "./queryLimits";
 
 const roleValidator = v.union(v.literal("Admin"), v.literal("Manager"), v.literal("Employee"));
 const invitationOverrideValidator = v.object({ capability: v.string(), effect: v.union(v.literal("allow"), v.literal("deny")) });
 const permissionDraftOverrideValidator = v.object({ capability: v.string(), effect: v.union(v.literal("allow"), v.literal("deny"), v.literal("inherit")) });
+const overviewListLimit = 500;
 
 function cleanTimeZone(value: string) {
   const timeZone = nonEmpty(value, "Time zone");
@@ -61,11 +63,22 @@ async function validatePermissionOverrides(overrides: { capability: string }[], 
   if (requireAll && seen.size !== capabilities.length) throw new ConvexError("Permission draft is incomplete.");
 }
 
-async function managerScope(ctx: any, managerMembershipId: Id<"companyMemberships">) {
-  const branchIds = (await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", managerMembershipId)).take(500)).map((row: any) => row.branchId);
-  const departmentIds = (await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", managerMembershipId)).take(500)).map((row: any) => row.departmentId);
-  const userMembershipIds = (await ctx.db.query("managerUserScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", managerMembershipId)).take(500)).map((row: any) => row.userMembershipId);
-  return { branchIds, departmentIds, userMembershipIds };
+async function managerScope(
+  ctx: any,
+  managerMembershipId: Id<"companyMemberships">,
+  onTruncated?: () => void,
+) {
+  const [branches, departments, users] = await Promise.all([
+    takeWithOverflow((limit) => ctx.db.query("managerBranchScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
+    takeWithOverflow((limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
+    takeWithOverflow((limit) => ctx.db.query("managerUserScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
+  ]);
+  if (branches.isTruncated || departments.isTruncated || users.isTruncated) onTruncated?.();
+  return {
+    branchIds: branches.rows.map((row: any) => row.branchId),
+    departmentIds: departments.rows.map((row: any) => row.departmentId),
+    userMembershipIds: users.rows.map((row: any) => row.userMembershipId),
+  };
 }
 
 async function clearUserManagementRows(ctx: any, membershipId: Id<"companyMemberships">, preserveOverrides = false) {
@@ -120,31 +133,75 @@ export const overview = query({
     const canReadUsers = caps.has("company:manage_users") || caps.has("company:manage_permissions");
     const canReadInvitations = caps.has("company:invite_users") || caps.has("company:manage_permissions");
     const canReadPermissions = caps.has("company:manage_permissions");
-    const branches = canReadStructure ? (await ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt) : [];
-    const departments = canReadStructure ? (await ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt) : [];
-    const ms = canReadUsers ? await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500) : [];
+    const branchResult = canReadStructure
+      ? await takeWithOverflow((limit) => ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
+      : { rows: [], isTruncated: false };
+    const departmentResult = canReadStructure
+      ? await takeWithOverflow((limit) => ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
+      : { rows: [], isTruncated: false };
+    const membershipResult = canReadUsers
+      ? await takeWithOverflow((limit) => ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
+      : { rows: [], isTruncated: false };
+    const invitationResult = canReadInvitations
+      ? await takeWithOverflow((limit) => ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(limit), 100)
+      : { rows: [], isTruncated: false };
+    const branches = branchResult.rows.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
+    const departments = departmentResult.rows.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
+    let userDetailsTruncated = false;
     const users = [];
-    for (const m of ms) {
+    for (const m of membershipResult.rows) {
       const user = await ctx.db.get(m.userId);
-      const branchIds = (await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500)).map((a) => a.branchId);
-      const departmentIds = (await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500)).map((a) => a.departmentId);
-      const scope = canReadPermissions ? await managerScope(ctx, m._id) : { branchIds: [], departmentIds: [], userMembershipIds: [] };
-      const overrides = canReadPermissions ? await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(500) : [];
+      const branchAssignmentResult = await takeWithOverflow(
+        (limit) => ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(limit),
+        overviewListLimit,
+      );
+      const departmentAssignmentResult = await takeWithOverflow(
+        (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(limit),
+        overviewListLimit,
+      );
+      const scope = canReadPermissions
+        ? await managerScope(ctx, m._id, () => { userDetailsTruncated = true; })
+        : { branchIds: [], departmentIds: [], userMembershipIds: [] };
+      const overrideResult = canReadPermissions
+        ? await takeWithOverflow(
+          (limit) => ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(limit),
+          overviewListLimit,
+        )
+        : { rows: [], isTruncated: false };
+      if (branchAssignmentResult.isTruncated || departmentAssignmentResult.isTruncated || overrideResult.isTruncated) {
+        userDetailsTruncated = true;
+      }
       if (user) {
         const memFirstName = memberFirstName(m, user);
         const memSecondName = m.secondName !== undefined ? m.secondName.trim() : (user.secondName?.trim() ?? "");
         const memFullName = memberFullName(m, user);
-        users.push({ membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt }, user: { _id: user._id, name: memFullName, firstName: memFirstName, secondName: memSecondName, email: user.email }, branchIds, departmentIds, scope, overrides: overrides.map((o) => ({ _id: o._id, capability: o.capability, effect: o.effect })) });
+        users.push({
+          membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt },
+          user: { _id: user._id, name: memFullName, firstName: memFirstName, secondName: memSecondName, email: user.email },
+          branchIds: branchAssignmentResult.rows.map((assignment) => assignment.branchId),
+          departmentIds: departmentAssignmentResult.rows.map((assignment) => assignment.departmentId),
+          scope,
+          overrides: overrideResult.rows.map((override) => ({ _id: override._id, capability: override.capability, effect: override.effect })),
+        });
       }
     }
-    const invitations = canReadInvitations ? await ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100) : [];
+    const truncated = {
+      branches: branchResult.isTruncated,
+      departments: departmentResult.isTruncated,
+      users: membershipResult.isTruncated,
+      invitations: invitationResult.isTruncated,
+      userDetails: userDetailsTruncated,
+    };
+    const isTruncated = Object.values(truncated).some(Boolean);
     return {
+      isTruncated,
+      truncated,
       company: { _id: company._id, name: company.name, timeZone: company.timeZone ?? defaultTimeZone, hasTimeZone: Boolean(company.timeZone) },
       currentMembership: { _id: membership._id, role: membership.role, active: membership.active, createdAt: membership.createdAt },
       branches: branches.map((b) => ({ _id: b._id, name: b.name, order: b.order })),
       departments: departments.map((d) => ({ _id: d._id, branchId: d.branchId, name: d.name, order: d.order })),
       users,
-      invitations: invitations.map((i) => ({ _id: i._id, email: i.email, role: i.role, status: i.status, createdAt: i.createdAt, expiresAt: i.expiresAt, branchIds: i.branchIds ?? [], departmentIds: i.departmentIds ?? [], managedBranchIds: canReadPermissions ? i.managedBranchIds ?? [] : [], managedDepartmentIds: canReadPermissions ? i.managedDepartmentIds ?? [] : [], managedUserMembershipIds: canReadPermissions ? i.managedUserMembershipIds ?? [] : [], permissionOverrides: canReadPermissions ? i.permissionOverrides ?? [] : [] })),
+      invitations: invitationResult.rows.map((i) => ({ _id: i._id, email: i.email, role: i.role, status: i.status, createdAt: i.createdAt, expiresAt: i.expiresAt, branchIds: i.branchIds ?? [], departmentIds: i.departmentIds ?? [], managedBranchIds: canReadPermissions ? i.managedBranchIds ?? [] : [], managedDepartmentIds: canReadPermissions ? i.managedDepartmentIds ?? [] : [], managedUserMembershipIds: canReadPermissions ? i.managedUserMembershipIds ?? [] : [], permissionOverrides: canReadPermissions ? i.permissionOverrides ?? [] : [] })),
       capabilities,
     };
   },

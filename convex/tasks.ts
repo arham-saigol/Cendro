@@ -27,6 +27,9 @@ const jdFrequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"),
 const TASK_LIST_ORDER_LIMIT = 2_000;
 const TASK_LIST_ORDER_MAX_SERIALIZED_BYTES = 128 * 1024;
 const TASK_LIST_ORDER_KEY_MAX_LENGTH = 512;
+const ASSIGNABLE_USER_SEARCH_MIN_LENGTH = 3;
+const ASSIGNABLE_USER_SEARCH_SCAN_LIMIT = 1_000;
+const ASSIGNABLE_USER_SEARCH_RESULT_LIMIT = 50;
 const taskListOrderKeyPattern = /^(?:0|-[1-9]\d*|[1-9]\d*)\/[1-9]\d*$/;
 function statusLabel(status: ManualStatus | "overdue") { return status === "due" ? "Pending" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue"; }
 function cleanOptionalText(value?: string) { const text = value?.trim(); return text ? text : undefined; }
@@ -194,6 +197,25 @@ function matchesSearch(task: { title: string; reference: string }, search?: stri
   const needle = search?.trim().toLowerCase();
   if (!needle) return true;
   return task.title.toLowerCase().includes(needle) || task.reference.toLowerCase().includes(needle);
+}
+
+async function filterAssignableUsersBySearch(
+  ctx: QueryCtx,
+  memberships: Doc<"companyMemberships">[],
+  search: string,
+) {
+  const needle = search.toLowerCase();
+  const matches: Id<"companyMemberships">[] = [];
+  for (const membership of memberships) {
+    if (!membership.active) continue;
+    const user = await ctx.db.get(membership.userId);
+    if (!user) continue;
+    const searchable = `${memberFullName(membership, user)} ${user.email} ${membership.role}`.toLowerCase();
+    if (!searchable.includes(needle)) continue;
+    matches.push(membership._id);
+    if (matches.length === ASSIGNABLE_USER_SEARCH_RESULT_LIMIT) break;
+  }
+  return matches;
 }
 
 async function getTaskListPreference(
@@ -1332,25 +1354,50 @@ export const deleteAttachment = mutation({
 });
 
 export const assignableUsers = query({
-  args: { companyId: v.id("companies"), kind: v.union(v.literal("jd"), v.literal("one_time")) },
+  args: {
+    companyId: v.id("companies"),
+    kind: v.union(v.literal("jd"), v.literal("one_time")),
+    search: v.optional(v.string()),
+  },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     const caps = await membershipCapabilities(ctx, membership);
     const prefix = args.kind === "jd" ? "tasks:jd" : "tasks:one_time";
     const canCreateOrUpdate = caps.has(`${prefix}:create` as any) || caps.has(`${prefix}:update:any` as any) || caps.has(`${prefix}:update:managed` as any) || caps.has(`${prefix}:update:self` as any);
     if (!canCreateOrUpdate) return [];
-    let ids: Set<Id<"companyMemberships">>;
+
+    const search = args.search?.trim();
+    if (search && search.length < ASSIGNABLE_USER_SEARCH_MIN_LENGTH) {
+      throw new ConvexError(`Enter at least ${ASSIGNABLE_USER_SEARCH_MIN_LENGTH} characters to search assignees.`);
+    }
+    if (search && search.length > 100) throw new ConvexError("Assignee search is too long.");
+
     if (caps.has(`${prefix}:assign:any` as any)) {
+      if (search) {
+        const candidates = await ctx.db
+          .query("companyMemberships")
+          .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
+          .take(ASSIGNABLE_USER_SEARCH_SCAN_LIMIT);
+        const matches = await filterAssignableUsersBySearch(ctx, candidates, search);
+        return await enrich(ctx, matches);
+      }
+
       const all = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
-      ids = new Set(all.filter((m) => m.active).map((m) => m._id));
-    } else if (caps.has(`${prefix}:assign:managed` as any)) {
+      return await enrich(ctx, all.filter((candidate) => candidate.active).map((candidate) => candidate._id));
+    }
+
+    let ids: Set<Id<"companyMemberships">>;
+    if (caps.has(`${prefix}:assign:managed` as any)) {
       ids = await getManagedMembershipIds(ctx, args.companyId, membership._id);
     } else if (caps.has(`${prefix}:assign:self` as any)) {
       ids = new Set([membership._id]);
     } else {
       return [];
     }
-    return await enrich(ctx, Array.from(ids));
+    if (!search) return await enrich(ctx, Array.from(ids));
+
+    const candidates = (await Promise.all(Array.from(ids, (id) => ctx.db.get(id)))).filter(Boolean) as Doc<"companyMemberships">[];
+    return await enrich(ctx, await filterAssignableUsersBySearch(ctx, candidates, search));
   },
 });
 

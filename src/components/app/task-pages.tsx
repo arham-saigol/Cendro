@@ -898,12 +898,31 @@ function SelectPicker<T extends string>({ ariaLabel, value, options, onChange, p
   );
 }
 
-function AssigneePicker({ assignable, selected, onChange, required = false }: { assignable: any[]; selected: string[]; onChange: (ids: string[]) => void; required?: boolean }) {
+function AssigneePicker({ assignable, selected, onChange, companyId, kind, required = false }: { assignable: any[]; selected: string[]; onChange: (ids: string[]) => void; companyId?: Id<"companies">; kind: Kind; required?: boolean }) {
   const [open, setOpen] = useState(false);
   const [searchValue, setSearchValue] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
-  const selectedAssignee = assignable.find((assignee) => assignee.membership._id === selected[0]);
-  const filtered = assignable.filter((assignee) => `${assignee.user.name || ""} ${assignee.user.email || ""} ${assignee.membership.role}`.toLowerCase().includes(searchValue.toLowerCase()));
+  const search = searchValue.trim();
+  useEffect(() => {
+    if (!open) {
+      setDebouncedSearch("");
+      return;
+    }
+    const timeout = window.setTimeout(() => setDebouncedSearch(search), 200);
+    return () => window.clearTimeout(timeout);
+  }, [open, search]);
+  const useServerSearch = Boolean(open && companyId && search === debouncedSearch && search.length >= 3);
+  const searchedAssignable = useQuery(
+    api.tasks.assignableUsers,
+    useServerSearch && companyId ? { companyId, kind: taskTypeFor(kind), search } : "skip",
+  ) as any[] | undefined;
+  const candidates = useServerSearch ? searchedAssignable ?? [] : assignable;
+  const selectedAssignee = candidates.find((assignee) => assignee.membership._id === selected[0]) ?? assignable.find((assignee) => assignee.membership._id === selected[0]);
+  const filtered = useServerSearch
+    ? candidates
+    : assignable.filter((assignee) => `${assignee.user.name || ""} ${assignee.user.email || ""} ${assignee.membership.role}`.toLowerCase().includes(search.toLowerCase()));
+  const reachesInitialLimit = Boolean(companyId && assignable.length >= 500);
 
   useEffect(() => {
     if (!open) return;
@@ -927,7 +946,7 @@ function AssigneePicker({ assignable, selected, onChange, required = false }: { 
     };
   }, [open]);
 
-  if (!assignable.length) return <div className="py-2 text-[13px] text-[var(--ink-faint)]">No assignable people.</div>;
+  if (!assignable.length && !companyId) return <div className="py-2 text-[13px] text-[var(--ink-faint)]">No assignable people.</div>;
   return (
     <div ref={containerRef} className="relative">
       <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((current) => !current); }} className="task-inline-control" data-interactive="true">
@@ -941,6 +960,7 @@ function AssigneePicker({ assignable, selected, onChange, required = false }: { 
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--ink-faint)]" />
             <Input aria-label="Search assignees" className="h-8 rounded-md pl-8 text-[13px]" value={searchValue} onChange={(event) => setSearchValue(event.target.value)} placeholder="Search people" autoFocus />
           </div>
+          {reachesInitialLimit && <p className="px-2.5 pb-1 text-[11.5px] text-[var(--ink-muted)]" role="status">This picker initially shows 500 people. Search with at least 3 characters to search up to 1,000 people.</p>}
           <div className="max-h-56 overflow-auto p-0.5">
             {!required && (
               <button type="button" onClick={() => { onChange([]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
@@ -960,7 +980,7 @@ function AssigneePicker({ assignable, selected, onChange, required = false }: { 
                 </button>
               );
             })}
-            {filtered.length === 0 && <div className="px-2.5 py-3 text-[13px] text-[var(--ink-muted)]">No people found.</div>}
+            {useServerSearch && !searchedAssignable ? <div className="px-2.5 py-3 text-[13px] text-[var(--ink-muted)]">Searching people…</div> : filtered.length === 0 && <div className="px-2.5 py-3 text-[13px] text-[var(--ink-muted)]">No people found.</div>}
           </div>
         </div>
       )}
@@ -1404,7 +1424,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
               <div className="mt-4 divide-y divide-[var(--hairline)] border-y border-[var(--hairline)]">
                 <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
                   <span className="text-[13px] text-[var(--ink-muted)]">Assigned To</span>
-                  <div className="min-w-0"><AssigneePicker assignable={dialogAssignable} selected={values.assigneeMembershipIds} onChange={(ids) => patch({ assigneeMembershipIds: ids })} required={mode === "create"} /></div>
+                  <div className="min-w-0"><AssigneePicker assignable={dialogAssignable} selected={values.assigneeMembershipIds} onChange={(ids) => patch({ assigneeMembershipIds: ids })} companyId={activeCompanyId ?? undefined} kind={kind} required={mode === "create"} /></div>
                 </div>
                 {kind === "jd" ? (
                   <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">

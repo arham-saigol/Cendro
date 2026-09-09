@@ -2,7 +2,9 @@ import { ConvexError, v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { analyticsScopedMembershipIds, memberFullName, membershipCapabilities, requireMembership, scopedMembershipIds, taskHasVisibleAssignee } from "./permissions";
+import { takeWithOverflow } from "./queryLimits";
 
+const performancePeopleLimit = 20;
 
 async function peopleRows(ctx: QueryCtx, companyId: Id<"companies">, ids: Set<Id<"companyMemberships">>, limit: number) {
   const out = [];
@@ -24,7 +26,15 @@ export const context = query({
     if (!capabilities.has("ai:use")) {
       throw new ConvexError("You do not have access to AI capabilities.");
     }
-    const scoped = await scopedMembershipIds(ctx, args.companyId, membership);
+    let isTruncated = false;
+    const scoped = await scopedMembershipIds(
+      ctx,
+      args.companyId,
+      membership,
+      undefined,
+      undefined,
+      () => { isTruncated = true; },
+    );
     const hasCompanyScope = capabilities.has("analytics:view:company") || capabilities.has("tasks:jd:view:any") || capabilities.has("tasks:one_time:view:any") || capabilities.has("sops:view:company");
     const hasManagedScope = capabilities.has("analytics:view:managed_scope") || capabilities.has("tasks:jd:view:managed") || capabilities.has("tasks:one_time:view:managed") || capabilities.has("sops:view:managed");
     const scope = hasCompanyScope ? "company" : hasManagedScope ? "managed" : "self";
@@ -34,6 +44,8 @@ export const context = query({
       capabilities: Array.from(capabilities),
       scope,
       visiblePeopleLimit: scoped.size,
+      isTruncated,
+      isComplete: !isTruncated,
       unsupportedActions: ["delete", "remove", "role-change", "permission-change", "bulk-update"],
     };
   },
@@ -47,12 +59,24 @@ export const performanceSummary = query({
     if (!capabilities.has("ai:use")) {
       throw new ConvexError("You do not have access to AI capabilities.");
     }
-    const scoped = await analyticsScopedMembershipIds(ctx, args.companyId, membership);
-    const oneTime = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
-    const visibleOneTime = oneTime.filter((task) => taskHasVisibleAssignee(task, scoped));
+    let isTruncated = false;
+    const scoped = await analyticsScopedMembershipIds(
+      ctx,
+      args.companyId,
+      membership,
+      capabilities,
+      () => { isTruncated = true; },
+    );
+    const oneTimeResult = await takeWithOverflow(
+      (limit) => ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
+    );
+    if (oneTimeResult.isTruncated) isTruncated = true;
+    const visibleOneTime = oneTimeResult.rows.filter((task) => taskHasVisibleAssignee(task, scoped));
     const completed = visibleOneTime.filter((task) => task.status === "completed").length;
     const overdue = visibleOneTime.filter((task) => task.status !== "completed" && (task.overdueAt || (task.dueDate && task.dueDate < Date.now()))).length;
-    const people = await peopleRows(ctx, args.companyId, scoped, 50);
+    const people = await peopleRows(ctx, args.companyId, scoped, performancePeopleLimit);
+    const peopleTruncated = scoped.size > performancePeopleLimit;
+    if (peopleTruncated) isTruncated = true;
     const byPerson = people.map((person) => {
       const assigned = visibleOneTime.filter((task) => task.assigneeMembershipIds.includes(person.membershipId));
       const personCompleted = assigned.filter((task) => task.status === "completed").length;
@@ -66,7 +90,10 @@ export const performanceSummary = query({
       completedOneTimeTasks: completed,
       overdueOneTimeTasks: overdue,
       completionRate: visibleOneTime.length ? Math.round((completed / visibleOneTime.length) * 100) : 100,
-      byPerson: byPerson.slice(0, 20),
+      byPerson: byPerson.slice(0, performancePeopleLimit),
+      isTruncated,
+      isComplete: !isTruncated,
+      limitations: { peopleTruncated },
     };
   },
 });

@@ -3,6 +3,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
+  AlertTriangle,
   Building2,
   CalendarDays,
   Check,
@@ -75,6 +76,8 @@ type InvitationRow = {
   permissionOverrides?: Override[];
 };
 type Overview = {
+  isTruncated: boolean;
+  truncated: { branches: boolean; departments: boolean; users: boolean; invitations: boolean; userDetails: boolean };
   company?: { _id: Id<"companies">; name: string; timeZone: string; hasTimeZone: boolean };
   currentMembership: MembershipCore;
   branches: BranchRow[];
@@ -2220,6 +2223,12 @@ export default function Company() {
           <button type="button" className="task-icon-btn h-6 w-6" onClick={() => setError(null)} aria-label="Dismiss error">
             <X className="h-3.5 w-3.5" />
           </button>
+        </div>
+      )}
+      {data.isTruncated && (
+        <div className="company-alert flex items-start gap-2 border-amber-300/70 bg-amber-50 text-amber-950" role="alert">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>This view is incomplete because the workspace exceeds its current management limit. Do not make access or staffing decisions from omitted records.</span>
         </div>
       )}
 

@@ -15,7 +15,7 @@ import {
   Clock,
   Download,
   Flag,
-  GripVertical,
+  Grip,
   Hash,
   Inbox,
   PanelRight,
@@ -31,9 +31,10 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
-import { DragDropProvider, type DragEndEvent, type DragStartEvent } from "@dnd-kit/react";
+import { DragDropProvider, type DragEndEvent, type DragMoveEvent, type DragStartEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { OptimisticSortingPlugin } from "@dnd-kit/dom/sortable";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
@@ -59,14 +60,12 @@ import {
   defaultTaskListSortDirection,
   defaultTaskListSortField,
   initialTaskListSortDirection,
-  taskListSortFieldLabel,
-  taskListSortFields,
-  taskListSortLabel,
   type TaskListSort,
   type TaskListSortDirection,
   type TaskListSortField,
   type TaskListTaskType,
 } from "@/lib/task-list-sort";
+import { ASSIGNEE_SEARCH_MAX_LENGTH } from "@/lib/assignee-search";
 import { cn, formatDate, initials } from "@/lib/utils";
 
 type Kind = "jd" | "one";
@@ -101,6 +100,11 @@ type TaskRowAssignee = {
     email: string;
     imageUrl?: string | null;
   };
+};
+
+type AssignableUsersResult = {
+  users: TaskRowAssignee[];
+  isTruncated: boolean;
 };
 
 type TaskRow = TaskListOrderingRow & {
@@ -138,7 +142,30 @@ type TaskDragSnapshot = {
   visibleIds: string[];
   fullOrderIds: string[];
 };
+type TaskDragPreview = { sourceIndex: number; targetIndex: number };
 type OptimisticTaskOrderKeys = { scope: string; keys: Record<string, string> };
+
+// Task rows are fixed-height (task-table td and the rail rows); the drag preview shifts
+// rows by this multiple.
+const TASK_ROW_HEIGHT = 41;
+
+// Visual shift for a row while a drag preview is active. Rows between the source and the
+// projected drop slot move one row height toward the source's slot, which opens the drop
+// gap at targetIndex. Rows are only transformed - the DOM order stays owned by React.
+function taskRowShift(index: number, preview: TaskDragPreview | null) {
+  if (!preview) return 0;
+  const { sourceIndex, targetIndex } = preview;
+  if (index === sourceIndex || sourceIndex === targetIndex) return 0;
+  if (sourceIndex < targetIndex) {
+    return index > sourceIndex && index <= targetIndex ? -TASK_ROW_HEIGHT : 0;
+  }
+  return index >= targetIndex && index < sourceIndex ? TASK_ROW_HEIGHT : 0;
+}
+
+function taskRowShiftTransform(index: number, preview: TaskDragPreview | null): CSSProperties | undefined {
+  const shift = taskRowShift(index, preview);
+  return shift ? { transform: `translateY(${shift}px)` } : undefined;
+}
 
 function sameTaskListSort(left: TaskListSort, right: TaskListSort) {
   if (left.mode !== right.mode) return false;
@@ -718,70 +745,6 @@ function TaskSortHeader({
   );
 }
 
-function TaskSortMenu({
-  taskType,
-  sort,
-  disabled,
-  customOrderingEnabled,
-  onSelect,
-}: {
-  taskType: TaskListTaskType;
-  sort: TaskListSort;
-  disabled: boolean;
-  customOrderingEnabled: boolean;
-  onSelect: (sort: TaskListSort) => void;
-}) {
-  return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>
-        <button
-          type="button"
-          className="task-sort-trigger"
-          data-active={sort.mode !== "default" ? "true" : undefined}
-          disabled={disabled}
-          aria-label={`Sort tasks: ${taskListSortLabel(taskType, sort)}`}
-        >
-          <SlidersHorizontal className="h-4 w-4" />
-          <span>Sort: {taskListSortLabel(taskType, sort)}</span>
-          <ChevronDown className="h-3.5 w-3.5 text-[var(--ink-faint)]" />
-        </button>
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content align="end" sideOffset={6} className="task-menu min-w-52" aria-label="Task sorting">
-          <DropdownMenu.Item onSelect={() => onSelect({ mode: "default" })} className="task-menu-item">
-            <span className="flex-1">Default</span>
-            {sort.mode === "default" && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
-          </DropdownMenu.Item>
-          <DropdownMenu.Item disabled={!customOrderingEnabled} onSelect={() => onSelect({ mode: "custom" })} className="task-menu-item">
-            <span className="flex-1">Custom</span>
-            {sort.mode === "custom" && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
-          </DropdownMenu.Item>
-          <div className="my-1 h-px bg-[var(--hairline)]" />
-          {taskListSortFields(taskType).map((field) => (
-            <DropdownMenu.Sub key={field}>
-              <DropdownMenu.SubTrigger className="task-menu-item">
-                <span className="flex-1">{taskListSortFieldLabel(field)}</span>
-                {sort.mode === "field" && sort.field === field && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
-                <ChevronRight className="h-3.5 w-3.5" />
-              </DropdownMenu.SubTrigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.SubContent sideOffset={7} alignOffset={-5} className="task-menu min-w-40">
-                  {(["asc", "desc"] as const).map((direction) => (
-                    <DropdownMenu.Item key={direction} onSelect={() => onSelect({ mode: "field", field, direction })} className="task-menu-item">
-                      <span className="flex-1">{direction === "asc" ? "Ascending" : "Descending"}</span>
-                      {sort.mode === "field" && sort.field === field && sort.direction === direction && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
-                    </DropdownMenu.Item>
-                  ))}
-                </DropdownMenu.SubContent>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Sub>
-          ))}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
-  );
-}
-
 function SortableTaskRow({
   task,
   index,
@@ -790,9 +753,9 @@ function SortableTaskRow({
   checked,
   selected,
   rowCanEdit,
-  onToggle,
+  onRegisterHandle,
+  shift,
   onOpenDetails,
-  onHandleElement,
   children,
 }: {
   task: TaskRow;
@@ -802,11 +765,15 @@ function SortableTaskRow({
   checked: boolean;
   selected: boolean;
   rowCanEdit: boolean;
-  onToggle: () => void;
+  onRegisterHandle: (id: string, handleRef: ((element: Element | null) => void) | null) => void;
+  shift: number;
   onOpenDetails: () => void;
-  onHandleElement: (id: string, element: HTMLButtonElement | null) => void;
   children: ReactNode;
 }) {
+  // The drag handle lives in the rail beside the table. Register dnd-kit's callback
+  // ref with the parent so it can be attached to that sibling after both nodes mount.
+  // OptimisticSortingPlugin is disabled because it reorders <tr> nodes directly during
+  // dragover, leaving the DOM out of sync with React's row order.
   const { ref, handleRef, isDragging } = useSortable<TaskSortableData>({
     id: task._id,
     index,
@@ -815,11 +782,13 @@ function SortableTaskRow({
     accept: "task",
     disabled: dragDisabled,
     data: { kind: "task", scope },
+    plugins: (defaults) => defaults.filter((plugin) => plugin !== OptimisticSortingPlugin),
   });
-  const setHandleRef = useCallback((element: HTMLButtonElement | null) => {
-    handleRef(element);
-    onHandleElement(task._id, element);
-  }, [handleRef, onHandleElement, task._id]);
+
+  useLayoutEffect(() => {
+    onRegisterHandle(task._id, handleRef);
+    return () => onRegisterHandle(task._id, null);
+  }, [handleRef, onRegisterHandle, task._id]);
 
   return (
     <tr
@@ -829,6 +798,7 @@ function SortableTaskRow({
       data-selected={selected ? "true" : undefined}
       data-checked={checked ? "true" : undefined}
       data-dragging={isDragging ? "true" : undefined}
+      style={shift ? { transform: `translateY(${shift}px)` } : undefined}
       tabIndex={!rowCanEdit ? 0 : undefined}
       onClick={(event) => {
         if (rowCanEdit) return;
@@ -842,30 +812,7 @@ function SortableTaskRow({
           onOpenDetails();
         }
       }}
-      className="group/row"
     >
-      <td className="task-list-controls" data-interactive="true" onClick={(event) => event.stopPropagation()}>
-        <div className="task-list-controls-inner">
-          <button
-            ref={setHandleRef}
-            type="button"
-            className="task-list-row-control task-list-drag-handle"
-            disabled={dragDisabled}
-            data-interactive="true"
-            onClick={(event) => event.stopPropagation()}
-            aria-label={`Reorder ${task.reference}: ${task.title}`}
-          >
-            <GripVertical className="h-3.5 w-3.5" />
-          </button>
-          <span className="task-list-row-control" data-interactive="true" onClick={(event) => event.stopPropagation()}>
-            <Checkbox
-              checked={checked}
-              onCheckedChange={onToggle}
-              aria-label={checked ? `Unselect ${task.title}` : `Select ${task.title}`}
-            />
-          </span>
-        </div>
-      </td>
       {children}
     </tr>
   );
@@ -898,12 +845,35 @@ function SelectPicker<T extends string>({ ariaLabel, value, options, onChange, p
   );
 }
 
-function AssigneePicker({ assignable, selected, onChange, required = false }: { assignable: any[]; selected: string[]; onChange: (ids: string[]) => void; required?: boolean }) {
+function AssigneePicker({ assignable, selected, onChange, companyId, kind, required = false, assignableIsTruncated = false }: { assignable: any[]; selected: string[]; onChange: (ids: string[]) => void; companyId?: Id<"companies">; kind: Kind; required?: boolean; assignableIsTruncated?: boolean }) {
   const [open, setOpen] = useState(false);
   const [searchValue, setSearchValue] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [selectedServerAssignee, setSelectedServerAssignee] = useState<TaskRowAssignee | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const selectedAssignee = assignable.find((assignee) => assignee.membership._id === selected[0]);
-  const filtered = assignable.filter((assignee) => `${assignee.user.name || ""} ${assignee.user.email || ""} ${assignee.membership.role}`.toLowerCase().includes(searchValue.toLowerCase()));
+  const search = searchValue.trim();
+  useEffect(() => {
+    if (!open) {
+      setDebouncedSearch("");
+      return;
+    }
+    const timeout = window.setTimeout(() => setDebouncedSearch(search), 200);
+    return () => window.clearTimeout(timeout);
+  }, [open, search]);
+  const useServerSearch = Boolean(open && companyId && search === debouncedSearch && search.length >= 3 && search.length <= ASSIGNEE_SEARCH_MAX_LENGTH);
+  const searchedAssignableResult = useQuery(
+    api.tasks.assignableUsers,
+    useServerSearch && companyId ? { companyId, kind: taskTypeFor(kind), search } : "skip",
+  ) as AssignableUsersResult | undefined;
+  const searchedAssignable = searchedAssignableResult?.users;
+  const candidates = useServerSearch ? searchedAssignable ?? [] : assignable;
+  const selectedAssignee = candidates.find((assignee) => assignee.membership._id === selected[0])
+    ?? assignable.find((assignee) => assignee.membership._id === selected[0])
+    ?? (selectedServerAssignee?.membership._id === selected[0] ? selectedServerAssignee : undefined);
+  const filtered = useServerSearch
+    ? candidates
+    : assignable.filter((assignee) => `${assignee.user.name || ""} ${assignee.user.email || ""} ${assignee.membership.role}`.toLowerCase().includes(search.toLowerCase()));
+  const resultsAreTruncated = useServerSearch ? searchedAssignableResult?.isTruncated : assignableIsTruncated;
 
   useEffect(() => {
     if (!open) return;
@@ -927,7 +897,7 @@ function AssigneePicker({ assignable, selected, onChange, required = false }: { 
     };
   }, [open]);
 
-  if (!assignable.length) return <div className="py-2 text-[13px] text-[var(--ink-faint)]">No assignable people.</div>;
+  if (!assignable.length && !companyId) return <div className="py-2 text-[13px] text-[var(--ink-faint)]">No assignable people.</div>;
   return (
     <div ref={containerRef} className="relative">
       <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((current) => !current); }} className="task-inline-control" data-interactive="true">
@@ -939,11 +909,12 @@ function AssigneePicker({ assignable, selected, onChange, required = false }: { 
         <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-[71] rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-1.5 shadow-[var(--shadow-popover)]" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
           <div className="relative px-1 pb-1.5 pt-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--ink-faint)]" />
-            <Input aria-label="Search assignees" className="h-8 rounded-md pl-8 text-[13px]" value={searchValue} onChange={(event) => setSearchValue(event.target.value)} placeholder="Search people" autoFocus />
+            <Input aria-label="Search assignees" className="h-8 rounded-md pl-8 text-[13px]" maxLength={ASSIGNEE_SEARCH_MAX_LENGTH} value={searchValue} onChange={(event) => setSearchValue(event.target.value)} placeholder="Search people" autoFocus />
           </div>
+          {resultsAreTruncated && <p className="px-2.5 pb-1 text-[11.5px] text-[var(--ink-muted)]" role="status">{useServerSearch ? "Search results are limited. Try a more specific search." : "This picker initially shows 500 people. Search with at least 3 characters to search up to 1,000 people."}</p>}
           <div className="max-h-56 overflow-auto p-0.5">
             {!required && (
-              <button type="button" onClick={() => { onChange([]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
+              <button type="button" onClick={() => { setSelectedServerAssignee(null); onChange([]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
                 <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>
                 <span className="flex-1 text-[var(--ink-secondary)]">Unassigned</span>
                 {!selected[0] && <Check className="h-4 w-4 text-[var(--primary)]" />}
@@ -953,14 +924,14 @@ function AssigneePicker({ assignable, selected, onChange, required = false }: { 
               const id = assignee.membership._id as string;
               const name = assignee.user.name || assignee.user.email;
               return (
-                <button key={id} type="button" onClick={() => { onChange([id]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
+                <button key={id} type="button" onClick={() => { setSelectedServerAssignee(assignee); onChange([id]); setOpen(false); setSearchValue(""); }} className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-[var(--surface-muted)]">
                   <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} />
                   <span className="min-w-0 flex-1"><span className="block truncate font-medium text-[var(--ink)]">{name}</span><span className="block truncate text-[11.5px] text-[var(--ink-muted)]">{assignee.membership.role}</span></span>
                   {selected[0] === id && <Check className="h-4 w-4 shrink-0 text-[var(--primary)]" />}
                 </button>
               );
             })}
-            {filtered.length === 0 && <div className="px-2.5 py-3 text-[13px] text-[var(--ink-muted)]">No people found.</div>}
+            {useServerSearch && !searchedAssignable ? <div className="px-2.5 py-3 text-[13px] text-[var(--ink-muted)]">Searching people…</div> : filtered.length === 0 && <div className="px-2.5 py-3 text-[13px] text-[var(--ink-muted)]">No people found.</div>}
           </div>
         </div>
       )}
@@ -1302,7 +1273,7 @@ function AttachmentPicker({ files, onChange }: { files: File[]; onChange: (files
   );
 }
 
-function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind: Kind; mode: "create" | "edit"; open: boolean; onOpenChange: (open: boolean) => void; task?: any; assignable: any[] }) {
+function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignableIsTruncated = false }: { kind: Kind; mode: "create" | "edit"; open: boolean; onOpenChange: (open: boolean) => void; task?: any; assignable: any[]; assignableIsTruncated?: boolean }) {
   const { activeCompanyId, active } = useCompany();
   const createJd = useMutation(api.tasks.createJd);
   const createOne = useMutation(api.tasks.createOneTime);
@@ -1404,7 +1375,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable }: { kind
               <div className="mt-4 divide-y divide-[var(--hairline)] border-y border-[var(--hairline)]">
                 <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
                   <span className="text-[13px] text-[var(--ink-muted)]">Assigned To</span>
-                  <div className="min-w-0"><AssigneePicker assignable={dialogAssignable} selected={values.assigneeMembershipIds} onChange={(ids) => patch({ assigneeMembershipIds: ids })} required={mode === "create"} /></div>
+                  <div className="min-w-0"><AssigneePicker assignable={dialogAssignable} assignableIsTruncated={assignableIsTruncated} selected={values.assigneeMembershipIds} onChange={(ids) => patch({ assigneeMembershipIds: ids })} companyId={activeCompanyId ?? undefined} kind={kind} required={mode === "create"} /></div>
                 </div>
                 {kind === "jd" ? (
                   <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
@@ -1491,12 +1462,16 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [optimisticPreference, setOptimisticPreference] = useState<(TaskListPreferenceState & { scope: string }) | null>(null);
   const [optimisticTaskOrderKeys, setOptimisticTaskOrderKeys] = useState<OptimisticTaskOrderKeys | null>(null);
   const [preferencePending, setPreferencePending] = useState(false);
+  const taskTableBodyRef = useRef<HTMLTableSectionElement>(null);
   const [dragSnapshot, setDragSnapshot] = useState<TaskDragSnapshot | null>(null);
+  const [dragPreview, setDragPreview] = useState<TaskDragPreview | null>(null);
   const dragHandleRefs = useRef(new Map<string, HTMLButtonElement>());
+  const sortableHandleRefs = useRef(new Map<string, (element: Element | null) => void>());
   const preferenceScopeRef = useRef("");
   const taskPrefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   const canUseAllTasks = Boolean(active?.capabilities.some((c) => c === `${taskPrefix}:view:any` || c === `${taskPrefix}:view:managed`));
-  const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip") as any[] | undefined;
+  const assignableResult = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip") as AssignableUsersResult | undefined;
+  const assignable = assignableResult?.users;
   const filterableAssignees = useQuery(api.tasks.filterableAssignees, activeCompanyId && canUseAllTasks ? { companyId: activeCompanyId } : "skip") as any[] | undefined;
   const taskType: TaskListTaskType = taskTypeFor(kind);
   const queryArgs = useMemo(
@@ -1877,9 +1852,19 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     setPersonalPriorityView("all");
   }
 
-  const registerDragHandle = useCallback((id: string, element: HTMLButtonElement | null) => {
+  const registerSortableHandle = useCallback((id: string, handleRef: ((element: Element | null) => void) | null) => {
+    if (!handleRef) {
+      sortableHandleRefs.current.delete(id);
+      return;
+    }
+    sortableHandleRefs.current.set(id, handleRef);
+    handleRef(dragHandleRefs.current.get(id) ?? null);
+  }, []);
+
+  const setDragHandleElement = useCallback((id: string, element: HTMLButtonElement | null) => {
     if (element) dragHandleRefs.current.set(id, element);
     else dragHandleRefs.current.delete(id);
+    sortableHandleRefs.current.get(id)?.(element);
   }, []);
 
   function focusDragHandle(id: string) {
@@ -2002,6 +1987,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     if (!source || !isSortable(source) || source.data?.kind !== "task" || source.group !== preferenceScope) return;
     const sourceId = String(source.id);
     if (!displayedTasks.some((task) => task._id === sourceId)) return;
+    setDragPreview(null);
     setDragSnapshot({
       scope: preferenceScope,
       sourceId,
@@ -2010,21 +1996,61 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     });
   }
 
+  // Projects the drop position from the pointer against the table's own geometry instead
+  // of dnd-kit's collision target, so the preview and the eventual drop always agree and
+  // shifting rows (which changes their rects) cannot feed back into the projection.
+  // Returns null when the projection is unavailable, or targetIndex null for "no move".
+  function taskDropProjection(sourceId: string, pointerY: number): { sourceIndex: number; targetIndex: number | null } | null {
+    const tbody = taskTableBodyRef.current;
+    if (!tbody) return null;
+    const sourceIndex = renderedTasks.findIndex((task) => task._id === sourceId);
+    if (sourceIndex < 0) return null;
+    const tbodyTop = tbody.getBoundingClientRect().top;
+    const slot = Math.floor((pointerY - tbodyTop) / TASK_ROW_HEIGHT);
+    const targetIndex = Math.min(Math.max(slot, 0), renderedTasks.length - 1);
+    return { sourceIndex, targetIndex: targetIndex === sourceIndex ? null : targetIndex };
+  }
+
+  function handleTaskDragMove(event: DragMoveEvent) {
+    const snapshot = dragSnapshot;
+    if (!snapshot || snapshot.scope !== preferenceScope) return;
+    const projection = taskDropProjection(snapshot.sourceId, event.operation.position.current.y);
+    if (!projection || projection.targetIndex == null) {
+      if (dragPreview) setDragPreview(null);
+      return;
+    }
+    const { sourceIndex } = projection;
+    const targetIndex: number = projection.targetIndex;
+    setDragPreview((current) =>
+      current && current.sourceIndex === sourceIndex && current.targetIndex === targetIndex
+        ? current
+        : { sourceIndex, targetIndex },
+    );
+  }
+
   function handleTaskDragEnd(event: DragEndEvent) {
     const snapshot = dragSnapshot;
+    const preview = dragPreview;
     setDragSnapshot(null);
+    setDragPreview(null);
     if (event.canceled || !snapshot || snapshot.scope !== preferenceScope || preferencePending) return;
     const { source, target } = event.operation;
-    if (!source || !target || !isSortable(source) || !isSortable(target)) return;
-    if (
-      source.data?.kind !== "task" ||
-      target.data?.kind !== "task" ||
-      source.group !== preferenceScope ||
-      target.group !== preferenceScope
-    ) return;
+    if (!source || !isSortable(source)) return;
+    if (source.data?.kind !== "task" || source.group !== preferenceScope) return;
+    // The handle sits beside the table, so its pointer can be outside every row's
+    // droppable rect. Use the table projection when there is no collision target.
+    if (target && (!isSortable(target) || target.data?.kind !== "task" || target.group !== preferenceScope)) return;
     const sourceId = String(source.id);
-    const targetId = String(target.id);
-    if (sourceId !== snapshot.sourceId || sourceId === targetId) return;
+    // Recompute the slot from the final pointer position (position.current is accurate at
+    // drag end; the preview state can trail the last pointer move by one event). Releasing
+    // over the source's own slot means no move; only fall back to the collision target if
+    // the geometry projection is unavailable.
+    const projection = taskDropProjection(sourceId, event.operation.position.current.y);
+    if (projection && projection.targetIndex == null) return;
+    const projectedId = projection?.targetIndex != null ? renderedTasks[projection.targetIndex]?._id : undefined;
+    const previewId = preview && renderedTasks[preview.sourceIndex]?._id === sourceId ? renderedTasks[preview.targetIndex]?._id : undefined;
+    const targetId = projectedId ?? previewId ?? (target ? String(target.id) : undefined);
+    if (sourceId !== snapshot.sourceId || !targetId || sourceId === targetId) return;
 
     const currentIds = new Set(allTasks.map((task) => task._id));
     const visibleIds = snapshot.visibleIds.filter((id) => currentIds.has(id));
@@ -2035,8 +2061,8 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     void saveCustomTaskOrder(nextOrder, sourceId);
   }
 
-  const jdColumns = 6 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // controls + reference + title + optional frequency + optional assignee + status + time + quantity
-  const oneColumns = 6 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // controls + reference + title + optional priority + optional assignee + status + date assigned + due
+  const jdColumns = 5 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional frequency + optional assignee + status + time + quantity
+  const oneColumns = 5 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional priority + optional assignee + status + date assigned + due
   const filterCount = [statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
   const hasActiveFilters = filterCount > 0 || search.trim() !== "";
 
@@ -2047,7 +2073,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
         description={description}
       />
 
-      <TaskDialog kind={kind} mode="create" open={createOpen} onOpenChange={setCreateOpen} assignable={assignable ?? []} />
+      <TaskDialog kind={kind} mode="create" open={createOpen} onOpenChange={setCreateOpen} assignable={assignable ?? []} assignableIsTruncated={assignableResult?.isTruncated ?? false} />
       {editingTask && (
         <TaskDialog
           key={editingTask._id}
@@ -2057,6 +2083,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
           onOpenChange={handleEditOpenChange}
           task={editingTask}
           assignable={assignable ?? []}
+          assignableIsTruncated={assignableResult?.isTruncated ?? false}
         />
       )}
 
@@ -2106,13 +2133,6 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               {search ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
             </button>
           </div>
-          <TaskSortMenu
-            taskType={taskType}
-            sort={activeSort}
-            disabled={!dataReady || preferencePending}
-            customOrderingEnabled={customOrderingEnabled}
-            onSelect={(sort) => void selectTaskSort(sort)}
-          />
           <TaskFilterMenu
             kind={kind}
             statusFilter={statusFilter}
@@ -2204,25 +2224,13 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
           </div>
         )}
 
-        <div className="task-table-wrap task-list-table-wrap relative overflow-x-auto">
-        <DragDropProvider onDragStart={handleTaskDragStart} onDragEnd={handleTaskDragEnd}>
-        <table className="task-table task-list-table">
+        <div className="relative -ml-14 w-[calc(100%+3.5rem)] pl-14">
+        <DragDropProvider onDragStart={handleTaskDragStart} onDragMove={handleTaskDragMove} onDragEnd={handleTaskDragEnd}>
+        <div className="task-table-wrap task-list-table-wrap overflow-x-auto">
+        <table className="task-table">
           <thead>
             {kind === "jd" ? (
-              <tr className="group/head">
-                <th scope="col" className="task-list-controls-header">
-                  <div className="task-list-controls-inner">
-                    <span className="task-list-handle-spacer" aria-hidden="true" />
-                    <Checkbox
-                      checked={allVisibleSelected}
-                      indeterminate={someVisibleSelected}
-                      onCheckedChange={toggleAllVisible}
-                      disabled={!dataReady || renderedTasks.length === 0}
-                      aria-label={allVisibleSelected ? "Unselect all rendered tasks" : "Select all rendered tasks"}
-                      className="task-list-header-checkbox"
-                    />
-                  </div>
-                </th>
+              <tr>
                 <TaskSortHeader taskType={taskType} field="code" label="CODE" icon={<Hash className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="w-[92px] whitespace-nowrap" />
                 <TaskSortHeader taskType={taskType} field="title" label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="min-w-[200px] max-w-[250px]" />
                 {showFrequencyColumn && <TaskSortHeader taskType={taskType} field="frequency" label="FREQUENCY" icon={<FrequencyIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />}
@@ -2232,20 +2240,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                 <TaskSortHeader taskType={taskType} field="quantity" label="QUANTITY" icon={<QuantityIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />
               </tr>
             ) : (
-              <tr className="group/head">
-                <th scope="col" className="task-list-controls-header">
-                  <div className="task-list-controls-inner">
-                    <span className="task-list-handle-spacer" aria-hidden="true" />
-                    <Checkbox
-                      checked={allVisibleSelected}
-                      indeterminate={someVisibleSelected}
-                      onCheckedChange={toggleAllVisible}
-                      disabled={!dataReady || renderedTasks.length === 0}
-                      aria-label={allVisibleSelected ? "Unselect all rendered tasks" : "Select all rendered tasks"}
-                      className="task-list-header-checkbox"
-                    />
-                  </div>
-                </th>
+              <tr>
                 <TaskSortHeader taskType={taskType} field="code" label="CODE" icon={<Hash className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="w-[92px] whitespace-nowrap" />
                 <TaskSortHeader taskType={taskType} field="title" label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="min-w-[200px] max-w-[250px]" />
                 {showPriorityColumn && <TaskSortHeader taskType={taskType} field="priority" label="PRIORITY" icon={<Tag className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />}
@@ -2256,7 +2251,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               </tr>
             )}
           </thead>
-          <tbody>
+          <tbody ref={taskTableBodyRef}>
             {!dataReady ? (
               Array.from({ length: 6 }).map((_, index) => (
                 <tr key={`skel-${index}`}>
@@ -2303,9 +2298,9 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                       checked={isChecked}
                       selected={task._id === selectedId}
                       rowCanEdit={rowCanEdit}
-                      onToggle={() => toggleOne(task._id)}
+                      onRegisterHandle={registerSortableHandle}
+                      shift={taskRowShift(index, dragPreview)}
                       onOpenDetails={openDetails}
-                      onHandleElement={registerDragHandle}
                     >
                       <td className="w-[92px] whitespace-nowrap font-mono text-[12px] text-[var(--ink-muted)]">{task.reference}</td>
                       <td className="col-task max-w-[250px]">
@@ -2378,7 +2373,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                       {kind === "jd" && (
                         <>
                           <td>
-                            {rowCanEdit ? <InlineTextCell value={task.time ?? ""} ariaLabel="Edit time" pending={pending("time")} onSave={(time) => saveInline(task, { time }, "time")} /> : (task.time || "—")}
+                            {rowCanEdit ? <InlineTextCell value={task.time ?? ""} ariaLabel="Edit time" pending={pending("time")} onSave={(time) => saveInline(task, { time }, "time")} /> : <span className="whitespace-nowrap">{task.time || "—"}</span>}
                           </td>
                           <td>
                             {rowCanEdit ? <InlineTextCell value={task.quantity != null ? String(task.quantity) : ""} ariaLabel="Edit quantity" inputMode="decimal" pending={pending("quantity")} onSave={(quantity) => saveInline(task, { quantity }, "quantity")} /> : (task.quantity != null ? task.quantity : "—")}
@@ -2401,6 +2396,42 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
             )}
           </tbody>
         </table>
+        </div>
+        {renderedTasks.length > 0 && (
+          <div className="task-checkbox-rail pointer-events-none absolute left-0 top-0 z-10 flex w-14 flex-col pr-2">
+            <div className="task-list-rail-row pointer-events-auto flex h-9 items-center justify-end" data-active={selectionCount > 0 ? "true" : undefined}>
+              <Checkbox
+                checked={allVisibleSelected}
+                indeterminate={someVisibleSelected}
+                onCheckedChange={toggleAllVisible}
+                aria-label={allVisibleSelected ? "Unselect all rendered tasks" : "Select all rendered tasks"}
+                className="task-list-rail-control"
+              />
+            </div>
+            {renderedTasks.map((task, railIndex) => {
+              const isChecked = selectedIds.has(task._id);
+              return (
+                <div key={`rail-${task._id}`} className="task-list-rail-row pointer-events-auto flex h-[41px] items-center justify-end gap-1" data-active={isChecked ? "true" : undefined} style={taskRowShiftTransform(railIndex, dragPreview)}>
+                  <button
+                    type="button"
+                    className="task-list-rail-control task-list-drag-handle"
+                    disabled={dragDisabled}
+                    aria-label={`Reorder ${task.reference}: ${task.title}`}
+                    ref={(element) => setDragHandleElement(task._id, element)}
+                  >
+                    <Grip className="h-4 w-4" />
+                  </button>
+                  <Checkbox
+                    className="task-list-rail-control"
+                    checked={isChecked}
+                    onCheckedChange={() => toggleOne(task._id)}
+                    aria-label={isChecked ? `Unselect ${task.title}` : `Select ${task.title}`}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
         </DragDropProvider>
         </div>
         <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center py-2" aria-live="polite">
@@ -2640,7 +2671,8 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const { activeCompanyId, active, email } = useCompany();
   const taskType = taskTypeFor(kind);
   const data = useQuery(kind === "jd" ? api.tasks.getJd : api.tasks.getOneTime, activeCompanyId ? { companyId: activeCompanyId, taskId: id as any } : "skip") as any;
-  const assignable = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskType } : "skip") as any[] | undefined;
+  const assignableResult = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskType } : "skip") as AssignableUsersResult | undefined;
+  const assignable = assignableResult?.users;
   const [activityLimit, setActivityLimit] = useState(50);
   const activity = useQuery(api.tasks.listActivity, activeCompanyId ? { companyId: activeCompanyId, taskType, taskId: id, limit: activityLimit } : "skip") as { items: any[]; hasMore: boolean } | undefined;
   const attachmentsQuery = usePaginatedQuery(api.tasks.listAttachments, activeCompanyId ? { companyId: activeCompanyId, taskType, taskId: id } : "skip", { initialNumItems: 25 });
@@ -2842,7 +2874,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   return (
     <div>
       <PeekBar kind={kind} canEdit={canEdit} onEdit={() => setEditOpen(true)} />
-      <TaskDialog kind={kind} mode="edit" open={editOpen} onOpenChange={setEditOpen} task={task} assignable={assignable ?? []} />
+      <TaskDialog kind={kind} mode="edit" open={editOpen} onOpenChange={setEditOpen} task={task} assignable={assignable ?? []} assignableIsTruncated={assignableResult?.isTruncated ?? false} />
 
       {textError && <p className="alert-error mt-4 rounded-md p-2 text-[13px]" role="alert">{textError}</p>}
 

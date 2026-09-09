@@ -3,6 +3,7 @@ import { query, type QueryCtx } from "./_generated/server";
 import { analyticsScopedMembershipIds, assertAnalyticsViewAccess, buildSopVisibilityContext, membershipCapabilities, requireMembership, taskHasVisibleAssignee, visibleAssigneeMembershipIds, visibleSop } from "./permissions";
 import { currentJdCycle } from "./taskCycles";
 import type { Doc, Id } from "./_generated/dataModel";
+import { takeWithOverflow } from "./queryLimits";
 
 type DashboardRole = "Admin" | "Manager" | "Employee";
 type TaskKind = "jd" | "one_time";
@@ -73,6 +74,17 @@ type MissedEvent = {
 const dayMs = 86_400_000;
 const dashboardTakeLimit = 500;
 
+type QueryCompleteness = { isTruncated: boolean };
+
+async function takeDashboardRows<T>(
+  completeness: QueryCompleteness,
+  take: (limit: number) => Promise<T[]>,
+) {
+  const result = await takeWithOverflow(take, dashboardTakeLimit);
+  if (result.isTruncated) completeness.isTruncated = true;
+  return result.rows;
+}
+
 const datePresetValidator = v.union(v.literal("7d"), v.literal("30d"), v.literal("90d"), v.literal("365d"));
 const taskTypeFilterValidator = v.union(v.literal("all"), v.literal("jd"), v.literal("one_time"));
 const statusFilterValidator = v.union(v.literal("all"), v.literal("due"), v.literal("in_progress"), v.literal("completed"), v.literal("overdue"));
@@ -105,13 +117,23 @@ function dateWindow(preset: DatePreset | undefined, now: number) {
   return { preset: selected, start: now - days * dayMs, end: now, label: labels[selected] };
 }
 
-async function dashboardAccess(ctx: QueryCtx, companyId: Id<"companies">) {
+async function dashboardAccess(
+  ctx: QueryCtx,
+  companyId: Id<"companies">,
+  completeness: QueryCompleteness,
+) {
   const { membership, company } = await requireMembership(ctx, companyId);
   const caps = await membershipCapabilities(ctx, membership);
   assertAnalyticsViewAccess(caps);
 
   const dashboardRole: DashboardRole = caps.has("analytics:view:company") ? "Admin" : caps.has("analytics:view:managed_scope") ? "Manager" : "Employee";
-  const scopedIds = await analyticsScopedMembershipIds(ctx, companyId, membership, caps);
+  const scopedIds = await analyticsScopedMembershipIds(
+    ctx,
+    companyId,
+    membership,
+    caps,
+    () => { completeness.isTruncated = true; },
+  );
   return { membership, company, caps, dashboardRole, scopedIds };
 }
 
@@ -133,14 +155,24 @@ async function loadPeople(ctx: QueryCtx, membershipIds: Set<Id<"companyMembershi
   return people;
 }
 
-async function loadAssignments(ctx: QueryCtx, membershipIds: Set<Id<"companyMemberships">>) {
+async function loadAssignments(
+  ctx: QueryCtx,
+  membershipIds: Set<Id<"companyMemberships">>,
+  completeness: QueryCompleteness,
+) {
   const byMembership = new Map<Id<"companyMemberships">, OrgAssignments>();
   const branchIds = new Set<Id<"branches">>();
   const departmentIds = new Set<Id<"departments">>();
 
   for (const membershipId of membershipIds) {
-    const membershipBranches = await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(dashboardTakeLimit);
-    const membershipDepartments = await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(dashboardTakeLimit);
+    const membershipBranches = await takeDashboardRows(
+      completeness,
+      (limit) => ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(limit),
+    );
+    const membershipDepartments = await takeDashboardRows(
+      completeness,
+      (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(limit),
+    );
     const assignments = {
       branchIds: new Set(membershipBranches.map((row) => row.branchId)),
       departmentIds: new Set(membershipDepartments.map((row) => row.departmentId)),
@@ -153,9 +185,19 @@ async function loadAssignments(ctx: QueryCtx, membershipIds: Set<Id<"companyMemb
   return { byMembership, branchIds, departmentIds };
 }
 
-async function loadOrg(ctx: QueryCtx, companyId: Id<"companies">) {
-  const branches = await ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(dashboardTakeLimit);
-  const departments = await ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(dashboardTakeLimit);
+async function loadOrg(
+  ctx: QueryCtx,
+  companyId: Id<"companies">,
+  completeness: QueryCompleteness,
+) {
+  const branches = await takeDashboardRows(
+    completeness,
+    (limit) => ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
+  );
+  const departments = await takeDashboardRows(
+    completeness,
+    (limit) => ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
+  );
   branches.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name));
   departments.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name));
   return {
@@ -174,6 +216,7 @@ async function allowedOrgIds(
   org: Awaited<ReturnType<typeof loadOrg>>,
   assignedBranchIds: Set<Id<"branches">>,
   assignedDepartmentIds: Set<Id<"departments">>,
+  completeness: QueryCompleteness,
 ) {
   if (dashboardRole === "Admin") {
     return {
@@ -185,8 +228,14 @@ async function allowedOrgIds(
   if (dashboardRole === "Manager") {
     const branchIds = new Set<Id<"branches">>();
     const departmentIds = new Set<Id<"departments">>();
-    const managedBranches = await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", viewerMembershipId)).take(dashboardTakeLimit);
-    const managedDepartments = await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", viewerMembershipId)).take(dashboardTakeLimit);
+    const managedBranches = await takeDashboardRows(
+      completeness,
+      (limit) => ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", viewerMembershipId)).take(limit),
+    );
+    const managedDepartments = await takeDashboardRows(
+      completeness,
+      (limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", viewerMembershipId)).take(limit),
+    );
     for (const row of managedBranches) if (row.companyId === companyId) branchIds.add(row.branchId);
     for (const row of managedDepartments) if (row.companyId === companyId) departmentIds.add(row.departmentId);
     for (const department of org.departments) if (branchIds.has(department.branchId)) departmentIds.add(department._id);
@@ -239,13 +288,17 @@ async function buildTasks(
   allowedMembershipIds: Set<Id<"companyMemberships">>,
   assignments: Map<Id<"companyMemberships">, OrgAssignments>,
   now: number,
-  timeZone?: string | null,
+  timeZone: string | null | undefined,
+  completeness: QueryCompleteness,
 ) {
   const tasks: DashboardTask[] = [];
   const completionEvents: CompletionEvent[] = [];
   const missedEvents: MissedEvent[] = [];
 
-  const jdTasks = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(dashboardTakeLimit);
+  const jdTasks = await takeDashboardRows(
+    completeness,
+    (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
+  );
   for (const task of jdTasks) {
     const scopedAssignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, allowedMembershipIds);
     if (!scopedAssignees.length) continue;
@@ -274,7 +327,10 @@ async function buildTasks(
     };
     tasks.push(row);
 
-    const completions = await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", task._id)).take(dashboardTakeLimit);
+    const completions = await takeDashboardRows(
+      completeness,
+      (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", task._id)).take(limit),
+    );
     for (const completion of completions) {
       if (!allowedMembershipIds.has(completion.completedByMembershipId)) continue;
       completionEvents.push({
@@ -287,11 +343,17 @@ async function buildTasks(
       });
     }
 
-    const missed = await ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", task._id)).take(dashboardTakeLimit);
+    const missed = await takeDashboardRows(
+      completeness,
+      (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", task._id)).take(limit),
+    );
     for (const record of missed) missedEvents.push({ taskId: task._id, title: task.title, at: record.cycleEnd });
   }
 
-  const oneTimeTasks = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(dashboardTakeLimit);
+  const oneTimeTasks = await takeDashboardRows(
+    completeness,
+    (limit) => ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
+  );
   for (const task of oneTimeTasks) {
     const scopedAssignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, allowedMembershipIds);
     if (!scopedAssignees.length) continue;
@@ -432,9 +494,21 @@ function buildOrgPerformance<T extends Id<"branches"> | Id<"departments">>(
     .sort((a, b) => b.assigned - a.assigned || a.name.localeCompare(b.name));
 }
 
-async function visibleSopStats(ctx: QueryCtx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, caps: Awaited<ReturnType<typeof membershipCapabilities>>) {
-  const sops = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(dashboardTakeLimit);
-  const visibility = await buildSopVisibilityContext(ctx, companyId, membership, caps);
+async function visibleSopStats(
+  ctx: QueryCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  caps: Awaited<ReturnType<typeof membershipCapabilities>>,
+  completeness: QueryCompleteness,
+) {
+  const sops = await takeDashboardRows(
+    completeness,
+    (limit) => ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
+  );
+  const markTruncated = () => { completeness.isTruncated = true; };
+  const visibility = sops.length
+    ? await buildSopVisibilityContext(ctx, companyId, membership, caps, markTruncated)
+    : null;
   const counts = new Map<Doc<"sops">["scopeType"], number>([
     ["company", 0],
     ["branch", 0],
@@ -443,7 +517,7 @@ async function visibleSopStats(ctx: QueryCtx, companyId: Id<"companies">, member
   ]);
   let total = 0;
   for (const sop of sops) {
-    if (!(await visibleSop(ctx, companyId, membership, sop, visibility, caps))) continue;
+    if (!(await visibleSop(ctx, companyId, membership, sop, visibility, caps, markTruncated))) continue;
     total += 1;
     counts.set(sop.scopeType, (counts.get(sop.scopeType) ?? 0) + 1);
   }
@@ -473,15 +547,33 @@ export const dashboard = query({
   handler: async (ctx, args: DashboardArgs) => {
     const now = Date.now();
     const range = dateWindow(args.datePreset, now);
-    const access = await dashboardAccess(ctx, args.companyId);
+    const completeness: QueryCompleteness = { isTruncated: false };
+    const access = await dashboardAccess(ctx, args.companyId, completeness);
     const people = await loadPeople(ctx, access.scopedIds);
-    const assignments = await loadAssignments(ctx, access.scopedIds);
-    const org = await loadOrg(ctx, args.companyId);
-    const allowedOrg = await allowedOrgIds(ctx, args.companyId, access.dashboardRole, access.membership._id, org, assignments.branchIds, assignments.departmentIds);
+    const assignments = await loadAssignments(ctx, access.scopedIds, completeness);
+    const org = await loadOrg(ctx, args.companyId, completeness);
+    const allowedOrg = await allowedOrgIds(
+      ctx,
+      args.companyId,
+      access.dashboardRole,
+      access.membership._id,
+      org,
+      assignments.branchIds,
+      assignments.departmentIds,
+      completeness,
+    );
 
     assertAllowedFilters(args, access.dashboardRole, access.scopedIds, allowedOrg.branchIds, allowedOrg.departmentIds, access.membership._id);
 
-    const built = await buildTasks(ctx, args.companyId, access.scopedIds, assignments.byMembership, now, access.company.timeZone);
+    const built = await buildTasks(
+      ctx,
+      args.companyId,
+      access.scopedIds,
+      assignments.byMembership,
+      now,
+      access.company.timeZone,
+      completeness,
+    );
     const filteredTasks = built.tasks.filter((task) => matchesDashboardFilters(task, args));
     const filteredTaskIds = new Set(filteredTasks.map((task) => task.id));
     const completionEvents = built.completionEvents.filter((event) => filteredTaskIds.has(event.taskId) && event.at >= range.start && event.at <= range.end);
@@ -539,8 +631,9 @@ export const dashboard = query({
       },
       (task) => task.departmentIds as Id<"departments">[],
     );
-    const sopStats = await visibleSopStats(ctx, args.companyId, access.membership, access.caps);
+    const sopStats = await visibleSopStats(ctx, args.companyId, access.membership, access.caps, completeness);
     const viewer = people.get(access.membership._id);
+    const isTruncated = completeness.isTruncated;
 
     const branches = access.dashboardRole === "Employee" ? [] : org.branches
       .filter((branch) => allowedOrg.branchIds.has(branch._id))
@@ -586,6 +679,8 @@ export const dashboard = query({
       : [];
 
     return {
+      isTruncated,
+      reportState: isTruncated ? "incomplete" as const : "complete" as const,
       role: access.dashboardRole,
       viewer: {
         membershipId: access.membership._id,
@@ -624,6 +719,7 @@ export const dashboard = query({
         recurringTasks: typeCounts.get("jd") ?? 0,
         lateCompletions,
         lateCompletionRate: safeRate(lateCompletions, completionEvents.filter((event) => event.kind === "one_time").length),
+        isTruncated,
       },
       breakdowns: {
         status: makeBreakdown(["due", "in_progress", "completed", "overdue"] as const, statusCounts, { due: "Pending", in_progress: "In progress", completed: "Completed", overdue: "Overdue" }),
@@ -652,6 +748,7 @@ export const dashboard = query({
       limitations: {
         sopCompliance: false,
         lateJdCompletionRate: false,
+        dataTruncated: isTruncated,
       },
     };
   },
@@ -661,21 +758,51 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
   const { membership } = await requireMembership(ctx, args.companyId);
   const caps = await membershipCapabilities(ctx, membership);
   assertAnalyticsViewAccess(caps);
-  const scoped = await analyticsScopedMembershipIds(ctx, args.companyId, membership, caps);
-  const jd = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(dashboardTakeLimit);
-  const one = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(dashboardTakeLimit);
+  const completeness: QueryCompleteness = { isTruncated: false };
+  const scoped = await analyticsScopedMembershipIds(
+    ctx,
+    args.companyId,
+    membership,
+    caps,
+    () => { completeness.isTruncated = true; },
+  );
+  const jd = await takeDashboardRows(
+    completeness,
+    (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
+  );
+  const one = await takeDashboardRows(
+    completeness,
+    (limit) => ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
+  );
   const visibleJd = jd.filter((task) => taskHasVisibleAssignee(task, scoped));
   const visibleOne = one.filter((task) => taskHasVisibleAssignee(task, scoped));
   const overdueOne = visibleOne.filter((t) => t.status !== "completed" && (t.overdueAt || (t.dueDate && t.dueDate < Date.now()))).length;
   const completedOne = visibleOne.filter((t) => t.status === "completed").length;
-  const sops = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(dashboardTakeLimit);
-  const sopVisibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
+  const sops = await takeDashboardRows(
+    completeness,
+    (limit) => ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
+  );
+  const markTruncated = () => { completeness.isTruncated = true; };
+  const sopVisibility = sops.length
+    ? await buildSopVisibilityContext(ctx, args.companyId, membership, caps, markTruncated)
+    : null;
   let sopCount = 0;
-  for (const sop of sops) if (await visibleSop(ctx, args.companyId, membership, sop, sopVisibility, caps)) sopCount++;
+  for (const sop of sops) if (await visibleSop(ctx, args.companyId, membership, sop, sopVisibility, caps, markTruncated)) sopCount++;
   const recent = caps.has("company:view_audit_log")
     ? (await ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(8)).map((event) => ({ _id: event._id, action: event.action, targetType: event.targetType, createdAt: event.createdAt }))
     : [];
-  return { role: membership.role, scopeSize: scoped.size, jdTaskCount: visibleJd.length, oneTimeTaskCount: visibleOne.length, overdueTasks: overdueOne, completionRate: visibleOne.length ? Math.round(completedOne / visibleOne.length * 100) : 100, sopCount, recent };
+  return {
+    role: membership.role,
+    scopeSize: scoped.size,
+    jdTaskCount: visibleJd.length,
+    oneTimeTaskCount: visibleOne.length,
+    overdueTasks: overdueOne,
+    completionRate: visibleOne.length ? Math.round(completedOne / visibleOne.length * 100) : 100,
+    sopCount,
+    recent,
+    isTruncated: completeness.isTruncated,
+    isComplete: !completeness.isTruncated,
+  };
 }
 
 export const summary = query({

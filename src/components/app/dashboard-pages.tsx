@@ -54,6 +54,8 @@ type PerformanceRow = {
 };
 
 type DashboardData = {
+  isTruncated: boolean;
+  reportState: "complete" | "incomplete";
   role: DashboardRole;
   viewer: { membershipId: string; role: string; name: string; firstName: string };
   company: { _id: string; name: string; timeZone: string | null };
@@ -87,6 +89,7 @@ type DashboardData = {
     recurringTasks: number;
     lateCompletions: number;
     lateCompletionRate: number;
+    isTruncated: boolean;
   };
   breakdowns: { status: BreakdownItem[]; priority: BreakdownItem[]; frequency: BreakdownItem[]; type: BreakdownItem[] };
   jdCycleHealth: { completedCycles: number; missedCycles: number; healthyRate: number };
@@ -103,7 +106,7 @@ type DashboardData = {
     completions: { id: string; kind: "jd" | "one_time"; title: string; completedAt: number; actorName: string | null }[];
     audit: { id: string; action: string; targetType: string; createdAt: number }[];
   };
-  limitations: { sopCompliance: boolean; lateJdCompletionRate: boolean };
+  limitations: { sopCompliance: boolean; lateJdCompletionRate: boolean; dataTruncated: boolean };
 };
 
 const datePresets: { value: DatePreset; label: string }[] = [
@@ -876,6 +879,13 @@ export function DashboardPage() {
           </p>
         </div>
       </div>
+
+      {data.isTruncated && (
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-300/70 bg-amber-50 px-3 py-2.5 text-[13px] text-amber-950" role="alert">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <p>This dashboard is incomplete because the workspace exceeds its current reporting limit. Metrics and comparisons may omit records.</p>
+        </div>
+      )}
 
       {/* 4-Metric Overview Strip */}
       <NotionMetricStrip data={data} />

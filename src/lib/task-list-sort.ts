@@ -33,25 +33,6 @@ const allFields = new Set<TaskListSortField>([
   "quantity",
 ]);
 
-const fieldLabels: Record<TaskListSortField, string> = {
-  code: "Code",
-  user: "Assigned to",
-  frequency: "Frequency",
-  priority: "Priority",
-  dueDate: "Due date",
-  title: "Title",
-  dateAssigned: "Date assigned",
-  quantity: "Quantity",
-};
-
-export function taskListSortFields(taskType: TaskListTaskType) {
-  return fieldsByTaskType[taskType];
-}
-
-export function taskListSortFieldLabel(field: TaskListSortField) {
-  return fieldLabels[field];
-}
-
 export function defaultTaskListSort(taskType: TaskListTaskType): TaskListSort {
   void taskType;
   return { mode: "default" };
@@ -92,10 +73,4 @@ export function isTaskListSortForTaskType(
     isTaskListSort(value) &&
     (value.mode !== "field" || fieldsByTaskType[taskType].includes(value.field))
   );
-}
-
-export function taskListSortLabel(taskType: TaskListTaskType, sort: TaskListSort) {
-  if (sort.mode === "default") return "Default";
-  if (sort.mode === "custom") return "Custom";
-  return `${taskListSortFieldLabel(sort.field)} (${sort.direction === "asc" ? "ascending" : "descending"})`;
 }

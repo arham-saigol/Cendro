@@ -18,6 +18,7 @@
     "@ai-sdk/gateway": "^3.0.133",
     "@ai-sdk/react": "^3.0.210",
     "@clerk/nextjs": "^7.0.1",
+    "@dnd-kit/dom": "^0.5.0",
     "@dnd-kit/react": "^0.5.0",
     "@radix-ui/react-dialog": "^1.1.17",
     "@radix-ui/react-dropdown-menu": "^2.1.18",

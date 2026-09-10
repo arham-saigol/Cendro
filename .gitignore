@@ -6,4 +6,5 @@ node_modules
 .vercel
 .DS_Store
 *.tsbuildinfo
+next-env.d.ts
 .agents

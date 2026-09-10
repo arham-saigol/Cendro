@@ -311,6 +311,7 @@ function taskListPreferenceResult(
       taskType: "jd" as const,
       sort: preference?.sort ?? { mode: "default" as const },
       customOrder: preference?.taskType === "jd" ? preference.customOrder ?? null : null,
+      ...(preference?.orderFormat ? { orderFormat: preference.orderFormat } : {}),
       revision: preference?.revision ?? 0,
       updatedAt: preference?.updatedAt ?? null,
     };
@@ -319,6 +320,7 @@ function taskListPreferenceResult(
     taskType: "one_time" as const,
     sort: preference?.sort ?? { mode: "default" as const },
     customOrder: preference?.taskType === "one_time" ? preference.customOrder ?? null : null,
+    ...(preference?.orderFormat ? { orderFormat: preference.orderFormat } : {}),
     revision: preference?.revision ?? 0,
     updatedAt: preference?.updatedAt ?? null,
   };
@@ -426,33 +428,37 @@ async function applyTaskListOrderKeyUpdates(
     throw new ConvexError("Task list order is too large to save.");
   }
 
-  const writes: Promise<unknown>[] = [];
-  for (const [index, taskId] of taskIds.entries()) {
-    const { orderKey } = orderKeyUpdates[index];
-    const entry = entryByTaskId.get(taskId);
-    if (entry) {
-      writes.push(ctx.db.patch(entry._id, { orderKey, updatedAt: now }));
-    } else if (taskType === "jd") {
-      writes.push(ctx.db.insert("taskListOrderEntries", {
-        companyId,
-        membershipId: membership._id,
-        taskType: "jd",
-        taskId: taskId as Id<"jdTasks">,
-        orderKey,
-        updatedAt: now,
-      }));
-    } else {
-      writes.push(ctx.db.insert("taskListOrderEntries", {
-        companyId,
-        membershipId: membership._id,
-        taskType: "one_time",
-        taskId: taskId as Id<"oneTimeTasks">,
-        orderKey,
-        updatedAt: now,
-      }));
+  // This only supports older clients, but a full legacy rebalance can contain 2,000 writes.
+  for (let start = 0; start < taskIds.length; start += 100) {
+    const writes: Promise<unknown>[] = [];
+    for (let index = start; index < Math.min(start + 100, taskIds.length); index += 1) {
+      const taskId = taskIds[index];
+      const { orderKey } = orderKeyUpdates[index];
+      const entry = entryByTaskId.get(taskId);
+      if (entry) {
+        writes.push(ctx.db.patch(entry._id, { orderKey, updatedAt: now }));
+      } else if (taskType === "jd") {
+        writes.push(ctx.db.insert("taskListOrderEntries", {
+          companyId,
+          membershipId: membership._id,
+          taskType: "jd",
+          taskId: taskId as Id<"jdTasks">,
+          orderKey,
+          updatedAt: now,
+        }));
+      } else {
+        writes.push(ctx.db.insert("taskListOrderEntries", {
+          companyId,
+          membershipId: membership._id,
+          taskType: "one_time",
+          taskId: taskId as Id<"oneTimeTasks">,
+          orderKey,
+          updatedAt: now,
+        }));
+      }
     }
+    await Promise.all(writes);
   }
-  await Promise.all(writes);
 }
 
 export const listJdRows = query({
@@ -463,7 +469,7 @@ export const listJdRows = query({
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
     const scoped = await scopedMembershipIds(ctx, args.companyId, membership, auth.caps, "tasks:jd:view:any");
     const preference = await getTaskListPreference(ctx, args.companyId, membership._id, "jd");
-    const includeCustomOrderKeys = preference?.sort.mode === "custom";
+    const includeCustomOrderKeys = preference && preference.orderFormat !== "vector";
     const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
     const rows = [];
     const managedIds = await auth.getScopedMembershipIds();
@@ -521,7 +527,7 @@ export const listOneTimeRows = query({
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
     const scoped = await scopedMembershipIds(ctx, args.companyId, membership, auth.caps, "tasks:one_time:view:any");
     const preference = await getTaskListPreference(ctx, args.companyId, membership._id, "one_time");
-    const includeCustomOrderKeys = preference?.sort.mode === "custom";
+    const includeCustomOrderKeys = preference && preference.orderFormat !== "vector";
     const page = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
     const rows = [];
     const managedIds = await auth.getScopedMembershipIds();
@@ -620,7 +626,7 @@ export const saveListOrder = mutation({
     if (args.taskType === "jd") {
       const customOrder = await validateTaskListOrder(ctx, args.companyId, membership, "jd", args.orderedIds);
       if (preference) {
-        await ctx.db.patch(preference._id, { sort: { mode: "custom" }, customOrder, revision, updatedAt: now });
+        await ctx.db.patch(preference._id, { sort: { mode: "custom" }, customOrder, orderFormat: "vector", revision, updatedAt: now });
         preferenceId = preference._id;
       } else {
         preferenceId = await ctx.db.insert("taskListPreferences", {
@@ -629,6 +635,7 @@ export const saveListOrder = mutation({
           taskType: "jd",
           sort: { mode: "custom" },
           customOrder,
+          orderFormat: "vector",
           revision,
           updatedAt: now,
         });
@@ -636,7 +643,7 @@ export const saveListOrder = mutation({
     } else {
       const customOrder = await validateTaskListOrder(ctx, args.companyId, membership, "one_time", args.orderedIds);
       if (preference) {
-        await ctx.db.patch(preference._id, { sort: { mode: "custom" }, customOrder, revision, updatedAt: now });
+        await ctx.db.patch(preference._id, { sort: { mode: "custom" }, customOrder, orderFormat: "vector", revision, updatedAt: now });
         preferenceId = preference._id;
       } else {
         preferenceId = await ctx.db.insert("taskListPreferences", {
@@ -645,15 +652,40 @@ export const saveListOrder = mutation({
           taskType: "one_time",
           sort: { mode: "custom" },
           customOrder,
+          orderFormat: "vector",
           revision,
           updatedAt: now,
         });
       }
     }
 
+    if (preference && preference.orderFormat !== "vector") {
+      await ctx.scheduler.runAfter(0, internal.tasks.cleanupLegacyListOrder, { preferenceId });
+    }
     const saved = await ctx.db.get(preferenceId);
     if (!saved) throw new ConvexError("Task list preference was not saved.");
     return taskListPreferenceResult(args.taskType, saved);
+  },
+});
+
+// Converted preferences no longer read these entries. Keep legacy preferences intact.
+export const cleanupLegacyListOrder = internalMutation({
+  args: { preferenceId: v.id("taskListPreferences") },
+  returns: v.null(),
+  handler: async (ctx, { preferenceId }) => {
+    const preference = await ctx.db.get(preferenceId);
+    if (!preference || preference.orderFormat !== "vector") return null;
+    const entries = await ctx.db.query("taskListOrderEntries")
+      .withIndex("by_companyId_and_membershipId_and_taskType_and_taskId", (q) =>
+        q.eq("companyId", preference.companyId)
+          .eq("membershipId", preference.membershipId)
+          .eq("taskType", preference.taskType))
+      .take(100);
+    for (const entry of entries) await ctx.db.delete(entry._id);
+    if (entries.length === 100) {
+      await ctx.scheduler.runAfter(0, internal.tasks.cleanupLegacyListOrder, { preferenceId });
+    }
+    return null;
   },
 });
 
@@ -676,6 +708,9 @@ export const moveListOrderTask = mutation({
       throw new ConvexError("Task list order position is invalid.");
     }
     const preference = await getTaskListPreference(ctx, args.companyId, membership._id, args.taskType);
+    if (preference?.orderFormat === "vector") {
+      throw new ConvexError("Task ordering has been upgraded. Reload this page before reordering.");
+    }
     assertExpectedPreferenceRevision(preference, args.expectedRevision);
     const now = Date.now();
     const revision = args.expectedRevision + 1;

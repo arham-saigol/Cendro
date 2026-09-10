@@ -15,7 +15,6 @@ import {
   Clock,
   Download,
   Flag,
-  Grip,
   Hash,
   Inbox,
   PanelRight,
@@ -31,10 +30,8 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
-import { DragDropProvider, type DragEndEvent, type DragMoveEvent, type DragStartEvent } from "@dnd-kit/react";
-import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import { OptimisticSortingPlugin } from "@dnd-kit/dom/sortable";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { DragDropProvider } from "@dnd-kit/react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
@@ -42,18 +39,18 @@ import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
 import { TaskImportExportMenu } from "./task-import-dialog";
 import { TaskRail, useTaskRailAutoScroll } from "./task-rail-scroll";
+import { TaskDragRailRow, TaskListDragOverlay, TaskSortableRow, useTaskListDrag, type TaskListDrag } from "./task-list-dnd";
+import { TaskListPreferenceController, type TaskListPreference } from "@/lib/task-list-preference-controller";
+import { insertTask } from "@/lib/task-list-drag";
 import { downloadBlob, exportTaskWorkbook } from "@/lib/task-import/workbook";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
-  moveTaskListId,
+  mergeFilteredTaskListOrder,
   restoreTaskListCustomOrder,
   sameTaskListOrder,
   sortTaskListRows,
-  taskListCustomOrderKeys,
-  taskListOrderPositionForMove,
-  type TaskListOrderKeyUpdate,
   type TaskListOrderingRow,
 } from "@/lib/task-list-order";
 import {
@@ -128,50 +125,6 @@ type TaskRow = TaskListOrderingRow & {
   canDelete?: boolean;
   customOrderKey?: string;
 };
-
-type TaskListPreferenceState = {
-  sort: TaskListSort;
-  customOrder: string[] | null;
-  revision: number;
-};
-
-type TaskSortableData = { kind: "task"; scope: string };
-type TaskDragSnapshot = {
-  scope: string;
-  sourceId: string;
-  visibleIds: string[];
-  fullOrderIds: string[];
-};
-type TaskDragPreview = { sourceIndex: number; targetIndex: number };
-type OptimisticTaskOrderKeys = { scope: string; keys: Record<string, string> };
-
-// Task rows are fixed-height (task-table td and the rail rows); the drag preview shifts
-// rows by this multiple.
-const TASK_ROW_HEIGHT = 41;
-
-// Visual shift for a row while a drag preview is active. Rows between the source and the
-// projected drop slot move one row height toward the source's slot, which opens the drop
-// gap at targetIndex. Rows are only transformed - the DOM order stays owned by React.
-function taskRowShift(index: number, preview: TaskDragPreview | null) {
-  if (!preview) return 0;
-  const { sourceIndex, targetIndex } = preview;
-  if (index === sourceIndex || sourceIndex === targetIndex) return 0;
-  if (sourceIndex < targetIndex) {
-    return index > sourceIndex && index <= targetIndex ? -TASK_ROW_HEIGHT : 0;
-  }
-  return index >= targetIndex && index < sourceIndex ? TASK_ROW_HEIGHT : 0;
-}
-
-function taskRowShiftTransform(index: number, preview: TaskDragPreview | null): CSSProperties | undefined {
-  const shift = taskRowShift(index, preview);
-  return shift ? { transform: `translateY(${shift}px)` } : undefined;
-}
-
-function sameTaskListSort(left: TaskListSort, right: TaskListSort) {
-  if (left.mode !== right.mode) return false;
-  if (left.mode !== "field" || right.mode !== "field") return true;
-  return left.field === right.field && left.direction === right.direction;
-}
 
 const frequencies: { value: Frequency; label: string }[] = [
   { value: "daily", label: "Daily" },
@@ -753,8 +706,7 @@ function SortableTaskRow({
   checked,
   selected,
   rowCanEdit,
-  onRegisterHandle,
-  shift,
+  drag,
   onOpenDetails,
   children,
 }: {
@@ -765,40 +717,21 @@ function SortableTaskRow({
   checked: boolean;
   selected: boolean;
   rowCanEdit: boolean;
-  onRegisterHandle: (id: string, handleRef: ((element: Element | null) => void) | null) => void;
-  shift: number;
+  drag: TaskListDrag;
   onOpenDetails: () => void;
   children: ReactNode;
 }) {
-  // The drag handle lives in the rail beside the table. Register dnd-kit's callback
-  // ref with the parent so it can be attached to that sibling after both nodes mount.
-  // OptimisticSortingPlugin is disabled because it reorders <tr> nodes directly during
-  // dragover, leaving the DOM out of sync with React's row order.
-  const { ref, handleRef, isDragging } = useSortable<TaskSortableData>({
-    id: task._id,
-    index,
-    group: scope,
-    type: "task",
-    accept: "task",
-    disabled: dragDisabled,
-    data: { kind: "task", scope },
-    plugins: (defaults) => defaults.filter((plugin) => plugin !== OptimisticSortingPlugin),
-  });
-
-  useLayoutEffect(() => {
-    onRegisterHandle(task._id, handleRef);
-    return () => onRegisterHandle(task._id, null);
-  }, [handleRef, onRegisterHandle, task._id]);
-
   return (
-    <tr
-      ref={ref}
+    <TaskSortableRow
+      id={task._id}
+      index={index}
+      scope={scope}
+      disabled={dragDisabled}
+      drag={drag}
       data-row="task"
       data-clickable={!rowCanEdit ? "true" : undefined}
       data-selected={selected ? "true" : undefined}
       data-checked={checked ? "true" : undefined}
-      data-dragging={isDragging ? "true" : undefined}
-      style={shift ? { transform: `translateY(${shift}px)` } : undefined}
       tabIndex={!rowCanEdit ? 0 : undefined}
       onClick={(event) => {
         if (rowCanEdit) return;
@@ -814,7 +747,7 @@ function SortableTaskRow({
       }}
     >
       {children}
-    </tr>
+    </TaskSortableRow>
   );
 }
 
@@ -1433,6 +1366,11 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
 }
 
 export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string }) {
+  const { activeCompanyId, active } = useCompany();
+  return <TaskListContent key={`${activeCompanyId}:${active?.membership._id}:${kind}`} kind={kind} selectedId={selectedId} />;
+}
+
+function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string }) {
   const router = useRouter();
   const { activeCompanyId, active } = useCompany();
   const [search, setSearch] = useState("");
@@ -1458,16 +1396,6 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [pendingCell, setPendingCell] = useState<string | null>(null);
   const [renderedCount, setRenderedCount] = useState(TASK_PAGE_SIZE);
-  const [sortOverride, setSortOverride] = useState<{ scope: string; sort: TaskListSort } | null>(null);
-  const [optimisticPreference, setOptimisticPreference] = useState<(TaskListPreferenceState & { scope: string }) | null>(null);
-  const [optimisticTaskOrderKeys, setOptimisticTaskOrderKeys] = useState<OptimisticTaskOrderKeys | null>(null);
-  const [preferencePending, setPreferencePending] = useState(false);
-  const taskTableBodyRef = useRef<HTMLTableSectionElement>(null);
-  const [dragSnapshot, setDragSnapshot] = useState<TaskDragSnapshot | null>(null);
-  const [dragPreview, setDragPreview] = useState<TaskDragPreview | null>(null);
-  const dragHandleRefs = useRef(new Map<string, HTMLButtonElement>());
-  const sortableHandleRefs = useRef(new Map<string, (element: Element | null) => void>());
-  const preferenceScopeRef = useRef("");
   const taskPrefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   const canUseAllTasks = Boolean(active?.capabilities.some((c) => c === `${taskPrefix}:view:any` || c === `${taskPrefix}:view:managed`));
   const assignableResult = useQuery(api.tasks.assignableUsers, activeCompanyId ? { companyId: activeCompanyId, kind: taskTypeFor(kind) } : "skip") as AssignableUsersResult | undefined;
@@ -1494,12 +1422,13 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     api.tasks.getListPreference,
     activeCompanyId ? { companyId: activeCompanyId, taskType } : "skip",
   );
-  const subscribedPreference = useMemo<TaskListPreferenceState | undefined>(() => {
+  const subscribedPreference = useMemo<TaskListPreference | undefined>(() => {
     if (!preferenceResult) return undefined;
     return {
       sort: preferenceResult.sort as TaskListSort,
       customOrder: preferenceResult.customOrder?.map(String) ?? null,
       revision: preferenceResult.revision,
+      orderFormat: preferenceResult.orderFormat,
     };
   }, [preferenceResult]);
   const updateJd = useMutation(api.tasks.updateJd);
@@ -1509,7 +1438,24 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const deleteOneTime = useMutation(api.tasks.deleteOneTime);
   const deleteOneTimeBulk = useMutation(api.tasks.deleteOneTimeBulk);
   const setListSort = useMutation(api.tasks.setListSort);
-  const moveListOrderTask = useMutation(api.tasks.moveListOrderTask);
+  const saveListOrder = useMutation(api.tasks.saveListOrder);
+  const [preferenceController] = useState(() => new TaskListPreferenceController(async (command) => {
+    if (!activeCompanyId) throw new Error("No active company.");
+    const args = { companyId: activeCompanyId, taskType, expectedRevision: command.expectedRevision };
+    const saved = command.orderedIds !== undefined
+      ? await saveListOrder({ ...args, orderedIds: command.orderedIds })
+      : await setListSort({ ...args, sort: command.sort });
+    return { ...saved, customOrder: saved.customOrder?.map(String) ?? null };
+  }));
+  const preferenceState = useSyncExternalStore(preferenceController.subscribe, preferenceController.getSnapshot, preferenceController.getSnapshot);
+  const preferencePending = preferenceState.pending;
+  useLayoutEffect(() => {
+    if (subscribedPreference) preferenceController.receive(subscribedPreference);
+  }, [preferenceController, subscribedPreference]);
+  useEffect(() => () => preferenceController.cancel(), [preferenceController]);
+  useEffect(() => {
+    if (preferenceState.error) setInlineError(preferenceState.error);
+  }, [preferenceState.error]);
   const base = kind === "jd" ? "/jd-tasks" : "/one-time-tasks";
   const pageTitle = kind === "jd" ? "Job Description" : "Tasks";
   const description = kind === "jd" ? "Track and manage recurring responsibilities and scheduled duties." : "Track and manage assignments, action items, and upcoming deadlines.";
@@ -1523,25 +1469,19 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const effectiveTaskView: TaskView = canUseAllTasks ? taskView : "my";
   const currentMembershipId = active?.membership._id as string | undefined;
   const preferenceScope = `${activeCompanyId ?? "none"}:${active?.membership._id ?? "none"}:${taskType}`;
-  const activePreference = optimisticPreference?.scope === preferenceScope
-    ? optimisticPreference
-    : subscribedPreference;
+  const activePreference = preferenceState.preference ?? subscribedPreference;
   const activeSort = useMemo<TaskListSort>(
-    () => sortOverride?.scope === preferenceScope
-      ? sortOverride.sort
-      : activePreference?.sort ?? { mode: "default" },
-    [activePreference?.sort, preferenceScope, sortOverride],
+    () => activePreference?.sort ?? { mode: "default" },
+    [activePreference?.sort],
   );
   const taskOrderKeys = useMemo(() => {
     const keys = new Map<string, string>();
+    if (activePreference?.orderFormat === "vector") return keys;
     for (const task of allTasks) {
       if (task.customOrderKey) keys.set(task._id, task.customOrderKey);
     }
-    if (optimisticTaskOrderKeys?.scope === preferenceScope) {
-      for (const [id, key] of Object.entries(optimisticTaskOrderKeys.keys)) keys.set(id, key);
-    }
     return keys;
-  }, [allTasks, optimisticTaskOrderKeys, preferenceScope]);
+  }, [allTasks, activePreference?.orderFormat]);
   const dataReady = Boolean(activeCompanyId && subscribedPreference && taskPageStatus === "Exhausted");
   const customOrderingEnabled = dataReady && allTasks.length <= TASK_LIST_ORDER_LIMIT;
   const ownFrequencyValues = useMemo(() => {
@@ -1575,14 +1515,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
       return true;
     })
   ), [assigneeFilter, currentMembershipId, effectiveTaskView, frequency, kind, orderedTasks, priorityFilter, search, statusFilter]);
-  const displayedTasks = useMemo(() => {
-    if (!dragSnapshot || dragSnapshot.scope !== preferenceScope) return filteredTasks;
-    const taskById = new Map(filteredTasks.map((task) => [task._id, task]));
-    return dragSnapshot.visibleIds.flatMap((id) => {
-      const task = taskById.get(id);
-      return task ? [task] : [];
-    });
-  }, [dragSnapshot, filteredTasks, preferenceScope]);
+  const displayedTasks = filteredTasks;
   const renderedTasks = displayedTasks.slice(0, renderedCount);
   const visibleIds = renderedTasks.map((task) => task._id);
   const selectedVisibleCount = visibleIds.reduce((count, id) => count + (selectedIds.has(id) ? 1 : 0), 0);
@@ -1594,7 +1527,31 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
   const selectedTask = selectedTaskId ? allTasks.find((task) => task._id === selectedTaskId) ?? null : null;
   const canEditSelectedTask = Boolean(selectedTask && canEditTaskRow(active, kind, selectedTask));
   const hasMoreRenderedTasks = dataReady && renderedTasks.length < displayedTasks.length;
-  const dragDisabled = !customOrderingEnabled || preferencePending;
+  const dragDisabled = !customOrderingEnabled || preferenceState.sorting;
+  const taskDragWrapperRef = useRef<HTMLDivElement>(null);
+  const taskDragBodyRef = useRef<HTMLTableSectionElement>(null);
+  const dragSessionKey = useMemo(
+    () => JSON.stringify([
+      preferenceScope, preferenceState.dragVersion, search, effectiveTaskView, frequency,
+      priorityFilter, statusFilter, assigneeFilter,
+      filteredTasks.map((task) => task._id), orderedTasks.map((task) => task._id),
+    ]),
+    [preferenceScope, preferenceState.dragVersion, search, effectiveTaskView, frequency, priorityFilter, statusFilter, assigneeFilter, filteredTasks, orderedTasks],
+  );
+  const drag = useTaskListDrag({
+    ids: visibleIds,
+    sessionKey: dragSessionKey,
+    disabled: dragDisabled,
+    wrapperRef: taskDragWrapperRef,
+    bodyRef: taskDragBodyRef,
+    onDrop(sourceId, insertion) {
+      const visible = filteredTasks.map((task) => task._id);
+      const nextVisible = insertTask(visible, sourceId, insertion);
+      if (sameTaskListOrder(visible, nextVisible)) return;
+      const baseline = restoreTaskListCustomOrder(allTasks, taskType, activePreference?.customOrder, taskOrderKeys).map((task) => task._id);
+      preferenceController.saveOrder(mergeFilteredTaskListOrder(baseline, visible, nextVisible));
+    },
+  });
 
   useEffect(() => {
     if (!activeCompanyId) return;
@@ -1624,49 +1581,6 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     }
   }, [dataReady, kind, ownPriorityValues, personalPriorityView]);
 
-  useEffect(() => {
-    preferenceScopeRef.current = preferenceScope;
-  }, [preferenceScope]);
-
-  useEffect(() => {
-    setRenderedCount(TASK_PAGE_SIZE);
-    setSortOverride(null);
-    setOptimisticPreference(null);
-    setOptimisticTaskOrderKeys(null);
-    setPreferencePending(false);
-    setDragSnapshot(null);
-    dragHandleRefs.current.clear();
-  }, [preferenceScope]);
-
-  useEffect(() => {
-    if (!optimisticPreference || optimisticPreference.scope !== preferenceScope || !subscribedPreference) return;
-    if (subscribedPreference.revision >= optimisticPreference.revision) {
-      setOptimisticPreference(null);
-    }
-  }, [optimisticPreference, preferenceScope, subscribedPreference]);
-
-  useEffect(() => {
-    if (!optimisticTaskOrderKeys || optimisticTaskOrderKeys.scope !== preferenceScope) return;
-    const persistedKeys = new Map(allTasks.map((task) => [task._id, task.customOrderKey]));
-    const remaining = Object.fromEntries(
-      Object.entries(optimisticTaskOrderKeys.keys).filter(([id, key]) => persistedKeys.get(id) !== key),
-    );
-    if (Object.keys(remaining).length === Object.keys(optimisticTaskOrderKeys.keys).length) return;
-    setOptimisticTaskOrderKeys(Object.keys(remaining).length > 0
-      ? { scope: preferenceScope, keys: remaining }
-      : null);
-  }, [allTasks, optimisticTaskOrderKeys, preferenceScope]);
-
-  useEffect(() => {
-    if (!dragSnapshot) return;
-    if (
-      dragSnapshot.scope !== preferenceScope ||
-      !allTasks.some((task) => task._id === dragSnapshot.sourceId)
-    ) {
-      setDragSnapshot(null);
-    }
-  }, [allTasks, dragSnapshot, preferenceScope]);
-
   const ownFilterCount = kind === "jd" ? ownFrequencyValues.length : ownPriorityValues.length;
   const activeView = kind === "jd" ? personalFrequencyView : personalPriorityView;
 
@@ -1689,7 +1603,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
 
   useEffect(() => {
     const node = loadMoreRef.current;
-    if (!node || !hasMoreRenderedTasks) return;
+    if (!node || !hasMoreRenderedTasks || drag.active) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
@@ -1700,7 +1614,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [displayedTasks.length, hasMoreRenderedTasks]);
+  }, [displayedTasks.length, hasMoreRenderedTasks, drag.active]);
 
   useEffect(() => {
     if (tasks && selectedIds.size > 0) {
@@ -1852,58 +1766,6 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
     setPersonalPriorityView("all");
   }
 
-  const registerSortableHandle = useCallback((id: string, handleRef: ((element: Element | null) => void) | null) => {
-    if (!handleRef) {
-      sortableHandleRefs.current.delete(id);
-      return;
-    }
-    sortableHandleRefs.current.set(id, handleRef);
-    handleRef(dragHandleRefs.current.get(id) ?? null);
-  }, []);
-
-  const setDragHandleElement = useCallback((id: string, element: HTMLButtonElement | null) => {
-    if (element) dragHandleRefs.current.set(id, element);
-    else dragHandleRefs.current.delete(id);
-    sortableHandleRefs.current.get(id)?.(element);
-  }, []);
-
-  function focusDragHandle(id: string) {
-    requestAnimationFrame(() => dragHandleRefs.current.get(id)?.focus());
-  }
-
-  async function selectTaskSort(nextSort: TaskListSort) {
-    if (!activeCompanyId || !dataReady || !activePreference || preferencePending) return;
-    if (sameTaskListSort(activeSort, nextSort)) return;
-
-    const operationScope = preferenceScope;
-    const expectedRevision = activePreference.revision;
-    setSortOverride({ scope: operationScope, sort: nextSort });
-    setPreferencePending(true);
-    setInlineError(null);
-    try {
-      const saved = await setListSort({
-        companyId: activeCompanyId,
-        taskType,
-        sort: nextSort,
-        expectedRevision,
-      });
-      if (preferenceScopeRef.current !== operationScope) return;
-      setOptimisticPreference({
-        scope: operationScope,
-        sort: saved.sort as TaskListSort,
-        customOrder: saved.customOrder?.map(String) ?? null,
-        revision: saved.revision,
-      });
-      setSortOverride(null);
-    } catch (error) {
-      if (preferenceScopeRef.current !== operationScope) return;
-      setSortOverride(null);
-      setInlineError(error instanceof Error ? error.message : "Could not update task sorting.");
-    } finally {
-      if (preferenceScopeRef.current === operationScope) setPreferencePending(false);
-    }
-  }
-
   function selectTaskSortField(field: TaskListSortField) {
     const direction = taskSortDirectionForField(taskType, activeSort, field);
     const nextSort: TaskListSort = {
@@ -1913,152 +1775,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
         ? initialTaskListSortDirection(field)
         : direction === "asc" ? "desc" : "asc",
     };
-    void selectTaskSort(nextSort);
-  }
-
-  async function saveCustomTaskOrder(orderedIds: string[], sourceId: string) {
-    if (!activeCompanyId || !customOrderingEnabled || !activePreference || preferencePending) return;
-    const orderKeys = taskListCustomOrderKeys(allTasks, taskType, activePreference.customOrder, taskOrderKeys);
-    let orderKey: string;
-    let rebalancedOrderKeys: TaskListOrderKeyUpdate[] | null;
-    try {
-      ({ orderKey, rebalancedOrderKeys } = taskListOrderPositionForMove(orderedIds, sourceId, orderKeys));
-    } catch (error) {
-      setInlineError(error instanceof Error ? error.message : "Could not calculate a position for this task.");
-      return;
-    }
-
-    const operationScope = preferenceScope;
-    const expectedRevision = activePreference.revision;
-    const previousOptimisticPreference = optimisticPreference?.scope === operationScope
-      ? optimisticPreference
-      : null;
-    const previousOptimisticTaskOrderKeys = optimisticTaskOrderKeys?.scope === operationScope
-      ? optimisticTaskOrderKeys
-      : null;
-    const orderKeyUpdates = rebalancedOrderKeys ?? [{ taskId: sourceId, orderKey }];
-    setPreferencePending(true);
-    setInlineError(null);
-    setSortOverride(null);
-    setOptimisticTaskOrderKeys((current) => ({
-      scope: operationScope,
-      keys: {
-        ...(current?.scope === operationScope ? current.keys : {}),
-        ...Object.fromEntries(orderKeyUpdates.map(({ taskId, orderKey }) => [taskId, orderKey])),
-      },
-    }));
-    setOptimisticPreference({
-      scope: operationScope,
-      sort: { mode: "custom" },
-      customOrder: activePreference.customOrder,
-      revision: expectedRevision + 1,
-    });
-    try {
-      const saved = await moveListOrderTask({
-        companyId: activeCompanyId,
-        taskType,
-        taskId: sourceId,
-        orderKey,
-        ...(rebalancedOrderKeys ? { rebalancedOrderKeys } : {}),
-        expectedRevision,
-      });
-      if (preferenceScopeRef.current !== operationScope) return;
-      setOptimisticPreference({
-        scope: operationScope,
-        sort: saved.sort as TaskListSort,
-        customOrder: saved.customOrder?.map(String) ?? null,
-        revision: saved.revision,
-      });
-      focusDragHandle(sourceId);
-    } catch (error) {
-      if (preferenceScopeRef.current !== operationScope) return;
-      setOptimisticPreference(previousOptimisticPreference);
-      setOptimisticTaskOrderKeys(previousOptimisticTaskOrderKeys);
-      setSortOverride(null);
-      setInlineError(error instanceof Error ? error.message : "Could not save task order. Refresh and try again.");
-    } finally {
-      if (preferenceScopeRef.current === operationScope) setPreferencePending(false);
-    }
-  }
-
-  function handleTaskDragStart(event: DragStartEvent) {
-    if (dragDisabled) return;
-    const source = event.operation.source;
-    if (!source || !isSortable(source) || source.data?.kind !== "task" || source.group !== preferenceScope) return;
-    const sourceId = String(source.id);
-    if (!displayedTasks.some((task) => task._id === sourceId)) return;
-    setDragPreview(null);
-    setDragSnapshot({
-      scope: preferenceScope,
-      sourceId,
-      visibleIds: filteredTasks.map((task) => task._id),
-      fullOrderIds: orderedTasks.map((task) => task._id),
-    });
-  }
-
-  // Projects the drop position from the pointer against the table's own geometry instead
-  // of dnd-kit's collision target, so the preview and the eventual drop always agree and
-  // shifting rows (which changes their rects) cannot feed back into the projection.
-  // Returns null when the projection is unavailable, or targetIndex null for "no move".
-  function taskDropProjection(sourceId: string, pointerY: number): { sourceIndex: number; targetIndex: number | null } | null {
-    const tbody = taskTableBodyRef.current;
-    if (!tbody) return null;
-    const sourceIndex = renderedTasks.findIndex((task) => task._id === sourceId);
-    if (sourceIndex < 0) return null;
-    const tbodyTop = tbody.getBoundingClientRect().top;
-    const slot = Math.floor((pointerY - tbodyTop) / TASK_ROW_HEIGHT);
-    const targetIndex = Math.min(Math.max(slot, 0), renderedTasks.length - 1);
-    return { sourceIndex, targetIndex: targetIndex === sourceIndex ? null : targetIndex };
-  }
-
-  function handleTaskDragMove(event: DragMoveEvent) {
-    const snapshot = dragSnapshot;
-    if (!snapshot || snapshot.scope !== preferenceScope) return;
-    const projection = taskDropProjection(snapshot.sourceId, event.operation.position.current.y);
-    if (!projection || projection.targetIndex == null) {
-      if (dragPreview) setDragPreview(null);
-      return;
-    }
-    const { sourceIndex } = projection;
-    const targetIndex: number = projection.targetIndex;
-    setDragPreview((current) =>
-      current && current.sourceIndex === sourceIndex && current.targetIndex === targetIndex
-        ? current
-        : { sourceIndex, targetIndex },
-    );
-  }
-
-  function handleTaskDragEnd(event: DragEndEvent) {
-    const snapshot = dragSnapshot;
-    const preview = dragPreview;
-    setDragSnapshot(null);
-    setDragPreview(null);
-    if (event.canceled || !snapshot || snapshot.scope !== preferenceScope || preferencePending) return;
-    const { source, target } = event.operation;
-    if (!source || !isSortable(source)) return;
-    if (source.data?.kind !== "task" || source.group !== preferenceScope) return;
-    // The handle sits beside the table, so its pointer can be outside every row's
-    // droppable rect. Use the table projection when there is no collision target.
-    if (target && (!isSortable(target) || target.data?.kind !== "task" || target.group !== preferenceScope)) return;
-    const sourceId = String(source.id);
-    // Recompute the slot from the final pointer position (position.current is accurate at
-    // drag end; the preview state can trail the last pointer move by one event). Releasing
-    // over the source's own slot means no move; only fall back to the collision target if
-    // the geometry projection is unavailable.
-    const projection = taskDropProjection(sourceId, event.operation.position.current.y);
-    if (projection && projection.targetIndex == null) return;
-    const projectedId = projection?.targetIndex != null ? renderedTasks[projection.targetIndex]?._id : undefined;
-    const previewId = preview && renderedTasks[preview.sourceIndex]?._id === sourceId ? renderedTasks[preview.targetIndex]?._id : undefined;
-    const targetId = projectedId ?? previewId ?? (target ? String(target.id) : undefined);
-    if (sourceId !== snapshot.sourceId || !targetId || sourceId === targetId) return;
-
-    const currentIds = new Set(allTasks.map((task) => task._id));
-    const visibleIds = snapshot.visibleIds.filter((id) => currentIds.has(id));
-    if (!visibleIds.includes(sourceId) || !visibleIds.includes(targetId)) return;
-    const reconciledFullOrder = restoreTaskListCustomOrder(allTasks, taskType, snapshot.fullOrderIds).map((task) => task._id);
-    const nextOrder = moveTaskListId(reconciledFullOrder, sourceId, targetId);
-    if (sameTaskListOrder(reconciledFullOrder, nextOrder)) return;
-    void saveCustomTaskOrder(nextOrder, sourceId);
+    if (dataReady) preferenceController.saveSort(nextSort);
   }
 
   const jdColumns = 5 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional frequency + optional assignee + status + time + quantity
@@ -2224,8 +1941,13 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
           </div>
         )}
 
-        <div className="relative -ml-14 w-[calc(100%+3.5rem)] pl-14">
-        <DragDropProvider onDragStart={handleTaskDragStart} onDragMove={handleTaskDragMove} onDragEnd={handleTaskDragEnd}>
+        <div ref={taskDragWrapperRef} className="relative -ml-14 w-[calc(100%+3.5rem)] pl-14">
+        <DragDropProvider
+          onBeforeDragStart={drag.onBeforeDragStart}
+          onDragMove={drag.onDragMove}
+          onDragOver={drag.onDragOver}
+          onDragEnd={drag.onDragEnd}
+        >
         <div className="task-table-wrap task-list-table-wrap overflow-x-auto">
         <table className="task-table">
           <thead>
@@ -2251,7 +1973,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
               </tr>
             )}
           </thead>
-          <tbody ref={taskTableBodyRef}>
+          <tbody ref={taskDragBodyRef}>
             {!dataReady ? (
               Array.from({ length: 6 }).map((_, index) => (
                 <tr key={`skel-${index}`}>
@@ -2298,8 +2020,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                       checked={isChecked}
                       selected={task._id === selectedId}
                       rowCanEdit={rowCanEdit}
-                      onRegisterHandle={registerSortableHandle}
-                      shift={taskRowShift(index, dragPreview)}
+                      drag={drag}
                       onOpenDetails={openDetails}
                     >
                       <td className="w-[92px] whitespace-nowrap font-mono text-[12px] text-[var(--ink-muted)]">{task.reference}</td>
@@ -2398,7 +2119,7 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
         </table>
         </div>
         {renderedTasks.length > 0 && (
-          <div className="task-checkbox-rail pointer-events-none absolute left-0 top-0 z-10 flex w-14 flex-col pr-2">
+          <div className="task-checkbox-rail pointer-events-none absolute left-0 top-0 z-10 w-14 pr-2">
             <div className="task-list-rail-row pointer-events-auto flex h-9 items-center justify-end" data-active={selectionCount > 0 ? "true" : undefined}>
               <Checkbox
                 checked={allVisibleSelected}
@@ -2408,30 +2129,29 @@ export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string
                 className="task-list-rail-control"
               />
             </div>
-            {renderedTasks.map((task, railIndex) => {
+            {renderedTasks.map((task) => {
               const isChecked = selectedIds.has(task._id);
               return (
-                <div key={`rail-${task._id}`} className="task-list-rail-row pointer-events-auto flex h-[41px] items-center justify-end gap-1" data-active={isChecked ? "true" : undefined} style={taskRowShiftTransform(railIndex, dragPreview)}>
-                  <button
-                    type="button"
-                    className="task-list-rail-control task-list-drag-handle"
-                    disabled={dragDisabled}
-                    aria-label={`Reorder ${task.reference}: ${task.title}`}
-                    ref={(element) => setDragHandleElement(task._id, element)}
-                  >
-                    <Grip className="h-4 w-4" />
-                  </button>
+                <TaskDragRailRow
+                  key={`rail-${task._id}`}
+                  id={task._id}
+                  label={`Reorder ${task.reference}: ${task.title}`}
+                  disabled={dragDisabled}
+                  checked={isChecked}
+                  drag={drag}
+                >
                   <Checkbox
                     className="task-list-rail-control"
                     checked={isChecked}
                     onCheckedChange={() => toggleOne(task._id)}
                     aria-label={isChecked ? `Unselect ${task.title}` : `Select ${task.title}`}
                   />
-                </div>
+                </TaskDragRailRow>
               );
             })}
           </div>
         )}
+        <TaskListDragOverlay table={drag.overlay} />
         </DragDropProvider>
         </div>
         <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center py-2" aria-live="polite">

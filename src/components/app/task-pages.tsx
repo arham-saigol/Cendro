@@ -1530,9 +1530,17 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const dragDisabled = !customOrderingEnabled || preferenceState.sorting;
   const taskDragWrapperRef = useRef<HTMLDivElement>(null);
   const taskDragBodyRef = useRef<HTMLTableSectionElement>(null);
+  const dragSessionKey = useMemo(
+    () => JSON.stringify([
+      preferenceScope, preferenceState.dragVersion, search, effectiveTaskView, frequency,
+      priorityFilter, statusFilter, assigneeFilter,
+      filteredTasks.map((task) => task._id), orderedTasks.map((task) => task._id),
+    ]),
+    [preferenceScope, preferenceState.dragVersion, search, effectiveTaskView, frequency, priorityFilter, statusFilter, assigneeFilter, filteredTasks, orderedTasks],
+  );
   const drag = useTaskListDrag({
     ids: visibleIds,
-    sessionKey: JSON.stringify([preferenceScope, preferenceState.dragVersion, search, effectiveTaskView, frequency, priorityFilter, statusFilter, assigneeFilter, filteredTasks.map((task) => task._id), orderedTasks.map((task) => task._id)]),
+    sessionKey: dragSessionKey,
     disabled: dragDisabled,
     wrapperRef: taskDragWrapperRef,
     bodyRef: taskDragBodyRef,

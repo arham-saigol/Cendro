@@ -51,3 +51,11 @@ test("a completion from an unmounted scope cannot change its replacement", async
   await Promise.resolve();
   expect(replacement.getSnapshot().preference).toEqual(initial);
 });
+
+test("a legacy null order does not acknowledge a vector order save", () => {
+  const { controller } = harness();
+  controller.saveOrder([]);
+  controller.receive({ sort: { mode: "custom" }, customOrder: null, revision: 2 });
+  expect(controller.getSnapshot().error).toContain("another session");
+  expect(controller.getSnapshot().pending).toBe(false);
+});

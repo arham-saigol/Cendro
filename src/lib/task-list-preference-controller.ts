@@ -20,7 +20,10 @@ type Snapshot = {
 
 function samePreference(left: TaskListPreference, right: TaskListPreference) {
   return JSON.stringify(left.sort) === JSON.stringify(right.sort) &&
-    sameTaskListOrder(left.customOrder ?? [], right.customOrder ?? []);
+    left.orderFormat === right.orderFormat &&
+    (left.customOrder === null || right.customOrder === null
+      ? left.customOrder === right.customOrder
+      : sameTaskListOrder(left.customOrder, right.customOrder));
 }
 
 /** One in-flight save and one latest desired order. Conflicts discard dependent work. */

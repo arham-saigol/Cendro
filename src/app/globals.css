@@ -336,7 +336,9 @@ button:disabled { cursor: not-allowed; }
 @media (hover: none), (pointer: coarse) {
   .task-list-rail-control { opacity: 1; }
 }
-.task-table tbody tr[data-dragging="true"] td { opacity: 0.55; }
+/* The dragged row keeps its layout slot but is not painted: the overlay wears the row, and the rows
+   that close the gap slide through this slot instead of over a dimmed copy of it. */
+.task-table tbody tr[data-dragging="true"] { visibility: hidden; }
 .task-table tbody tr[data-row="task"]:not([data-dragging="true"]),
 .task-list-rail-row { transition: transform 0.15s ease; }
 .task-drag-overlay { pointer-events: none; z-index: 60; }

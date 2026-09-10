@@ -9,7 +9,9 @@ import {
   type DragDropManager,
 } from "@dnd-kit/react";
 import { useSortable } from "@dnd-kit/react/sortable";
+import type { DropAnimationFunction } from "@dnd-kit/dom";
 import { SortableKeyboardPlugin } from "@dnd-kit/dom/sortable";
+import { getWindow, parseTranslate, prefersReducedMotion } from "@dnd-kit/dom/utilities";
 import { Grip } from "lucide-react";
 import { useCallback, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import {
@@ -42,20 +44,44 @@ type Options = {
 // Only the keyboard sorting plugin is needed; React owns both the table and rail.
 const plugins = [SortableKeyboardPlugin];
 
+// Rows carry a preview transform while dragging, and getBoundingClientRect() reports that transformed
+// box — including for the frames where the transform is being animated away. The rail places each row
+// control with `top`, so measure the layout box instead: offsetTop/offsetHeight are defined on the
+// layout box and ignore transforms, transitions, and scrolling. The walk stops at the wrapper, which is
+// both the rail's containing block and the coordinate space the pointer insertion math already uses.
+function layoutOffsetTop(element: HTMLElement, boundary: HTMLElement) {
+  let top = 0;
+  for (let node: HTMLElement | null = element; node && node !== boundary; node = node.offsetParent as HTMLElement | null) {
+    top += node.offsetTop;
+  }
+  return top;
+}
+
 function measureTaskLayout(wrapper: HTMLDivElement | null, body: HTMLTableSectionElement | null): Layout | null {
   if (!wrapper || !body) return null;
   const origin = wrapper.getBoundingClientRect();
   const table = body.closest("table")!;
   const tableRect = table.getBoundingClientRect();
   return {
-    rows: [...body.querySelectorAll<HTMLTableRowElement>("tr[data-task-id]")].map((row) => {
-      const rect = row.getBoundingClientRect();
-      return { id: row.dataset.taskId!, top: rect.top - origin.top, height: rect.height };
-    }),
+    rows: [...body.querySelectorAll<HTMLTableRowElement>("tr[data-task-id]")].map((row) => ({
+      id: row.dataset.taskId!,
+      top: layoutOffsetTop(row, wrapper),
+      height: row.offsetHeight,
+    })),
     headerHeight: table.tHead?.getBoundingClientRect().height ?? 36,
     tableLeft: tableRect.left - origin.left,
     tableWidth: tableRect.width,
   };
+}
+
+// The source keeps its layout slot while its overlay follows the pointer, so its own shift is
+// never applied. Storing it would translate the real source row by the whole move distance in
+// any commit that lands after the session ends but before the offsets are cleared — the same
+// commit that already shows the reordered list.
+function previewRowOffsets(current: Session, nextIds: readonly string[]) {
+  const offsets = taskPreviewOffsets(current.layout.rows, nextIds);
+  offsets.delete(current.sourceId);
+  return offsets;
 }
 
 function projectTaskDrag(current: Session, wrapper: HTMLDivElement, point: Point) {
@@ -67,7 +93,7 @@ function projectTaskDrag(current: Session, wrapper: HTMLDivElement, point: Point
   );
   const ids = current.layout.rows.map((row) => row.id);
   const next = current.insertion ? insertTask(ids, current.sourceId, current.insertion) : ids;
-  return taskPreviewOffsets(current.layout.rows, next);
+  return previewRowOffsets(current, next);
 }
 
 function cloneFeedback(row: HTMLTableRowElement) {
@@ -253,7 +279,8 @@ export function useTaskListDrag(options: Options) {
     const to = ids.indexOf(targetId);
     if (to < 0) return;
     current.insertion = targetId === current.sourceId ? null : { anchorId: targetId, edge: to < from ? "before" : "after" };
-    setOffsets(taskPreviewOffsets(current.layout.rows, current.insertion ? insertTask(ids, current.sourceId, current.insertion) : ids));
+    const next = current.insertion ? insertTask(ids, current.sourceId, current.insertion) : ids;
+    setOffsets(previewRowOffsets(current, next));
   }, []);
 
   const onDragEnd = useCallback((event: DragEndEvent) => {
@@ -278,8 +305,7 @@ export function useTaskListDrag(options: Options) {
 
   const rowStyle = useCallback((id: string): CSSProperties | undefined => {
     const shift = offsets.get(id);
-    // The source remains a layout slot while its overlay follows the pointer.
-    return shift && session.current?.sourceId !== id ? { transform: `translateY(${shift}px)` } : undefined;
+    return shift ? { transform: `translateY(${shift}px)` } : undefined;
   }, [offsets]);
 
   return {
@@ -335,11 +361,43 @@ export function TaskDragRailRow({
   );
 }
 
+const DROP_ANIMATION_DURATION = 150;
+const DROP_ANIMATION_EASING = "ease";
+// While dragging, dnd-kit pins the overlay's translate through an `!important` CSS variable;
+// the dropping attribute releases that rule so the animation below owns the property.
+const DROPPING_ATTRIBUTE = "data-dnd-dropping";
+
+// This list keeps no dnd-kit placeholder, so the default animation falls back to the source row as
+// its target. Settle the clone on that row's committed position explicitly instead, measured after
+// React has reordered the list, and release the !important translate rule the overlay is pinned by.
+const animateOverlayToSource: DropAnimationFunction = ({ source, feedbackElement, translate }) => {
+  const row = document.querySelector<HTMLTableRowElement>(`tr[data-task-id="${CSS.escape(String(source.id))}"]`);
+  if (!row) return;
+  const from = feedbackElement.getBoundingClientRect();
+  const to = row.getBoundingClientRect();
+  const current = parseTranslate(getComputedStyle(feedbackElement).translate) ?? translate;
+  feedbackElement.setAttribute(DROPPING_ATTRIBUTE, "");
+  return feedbackElement.animate(
+    {
+      translate: [
+        `${current.x}px ${current.y}px`,
+        `${current.x + to.left - from.left}px ${current.y + to.top - from.top}px`,
+      ],
+    },
+    {
+      duration: prefersReducedMotion(getWindow(feedbackElement)) ? 0 : DROP_ANIMATION_DURATION,
+      easing: DROP_ANIMATION_EASING,
+    },
+  ).finished.then(() => {
+    feedbackElement.removeAttribute(DROPPING_ATTRIBUTE);
+  });
+};
+
 export function TaskListDragOverlay({ table }: { table: HTMLTableElement | null }) {
   const ref = useCallback((node: HTMLDivElement | null) => {
     if (node && table) node.replaceChildren(table);
   }, [table]);
-  return <DragOverlay className="task-drag-overlay" dropAnimation={{ duration: 150 }}>
+  return <DragOverlay className="task-drag-overlay" dropAnimation={animateOverlayToSource}>
     <div ref={ref} aria-hidden="true" />
   </DragOverlay>;
 }

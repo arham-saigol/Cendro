@@ -339,6 +339,10 @@ button:disabled { cursor: not-allowed; }
 .task-table tbody tr[data-dragging="true"] td { opacity: 0.55; }
 .task-table tbody tr[data-row="task"]:not([data-dragging="true"]),
 .task-list-rail-row { transition: transform 0.15s ease; }
+.task-drag-overlay { pointer-events: none; z-index: 60; }
+.task-drag-overlay-table,
+.task-drag-overlay-table td { background: var(--surface); }
+.task-drag-overlay-table { box-shadow: var(--shadow-elevated); }
 
 .task-sort-header { padding-inline: 0 !important; }
 .task-sort-header-button {
@@ -584,7 +588,6 @@ button:disabled { cursor: not-allowed; }
 
 /* Floating selection rail rendered to the left of the task table */
 .task-checkbox-rail { user-select: none; }
-.task-checkbox-rail > div + div { border-top: 1px solid transparent; }
 .task-selection-layer {
   position: absolute;
   left: 0;

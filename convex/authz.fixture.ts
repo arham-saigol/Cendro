@@ -3,7 +3,7 @@
 import { convexTest } from "convex-test";
 import schema from "./schema";
 import type { Id } from "./_generated/dataModel";
-import type { Capability } from "../src/lib/permissions";
+import { defaultRoleCapabilities, defaultRoleNames, type Capability } from "../src/lib/permissions";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -73,6 +73,13 @@ export async function createAuthzFixture() {
     const employeeBUser = await ctx.db.insert("appUsers", { clerkSubject: "clerk|employeeB", email: "employeeb@example.com", firstName: "Employee", secondName: "B", createdAt: now, updatedAt: now });
     const employeeBM = await ctx.db.insert("companyMemberships", { companyId: companyB, userId: employeeBUser, role: "Employee", active: true, createdAt: now, updatedAt: now });
 
+    // Default role documents (post-migration state) for both companies.
+    for (const companyId of [companyA, companyB]) {
+      for (const name of defaultRoleNames) {
+        await ctx.db.insert("roles", { companyId, name, capabilities: [...defaultRoleCapabilities[name]], createdAt: now, updatedAt: now });
+      }
+    }
+
     return {
       companyA,
       branchA1,
@@ -101,20 +108,21 @@ export async function createAuthzFixture() {
 
   const asUser = (key: string, email?: string) => t.withIdentity(identity(key, email));
 
-  const setOverride = async (
+  const setRoleCapabilities = async (
     companyId: Id<"companies">,
-    membershipId: Id<"companyMemberships">,
-    capability: Capability | string,
-    effect: "allow" | "deny"
+    roleName: string,
+    roleCapabilities: Capability[]
   ) => {
     await t.run(async (ctx) => {
-      await ctx.db.insert("permissionOverrides", {
-        companyId,
-        membershipId,
-        capability,
-        effect,
-        updatedAt: Date.now(),
-      });
+      const existing = await ctx.db
+        .query("roles")
+        .withIndex("by_company_and_name", (q) => q.eq("companyId", companyId).eq("name", roleName))
+        .unique();
+      if (existing) {
+        await ctx.db.patch(existing._id, { capabilities: roleCapabilities, updatedAt: Date.now() });
+      } else {
+        await ctx.db.insert("roles", { companyId, name: roleName, capabilities: roleCapabilities, createdAt: Date.now(), updatedAt: Date.now() });
+      }
     });
   };
 
@@ -122,6 +130,6 @@ export async function createAuthzFixture() {
     t,
     ...data,
     asUser,
-    setOverride,
+    setRoleCapabilities,
   };
 }

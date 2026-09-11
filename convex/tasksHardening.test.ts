@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
 import { createAuthzFixture } from "./authz.fixture";
+import { defaultRoleCapabilities } from "../src/lib/permissions";
 
 describe("task authorization hardening", () => {
   beforeEach(() => {
@@ -165,16 +166,8 @@ describe("task authorization hardening", () => {
       })
     ).rejects.toThrow("You do not have access to delete this attachment.");
 
-    // With explicit allow override for tasks:attachment:delete:own, Employee 1 can delete their own attachment
-    await f.t.run(async (ctx) => {
-      await ctx.db.insert("permissionOverrides", {
-        companyId: f.companyA,
-        membershipId: f.employee1M,
-        capability: "tasks:attachment:delete:own",
-        effect: "allow",
-        updatedAt: Date.now(),
-      });
-    });
+    // With tasks:attachment:delete:own added to the Employee role, Employee 1 can delete their own attachment
+    await f.setRoleCapabilities(f.companyA, "Employee", [...defaultRoleCapabilities.Employee, "tasks:attachment:delete:own"]);
 
     await expect(
       f.asUser("employeeA1").mutation(api.tasks.deleteAttachment, {

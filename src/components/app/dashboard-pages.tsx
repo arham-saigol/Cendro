@@ -31,7 +31,7 @@ import {
   type TrendMetricMode,
 } from "./dashboard-charts";
 
-type DashboardRole = "Admin" | "Manager" | "Employee";
+type DashboardScope = "company" | "managed" | "self";
 type DatePreset = "7d" | "30d" | "90d" | "365d";
 type TaskTypeFilter = "all" | "jd" | "one_time";
 type StatusFilter = "all" | "due" | "in_progress" | "completed" | "overdue";
@@ -56,7 +56,7 @@ type PerformanceRow = {
 type DashboardData = {
   isTruncated: boolean;
   reportState: "complete" | "incomplete";
-  role: DashboardRole;
+  scopeLevel: DashboardScope;
   viewer: { membershipId: string; role: string; name: string; firstName: string };
   company: { _id: string; name: string; timeZone: string | null };
   generatedAt: number;
@@ -239,7 +239,7 @@ function NotionInlineFilters({
   onTaskType: (v: TaskTypeFilter) => void;
   onReset: () => void;
 }) {
-  const showScope = data.role === "Admin" || data.role === "Manager";
+  const showScope = data.scopeLevel !== "self";
 
   const branchOptions = useMemo(
     () => [{ value: "all", label: "All branches" }, ...(data.filterOptions.branches ?? []).map((b) => ({ value: b._id, label: b.name }))],
@@ -599,7 +599,7 @@ function AttentionView({
           </div>
         </div>
 
-        {data.role !== "Employee" && (
+        {data.scopeLevel !== "self" && (
           <div className="mt-5 border-t border-[var(--hairline)] pt-3.5">
             <div className="mb-2.5 flex items-center justify-between">
               <span className="text-[12px] font-semibold text-[var(--ink)]">Team Members with Bottlenecks</span>
@@ -816,8 +816,8 @@ export function DashboardPage() {
   }, [data]);
 
   useEffect(() => {
-    if (data?.role === "Employee" && (activeTab === "organization" || activeTab === "team")) setActiveTab("overview");
-  }, [activeTab, data?.role]);
+    if (data?.scopeLevel === "self" && (activeTab === "organization" || activeTab === "team")) setActiveTab("overview");
+  }, [activeTab, data?.scopeLevel]);
 
   function resetFilters() {
     setDatePreset("30d");
@@ -868,7 +868,7 @@ export function DashboardPage() {
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-[22px] font-semibold tracking-[-0.02em] text-[var(--ink)]">
-              {data.role === "Admin" ? "Executive Dashboard" : data.role === "Manager" ? "Manager Overview" : "My Dashboard"}
+              {data.scopeLevel === "company" ? "Executive Dashboard" : data.scopeLevel === "managed" ? "Manager Overview" : "My Dashboard"}
             </h1>
             <Badge tone="neutral" className="text-[11px]">
               {data.viewer.role}
@@ -925,7 +925,7 @@ export function DashboardPage() {
           )}
         </button>
 
-        {data.role !== "Employee" && (
+        {data.scopeLevel !== "self" && (
           <>
             <button
               type="button"

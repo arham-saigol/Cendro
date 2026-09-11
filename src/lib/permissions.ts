@@ -1,5 +1,5 @@
-export const roles = ["Admin", "Manager", "Employee"] as const;
-export type Role = (typeof roles)[number];
+export const defaultRoleNames = ["Admin", "Manager", "Employee"] as const;
+export type DefaultRoleName = (typeof defaultRoleNames)[number];
 
 export const capabilities = [
   "analytics:view:company",
@@ -56,7 +56,7 @@ export const capabilities = [
   "company:manage_departments",
   "company:invite_users",
   "company:manage_users",
-  "company:manage_permissions",
+  "company:manage_roles",
   "company:view_audit_log",
   "ai:use",
 ] as const;
@@ -75,7 +75,7 @@ export const companyManagementCapabilities: Capability[] = [
   "company:manage_departments",
   "company:invite_users",
   "company:manage_users",
-  "company:manage_permissions",
+  "company:manage_roles",
 ];
 
 export function canViewDashboard(caps: readonly string[] | null | undefined) {
@@ -95,7 +95,7 @@ export function canAccessCompanyManagement(caps: readonly string[] | null | unde
   );
 }
 
-export const defaultRoleCapabilities: Record<Role, Capability[]> = {
+export const defaultRoleCapabilities: Record<DefaultRoleName, Capability[]> = {
   Admin: [...capabilities],
   Manager: [
     "analytics:view:managed_scope",
@@ -148,53 +148,22 @@ export const defaultRoleCapabilities: Record<Role, Capability[]> = {
   ],
 };
 
-export type OverrideEntry = {
-  capability: string;
-  effect: "allow" | "deny" | "inherit";
-};
+/**
+ * Fallback capabilities for a membership whose role has no matching document
+ * yet. Legacy deployments keep their built-in defaults until the company's
+ * role records are seeded; unknown role names resolve to no access.
+ */
+export function legacyRoleCapabilities(roleName: string): Capability[] {
+  return defaultRoleCapabilities[roleName as DefaultRoleName] ?? [];
+}
 
 /**
- * Resolves the effective capabilities for a role given a set of overrides.
- * Rules:
- * - Unknown capabilities in overrides are ignored.
- * - If multiple overrides exist for the same capability, deny wins over allow.
- * - "inherit" falls back to role default.
+ * Baseline capability set used to decide whether an invitation targets a
+ * non-privileged member. Roles whose capabilities fit inside this set can be
+ * granted by anyone allowed to invite; anything broader requires
+ * company:manage_roles.
  */
-export function resolveEffectiveCapabilities(
-  role: Role,
-  overrides: readonly OverrideEntry[]
-): Set<Capability> {
-  const allowed = new Set<Capability>(defaultRoleCapabilities[role]);
-
-  // Group overrides by capability, only considering known capabilities
-  const overrideMap = new Map<Capability, Array<"allow" | "deny" | "inherit">>();
-  for (const entry of overrides) {
-    if (!isKnownCapability(entry.capability)) continue;
-    const list = overrideMap.get(entry.capability);
-    if (list) {
-      list.push(entry.effect);
-    } else {
-      overrideMap.set(entry.capability, [entry.effect]);
-    }
-  }
-
-  for (const [cap, effects] of overrideMap.entries()) {
-    if (effects.includes("deny")) {
-      allowed.delete(cap);
-    } else if (effects.includes("allow")) {
-      allowed.add(cap);
-    } else if (effects.includes("inherit")) {
-      // Revert to role default
-      if (defaultRoleCapabilities[role].includes(cap)) {
-        allowed.add(cap);
-      } else {
-        allowed.delete(cap);
-      }
-    }
-  }
-
-  return allowed;
-}
+export const baselineInvitationCapabilities: readonly Capability[] = defaultRoleCapabilities.Employee;
 
 export type ScopeLevel = "any" | "company" | "managed" | "self";
 
@@ -267,7 +236,7 @@ export const capabilityLabels: Record<Capability, string> = {
   "company:manage_departments": "Manage departments",
   "company:invite_users": "Invite users",
   "company:manage_users": "Manage users",
-  "company:manage_permissions": "Manage permissions",
+  "company:manage_roles": "Manage roles",
   "company:view_audit_log": "View audit log",
   "ai:use": "Use AI features",
 };
@@ -355,7 +324,7 @@ export const capabilityGroups: { title: string; capabilities: Capability[] }[] =
       "company:manage_departments",
       "company:invite_users",
       "company:manage_users",
-      "company:manage_permissions",
+      "company:manage_roles",
       "company:view_audit_log",
     ],
   },

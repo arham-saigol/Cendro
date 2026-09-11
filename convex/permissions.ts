@@ -3,9 +3,11 @@ import { ConvexError } from "convex/values";
 import type { Doc, Id, TableNames } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import {
-  resolveEffectiveCapabilities,
+  defaultRoleNames,
+  defaultRoleCapabilities,
+  isKnownCapability,
+  legacyRoleCapabilities,
   type Capability,
-  type Role,
 } from "../src/lib/permissions";
 import { isPlatformAdmin } from "../src/lib/platform-admin";
 import { normalizeEmail } from "./validation";
@@ -61,12 +63,59 @@ export async function currentUser(ctx: Ctx) {
   return { identity, user };
 }
 
-export type { Role };
-export type OverrideChange = {
-  membershipId: Id<"companyMemberships">;
-  capability: Capability;
-  effect: "allow" | "deny" | "inherit";
-};
+export async function roleDocByName(
+  ctx: Ctx,
+  companyId: Id<"companies">,
+  name: string
+) {
+  return await ctx.db
+    .query("roles")
+    .withIndex("by_company_and_name", (q) => q.eq("companyId", companyId).eq("name", name))
+    .unique();
+}
+
+export function roleDocCapabilities(role: Doc<"roles">) {
+  return new Set(role.capabilities.filter(isKnownCapability) as Capability[]);
+}
+
+export async function roleNameCapabilities(
+  ctx: Ctx,
+  companyId: Id<"companies">,
+  roleName: string,
+  cache?: Map<string, Promise<Set<Capability>>>
+) {
+  const cached = cache?.get(roleName);
+  if (cached) return await cached;
+  const promise = (async () => {
+    const doc = await roleDocByName(ctx, companyId, roleName);
+    return doc ? roleDocCapabilities(doc) : new Set(legacyRoleCapabilities(roleName));
+  })();
+  cache?.set(roleName, promise);
+  return await promise;
+}
+
+/**
+ * Inserts the default Admin/Manager/Employee role documents for a company
+ * that does not have any roles yet. Idempotent and never resurrects roles an
+ * admin deliberately removed.
+ */
+export async function ensureDefaultRoles(ctx: MutationCtx, companyId: Id<"companies">) {
+  const existing = await ctx.db
+    .query("roles")
+    .withIndex("by_company", (q) => q.eq("companyId", companyId))
+    .first();
+  if (existing) return;
+  const now = Date.now();
+  for (const name of defaultRoleNames) {
+    await ctx.db.insert("roles", {
+      companyId,
+      name,
+      capabilities: defaultRoleCapabilities[name],
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+}
 
 export function cleanNamePart(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -115,84 +164,44 @@ export function memberFullName(
 }
 
 export async function membershipCapabilities(ctx: Ctx, m: Doc<"companyMemberships">) {
-  const overrides = await ctx.db
-    .query("permissionOverrides")
-    .withIndex("by_membership", (q) => q.eq("membershipId", m._id))
-    .take(500);
-  return resolveEffectiveCapabilities(
-    m.role,
-    overrides.map((o) => ({ capability: o.capability, effect: o.effect }))
-  );
+  return await roleNameCapabilities(ctx, m.companyId, m.role);
 }
 
-export async function effectiveCapsAfter(
-  ctx: Ctx,
-  membership: Doc<"companyMemberships">,
-  nextRole?: Role,
-  overrides: OverrideChange[] = []
-) {
-  const rows = await ctx.db
-    .query("permissionOverrides")
-    .withIndex("by_membership", (q) => q.eq("membershipId", membership._id))
-    .take(500);
-  const changes = overrides.filter((override) => override.membershipId === membership._id);
-  const combinedOverrides: Array<{ capability: string; effect: "allow" | "deny" | "inherit" }> = [];
+export type RoleManagerChange = {
+  /** Memberships whose role name is about to change. */
+  roleChanges?: ReadonlyMap<Id<"companyMemberships">, string>;
+  /** Memberships whose active flag is about to change. */
+  activeChanges?: ReadonlyMap<Id<"companyMemberships">, boolean>;
+  /** Capability overrides for role names being edited (role name -> next capabilities). */
+  capabilityChanges?: ReadonlyMap<string, readonly string[]>;
+};
 
-  for (const row of rows) {
-    if (!changes.some((c) => c.capability === row.capability)) {
-      combinedOverrides.push({ capability: row.capability, effect: row.effect });
-    }
-  }
-  for (const change of changes) {
-    combinedOverrides.push(change);
-  }
-
-  return resolveEffectiveCapabilities(nextRole ?? membership.role, combinedOverrides);
-}
-
-export async function assertPermissionManagerRemains(
+/**
+ * Guarantees at least one active member retains the role-management
+ * capability after the supplied pending changes. Must run inside the same
+ * transaction as the mutation it guards.
+ */
+export async function assertRoleManagerRemains(
   ctx: Ctx,
   companyId: Id<"companies">,
-  changedMembershipId: Id<"companyMemberships">,
-  nextRole?: Role,
-  override?: OverrideChange | OverrideChange[],
-  nextActive?: boolean
+  change: RoleManagerChange = {}
 ) {
-  const overrides = override ? (Array.isArray(override) ? override : [override]) : [];
   const memberships = await ctx.db
     .query("companyMemberships")
     .withIndex("by_company", (q) => q.eq("companyId", companyId))
     .take(500);
+  const capCache = new Map<string, Promise<Set<Capability>>>();
   for (const membership of memberships) {
-    const isActive = membership._id === changedMembershipId ? (nextActive ?? true) : membership.active;
+    const isActive = change.activeChanges?.get(membership._id) ?? membership.active;
     if (!isActive) continue;
-    const caps = await effectiveCapsAfter(
-      ctx,
-      membership,
-      membership._id === changedMembershipId ? nextRole : undefined,
-      overrides
-    );
-    if (caps.has("company:manage_permissions")) return;
+    const roleName = change.roleChanges?.get(membership._id) ?? membership.role;
+    const pendingCaps = change.capabilityChanges?.get(roleName);
+    const caps = pendingCaps
+      ? new Set(pendingCaps.filter(isKnownCapability) as Capability[])
+      : await roleNameCapabilities(ctx, companyId, roleName, capCache);
+    if (caps.has("company:manage_roles")) return;
   }
-  throw new ConvexError("At least one active member must be able to manage permissions.");
-}
-
-export async function assertPermissionManagerRemainsAfterActiveChanges(
-  ctx: Ctx,
-  companyId: Id<"companies">,
-  activeChanges: Map<Id<"companyMemberships">, boolean>
-) {
-  const memberships = await ctx.db
-    .query("companyMemberships")
-    .withIndex("by_company", (q) => q.eq("companyId", companyId))
-    .take(500);
-  for (const membership of memberships) {
-    const active = activeChanges.get(membership._id) ?? membership.active;
-    if (!active) continue;
-    const caps = await membershipCapabilities(ctx, membership);
-    if (caps.has("company:manage_permissions")) return;
-  }
-  throw new ConvexError("At least one active member must be able to manage permissions.");
+  throw new ConvexError("At least one active member must be able to manage roles.");
 }
 
 export async function currentOrCreateUser(ctx: MutationCtx) {

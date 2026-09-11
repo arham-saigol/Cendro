@@ -2,7 +2,7 @@ import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { action, internalMutation, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { assertPlatformAdmin, isPlatformAdminSubject } from "./permissions";
+import { assertPlatformAdmin, ensureDefaultRoles, isPlatformAdminSubject } from "./permissions";
 import { nonEmpty, normalizeEmail } from "./validation";
 
 async function requirePlatformAdmin(ctx: { auth: { getUserIdentity: () => Promise<any> } }) {
@@ -68,6 +68,7 @@ export const createCompanyRecord = internalMutation({
       if (company && !company.deletedAt && company.name === name) return { companyId: company._id, invitationId: invitation._id, token: invitation.token };
     }
     const companyId = await ctx.db.insert("companies", { name, createdAt: now });
+    await ensureDefaultRoles(ctx, companyId);
     const token = crypto.randomUUID();
     const invitationId = await ctx.db.insert("invitations", {
       companyId,

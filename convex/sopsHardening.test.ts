@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
 import { createAuthzFixture } from "./authz.fixture";
+import { defaultRoleCapabilities } from "../src/lib/permissions";
 
 describe("SOP authorization hardening", () => {
   beforeEach(() => {
@@ -248,8 +249,12 @@ describe("SOP authorization hardening", () => {
     });
     expect(beforeList.page.length).toBe(1);
 
-    // Explicitly deny sops:view:self for employeeA1
-    await f.setOverride(f.companyA, f.employee1M, "sops:view:self", "deny");
+    // Remove sops:view:self from the Employee role
+    await f.setRoleCapabilities(
+      f.companyA,
+      "Employee",
+      defaultRoleCapabilities.Employee.filter((capability) => capability !== "sops:view:self"),
+    );
 
     // Employee cannot list rows anymore
     const afterRows = await f.asUser("employeeA1").query(api.sops.listRows, {
@@ -267,9 +272,12 @@ describe("SOP authorization hardening", () => {
   test("Task or analytics capabilities do not widen SOP managed scope or filter options", async () => {
     const f = await createAuthzFixture();
 
-    // Grant managerA tasks:jd:view:any and analytics:view:company
-    await f.setOverride(f.companyA, f.managerM, "tasks:jd:view:any", "allow");
-    await f.setOverride(f.companyA, f.managerM, "analytics:view:company", "allow");
+    // Grant the Manager role tasks:jd:view:any and analytics:view:company
+    await f.setRoleCapabilities(f.companyA, "Manager", [
+      ...defaultRoleCapabilities.Manager,
+      "tasks:jd:view:any",
+      "analytics:view:company",
+    ]);
 
     // Get filter options for managerA
     const filters = await f.asUser("managerA").query(api.sops.filterOptions, {
@@ -302,9 +310,12 @@ describe("SOP authorization hardening", () => {
   test("Manager with sops:view:company and sops:manage:user cannot target users outside manager scope", async () => {
     const f = await createAuthzFixture();
 
-    // Grant managerA sops:view:company and sops:manage:user
-    await f.setOverride(f.companyA, f.managerM, "sops:view:company", "allow");
-    await f.setOverride(f.companyA, f.managerM, "sops:manage:user", "allow");
+    // Grant the Manager role sops:view:company and sops:manage:user
+    await f.setRoleCapabilities(f.companyA, "Manager", [
+      ...defaultRoleCapabilities.Manager,
+      "sops:view:company",
+      "sops:manage:user",
+    ]);
 
     // Manager can target employee1M (within manager scope)
     const validUserSopId = await f.asUser("managerA").mutation(api.sops.create, {
@@ -331,8 +342,13 @@ describe("SOP authorization hardening", () => {
       })
     ).rejects.toThrow("You can only target users in your managed scope.");
 
-    // Manager with sops:manage:company bypass CAN target any user
-    await f.setOverride(f.companyA, f.managerM, "sops:manage:company", "allow");
+    // Manager role with sops:manage:company bypass CAN target any user
+    await f.setRoleCapabilities(f.companyA, "Manager", [
+      ...defaultRoleCapabilities.Manager,
+      "sops:view:company",
+      "sops:manage:user",
+      "sops:manage:company",
+    ]);
     const bypassUserSopId = await f.asUser("managerA").mutation(api.sops.create, {
       companyId: f.companyA,
       title: "Employee 2 SOP (bypassed)",
@@ -371,7 +387,11 @@ describe("SOP authorization hardening", () => {
     expect(ids).not.toContain(branch2Sop);
     expect(ids).not.toContain(employee2Sop);
 
-    await f.setOverride(f.companyA, f.employee1M, "sops:view:self", "deny");
+    await f.setRoleCapabilities(
+      f.companyA,
+      "Employee",
+      defaultRoleCapabilities.Employee.filter((capability) => capability !== "sops:view:self"),
+    );
     const denied = await f.asUser("employeeA1").query(api.sops.listOrderingRows, {
       companyId: f.companyA,
       paginationOpts: { cursor: null, numItems: 50 },
@@ -391,7 +411,6 @@ describe("SOP authorization hardening", () => {
     const employee1Sop = await admin.mutation(api.sops.create, { companyId: f.companyA, title: "Employee 1 SOP", content: "Body", scopeType: "user", branchIds: [], departmentIds: [], userMembershipIds: [f.employee1M] });
     const employee2Sop = await admin.mutation(api.sops.create, { companyId: f.companyA, title: "Employee 2 SOP", content: "Body", scopeType: "user", branchIds: [], departmentIds: [], userMembershipIds: [f.employee2M] });
 
-    await f.setOverride(f.companyA, f.managerM, "sops:manage:company", "deny");
     const rows = await f.asUser("managerA").query(api.sops.listOrderingRows, {
       companyId: f.companyA,
       paginationOpts: { cursor: null, numItems: 50 },

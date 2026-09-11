@@ -6,7 +6,7 @@ import { internal } from "./_generated/api";
 import { internalAction } from "./_generated/server";
 
 export const sendInvitation = internalAction({
-  args: { companyId: v.id("companies"), invitationId: v.id("invitations"), email: v.string(), role: v.union(v.literal("Admin"), v.literal("Manager"), v.literal("Employee")), token: v.string() },
+  args: { companyId: v.id("companies"), invitationId: v.id("invitations"), email: v.string(), role: v.string(), token: v.string() },
   handler: async (ctx, args) => {
     const apiKey = process.env.RESEND_API_KEY;
     const from = process.env.RESEND_FROM;

@@ -4,6 +4,7 @@ import { describe, expect, test } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { createAuthzFixture } from "./authz.fixture";
+import { defaultRoleCapabilities } from "../src/lib/permissions";
 
 describe("task list preferences", () => {
   test("converts legacy keys even from field sorting and prevents an old client from overwriting the vector", async () => {
@@ -304,7 +305,11 @@ describe("task list preferences", () => {
       priority: "medium",
       assigneeMembershipIds: [f.employee1M],
     });
-    await f.setOverride(f.companyA, f.employee1M, "tasks:one_time:update:self", "deny");
+    await f.setRoleCapabilities(
+      f.companyA,
+      "Employee",
+      defaultRoleCapabilities.Employee.filter((capability) => capability !== "tasks:one_time:update:self"),
+    );
 
     await expect(f.asUser("employeeA1").mutation(api.tasks.saveListOrder, {
       companyId: f.companyA,

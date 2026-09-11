@@ -8,9 +8,10 @@ import {
   assertCanDeleteTask,
   canViewTask,
   isManagedMembership,
-  assertPermissionManagerRemains,
+  assertRoleManagerRemains,
   assertPlatformAdmin,
 } from "./permissions";
+import { defaultRoleCapabilities } from "../src/lib/permissions";
 
 describe("backend permissions hardening", () => {
   beforeEach(() => {
@@ -56,9 +57,34 @@ describe("backend permissions hardening", () => {
     expect(hasJdCreate).toBe(true);
   });
 
-  test("deny override strips capability even for Admin", async () => {
+  test("editing a role's capabilities updates every member of that role", async () => {
     const f = await createAuthzFixture();
-    await f.setOverride(f.companyA, f.adminM, "tasks:jd:create", "deny");
+    await f.setRoleCapabilities(
+      f.companyA,
+      "Employee",
+      [...defaultRoleCapabilities.Employee, "tasks:jd:create"],
+    );
+
+    const { hasJdCreate } = await f.asUser("employeeA1").run(async (ctx) => {
+      const auth = await requireCompanyAccess(ctx, f.companyA);
+      return { hasJdCreate: auth.capabilities.has("tasks:jd:create") };
+    });
+    expect(hasJdCreate).toBe(true);
+
+    const { hasJdCreate: otherHasJdCreate } = await f.asUser("employeeA2").run(async (ctx) => {
+      const auth = await requireCompanyAccess(ctx, f.companyA);
+      return { hasJdCreate: auth.capabilities.has("tasks:jd:create") };
+    });
+    expect(otherHasJdCreate).toBe(true);
+  });
+
+  test("removing a capability from a role strips it even for Admin", async () => {
+    const f = await createAuthzFixture();
+    await f.setRoleCapabilities(
+      f.companyA,
+      "Admin",
+      defaultRoleCapabilities.Admin.filter((capability) => capability !== "tasks:jd:create"),
+    );
 
     const { hasJdCreate, hasOneTimeCreate } = await f.asUser("adminA").run(async (ctx) => {
       const auth = await requireCompanyAccess(ctx, f.companyA);
@@ -69,19 +95,6 @@ describe("backend permissions hardening", () => {
     });
     expect(hasJdCreate).toBe(false);
     expect(hasOneTimeCreate).toBe(true);
-  });
-
-  test("duplicate allow and deny override ensures deny wins deterministically", async () => {
-    const f = await createAuthzFixture();
-    // Insert allow then deny
-    await f.setOverride(f.companyA, f.employee1M, "tasks:jd:create", "allow");
-    await f.setOverride(f.companyA, f.employee1M, "tasks:jd:create", "deny");
-
-    const { hasJdCreate } = await f.asUser("employeeA1").run(async (ctx) => {
-      const auth = await requireCompanyAccess(ctx, f.companyA);
-      return { hasJdCreate: auth.capabilities.has("tasks:jd:create") };
-    });
-    expect(hasJdCreate).toBe(false);
   });
 
   test("Employee can update own assigned task but cannot delete it", async () => {
@@ -276,21 +289,26 @@ describe("backend permissions hardening", () => {
     expect(visibleCrossCompany).toBe(false);
   });
 
-  test("assertPermissionManagerRemains prevents removing the last permission manager", async () => {
+  test("assertRoleManagerRemains prevents removing the last role manager", async () => {
     const f = await createAuthzFixture();
 
-    // Denying manage_permissions on sole admin in company A throws!
+    // Reassigning the sole role admin in company A throws!
     await expect(
       f.t.run(async (ctx) => {
-        await assertPermissionManagerRemains(
-          ctx,
-          f.companyA,
-          f.adminM,
-          undefined,
-          { membershipId: f.adminM, capability: "company:manage_permissions", effect: "deny" }
-        );
+        await assertRoleManagerRemains(ctx, f.companyA, {
+          roleChanges: new Map([[f.adminM, "Employee"]]),
+        });
       })
-    ).rejects.toThrow("At least one active member must be able to manage permissions.");
+    ).rejects.toThrow("At least one active member must be able to manage roles.");
+
+    // Removing manage_roles from the Admin role also throws.
+    await expect(
+      f.t.run(async (ctx) => {
+        await assertRoleManagerRemains(ctx, f.companyA, {
+          capabilityChanges: new Map([["Admin", ["tasks:comment"]]]),
+        });
+      })
+    ).rejects.toThrow("At least one active member must be able to manage roles.");
   });
 
   test("assertPlatformAdmin uses Clerk user IDs and fails closed on email", () => {

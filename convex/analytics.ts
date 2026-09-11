@@ -5,7 +5,7 @@ import { currentJdCycle } from "./taskCycles";
 import type { Doc, Id } from "./_generated/dataModel";
 import { takeWithOverflow } from "./queryLimits";
 
-type DashboardRole = "Admin" | "Manager" | "Employee";
+type DashboardScope = "company" | "managed" | "self";
 type TaskKind = "jd" | "one_time";
 type ManualStatus = "due" | "in_progress" | "completed";
 type DashboardStatus = ManualStatus | "overdue";
@@ -126,7 +126,7 @@ async function dashboardAccess(
   const caps = await membershipCapabilities(ctx, membership);
   assertAnalyticsViewAccess(caps);
 
-  const dashboardRole: DashboardRole = caps.has("analytics:view:company") ? "Admin" : caps.has("analytics:view:managed_scope") ? "Manager" : "Employee";
+  const dashboardScope: DashboardScope = caps.has("analytics:view:company") ? "company" : caps.has("analytics:view:managed_scope") ? "managed" : "self";
   const scopedIds = await analyticsScopedMembershipIds(
     ctx,
     companyId,
@@ -134,7 +134,7 @@ async function dashboardAccess(
     caps,
     () => { completeness.isTruncated = true; },
   );
-  return { membership, company, caps, dashboardRole, scopedIds };
+  return { membership, company, caps, dashboardScope, scopedIds };
 }
 
 async function loadPeople(ctx: QueryCtx, membershipIds: Set<Id<"companyMemberships">>) {
@@ -211,21 +211,21 @@ async function loadOrg(
 async function allowedOrgIds(
   ctx: QueryCtx,
   companyId: Id<"companies">,
-  dashboardRole: DashboardRole,
+  scope: DashboardScope,
   viewerMembershipId: Id<"companyMemberships">,
   org: Awaited<ReturnType<typeof loadOrg>>,
   assignedBranchIds: Set<Id<"branches">>,
   assignedDepartmentIds: Set<Id<"departments">>,
   completeness: QueryCompleteness,
 ) {
-  if (dashboardRole === "Admin") {
+  if (scope === "company") {
     return {
       branchIds: new Set(org.branches.map((branch) => branch._id)),
       departmentIds: new Set(org.departments.map((department) => department._id)),
     };
   }
 
-  if (dashboardRole === "Manager") {
+  if (scope === "managed") {
     const branchIds = new Set<Id<"branches">>();
     const departmentIds = new Set<Id<"departments">>();
     const managedBranches = await takeDashboardRows(
@@ -395,10 +395,10 @@ async function buildTasks(
   return { tasks, completionEvents, missedEvents };
 }
 
-function assertAllowedFilters(args: DashboardArgs, role: DashboardRole, scopedIds: Set<Id<"companyMemberships">>, branchIds: Set<Id<"branches">>, departmentIds: Set<Id<"departments">>, viewerId: Id<"companyMemberships">) {
+function assertAllowedFilters(args: DashboardArgs, scope: DashboardScope, scopedIds: Set<Id<"companyMemberships">>, branchIds: Set<Id<"branches">>, departmentIds: Set<Id<"departments">>, viewerId: Id<"companyMemberships">) {
   if (args.membershipId && !scopedIds.has(args.membershipId)) throw new ConvexError("Employee filter is outside your analytics scope.");
-  if (role === "Employee" && args.membershipId && args.membershipId !== viewerId) throw new ConvexError("Employee filter is outside your analytics scope.");
-  if (role === "Employee" && (args.branchId || args.departmentId)) throw new ConvexError("Team filters are not available for your dashboard.");
+  if (scope === "self" && args.membershipId && args.membershipId !== viewerId) throw new ConvexError("Employee filter is outside your analytics scope.");
+  if (scope === "self" && (args.branchId || args.departmentId)) throw new ConvexError("Team filters are not available for your dashboard.");
   if (args.branchId && !branchIds.has(args.branchId)) throw new ConvexError("Branch filter is outside your analytics scope.");
   if (args.departmentId && !departmentIds.has(args.departmentId)) throw new ConvexError("Department filter is outside your analytics scope.");
 }
@@ -555,7 +555,7 @@ export const dashboard = query({
     const allowedOrg = await allowedOrgIds(
       ctx,
       args.companyId,
-      access.dashboardRole,
+      access.dashboardScope,
       access.membership._id,
       org,
       assignments.branchIds,
@@ -563,7 +563,7 @@ export const dashboard = query({
       completeness,
     );
 
-    assertAllowedFilters(args, access.dashboardRole, access.scopedIds, allowedOrg.branchIds, allowedOrg.departmentIds, access.membership._id);
+    assertAllowedFilters(args, access.dashboardScope, access.scopedIds, allowedOrg.branchIds, allowedOrg.departmentIds, access.membership._id);
 
     const built = await buildTasks(
       ctx,
@@ -599,7 +599,7 @@ export const dashboard = query({
     const lateCompletions = completionEvents.filter((event) => event.isLate).length;
     const jdCompletions = completionEvents.filter((event) => event.kind === "jd").length;
     const jdMissedCycles = missedEvents.length;
-    const personPerformance = access.dashboardRole === "Employee" ? [] : buildPersonPerformance(filteredTasks, people, access.scopedIds);
+    const personPerformance = access.dashboardScope === "self" ? [] : buildPersonPerformance(filteredTasks, people, access.scopedIds);
     const topPerformers = personPerformance
       .filter((row) => row.assigned > 0)
       .sort((a, b) => b.completionRate - a.completionRate || b.completed - a.completed || a.overdue - b.overdue || a.name.localeCompare(b.name))
@@ -609,7 +609,7 @@ export const dashboard = query({
       .sort((a, b) => b.overdue - a.overdue || a.completionRate - b.completionRate || b.assigned - a.assigned)
       .slice(0, 5);
 
-    const branchPerformance = access.dashboardRole === "Employee" ? [] : buildOrgPerformance(
+    const branchPerformance = access.dashboardScope === "self" ? [] : buildOrgPerformance(
       filteredTasks,
       allowedOrg.branchIds,
       (id) => {
@@ -622,7 +622,7 @@ export const dashboard = query({
       if (!args.branchId) return true;
       return org.departmentById.get(id)?.branchId === args.branchId;
     }));
-    const departmentPerformance = access.dashboardRole === "Employee" ? [] : buildOrgPerformance(
+    const departmentPerformance = access.dashboardScope === "self" ? [] : buildOrgPerformance(
       filteredTasks,
       departmentIdsForPerformance,
       (id) => {
@@ -635,13 +635,13 @@ export const dashboard = query({
     const viewer = people.get(access.membership._id);
     const isTruncated = completeness.isTruncated;
 
-    const branches = access.dashboardRole === "Employee" ? [] : org.branches
+    const branches = access.dashboardScope === "self" ? [] : org.branches
       .filter((branch) => allowedOrg.branchIds.has(branch._id))
       .map((branch) => ({ _id: branch._id, name: branch.name }));
-    const departments = access.dashboardRole === "Employee" ? [] : org.departments
+    const departments = access.dashboardScope === "self" ? [] : org.departments
       .filter((department) => allowedOrg.departmentIds.has(department._id))
       .map((department) => ({ _id: department._id, branchId: department.branchId, name: department.name, branchName: org.branchById.get(department.branchId)?.name ?? "Unknown branch" }));
-    const employees = access.dashboardRole === "Employee" ? [] : Array.from(people.values())
+    const employees = access.dashboardScope === "self" ? [] : Array.from(people.values())
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((person) => {
         const orgRow = assignments.byMembership.get(person._id);
@@ -681,7 +681,7 @@ export const dashboard = query({
     return {
       isTruncated,
       reportState: isTruncated ? "incomplete" as const : "complete" as const,
-      role: access.dashboardRole,
+      scopeLevel: access.dashboardScope,
       viewer: {
         membershipId: access.membership._id,
         role: access.membership.role,
@@ -703,8 +703,8 @@ export const dashboard = query({
       filterOptions: { branches, departments, employees },
       scope: {
         people: access.scopedIds.size,
-        branches: access.dashboardRole === "Employee" ? 0 : branches.length,
-        departments: access.dashboardRole === "Employee" ? 0 : departments.length,
+        branches: access.dashboardScope === "self" ? 0 : branches.length,
+        departments: access.dashboardScope === "self" ? 0 : departments.length,
       },
       metrics: {
         totalTasks,

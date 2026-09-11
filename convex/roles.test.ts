@@ -1,10 +1,18 @@
 /// <reference types="vite/client" />
 
+import { convexTest } from "convex-test";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
+import schema from "./schema";
 import { createAuthzFixture } from "./authz.fixture";
 import { requireCompanyAccess } from "./permissions";
 import { defaultRoleCapabilities } from "../src/lib/permissions";
+
+const modules = import.meta.glob("./**/*.ts");
+
+function identity(key: string, email = `${key}@example.com`) {
+  return { tokenIdentifier: `clerk|${key}`, subject: key, issuer: "https://clerk.test", email, name: key };
+}
 
 describe("company roles", () => {
   beforeEach(() => {
@@ -238,6 +246,114 @@ describe("company roles", () => {
         role: "Employee",
       })
     ).resolves.toBeNull();
+  });
+
+  test("role rename migrates every member and invitation, even past 500 rows", async () => {
+    const t = convexTest(schema, modules);
+    const { companyId, employeeIds, lastEmployeeId } = await t.run(async (ctx) => {
+      const now = Date.now();
+      const companyId = await ctx.db.insert("companies", { name: "Big Co", createdAt: now });
+      const employeeIds = [];
+      for (let i = 0; i < 505; i++) {
+        const userId = await ctx.db.insert("appUsers", {
+          clerkSubject: `clerk|emp${i}`,
+          email: `emp${i}@example.com`,
+          firstName: `Emp${i}`,
+          createdAt: now,
+          updatedAt: now,
+        });
+        employeeIds.push(
+          await ctx.db.insert("companyMemberships", {
+            companyId,
+            userId,
+            role: "Employee",
+            active: true,
+            createdAt: now,
+            updatedAt: now,
+          })
+        );
+      }
+      const adminUserId = await ctx.db.insert("appUsers", {
+        clerkSubject: "clerk|admin",
+        email: "admin@example.com",
+        firstName: "Admin",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("companyMemberships", {
+        companyId,
+        userId: adminUserId,
+        role: "Admin",
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("invitations", {
+        companyId,
+        email: "pending@example.com",
+        role: "Employee",
+        token: "rename-pending",
+        status: "pending",
+        createdAt: now,
+        expiresAt: now + 86_400_000,
+      });
+      return { companyId, employeeIds, lastEmployeeId: employeeIds[504] };
+    });
+
+    const admin = t.withIdentity(identity("admin"));
+    // The admin sits beyond the first 500 memberships: guarded mutations must
+    // still find them instead of reporting a missing role manager.
+    await expect(
+      admin.mutation(api.roles.assign, { companyId, membershipIds: [employeeIds[0]], role: "Employee" })
+    ).resolves.toBeNull();
+
+    const employeeRoleId = await t.run(async (ctx) => {
+      const role = await ctx.db
+        .query("roles")
+        .withIndex("by_company_and_name", (q) => q.eq("companyId", companyId).eq("name", "Employee"))
+        .unique();
+      return role!._id;
+    });
+    await admin.mutation(api.roles.update, {
+      companyId,
+      roleId: employeeRoleId,
+      name: "Crew",
+      capabilities: [...defaultRoleCapabilities.Employee],
+    });
+
+    const state = await t.run(async (ctx) => {
+      const stale = await ctx.db
+        .query("companyMemberships")
+        .withIndex("by_company", (q) => q.eq("companyId", companyId))
+        .filter((q) => q.eq(q.field("role"), "Employee"))
+        .first();
+      const last = await ctx.db.get(lastEmployeeId);
+      const invite = await ctx.db
+        .query("invitations")
+        .withIndex("by_token", (q) => q.eq("token", "rename-pending"))
+        .unique();
+      return { stale: stale?._id ?? null, lastRole: last?.role, inviteRole: invite?.role };
+    });
+    expect(state.stale).toBeNull();
+    expect(state.lastRole).toBe("Crew");
+    expect(state.inviteRole).toBe("Crew");
+  });
+
+  test("roles.duplicate terminates for a maximum-length role name", async () => {
+    const f = await createAuthzFixture();
+    const longName = "R".repeat(60);
+    const roleId = await f.asUser("adminA").mutation(api.roles.create, {
+      companyId: f.companyA,
+      name: longName,
+      capabilities: ["tasks:comment"],
+    });
+    const copyId = await f.asUser("adminA").mutation(api.roles.duplicate, {
+      companyId: f.companyA,
+      roleId,
+    });
+    const copy = await f.t.run(async (ctx) => await ctx.db.get(copyId));
+    expect(copy?.name).not.toBe(longName);
+    expect(copy?.name.length ?? 0).toBeLessThanOrEqual(60);
   });
 
   test("ensureDefaults seeds the three default roles and clears legacy overrides", async () => {

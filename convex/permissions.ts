@@ -186,12 +186,10 @@ export async function assertRoleManagerRemains(
   companyId: Id<"companies">,
   change: RoleManagerChange = {}
 ) {
-  const memberships = await ctx.db
-    .query("companyMemberships")
-    .withIndex("by_company", (q) => q.eq("companyId", companyId))
-    .take(500);
   const capCache = new Map<string, Promise<Set<Capability>>>();
-  for (const membership of memberships) {
+  for await (const membership of ctx.db
+    .query("companyMemberships")
+    .withIndex("by_company", (q) => q.eq("companyId", companyId))) {
     const isActive = change.activeChanges?.get(membership._id) ?? membership.active;
     if (!isActive) continue;
     const roleName = change.roleChanges?.get(membership._id) ?? membership.role;

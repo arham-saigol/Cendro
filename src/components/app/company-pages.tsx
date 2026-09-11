@@ -2310,10 +2310,12 @@ export default function Company() {
     }
   }, [active?.company.name, active?.company.timeZone, data]);
 
+  const rolesMissing = Boolean(data && data.roles.length === 0);
+  const canSeedRoles = Boolean(active?.capabilities.includes("company:manage_roles"));
   useEffect(() => {
-    if (!activeCompanyId || !data || data.roles.length > 0) return;
+    if (!activeCompanyId || !rolesMissing || !canSeedRoles) return;
     void ensureRoles({ companyId: activeCompanyId }).catch(() => undefined);
-  }, [activeCompanyId, data, ensureRoles]);
+  }, [activeCompanyId, rolesMissing, canSeedRoles, ensureRoles]);
 
   const accessUser = useMemo(() => data?.users.find((user) => user.membership._id === accessMembershipId), [data?.users, accessMembershipId]);
   const visibleTabs = useMemo(() => TABS.filter((item) => canViewCompanyTab(item.value, active?.capabilities)), [active?.capabilities]);

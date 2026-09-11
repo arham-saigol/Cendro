@@ -33,7 +33,7 @@ async function seedCompany() {
   return { t, ...ids };
 }
 
-async function setRoleCaps({ t, companyId }: Seed, roleName: string, capabilities: Capability[]) {
+async function setRoleCaps({ t, companyId }: Pick<Seed, "t" | "companyId">, roleName: string, capabilities: Capability[]) {
   await t.run(async (ctx) => {
     const role = await ctx.db
       .query("roles")
@@ -410,10 +410,9 @@ describe("production permission and validation fixes", () => {
       await ctx.db.insert("managerBranchScopes", { companyId, managerMembershipId, branchId: managedBranchId, updatedAt: now });
       await ctx.db.insert("managerDepartmentScopes", { companyId, managerMembershipId, departmentId: managedDepartmentId, updatedAt: now });
       await ctx.db.insert("managerUserScopes", { companyId, managerMembershipId, userMembershipId: employeeMembershipId, updatedAt: now });
-      const managerRole = await ctx.db.query("roles").withIndex("by_company_and_name", (q) => q.eq("companyId", companyId).eq("name", "Manager")).unique();
-      await ctx.db.patch(managerRole!._id, { capabilities: [...managerRole!.capabilities, "sops:manage:user"], updatedAt: now });
       return { managerMembershipId, managedBranchId, unmanagedBranchId, managedDepartmentId, unmanagedDepartmentId, unmanagedUserMembershipId };
     });
+    await setRoleCaps({ t, companyId }, "Manager", [...defaultRoleCapabilities.Manager, "sops:manage:user"]);
 
     const managedBranchSopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Managed branch SOP", content: "Body", scopeType: "branch", branchIds: [managedBranchId], departmentIds: [], userMembershipIds: [] });
     const unmanagedBranchSopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Unmanaged branch SOP", content: "Body", scopeType: "branch", branchIds: [unmanagedBranchId], departmentIds: [], userMembershipIds: [] });

@@ -49,20 +49,35 @@ function cleanRoleName(value: string) {
 }
 
 async function uniqueRoleName(ctx: MutationCtx, companyId: Id<"companies">, base: string) {
-  const trimmed = base.slice(0, ROLE_NAME_LIMIT);
+  const trimmed = base.slice(0, ROLE_NAME_LIMIT).trimEnd();
   if (!(await roleDocByName(ctx, companyId, trimmed))) return trimmed;
   for (let index = 2; ; index += 1) {
-    const candidate = `${trimmed} ${index}`.slice(0, ROLE_NAME_LIMIT);
+    const suffix = ` ${index}`;
+    const candidate = `${trimmed.slice(0, ROLE_NAME_LIMIT - suffix.length)}${suffix}`;
     if (!(await roleDocByName(ctx, companyId, candidate))) return candidate;
   }
 }
 
 async function pendingInvitations(ctx: MutationCtx, companyId: Id<"companies">) {
-  return await ctx.db
+  const rows: Doc<"invitations">[] = [];
+  for await (const invitation of ctx.db
     .query("invitations")
     .withIndex("by_company", (q) => q.eq("companyId", companyId))
-    .filter((q) => q.eq(q.field("status"), "pending"))
-    .take(LIST_LIMIT);
+    .filter((q) => q.eq(q.field("status"), "pending"))) {
+    rows.push(invitation);
+  }
+  return rows;
+}
+
+async function membershipsWithRole(ctx: MutationCtx, companyId: Id<"companies">, roleName: string) {
+  const rows: Doc<"companyMemberships">[] = [];
+  for await (const membership of ctx.db
+    .query("companyMemberships")
+    .withIndex("by_company", (q) => q.eq("companyId", companyId))
+    .filter((q) => q.eq(q.field("role"), roleName))) {
+    rows.push(membership);
+  }
+  return rows;
 }
 
 /**
@@ -71,11 +86,9 @@ async function pendingInvitations(ctx: MutationCtx, companyId: Id<"companies">) 
  * deployments are cleaned automatically on first use.
  */
 async function deleteLegacyOverrideRows(ctx: MutationCtx, companyId: Id<"companies">) {
-  const memberships = await ctx.db
+  for await (const membership of ctx.db
     .query("companyMemberships")
-    .withIndex("by_company", (q) => q.eq("companyId", companyId))
-    .take(LIST_LIMIT);
-  for (const membership of memberships) {
+    .withIndex("by_company", (q) => q.eq("companyId", companyId))) {
     while (true) {
       const rows = await ctx.db
         .query("permissionOverrides")
@@ -142,11 +155,7 @@ export const update = mutation({
     if (renamed) await assertRoleNameAvailable(ctx, args.companyId, name, role._id);
 
     if (renamed) {
-      const memberships = await ctx.db
-        .query("companyMemberships")
-        .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
-        .filter((q) => q.eq(q.field("role"), role.name))
-        .take(LIST_LIMIT);
+      const memberships = await membershipsWithRole(ctx, args.companyId, role.name);
       const roleChanges = new Map(memberships.map((m) => [m._id, name]));
       await assertRoleManagerRemains(ctx, args.companyId, {
         roleChanges,
@@ -212,16 +221,20 @@ export const remove = mutation({
     const { user } = await requireCapability(ctx, args.companyId, "company:manage_roles");
     const role = await assertRole(ctx, args.companyId, args.roleId);
 
-    const members = await ctx.db
+    const member = await ctx.db
       .query("companyMemberships")
       .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
       .filter((q) => q.eq(q.field("role"), role.name))
-      .take(2);
-    if (members.length) {
+      .first();
+    if (member) {
       throw new ConvexError("Reassign members to another role before deleting this one.");
     }
-    const invitations = await pendingInvitations(ctx, args.companyId);
-    if (invitations.some((invitation) => invitation.role === role.name)) {
+    const invitation = await ctx.db
+      .query("invitations")
+      .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
+      .filter((q) => q.and(q.eq(q.field("status"), "pending"), q.eq(q.field("role"), role.name)))
+      .first();
+    if (invitation) {
       throw new ConvexError("Revoke pending invitations using this role before deleting it.");
     }
     await assertRoleManagerRemains(ctx, args.companyId, {

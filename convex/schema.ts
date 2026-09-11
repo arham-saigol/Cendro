@@ -1,6 +1,7 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 import { taskListOrderEntryValidator, taskListPreferenceValidator } from "./taskListPreferences";
+import { sopListPreferenceValidator } from "./sopListPreferences";
 
 const role = v.union(v.literal("Admin"), v.literal("Manager"), v.literal("Employee"));
 const priority = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
@@ -57,6 +58,7 @@ export default defineSchema({
   sopBranchScopes: defineTable({ companyId: v.id("companies"), sopId: v.id("sops"), branchId: v.id("branches") }).index("by_sop", ["sopId"]).index("by_branch", ["branchId"]).index("by_company", ["companyId"]).index("by_sopId_and_branchId", ["sopId", "branchId"]),
   sopDepartmentScopes: defineTable({ companyId: v.id("companies"), sopId: v.id("sops"), departmentId: v.id("departments") }).index("by_sop", ["sopId"]).index("by_department", ["departmentId"]).index("by_company", ["companyId"]).index("by_sopId_and_departmentId", ["sopId", "departmentId"]),
   sopUserScopes: defineTable({ companyId: v.id("companies"), sopId: v.id("sops"), userMembershipId: v.id("companyMemberships") }).index("by_sop", ["sopId"]).index("by_user", ["userMembershipId"]).index("by_company", ["companyId"]).index("by_sopId_and_userMembershipId", ["sopId", "userMembershipId"]),
+  sopListPreferences: defineTable(sopListPreferenceValidator).index("by_companyId_and_membershipId", ["companyId", "membershipId"]),
   sopEmbeddings: defineTable({ companyId: v.id("companies"), sopId: v.id("sops"), chunk: v.string(), embedding: v.array(v.number()), metadata: v.object({ title: v.string(), scopeType: scope }), updatedAt: v.number() }).index("by_sop", ["sopId"]).index("by_company", ["companyId"]).vectorIndex("by_embedding", { vectorField: "embedding", dimensions: 1024, filterFields: ["companyId"] }),
   auditEvents: defineTable({ companyId: v.optional(v.id("companies")), actorUserId: v.optional(v.id("appUsers")), actorEmail: v.optional(v.string()), action: v.string(), targetType: v.string(), targetId: v.optional(v.string()), metadata: v.optional(v.any()), createdAt: v.number() }).index("by_company", ["companyId"]),
   aiChatSessions: defineTable({ companyId: v.id("companies"), membershipId: v.id("companyMemberships"), title: v.optional(v.string()), hasMessages: v.optional(v.boolean()), createdAt: v.number(), updatedAt: v.number() }).index("by_membership", ["membershipId"]).index("by_membership_and_updatedAt", ["membershipId", "updatedAt"]).index("by_company", ["companyId"]),

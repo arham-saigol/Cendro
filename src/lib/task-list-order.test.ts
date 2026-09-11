@@ -1,9 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
-  mergeFilteredTaskListOrder,
-  moveTaskListId,
   restoreTaskListCustomOrder,
-  sameTaskListOrder,
   sortTaskListRows,
   taskListOrderKeyMaxLength,
   taskListOrderPositionForMove,
@@ -108,20 +105,13 @@ describe("task list ordering", () => {
     expect(sortTaskListRows(rows, "jd", { mode: "field", field: "quantity", direction: "desc" }).map((task) => task._id)).toEqual(["late", "early", "missing"]);
   });
 
-  test("restores surviving custom IDs, retains later pages, and replaces only filtered slots on reorder", () => {
+  test("restores surviving custom IDs and keeps later pages", () => {
     const rows = Array.from({ length: 201 }, (_, index) => row(String(index + 1), { recurrence: "daily", createdAt: index }));
     const customOrder = ["201", "2", "missing", "1"];
     const restored = restoreTaskListCustomOrder(rows, "jd", customOrder);
     expect(restored.slice(0, 3).map((task) => task._id)).toEqual(["201", "2", "1"]);
     expect(restored).toHaveLength(201);
     expect(customOrder).toEqual(["201", "2", "missing", "1"]);
-
-    const full = ["A", "X", "B", "Y", "C"];
-    const visible = ["A", "B", "C"];
-    const moved = moveTaskListId(visible, "C", "A");
-    expect(moved).toEqual(["C", "A", "B"]);
-    expect(mergeFilteredTaskListOrder(full, visible, moved)).toEqual(["C", "X", "A", "Y", "B"]);
-    expect(sameTaskListOrder(visible, moveTaskListId(visible, "A", "A"))).toBe(true);
   });
 
   test("rebalances repeated inserts into the same interval before producing an invalid position", () => {

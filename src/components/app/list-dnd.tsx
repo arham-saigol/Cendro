@@ -15,21 +15,21 @@ import { getWindow, parseTranslate, prefersReducedMotion } from "@dnd-kit/dom/ut
 import { Grip } from "lucide-react";
 import { useCallback, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import {
-  insertTask, resolveTaskInsertion, taskMovePoint, taskPreviewOffsets, taskReleasePoint,
-  type Point, type TaskInsertion, type TaskRowBounds,
-} from "@/lib/task-list-drag";
-import { sameTaskListOrder } from "@/lib/task-list-order";
+  insertListItem, resolveListInsertion, listMovePoint, listPreviewOffsets, listReleasePoint,
+  type Point, type ListInsertion, type ListRowBounds,
+} from "@/lib/list-drag";
+import { sameListOrder } from "@/lib/list-order";
 
 type Refs = { handleRef: (node: Element | null) => void; targetRef: (node: Element | null) => void };
 type Binding = { handle?: Element | null; target?: Element | null; refs?: Refs };
-type Layout = { rows: TaskRowBounds[]; headerHeight: number; tableLeft: number; tableWidth: number };
+type Layout = { rows: ListRowBounds[]; headerHeight: number; tableLeft: number; tableWidth: number };
 type Session = {
   sourceId: string;
   key: string;
   keyboard: boolean;
   layout: Layout;
   pointer: Point;
-  insertion: TaskInsertion | null;
+  insertion: ListInsertion | null;
   overlay: HTMLTableElement;
 };
 type Options = {
@@ -38,7 +38,7 @@ type Options = {
   disabled: boolean;
   wrapperRef: RefObject<HTMLDivElement | null>;
   bodyRef: RefObject<HTMLTableSectionElement | null>;
-  onDrop: (sourceId: string, insertion: TaskInsertion) => void;
+  onDrop: (sourceId: string, insertion: ListInsertion) => void;
 };
 
 // Only the keyboard sorting plugin is needed; React owns both the table and rail.
@@ -57,14 +57,14 @@ function layoutOffsetTop(element: HTMLElement, boundary: HTMLElement) {
   return top;
 }
 
-function measureTaskLayout(wrapper: HTMLDivElement | null, body: HTMLTableSectionElement | null): Layout | null {
+function measureListLayout(wrapper: HTMLDivElement | null, body: HTMLTableSectionElement | null): Layout | null {
   if (!wrapper || !body) return null;
   const origin = wrapper.getBoundingClientRect();
   const table = body.closest("table")!;
   const tableRect = table.getBoundingClientRect();
   return {
-    rows: [...body.querySelectorAll<HTMLTableRowElement>("tr[data-task-id]")].map((row) => ({
-      id: row.dataset.taskId!,
+    rows: [...body.querySelectorAll<HTMLTableRowElement>("tr[data-list-item-id]")].map((row) => ({
+      id: row.dataset.listItemId!,
       top: layoutOffsetTop(row, wrapper),
       height: row.offsetHeight,
     })),
@@ -79,20 +79,20 @@ function measureTaskLayout(wrapper: HTMLDivElement | null, body: HTMLTableSectio
 // any commit that lands after the session ends but before the offsets are cleared — the same
 // commit that already shows the reordered list.
 function previewRowOffsets(current: Session, nextIds: readonly string[]) {
-  const offsets = taskPreviewOffsets(current.layout.rows, nextIds);
+  const offsets = listPreviewOffsets(current.layout.rows, nextIds);
   offsets.delete(current.sourceId);
   return offsets;
 }
 
-function projectTaskDrag(current: Session, wrapper: HTMLDivElement, point: Point) {
+function projectListDrag(current: Session, wrapper: HTMLDivElement, point: Point) {
   current.pointer = point;
   const rect = wrapper.getBoundingClientRect();
   const pointer = { x: point.x - rect.left, y: point.y - rect.top };
-  current.insertion = resolveTaskInsertion(
+  current.insertion = resolveListInsertion(
     current.layout.rows, current.sourceId, pointer, { left: 0, right: rect.width },
   );
   const ids = current.layout.rows.map((row) => row.id);
-  const next = current.insertion ? insertTask(ids, current.sourceId, current.insertion) : ids;
+  const next = current.insertion ? insertListItem(ids, current.sourceId, current.insertion) : ids;
   return previewRowOffsets(current, next);
 }
 
@@ -124,7 +124,7 @@ function cloneFeedback(row: HTMLTableRowElement) {
   return table;
 }
 
-export function useTaskListDrag(options: Options) {
+export function useListDrag(options: Options) {
   const { wrapperRef, bodyRef } = options;
   const bindings = useRef(new Map<string, Binding>());
   const manager = useRef<DragDropManager | null>(null);
@@ -137,7 +137,7 @@ export function useTaskListDrag(options: Options) {
   const idsKey = JSON.stringify(options.ids);
 
   const measure = useCallback((): Layout | null => {
-    return measureTaskLayout(wrapperRef.current, bodyRef.current);
+    return measureListLayout(wrapperRef.current, bodyRef.current);
   }, [bodyRef, wrapperRef]);
 
   const clear = useCallback(() => {
@@ -184,7 +184,7 @@ export function useTaskListDrag(options: Options) {
     const current = session.current;
     const wrapper = wrapperRef.current;
     if (!current || !wrapper) return;
-    setOffsets(projectTaskDrag(current, wrapper, point));
+    setOffsets(projectListDrag(current, wrapper, point));
   }, [wrapperRef]);
 
   useLayoutEffect(() => {
@@ -199,7 +199,7 @@ export function useTaskListDrag(options: Options) {
       const current = session.current;
       if (!current) return;
       for (const entry of entries) {
-        const id = (entry.target as HTMLElement).dataset.taskId;
+        const id = (entry.target as HTMLElement).dataset.listItemId;
         const original = current.layout.rows.find((row) => row.id === id);
         if (original && Math.abs(entry.target.getBoundingClientRect().height - original.height) > 0.5) {
           cancel();
@@ -245,8 +245,8 @@ export function useTaskListDrag(options: Options) {
   const onBeforeDragStart = useCallback((event: BeforeDragStartEvent, instance: DragDropManager) => {
     const source = event.operation.source;
     const sourceId = String(source?.id);
-    const measured = measureTaskLayout(wrapperRef.current, bodyRef.current);
-    const row = [...(bodyRef.current?.rows ?? [])].find((row) => row.dataset.taskId === sourceId);
+    const measured = measureListLayout(wrapperRef.current, bodyRef.current);
+    const row = [...(bodyRef.current?.rows ?? [])].find((row) => row.dataset.listItemId === sourceId);
     if (latest.current.disabled || !source || !row || !measured || !latest.current.ids.includes(sourceId)) {
       event.preventDefault();
       return;
@@ -266,7 +266,7 @@ export function useTaskListDrag(options: Options) {
     const current = session.current;
     const wrapper = wrapperRef.current;
     if (!current || current.keyboard || !wrapper) return;
-    setOffsets(projectTaskDrag(current, wrapper, taskMovePoint(event)));
+    setOffsets(projectListDrag(current, wrapper, listMovePoint(event)));
   }, [wrapperRef]);
 
   const onDragOver = useCallback((event: DragOverEvent) => {
@@ -279,7 +279,7 @@ export function useTaskListDrag(options: Options) {
     const to = ids.indexOf(targetId);
     if (to < 0) return;
     current.insertion = targetId === current.sourceId ? null : { anchorId: targetId, edge: to < from ? "before" : "after" };
-    const next = current.insertion ? insertTask(ids, current.sourceId, current.insertion) : ids;
+    const next = current.insertion ? insertListItem(ids, current.sourceId, current.insertion) : ids;
     setOffsets(previewRowOffsets(current, next));
   }, []);
 
@@ -288,7 +288,7 @@ export function useTaskListDrag(options: Options) {
     if (!current) return;
     const valid = !event.canceled && current.key === latest.current.sessionKey && !latest.current.disabled;
     const wrapper = wrapperRef.current;
-    if (valid && !current.keyboard && wrapper) projectTaskDrag(current, wrapper, taskReleasePoint(event));
+    if (valid && !current.keyboard && wrapper) projectListDrag(current, wrapper, listReleasePoint(event));
     const insertion = current.insertion;
     const ids = current.layout.rows.map((row) => row.id);
     if (!current.keyboard) {
@@ -298,7 +298,7 @@ export function useTaskListDrag(options: Options) {
     session.current = null;
     setActive(false);
     setOffsets(new Map());
-    if (valid && insertion && !sameTaskListOrder(ids, insertTask(ids, current.sourceId, insertion))) {
+    if (valid && insertion && !sameListOrder(ids, insertListItem(ids, current.sourceId, insertion))) {
       latest.current.onDrop(current.sourceId, insertion);
     }
   }, [wrapperRef]);
@@ -314,15 +314,16 @@ export function useTaskListDrag(options: Options) {
   };
 }
 
-export type TaskListDrag = ReturnType<typeof useTaskListDrag>;
+export type ListDrag = ReturnType<typeof useListDrag>;
 
-export function TaskSortableRow({
+export function ListSortableRow({
   id, index, scope, disabled, drag, children, ...props
 }: {
-  id: string; index: number; scope: string; disabled: boolean; drag: TaskListDrag;
+  id: string; index: number; scope: string; disabled: boolean; drag: ListDrag;
 } & React.ComponentProps<"tr">) {
+  // The list scope is the drag item type, so a row can only ever be dropped inside its own list.
   const { ref, handleRef, targetRef, isDragSource } = useSortable({
-    id, index, group: scope, type: "task", accept: "task", disabled,
+    id, index, group: scope, type: scope, accept: scope, disabled,
     plugins, transition: { duration: 0 },
   });
   const register = drag.register;
@@ -330,14 +331,14 @@ export function TaskSortableRow({
     register(id, { handleRef, targetRef });
     return () => register(id, null);
   }, [id, register, handleRef, targetRef]);
-  return <tr {...props} ref={ref} data-task-id={id} data-dragging={isDragSource ? "true" : undefined} style={drag.rowStyle(id)}>{children}</tr>;
+  return <tr {...props} ref={ref} data-list-item-id={id} data-dragging={isDragSource ? "true" : undefined} style={drag.rowStyle(id)}>{children}</tr>;
 }
 
-export function TaskDragRailRow({
+export function ListDragRailRow({
   id, label, disabled, disabledReason, checked, drag, children,
 }: {
   id: string; label: string; disabled: boolean; disabledReason?: string; checked: boolean;
-  drag: TaskListDrag; children: ReactNode;
+  drag: ListDrag; children: ReactNode;
 }) {
   const attach = drag.attach;
   const handleRef = useCallback((node: HTMLButtonElement | null) => attach(id, "handle", node), [attach, id]);
@@ -371,7 +372,7 @@ const DROPPING_ATTRIBUTE = "data-dnd-dropping";
 // its target. Settle the clone on that row's committed position explicitly instead, measured after
 // React has reordered the list, and release the !important translate rule the overlay is pinned by.
 const animateOverlayToSource: DropAnimationFunction = ({ source, feedbackElement, translate }) => {
-  const row = document.querySelector<HTMLTableRowElement>(`tr[data-task-id="${CSS.escape(String(source.id))}"]`);
+  const row = document.querySelector<HTMLTableRowElement>(`tr[data-list-item-id="${CSS.escape(String(source.id))}"]`);
   if (!row) return;
   const from = feedbackElement.getBoundingClientRect();
   const to = row.getBoundingClientRect();
@@ -393,7 +394,7 @@ const animateOverlayToSource: DropAnimationFunction = ({ source, feedbackElement
   });
 };
 
-export function TaskListDragOverlay({ table }: { table: HTMLTableElement | null }) {
+export function ListDragOverlay({ table }: { table: HTMLTableElement | null }) {
   const ref = useCallback((node: HTMLDivElement | null) => {
     if (node && table) node.replaceChildren(table);
   }, [table]);

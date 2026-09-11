@@ -1,9 +1,11 @@
-import { paginationOptsValidator } from "convex/server";
+import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import { action, internalAction, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { Capability } from "../src/lib/permissions";
+import { sopListOrderLimit, sopListOrderMaxSerializedBytes } from "../src/lib/sop-list-sort";
+import { sopListPreferenceResultValidator, sopListSortValidator } from "./sopListPreferences";
 import { buildSopVisibilityContext, getManagedMembershipIds, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds, sopDeleteCapability, sopManageCapability, visibleSop, visibleSopForSelf, type SopVisibilityContext } from "./permissions";
 import { nonEmpty } from "./validation";
 import { nextReference } from "./references";
@@ -221,6 +223,169 @@ export const list = query({
 export const listRows = query({
   args: { companyId: v.id("companies"), search: v.optional(v.string()), view: v.optional(sopViewValidator), scope: v.optional(sopScopeFilterValidator), branchId: v.optional(v.id("branches")), userMembershipId: v.optional(v.id("companyMemberships")) },
   handler: async (ctx, args) => await filteredSopRows(ctx, { ...args, limit: 200 }),
+});
+
+// The list sorts and orders SOPs in the browser, so it reads every authorized SOP through
+// bounded pages and filters locally instead of letting the server drop rows it never saw.
+export const listOrderingRows = query({
+  args: { companyId: v.id("companies"), paginationOpts: paginationOptsValidator },
+  returns: paginationResultValidator(v.any()),
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const company = await ctx.db.get(args.companyId);
+    const caps = await membershipCapabilities(ctx, membership);
+    const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
+    const page = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
+    const departmentBranches = new Map<Id<"departments">, Id<"branches"> | null>();
+    const authorizedRows = [];
+    for (const sop of page.page) {
+      if (!(await visibleSop(ctx, args.companyId, membership, sop, visibility, caps))) continue;
+      const row = await withScopes(ctx, sop, membership, company?.name, caps);
+      const filterBranchIds: Id<"branches">[] = [];
+      if (sop.scopeType === "branch") {
+        filterBranchIds.push(...row.branchIds);
+      } else if (sop.scopeType === "department") {
+        for (const departmentId of row.departmentIds) {
+          if (!departmentBranches.has(departmentId)) {
+            const department = await ctx.db.get(departmentId);
+            departmentBranches.set(departmentId, department?.companyId === args.companyId ? department.branchId : null);
+          }
+          const branchId = departmentBranches.get(departmentId) ?? null;
+          if (branchId) filterBranchIds.push(branchId);
+        }
+      }
+      authorizedRows.push({
+        ...row,
+        // The self capability is checked here because visibleSopForSelf alone does not enforce it.
+        matchesMyView: caps.has("sops:view:self") && (await visibleSopForSelf(ctx, args.companyId, membership, sop)),
+        filterBranchIds,
+      });
+    }
+    return { ...page, page: authorizedRows };
+  },
+});
+
+async function getSopListPreference(ctx: QueryCtx | MutationCtx, companyId: Id<"companies">, membershipId: Id<"companyMemberships">) {
+  return await ctx.db
+    .query("sopListPreferences")
+    .withIndex("by_companyId_and_membershipId", (q) => q.eq("companyId", companyId).eq("membershipId", membershipId))
+    .unique();
+}
+
+function sopListPreferenceResult(preference: Doc<"sopListPreferences"> | null) {
+  return {
+    sort: preference?.sort ?? { mode: "default" as const },
+    customOrder: preference?.customOrder ?? null,
+    revision: preference?.revision ?? 0,
+    updatedAt: preference?.updatedAt ?? null,
+  };
+}
+
+function assertExpectedSopPreferenceRevision(preference: Doc<"sopListPreferences"> | null, expectedRevision: number) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw new ConvexError("SOP list preference revision is invalid.");
+  }
+  if ((preference?.revision ?? 0) !== expectedRevision) {
+    throw new ConvexError("SOP list preference was updated. Refresh and try again.");
+  }
+}
+
+function assertSopListOrderInput(orderedIds: Id<"sops">[]) {
+  if (orderedIds.length > sopListOrderLimit) {
+    throw new ConvexError(`SOP list order can contain at most ${sopListOrderLimit} SOPs.`);
+  }
+  if (new Set(orderedIds).size !== orderedIds.length) {
+    throw new ConvexError("SOP list order contains duplicate SOP IDs.");
+  }
+  if (JSON.stringify(orderedIds).length > sopListOrderMaxSerializedBytes) {
+    throw new ConvexError("SOP list order is too large to save.");
+  }
+}
+
+// Concurrently created SOPs are appended by restoration, so the vector only has to be accessible.
+async function validateSopListOrder(
+  ctx: MutationCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  orderedIds: Id<"sops">[],
+) {
+  const caps = await membershipCapabilities(ctx, membership);
+  const visibility = await buildSopVisibilityContext(ctx, companyId, membership, caps);
+  for (const sopId of orderedIds) {
+    const sop = await ctx.db.get(sopId);
+    if (!sop || sop.companyId !== companyId || !(await visibleSop(ctx, companyId, membership, sop, visibility, caps))) {
+      throw new ConvexError("SOP not found.");
+    }
+  }
+  return orderedIds;
+}
+
+export const getListPreference = query({
+  args: { companyId: v.id("companies") },
+  returns: sopListPreferenceResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    return sopListPreferenceResult(await getSopListPreference(ctx, args.companyId, membership._id));
+  },
+});
+
+export const setListSort = mutation({
+  args: { companyId: v.id("companies"), sort: sopListSortValidator, expectedRevision: v.number() },
+  returns: sopListPreferenceResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const preference = await getSopListPreference(ctx, args.companyId, membership._id);
+    assertExpectedSopPreferenceRevision(preference, args.expectedRevision);
+    const now = Date.now();
+    const revision = args.expectedRevision + 1;
+    let preferenceId: Id<"sopListPreferences">;
+    if (preference) {
+      await ctx.db.patch(preference._id, { sort: args.sort, revision, updatedAt: now });
+      preferenceId = preference._id;
+    } else {
+      preferenceId = await ctx.db.insert("sopListPreferences", {
+        companyId: args.companyId,
+        membershipId: membership._id,
+        sort: args.sort,
+        revision,
+        updatedAt: now,
+      });
+    }
+    const saved = await ctx.db.get(preferenceId);
+    if (!saved) throw new ConvexError("SOP list preference was not saved.");
+    return sopListPreferenceResult(saved);
+  },
+});
+
+export const saveListOrder = mutation({
+  args: { companyId: v.id("companies"), orderedIds: v.array(v.id("sops")), expectedRevision: v.number() },
+  returns: sopListPreferenceResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    assertSopListOrderInput(args.orderedIds);
+    const preference = await getSopListPreference(ctx, args.companyId, membership._id);
+    assertExpectedSopPreferenceRevision(preference, args.expectedRevision);
+    const customOrder = await validateSopListOrder(ctx, args.companyId, membership, args.orderedIds);
+    const now = Date.now();
+    const revision = args.expectedRevision + 1;
+    let preferenceId: Id<"sopListPreferences">;
+    if (preference) {
+      await ctx.db.patch(preference._id, { sort: { mode: "custom" }, customOrder, revision, updatedAt: now });
+      preferenceId = preference._id;
+    } else {
+      preferenceId = await ctx.db.insert("sopListPreferences", {
+        companyId: args.companyId,
+        membershipId: membership._id,
+        sort: { mode: "custom" },
+        customOrder,
+        revision,
+        updatedAt: now,
+      });
+    }
+    const saved = await ctx.db.get(preferenceId);
+    if (!saved) throw new ConvexError("SOP list preference was not saved.");
+    return sopListPreferenceResult(saved);
+  },
 });
 
 export const get = query({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found."); const company = await ctx.db.get(args.companyId); return await withScopes(ctx, sop, membership, company?.name); } });

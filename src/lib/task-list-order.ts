@@ -1,3 +1,4 @@
+import { restoreListCustomOrder } from "./list-order";
 import {
   defaultTaskListSortDirection,
   defaultTaskListSortField,
@@ -181,20 +182,7 @@ function restoreTaskListCustomOrderBase<TRow extends TaskListOrderingRow>(
   taskType: TaskListTaskType,
   customOrder: readonly string[] | null | undefined,
 ) {
-  const rowById = new Map(rows.map((row) => [row._id, row]));
-  const restored: TRow[] = [];
-  const included = new Set<string>();
-
-  for (const id of customOrder ?? []) {
-    const row = rowById.get(id);
-    if (row && !included.has(id)) {
-      restored.push(row);
-      included.add(id);
-    }
-  }
-
-  const missing = rows.filter((row) => !included.has(row._id));
-  return [...restored, ...sortTaskListRows(missing, taskType, { mode: "default" })];
+  return restoreListCustomOrder(rows, customOrder, sortTaskListRows(rows, taskType, { mode: "default" }));
 }
 
 export function taskListCustomOrderKeys<TRow extends TaskListOrderingRow>(
@@ -357,33 +345,4 @@ export function restoreTaskListCustomOrder<TRow extends TaskListOrderingRow>(
     }
     return (baseIndexById.get(left._id) ?? 0) - (baseIndexById.get(right._id) ?? 0);
   });
-}
-
-export function moveTaskListId(
-  ids: readonly string[],
-  sourceId: string,
-  targetId: string,
-) {
-  const sourceIndex = ids.indexOf(sourceId);
-  const targetIndex = ids.indexOf(targetId);
-  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return [...ids];
-  const next = [...ids];
-  const [moved] = next.splice(sourceIndex, 1);
-  next.splice(targetIndex, 0, moved);
-  return next;
-}
-
-export function mergeFilteredTaskListOrder(
-  fullOrder: readonly string[],
-  filteredIds: readonly string[],
-  nextFilteredIds: readonly string[],
-) {
-  const filtered = new Set(filteredIds);
-  const next = [...nextFilteredIds];
-  let nextIndex = 0;
-  return fullOrder.map((id) => (filtered.has(id) ? next[nextIndex++] ?? id : id));
-}
-
-export function sameTaskListOrder(left: readonly string[], right: readonly string[]) {
-  return left.length === right.length && left.every((id, index) => id === right[index]);
 }

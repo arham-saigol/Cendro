@@ -3,7 +3,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
-  ArrowDown,
   ArrowUp,
   CalendarClock,
   CalendarDays,
@@ -39,17 +38,17 @@ import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
 import { TaskImportExportMenu } from "./task-import-dialog";
 import { TaskRail, useTaskRailAutoScroll } from "./task-rail-scroll";
-import { TaskDragRailRow, TaskListDragOverlay, TaskSortableRow, useTaskListDrag, type TaskListDrag } from "./task-list-dnd";
-import { TaskListPreferenceController, type TaskListPreference } from "@/lib/task-list-preference-controller";
-import { insertTask } from "@/lib/task-list-drag";
+import { ListDragOverlay, ListDragRailRow, ListSortableRow, useListDrag, type ListDrag } from "./list-dnd";
+import { ListSortHeader } from "./list-sort-header";
+import { ListPreferenceController, type ListPreference, type ListPreferenceControllerOptions } from "@/lib/list-preference-controller";
+import { mergeFilteredListOrder, sameListOrder } from "@/lib/list-order";
+import { insertListItem } from "@/lib/list-drag";
 import { downloadBlob, exportTaskWorkbook } from "@/lib/task-import/workbook";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
-  mergeFilteredTaskListOrder,
   restoreTaskListCustomOrder,
-  sameTaskListOrder,
   sortTaskListRows,
   type TaskListOrderingRow,
 } from "@/lib/task-list-order";
@@ -144,6 +143,11 @@ const manualStatuses: { value: ManualStatus; label: string }[] = [
   { value: "in_progress", label: "In Progress" },
   { value: "completed", label: "Completed" },
 ];
+
+const taskListPreferenceMessages: ListPreferenceControllerOptions = {
+  conflict: "Task order changed in another session. Please repeat the move.",
+  saveFailed: "Could not save task order.",
+};
 
 const toneClasses: Record<string, string> = {
   blue: "bg-[var(--badge-blue-bg)] text-[var(--badge-blue-fg)]",
@@ -654,48 +658,12 @@ function taskSortDirectionForField(
   return null;
 }
 
-function TaskSortHeader({
-  taskType,
-  field,
-  label,
-  icon,
-  sort,
-  disabled,
-  className,
-  onSelect,
-}: {
-  taskType: TaskListTaskType;
-  field: TaskListSortField;
-  label: string;
-  icon: ReactNode;
-  sort: TaskListSort;
-  disabled: boolean;
-  className?: string;
-  onSelect: (field: TaskListSortField) => void;
-}) {
+function taskSortDirections(taskType: TaskListTaskType, sort: TaskListSort, field: TaskListSortField) {
   const direction = taskSortDirectionForField(taskType, sort, field);
-  const nextDirection = direction === "asc" ? "descending" : "ascending";
-  return (
-    <th
-      scope="col"
-      aria-sort={direction === "asc" ? "ascending" : direction === "desc" ? "descending" : "none"}
-      className={cn("task-sort-header", className)}
-    >
-      <button
-        type="button"
-        className="task-sort-header-button"
-        data-active={direction ? "true" : undefined}
-        disabled={disabled}
-        onClick={() => onSelect(field)}
-        aria-label={direction ? `Sort by ${label}, currently ${direction === "asc" ? "ascending" : "descending"}. Activate to sort ${nextDirection}.` : `Sort by ${label} ascending.`}
-      >
-        <span className="inline-flex min-w-0 items-center gap-1.5">{icon}{label}</span>
-        <span className="task-sort-icon" aria-hidden="true">
-          {direction === "desc" ? <ArrowDown className="h-3.5 w-3.5" /> : <ArrowUp className="h-3.5 w-3.5" />}
-        </span>
-      </button>
-    </th>
-  );
+  const nextDirection: TaskListSortDirection = direction === null
+    ? initialTaskListSortDirection(field)
+    : direction === "asc" ? "desc" : "asc";
+  return { direction, nextDirection };
 }
 
 function SortableTaskRow({
@@ -717,12 +685,12 @@ function SortableTaskRow({
   checked: boolean;
   selected: boolean;
   rowCanEdit: boolean;
-  drag: TaskListDrag;
+  drag: ListDrag;
   onOpenDetails: () => void;
   children: ReactNode;
 }) {
   return (
-    <TaskSortableRow
+    <ListSortableRow
       id={task._id}
       index={index}
       scope={scope}
@@ -747,7 +715,7 @@ function SortableTaskRow({
       }}
     >
       {children}
-    </TaskSortableRow>
+    </ListSortableRow>
   );
 }
 
@@ -1422,7 +1390,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     api.tasks.getListPreference,
     activeCompanyId ? { companyId: activeCompanyId, taskType } : "skip",
   );
-  const subscribedPreference = useMemo<TaskListPreference | undefined>(() => {
+  const subscribedPreference = useMemo<ListPreference<TaskListSort> | undefined>(() => {
     if (!preferenceResult) return undefined;
     return {
       sort: preferenceResult.sort as TaskListSort,
@@ -1439,14 +1407,19 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const deleteOneTimeBulk = useMutation(api.tasks.deleteOneTimeBulk);
   const setListSort = useMutation(api.tasks.setListSort);
   const saveListOrder = useMutation(api.tasks.saveListOrder);
-  const [preferenceController] = useState(() => new TaskListPreferenceController(async (command) => {
+  const [preferenceController] = useState(() => new ListPreferenceController<TaskListSort>(async (command) => {
     if (!activeCompanyId) throw new Error("No active company.");
     const args = { companyId: activeCompanyId, taskType, expectedRevision: command.expectedRevision };
     const saved = command.orderedIds !== undefined
       ? await saveListOrder({ ...args, orderedIds: command.orderedIds })
       : await setListSort({ ...args, sort: command.sort });
-    return { ...saved, customOrder: saved.customOrder?.map(String) ?? null };
-  }));
+    return {
+      sort: saved.sort as TaskListSort,
+      customOrder: saved.customOrder?.map(String) ?? null,
+      orderFormat: saved.orderFormat,
+      revision: saved.revision,
+    };
+  }, taskListPreferenceMessages));
   const preferenceState = useSyncExternalStore(preferenceController.subscribe, preferenceController.getSnapshot, preferenceController.getSnapshot);
   const preferencePending = preferenceState.pending;
   useLayoutEffect(() => {
@@ -1538,7 +1511,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     ]),
     [preferenceScope, preferenceState.dragVersion, search, effectiveTaskView, frequency, priorityFilter, statusFilter, assigneeFilter, filteredTasks, orderedTasks],
   );
-  const drag = useTaskListDrag({
+  const drag = useListDrag({
     ids: visibleIds,
     sessionKey: dragSessionKey,
     disabled: dragDisabled,
@@ -1546,10 +1519,10 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     bodyRef: taskDragBodyRef,
     onDrop(sourceId, insertion) {
       const visible = filteredTasks.map((task) => task._id);
-      const nextVisible = insertTask(visible, sourceId, insertion);
-      if (sameTaskListOrder(visible, nextVisible)) return;
+      const nextVisible = insertListItem(visible, sourceId, insertion);
+      if (sameListOrder(visible, nextVisible)) return;
       const baseline = restoreTaskListCustomOrder(allTasks, taskType, activePreference?.customOrder, taskOrderKeys).map((task) => task._id);
-      preferenceController.saveOrder(mergeFilteredTaskListOrder(baseline, visible, nextVisible));
+      preferenceController.saveOrder(mergeFilteredListOrder(baseline, visible, nextVisible));
     },
   });
 
@@ -1953,23 +1926,23 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
           <thead>
             {kind === "jd" ? (
               <tr>
-                <TaskSortHeader taskType={taskType} field="code" label="CODE" icon={<Hash className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="w-[92px] whitespace-nowrap" />
-                <TaskSortHeader taskType={taskType} field="title" label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="min-w-[200px] max-w-[250px]" />
-                {showFrequencyColumn && <TaskSortHeader taskType={taskType} field="frequency" label="FREQUENCY" icon={<FrequencyIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />}
-                {showAssigneeColumn && <TaskSortHeader taskType={taskType} field="user" label="ASSIGNED TO" icon={<UsersIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />}
+                <ListSortHeader {...taskSortDirections(taskType, activeSort, "code")} label="CODE" icon={<Hash className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("code")} className="w-[92px] whitespace-nowrap" />
+                <ListSortHeader {...taskSortDirections(taskType, activeSort, "title")} label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("title")} className="min-w-[200px] max-w-[250px]" />
+                {showFrequencyColumn && <ListSortHeader {...taskSortDirections(taskType, activeSort, "frequency")} label="FREQUENCY" icon={<FrequencyIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("frequency")} />}
+                {showAssigneeColumn && <ListSortHeader {...taskSortDirections(taskType, activeSort, "user")} label="ASSIGNED TO" icon={<UsersIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("user")} />}
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />TIME</span></th>
-                <TaskSortHeader taskType={taskType} field="quantity" label="QUANTITY" icon={<QuantityIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />
+                <ListSortHeader {...taskSortDirections(taskType, activeSort, "quantity")} label="QUANTITY" icon={<QuantityIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("quantity")} />
               </tr>
             ) : (
               <tr>
-                <TaskSortHeader taskType={taskType} field="code" label="CODE" icon={<Hash className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="w-[92px] whitespace-nowrap" />
-                <TaskSortHeader taskType={taskType} field="title" label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} className="min-w-[200px] max-w-[250px]" />
-                {showPriorityColumn && <TaskSortHeader taskType={taskType} field="priority" label="PRIORITY" icon={<Tag className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />}
-                {showAssigneeColumn && <TaskSortHeader taskType={taskType} field="user" label="ASSIGNED TO" icon={<UsersIcon className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />}
+                <ListSortHeader {...taskSortDirections(taskType, activeSort, "code")} label="CODE" icon={<Hash className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("code")} className="w-[92px] whitespace-nowrap" />
+                <ListSortHeader {...taskSortDirections(taskType, activeSort, "title")} label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("title")} className="min-w-[200px] max-w-[250px]" />
+                {showPriorityColumn && <ListSortHeader {...taskSortDirections(taskType, activeSort, "priority")} label="PRIORITY" icon={<Tag className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("priority")} />}
+                {showAssigneeColumn && <ListSortHeader {...taskSortDirections(taskType, activeSort, "user")} label="ASSIGNED TO" icon={<UsersIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("user")} />}
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
-                <TaskSortHeader taskType={taskType} field="dateAssigned" label="DATE ASSIGNED" icon={<CalendarClock className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />
-                <TaskSortHeader taskType={taskType} field="dueDate" label="DUE DATE" icon={<CalendarDays className="h-3.5 w-3.5" />} sort={activeSort} disabled={!dataReady || preferencePending} onSelect={selectTaskSortField} />
+                <ListSortHeader {...taskSortDirections(taskType, activeSort, "dateAssigned")} label="DATE ASSIGNED" icon={<CalendarClock className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("dateAssigned")} />
+                <ListSortHeader {...taskSortDirections(taskType, activeSort, "dueDate")} label="DUE DATE" icon={<CalendarDays className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("dueDate")} />
               </tr>
             )}
           </thead>
@@ -2132,7 +2105,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
             {renderedTasks.map((task) => {
               const isChecked = selectedIds.has(task._id);
               return (
-                <TaskDragRailRow
+                <ListDragRailRow
                   key={`rail-${task._id}`}
                   id={task._id}
                   label={`Reorder ${task.reference}: ${task.title}`}
@@ -2146,12 +2119,12 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                     onCheckedChange={() => toggleOne(task._id)}
                     aria-label={isChecked ? `Unselect ${task.title}` : `Select ${task.title}`}
                   />
-                </TaskDragRailRow>
+                </ListDragRailRow>
               );
             })}
           </div>
         )}
-        <TaskListDragOverlay table={drag.overlay} />
+        <ListDragOverlay table={drag.overlay} />
         </DragDropProvider>
         </div>
         <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center py-2" aria-live="polite">

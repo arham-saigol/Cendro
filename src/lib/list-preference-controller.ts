@@ -1,40 +1,69 @@
-import { sameTaskListOrder } from "./task-list-order";
-import type { TaskListSort } from "./task-list-sort";
+import { sameListOrder } from "./list-order";
 
-export type TaskListPreference = {
-  sort: TaskListSort;
+export type ListSortLike = { mode: string };
+
+export type ListPreference<TSort extends ListSortLike> = {
+  sort: TSort;
   customOrder: string[] | null;
   orderFormat?: "vector";
   revision: number;
 };
-type Command = { sort: TaskListSort; orderedIds?: string[] };
-type Write = (command: Command & { expectedRevision: number }) => Promise<TaskListPreference>;
-type Flight = { command: Command; target: TaskListPreference; expectedRevision: number };
-type Snapshot = {
-  preference: TaskListPreference | undefined;
+
+export type ListPreferenceControllerOptions = {
+  /** Shown when another session changed the preference while a local move was in flight. */
+  conflict: string;
+  /** Fallback shown when a save fails without its own message. */
+  saveFailed: string;
+};
+
+type Command<TSort extends ListSortLike> = { sort: TSort; orderedIds?: string[] };
+type Write<TSort extends ListSortLike> = (
+  command: Command<TSort> & { expectedRevision: number },
+) => Promise<ListPreference<TSort>>;
+type Flight<TSort extends ListSortLike> = {
+  command: Command<TSort>;
+  target: ListPreference<TSort>;
+  expectedRevision: number;
+};
+type Snapshot<TSort extends ListSortLike> = {
+  preference: ListPreference<TSort> | undefined;
   pending: boolean;
   sorting: boolean;
   dragVersion: number;
   error: string | null;
 };
 
-function samePreference(left: TaskListPreference, right: TaskListPreference) {
+function samePreference<TSort extends ListSortLike>(
+  left: ListPreference<TSort>,
+  right: ListPreference<TSort>,
+) {
   return JSON.stringify(left.sort) === JSON.stringify(right.sort) &&
     left.orderFormat === right.orderFormat &&
     (left.customOrder === null || right.customOrder === null
       ? left.customOrder === right.customOrder
-      : sameTaskListOrder(left.customOrder, right.customOrder));
+      : sameListOrder(left.customOrder, right.customOrder));
+}
+
+// The controller owns every custom-order save, so it is the one place that knows a manual move
+// always means custom mode, whatever union of sorts the caller subscribes to.
+function customSort<TSort extends ListSortLike>() {
+  return { mode: "custom" } as TSort;
 }
 
 /** One in-flight save and one latest desired order. Conflicts discard dependent work. */
-export class TaskListPreferenceController {
-  private server: TaskListPreference | undefined;
-  private flight: Flight | null = null;
-  private queued: Command | null = null;
+export class ListPreferenceController<TSort extends ListSortLike> {
+  private server: ListPreference<TSort> | undefined;
+  private flight: Flight<TSort> | null = null;
+  private queued: Command<TSort> | null = null;
   private listeners = new Set<() => void>();
-  private snapshot: Snapshot = { preference: undefined, pending: false, sorting: false, dragVersion: 0, error: null };
+  private snapshot: Snapshot<TSort> = {
+    preference: undefined, pending: false, sorting: false, dragVersion: 0, error: null,
+  };
 
-  constructor(private write: Write) {}
+  constructor(
+    private write: Write<TSort>,
+    private messages: ListPreferenceControllerOptions,
+  ) {}
 
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => {
@@ -42,18 +71,18 @@ export class TaskListPreferenceController {
     return () => { this.listeners.delete(listener); };
   };
 
-  private publish(patch: Partial<Snapshot>) {
+  private publish(patch: Partial<Snapshot<TSort>>) {
     this.snapshot = { ...this.snapshot, ...patch };
     this.listeners.forEach((listener) => listener());
   }
 
-  receive(preference: TaskListPreference) {
+  receive(preference: ListPreference<TSort>) {
     if (this.server && preference.revision <= this.server.revision) return;
     const flight = this.flight;
     this.server = preference;
     if (flight) {
       if (preference.revision === flight.expectedRevision + 1 && samePreference(preference, flight.target)) return;
-      this.fail("Task order changed in another session. Please repeat the move.");
+      this.fail(this.messages.conflict);
     } else {
       this.publish({ preference, dragVersion: this.snapshot.dragVersion + 1 });
     }
@@ -61,15 +90,15 @@ export class TaskListPreferenceController {
 
   saveOrder(orderedIds: string[]) {
     if (!this.server || this.snapshot.sorting) return;
-    this.enqueue({ sort: { mode: "custom" }, orderedIds: [...orderedIds] });
+    this.enqueue({ sort: customSort<TSort>(), orderedIds: [...orderedIds] });
   }
 
-  saveSort(sort: TaskListSort) {
+  saveSort(sort: TSort) {
     if (!this.server || this.flight || JSON.stringify(sort) === JSON.stringify(this.snapshot.preference?.sort)) return;
     this.enqueue({ sort });
   }
 
-  private target(command: Command): TaskListPreference {
+  private target(command: Command<TSort>): ListPreference<TSort> {
     return {
       ...this.server!,
       sort: command.sort,
@@ -78,7 +107,7 @@ export class TaskListPreferenceController {
     };
   }
 
-  private enqueue(command: Command) {
+  private enqueue(command: Command<TSort>) {
     this.queued = command;
     this.publish({
       preference: this.target(command), pending: true, sorting: !command.orderedIds, error: null,
@@ -96,7 +125,7 @@ export class TaskListPreferenceController {
       const saved = await this.write({ ...command, expectedRevision: flight.expectedRevision });
       if (this.flight !== flight) return;
       if (this.server.revision > saved.revision) {
-        this.fail("Task order changed in another session. Please repeat the move.");
+        this.fail(this.messages.conflict);
         return;
       }
       this.server = saved;
@@ -115,7 +144,7 @@ export class TaskListPreferenceController {
         if (this.queued) void this.flush();
         else this.publish({ preference: this.server, pending: false, sorting: false });
       } else {
-        this.fail(error instanceof Error ? error.message : "Could not save task order.");
+        this.fail(error instanceof Error ? error.message : this.messages.saveFailed);
       }
     }
   }

@@ -1,13 +1,13 @@
-export type TaskRowBounds = { id: string; top: number; height: number };
-export type TaskInsertion = { anchorId: string; edge: "before" | "after" };
+export type ListRowBounds = { id: string; top: number; height: number };
+export type ListInsertion = { anchorId: string; edge: "before" | "after" };
 export type Point = { x: number; y: number };
 
-export function resolveTaskInsertion(
-  rows: readonly TaskRowBounds[],
+export function resolveListInsertion(
+  rows: readonly ListRowBounds[],
   sourceId: string,
   pointer: Point,
   envelope: { left: number; right: number },
-): TaskInsertion | null {
+): ListInsertion | null {
   const first = rows[0];
   const last = rows.at(-1);
   if (!first || !last || !rows.some((row) => row.id === sourceId)) return null;
@@ -24,10 +24,10 @@ export function resolveTaskInsertion(
   return preceding ? { anchorId: preceding.id, edge: "after" } : null;
 }
 
-export function insertTask(
+export function insertListItem(
   ids: readonly string[],
   sourceId: string,
-  insertion: TaskInsertion,
+  insertion: ListInsertion,
 ): string[] {
   if (!ids.includes(sourceId) || sourceId === insertion.anchorId || !ids.includes(insertion.anchorId)) return [...ids];
   const next = ids.filter((id) => id !== sourceId);
@@ -35,7 +35,7 @@ export function insertTask(
   return next;
 }
 
-export function taskPreviewOffsets(rows: readonly TaskRowBounds[], nextIds: readonly string[]) {
+export function listPreviewOffsets(rows: readonly ListRowBounds[], nextIds: readonly string[]) {
   const byId = new Map(rows.map((row) => [row.id, row]));
   const offsets = new Map<string, number>();
   let top = rows[0]?.top ?? 0;
@@ -52,14 +52,14 @@ export function taskPreviewOffsets(rows: readonly TaskRowBounds[], nextIds: read
 }
 
 // dragmove is dispatched before operation.position is updated by dnd-kit.
-export function taskMovePoint(event: { to?: Point; by?: Partial<Point>; operation: { position: { current: Point } } }): Point {
+export function listMovePoint(event: { to?: Point; by?: Partial<Point>; operation: { position: { current: Point } } }): Point {
   return event.to ?? {
     x: event.operation.position.current.x + (event.by?.x ?? 0),
     y: event.operation.position.current.y + (event.by?.y ?? 0),
   };
 }
 
-export function taskReleasePoint(event: { nativeEvent?: Event; operation: { position: { current: Point } } }): Point {
+export function listReleasePoint(event: { nativeEvent?: Event; operation: { position: { current: Point } } }): Point {
   const native = event.nativeEvent;
   if (native && "clientX" in native && "clientY" in native &&
       typeof native.clientX === "number" && typeof native.clientY === "number") {

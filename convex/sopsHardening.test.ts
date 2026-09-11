@@ -344,5 +344,167 @@ describe("SOP authorization hardening", () => {
     });
     expect(bypassUserSopId).toBeDefined();
   });
+
+  test("Ordering rows expose only self-view SOPs and deny all of them without sops:view:self", async () => {
+    const f = await createAuthzFixture();
+    const admin = f.asUser("adminA");
+    const create = (title: string, scopeType: "company" | "branch" | "user", scopeArgs: { branchIds?: [typeof f.branchA1]; userMembershipIds?: [typeof f.employee1M] } = {}) => admin.mutation(api.sops.create, {
+      companyId: f.companyA,
+      title,
+      content: `${title} body`,
+      scopeType,
+      branchIds: scopeArgs.branchIds ?? [],
+      departmentIds: [],
+      userMembershipIds: scopeArgs.userMembershipIds ?? [],
+    });
+    const companySop = await create("Company SOP", "company");
+    const branch1Sop = await create("Branch 1 SOP", "branch", { branchIds: [f.branchA1] });
+    const branch2Sop = await create("Branch 2 SOP", "branch", { branchIds: [f.branchA2] });
+    const employee2Sop = await create("Employee 2 SOP", "user", { userMembershipIds: [f.employee2M] });
+
+    const rows = await f.asUser("employeeA1").query(api.sops.listOrderingRows, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: null, numItems: 50 },
+    });
+    const ids = rows.page.map((row) => row._id);
+    expect(ids).toEqual(expect.arrayContaining([companySop, branch1Sop]));
+    expect(ids).not.toContain(branch2Sop);
+    expect(ids).not.toContain(employee2Sop);
+
+    await f.setOverride(f.companyA, f.employee1M, "sops:view:self", "deny");
+    const denied = await f.asUser("employeeA1").query(api.sops.listOrderingRows, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: null, numItems: 50 },
+    });
+    expect(denied.page).toEqual([]);
+    expect(denied.isDone).toBe(true);
+  });
+
+  test("Ordering rows stay inside a manager's managed scope and mark My-view rows", async () => {
+    const f = await createAuthzFixture();
+    const admin = f.asUser("adminA");
+    const companySop = await admin.mutation(api.sops.create, { companyId: f.companyA, title: "Company SOP", content: "Body", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
+    const branch1Sop = await admin.mutation(api.sops.create, { companyId: f.companyA, title: "Branch 1 SOP", content: "Body", scopeType: "branch", branchIds: [f.branchA1], departmentIds: [], userMembershipIds: [] });
+    const branch2Sop = await admin.mutation(api.sops.create, { companyId: f.companyA, title: "Branch 2 SOP", content: "Body", scopeType: "branch", branchIds: [f.branchA2], departmentIds: [], userMembershipIds: [] });
+    const dept1Sop = await admin.mutation(api.sops.create, { companyId: f.companyA, title: "Dept 1 SOP", content: "Body", scopeType: "department", branchIds: [], departmentIds: [f.deptA1], userMembershipIds: [] });
+    const dept2Sop = await admin.mutation(api.sops.create, { companyId: f.companyA, title: "Dept 2 SOP", content: "Body", scopeType: "department", branchIds: [], departmentIds: [f.deptA2], userMembershipIds: [] });
+    const employee1Sop = await admin.mutation(api.sops.create, { companyId: f.companyA, title: "Employee 1 SOP", content: "Body", scopeType: "user", branchIds: [], departmentIds: [], userMembershipIds: [f.employee1M] });
+    const employee2Sop = await admin.mutation(api.sops.create, { companyId: f.companyA, title: "Employee 2 SOP", content: "Body", scopeType: "user", branchIds: [], departmentIds: [], userMembershipIds: [f.employee2M] });
+
+    await f.setOverride(f.companyA, f.managerM, "sops:manage:company", "deny");
+    const rows = await f.asUser("managerA").query(api.sops.listOrderingRows, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: null, numItems: 50 },
+    });
+    const byId = new Map(rows.page.map((row) => [row._id, row]));
+    expect([...byId.keys()]).toEqual(expect.arrayContaining([companySop, branch1Sop, dept1Sop, employee1Sop]));
+    expect(byId.has(branch2Sop)).toBe(false);
+    expect(byId.has(dept2Sop)).toBe(false);
+    expect(byId.has(employee2Sop)).toBe(false);
+
+    // The manager has no branch, department, or user assignment of their own.
+    expect(byId.get(companySop)).toMatchObject({ matchesMyView: true, filterBranchIds: [] });
+    expect(byId.get(branch1Sop)).toMatchObject({ matchesMyView: false, filterBranchIds: [f.branchA1] });
+    expect(byId.get(dept1Sop)).toMatchObject({ matchesMyView: false, filterBranchIds: [f.branchA1] });
+    expect(byId.get(employee1Sop)).toMatchObject({ matchesMyView: false, filterBranchIds: [] });
+
+    const employeeRows = await f.asUser("employeeA1").query(api.sops.listOrderingRows, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: null, numItems: 50 },
+    });
+    const employeeById = new Map(employeeRows.page.map((row) => [row._id, row]));
+    expect(employeeById.get(companySop)).toMatchObject({ matchesMyView: true, filterBranchIds: [] });
+    expect(employeeById.get(branch1Sop)).toMatchObject({ matchesMyView: true, filterBranchIds: [f.branchA1] });
+    expect(employeeById.get(dept1Sop)).toMatchObject({ matchesMyView: true, filterBranchIds: [f.branchA1] });
+    expect(employeeById.get(companySop)?.content).toBe("Body");
+  });
+
+  test("Ordering rows paginate over more than 200 SOPs", async () => {
+    const f = await createAuthzFixture();
+    const admin = f.asUser("adminA");
+    const sopIds = await f.t.run(async (ctx) => {
+      const now = Date.now();
+      const created: string[] = [];
+      for (let index = 0; index < 205; index += 1) {
+        created.push(await ctx.db.insert("sops", {
+          companyId: f.companyA,
+          reference: `SOP-${index + 1}`,
+          title: `Procedure ${index}`,
+          content: "Body",
+          scopeType: "company",
+          creatorMembershipId: f.adminM,
+          updatedByMembershipId: f.adminM,
+          createdAt: now + index,
+          updatedAt: now + index,
+        }));
+      }
+      return created;
+    });
+
+    const firstPage = await admin.query(api.sops.listOrderingRows, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: null, numItems: 200 },
+    });
+    expect(firstPage.page).toHaveLength(200);
+    expect(firstPage.isDone).toBe(false);
+    const secondPage = await admin.query(api.sops.listOrderingRows, {
+      companyId: f.companyA,
+      paginationOpts: { cursor: firstPage.continueCursor, numItems: 200 },
+    });
+    expect(secondPage.page).toHaveLength(5);
+    expect(secondPage.isDone).toBe(true);
+    expect(new Set([...firstPage.page, ...secondPage.page].map((row) => row._id))).toEqual(new Set(sopIds));
+  });
+
+  test("Ordering rows keep the continuation across empty authorized pages", async () => {
+    const f = await createAuthzFixture();
+    const admin = f.asUser("adminA");
+    const visible: string[] = [];
+    for (const title of ["Visible 0", "Visible 1"]) {
+      visible.push(await admin.mutation(api.sops.create, {
+        companyId: f.companyA,
+        title,
+        content: `${title} body`,
+        scopeType: "company",
+        branchIds: [],
+        departmentIds: [],
+        userMembershipIds: [],
+      }));
+    }
+    for (let index = 0; index < 12; index += 1) {
+      await admin.mutation(api.sops.create, {
+        companyId: f.companyA,
+        title: `Hidden ${index}`,
+        content: "Body",
+        scopeType: "user",
+        branchIds: [],
+        departmentIds: [],
+        userMembershipIds: [f.employee2M],
+      });
+    }
+
+    const employee = f.asUser("employeeA1");
+    const collected: string[] = [];
+    let cursor: string | null = null;
+    let emptyPages = 0;
+    let pages = 0;
+    let isDone = false;
+    do {
+      const result: { page: { _id: string }[]; isDone: boolean; continueCursor: string } =
+        await employee.query(api.sops.listOrderingRows, {
+          companyId: f.companyA,
+          paginationOpts: { cursor, numItems: 5 },
+        });
+      if (result.page.length === 0) emptyPages += 1;
+      collected.push(...result.page.map((row) => row._id));
+      cursor = result.continueCursor;
+      isDone = result.isDone;
+      pages += 1;
+      if (pages > 12) throw new Error("Pagination did not finish.");
+    } while (!isDone);
+
+    expect(emptyPages).toBeGreaterThan(0);
+    expect(collected.sort()).toEqual([...visible].sort());
+  });
 });
 

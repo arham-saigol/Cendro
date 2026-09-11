@@ -3,6 +3,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
+  CalendarDays,
   Check,
   ChevronDown,
   ChevronRight,
@@ -23,16 +24,34 @@ import {
   X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useMutation, useQuery, useQuery_experimental } from "convex/react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useMutation, usePaginatedQuery, useQuery, useQuery_experimental } from "convex/react";
+import { DragDropProvider } from "@dnd-kit/react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
 import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
+import { ListDragOverlay, ListDragRailRow, ListSortableRow, useListDrag, type ListDrag } from "./list-dnd";
+import { ListSortHeader } from "./list-sort-header";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { ListPreferenceController, type ListPreference, type ListPreferenceControllerOptions } from "@/lib/list-preference-controller";
+import { insertListItem } from "@/lib/list-drag";
+import { mergeFilteredListOrder, sameListOrder } from "@/lib/list-order";
+import { filterSopListRows, restoreSopListCustomOrder, sortSopListRows, type SopListOrderingRow } from "@/lib/sop-list-order";
+import {
+  defaultSopListSort,
+  defaultSopListSortDirection,
+  defaultSopListSortField,
+  initialSopListSortDirection,
+  sopListOrderLimit,
+  type SopListSort,
+  type SopListSortDirection,
+  type SopListSortField,
+} from "@/lib/sop-list-sort";
+import { sopTargetName } from "@/lib/sop-target-name";
 import { SopRichTextEditor, SopRichTextViewer } from "./sop-rich-text";
 import { cn, formatDate, initials } from "@/lib/utils";
 
@@ -141,12 +160,42 @@ function DialogSelectPicker<T extends string>({ ariaLabel, value, options, onCha
   );
 }
 
-function sopTargetName(sop: any, companyName?: string) {
-  if (typeof sop.scopeTargetName === "string" && sop.scopeTargetName.trim()) return sop.scopeTargetName;
-  if (sop.scopeType === "company") return companyName ?? "Company";
-  if (sop.scopeType === "branch") return "Unknown branch";
-  if (sop.scopeType === "department") return "Unknown department";
-  return "Unknown user";
+const SOP_PAGE_SIZE = 200;
+
+const sopListPreferenceMessages: ListPreferenceControllerOptions = {
+  conflict: "SOP order changed in another session. Please repeat the move.",
+  saveFailed: "Could not save the SOP order.",
+};
+
+type SopRow = SopListOrderingRow & {
+  reference: string;
+  title: string;
+  content: string;
+  scopeType: ScopeType;
+  branchIds: string[];
+  departmentIds: string[];
+  userMembershipIds: string[];
+  createdAt: number;
+  updatedAt: number;
+  scopeTargetUser?: SopTargetUser;
+  canUpdate?: boolean;
+  canDelete?: boolean;
+  matchesMyView?: boolean;
+  filterBranchIds?: string[];
+};
+
+function sopSortDirectionForField(sort: SopListSort, field: SopListSortField): SopListSortDirection | null {
+  if (sort.mode === "field" && sort.field === field) return sort.direction;
+  if (sort.mode === "default" && defaultSopListSortField() === field) return defaultSopListSortDirection();
+  return null;
+}
+
+function sopSortDirections(sort: SopListSort, field: SopListSortField) {
+  const direction = sopSortDirectionForField(sort, field);
+  const nextDirection: SopListSortDirection = direction === null
+    ? initialSopListSortDirection(field)
+    : direction === "asc" ? "desc" : "asc";
+  return { direction, nextDirection };
 }
 
 function firstDisplayName(user: SopTargetUser, fallback: string) {
@@ -752,11 +801,70 @@ function InlineSopTargetCell({ scopeType, targetName, targetUser, scopeOptions, 
 }
 
 export function SopList({ selectedId }: { selectedId?: string }) {
+  const { activeCompanyId, active } = useCompany();
+  return <SopListContent key={`${activeCompanyId}:${active?.membership._id}`} selectedId={selectedId} />;
+}
+
+function SortableSopRow({
+  sop,
+  index,
+  scope,
+  dragDisabled,
+  checked,
+  selected,
+  rowCanEdit,
+  drag,
+  onOpenDetails,
+  onPrefetchDetails,
+  children,
+}: {
+  sop: SopRow;
+  index: number;
+  scope: string;
+  dragDisabled: boolean;
+  checked: boolean;
+  selected: boolean;
+  rowCanEdit: boolean;
+  drag: ListDrag;
+  onOpenDetails: () => void;
+  onPrefetchDetails: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <ListSortableRow
+      id={sop._id}
+      index={index}
+      scope={scope}
+      disabled={dragDisabled}
+      drag={drag}
+      data-row="sop"
+      data-clickable={!rowCanEdit ? "true" : undefined}
+      data-selected={selected ? "true" : undefined}
+      data-checked={checked ? "true" : undefined}
+      tabIndex={!rowCanEdit ? 0 : undefined}
+      onMouseEnter={onPrefetchDetails}
+      onFocus={onPrefetchDetails}
+      onClick={(event) => {
+        if (rowCanEdit) return;
+        if ((event.target as HTMLElement).closest("[data-interactive='true']")) return;
+        onOpenDetails();
+      }}
+      onKeyDown={(event) => {
+        if (!rowCanEdit && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onOpenDetails(); }
+      }}
+    >
+      {children}
+    </ListSortableRow>
+  );
+}
+
+function SopListContent({ selectedId }: { selectedId?: string }) {
   const router = useRouter();
   const { activeCompanyId, active } = useCompany();
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const loadMoreRef = useRef<HTMLDivElement>(null);
   const [sopView, setSopView] = useState<SopView>("all");
   const [scopeFilter, setScopeFilter] = useState<SopScopeFilter>("all");
   const [branchFilter, setBranchFilter] = useState("all");
@@ -770,36 +878,135 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [pendingCell, setPendingCell] = useState<string | null>(null);
   const [optimisticRows, setOptimisticRows] = useState<Record<string, Record<string, unknown>>>({});
+  const [renderedCount, setRenderedCount] = useState(SOP_PAGE_SIZE);
   const debouncedSearch = useDebouncedValue(search);
   const canUseAllSops = Boolean(active?.capabilities.some((c) => c === "sops:view:company" || c === "sops:view:managed"));
   const effectiveSopView: SopView = canUseAllSops ? sopView : "my";
-  const sops = useQuery(api.sops.listRows, activeCompanyId ? {
-    companyId: activeCompanyId,
-    search: debouncedSearch || undefined,
-    view: effectiveSopView,
-    scope: scopeFilter,
-    branchId: branchFilter === "all" ? undefined : branchFilter as Id<"branches">,
-    userMembershipId: personFilter === "all" || effectiveSopView === "my" ? undefined : personFilter as Id<"companyMemberships">,
-  } : "skip") as any[] | undefined;
+  const queryArgs = useMemo(
+    () => (activeCompanyId ? { companyId: activeCompanyId } : "skip" as const),
+    [activeCompanyId],
+  );
+  const {
+    status: sopPageStatus,
+    results: sopPageResults,
+    loadMore: loadMoreSopPage,
+  } = usePaginatedQuery(api.sops.listOrderingRows, queryArgs, { initialNumItems: SOP_PAGE_SIZE });
+  const allSops = useMemo<SopRow[]>(
+    () => (sopPageStatus === "LoadingFirstPage" ? [] : sopPageResults),
+    [sopPageResults, sopPageStatus],
+  );
+  const preferenceResult = useQuery(api.sops.getListPreference, activeCompanyId ? { companyId: activeCompanyId } : "skip");
+  const subscribedPreference = useMemo<ListPreference<SopListSort> | undefined>(() => {
+    if (!preferenceResult) return undefined;
+    return {
+      sort: preferenceResult.sort as SopListSort,
+      customOrder: preferenceResult.customOrder?.map(String) ?? null,
+      // SOP preferences are always vectors; normalizing here keeps acknowledgement checks consistent.
+      orderFormat: "vector",
+      revision: preferenceResult.revision,
+    };
+  }, [preferenceResult]);
   const filterOptions = useQuery(api.sops.filterOptions, activeCompanyId && canUseAllSops ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const update = useMutation(api.sops.update);
   const remove = useMutation(api.sops.remove);
   const removeBulk = useMutation(api.sops.removeBulk);
-  const isLoading = sops === undefined;
-  const serverRows = useMemo(() => sops ?? [], [sops]);
-  const rows = useMemo(() => serverRows.map((sop) => ({ ...sop, ...optimisticRows[sop._id] })), [optimisticRows, serverRows]);
+  const setListSort = useMutation(api.sops.setListSort);
+  const saveListOrder = useMutation(api.sops.saveListOrder);
+  const [preferenceController] = useState(() => new ListPreferenceController<SopListSort>(async (command) => {
+    if (!activeCompanyId) throw new Error("No active company.");
+    const args = { companyId: activeCompanyId, expectedRevision: command.expectedRevision };
+    const saved = command.orderedIds !== undefined
+      ? await saveListOrder({ ...args, orderedIds: command.orderedIds as Id<"sops">[] })
+      : await setListSort({ ...args, sort: command.sort });
+    return {
+      sort: saved.sort as SopListSort,
+      customOrder: saved.customOrder?.map(String) ?? null,
+      orderFormat: "vector",
+      revision: saved.revision,
+    };
+  }, sopListPreferenceMessages));
+  const preferenceState = useSyncExternalStore(preferenceController.subscribe, preferenceController.getSnapshot, preferenceController.getSnapshot);
+  const preferencePending = preferenceState.pending;
+  useLayoutEffect(() => {
+    if (subscribedPreference) preferenceController.receive(subscribedPreference);
+  }, [preferenceController, subscribedPreference]);
+  useEffect(() => () => preferenceController.cancel(), [preferenceController]);
+  useEffect(() => {
+    if (preferenceState.error) setInlineError(preferenceState.error);
+  }, [preferenceState.error]);
+  const serverRows = allSops;
+  const rows = useMemo<SopRow[]>(
+    () => serverRows.map((sop) => ({ ...sop, ...optimisticRows[sop._id] })),
+    [optimisticRows, serverRows],
+  );
   const canCreate = canCreateSops(active);
+  const preferenceScope = `${activeCompanyId ?? "none"}:${active?.membership._id ?? "none"}:sop`;
+  const activePreference = preferenceState.preference ?? subscribedPreference;
+  const activeSort = useMemo<SopListSort>(
+    () => activePreference?.sort ?? defaultSopListSort(),
+    [activePreference?.sort],
+  );
+  const sortOptions = useMemo(() => ({ companyName: active?.company.name }), [active?.company.name]);
+  const dataReady = Boolean(activeCompanyId && subscribedPreference && sopPageStatus === "Exhausted");
+  const customOrderingEnabled = dataReady && rows.length <= sopListOrderLimit;
+  const orderedRows = useMemo(() => {
+    if (activeSort.mode === "custom") {
+      return restoreSopListCustomOrder(rows, activePreference?.customOrder, sortOptions);
+    }
+    return sortSopListRows(rows, activeSort, sortOptions);
+  }, [activePreference?.customOrder, activeSort, rows, sortOptions]);
+  const filteredRows = useMemo(
+    () => filterSopListRows(orderedRows, {
+      search: debouncedSearch,
+      view: effectiveSopView,
+      scope: scopeFilter,
+      branchId: branchFilter === "all" ? null : branchFilter,
+      userMembershipId: personFilter === "all" ? null : personFilter,
+    }),
+    [branchFilter, debouncedSearch, effectiveSopView, orderedRows, personFilter, scopeFilter],
+  );
+  const renderedRows = filteredRows.slice(0, renderedCount);
+  const renderedIds = renderedRows.map((sop) => sop._id);
   const filterCount = [scopeFilter !== "all", branchFilter !== "all", effectiveSopView === "all" && personFilter !== "all"].filter(Boolean).length;
   const hasActiveFilters = filterCount > 0 || search.trim() !== "";
-  const visibleIds = rows.map((sop) => sop._id as string);
-  const selectedVisibleCount = visibleIds.reduce((count, id) => count + (selectedIds.has(id) ? 1 : 0), 0);
-  const allVisibleSelected = rows.length > 0 && selectedVisibleCount === rows.length;
+  const selectedVisibleCount = renderedIds.reduce((count, id) => count + (selectedIds.has(id) ? 1 : 0), 0);
+  const allVisibleSelected = renderedIds.length > 0 && selectedVisibleCount === renderedIds.length;
   const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
   const selectionCount = selectedIds.size;
   const canDeleteSelection = selectionCount > 0 && !deleting && Array.from(selectedIds).every((id) => rows.find((s) => s._id === id)?.canDelete !== false);
   const selectedSopId = selectionCount === 1 ? Array.from(selectedIds)[0] : null;
   const selectedSop = selectedSopId ? rows.find((sop) => sop._id === selectedSopId) ?? null : null;
   const canEditSelectedSop = Boolean(selectedSop && (selectedSop.canUpdate ?? canManageSop(active, selectedSop.scopeType as ScopeType)));
+  const hasMoreRenderedRows = dataReady && renderedRows.length < filteredRows.length;
+  const dragDisabled = !customOrderingEnabled || preferenceState.sorting;
+  const dragDisabledReason = customOrderingEnabled ? undefined
+    : !dataReady ? "Loading all SOPs…"
+    : `Manual ordering supports up to ${sopListOrderLimit} SOPs.`;
+  const dragWrapperRef = useRef<HTMLDivElement>(null);
+  const dragBodyRef = useRef<HTMLTableSectionElement>(null);
+  const dragSessionKey = useMemo(
+    () => JSON.stringify([
+      preferenceScope, preferenceState.dragVersion, search, debouncedSearch, effectiveSopView,
+      scopeFilter, branchFilter, personFilter,
+      filteredRows.map((sop) => sop._id), orderedRows.map((sop) => sop._id), renderedRows.map((sop) => sop._id),
+    ]),
+    [preferenceScope, preferenceState.dragVersion, search, debouncedSearch, effectiveSopView, scopeFilter, branchFilter, personFilter, filteredRows, orderedRows, renderedRows],
+  );
+  const drag = useListDrag({
+    ids: renderedIds,
+    sessionKey: dragSessionKey,
+    disabled: dragDisabled,
+    wrapperRef: dragWrapperRef,
+    bodyRef: dragBodyRef,
+    onDrop(sourceId, insertion) {
+      // The persistence layer applies the move to every filtered row, not just the rendered chunk.
+      const visible = filteredRows.map((sop) => sop._id);
+      const nextVisible = insertListItem(visible, sourceId, insertion);
+      if (sameListOrder(visible, nextVisible)) return;
+      const baseline = restoreSopListCustomOrder(rows, activePreference?.customOrder, sortOptions).map((sop) => sop._id);
+      preferenceController.saveOrder(mergeFilteredListOrder(baseline, visible, nextVisible));
+    },
+  });
 
   useEffect(() => { if (searchOpen) searchInputRef.current?.focus(); }, [searchOpen]);
 
@@ -826,6 +1033,25 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   useEffect(() => {
     if (effectiveSopView === "my" && personFilter !== "all") setPersonFilter("all");
   }, [effectiveSopView, personFilter]);
+
+  useEffect(() => {
+    if (sopPageStatus === "CanLoadMore") loadMoreSopPage(SOP_PAGE_SIZE);
+  }, [loadMoreSopPage, sopPageStatus]);
+
+  useEffect(() => {
+    const node = loadMoreRef.current;
+    if (!node || !hasMoreRenderedRows || drag.active) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setRenderedCount((current) => Math.min(current + SOP_PAGE_SIZE, filteredRows.length));
+        }
+      },
+      { rootMargin: "400px 0px" }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [drag.active, filteredRows.length, hasMoreRenderedRows]);
 
   useEffect(() => {
     if (rows.length && selectedIds.size > 0) {
@@ -858,11 +1084,11 @@ export function SopList({ selectedId }: { selectedId?: string }) {
     setSelectedIds((current) => {
       if (allVisibleSelected) {
         const next = new Set(current);
-        for (const id of visibleIds) next.delete(id);
+        for (const id of renderedIds) next.delete(id);
         return next;
       }
       const next = new Set(current);
-      for (const id of visibleIds) next.add(id);
+      for (const id of renderedIds) next.add(id);
       return next;
     });
     setDeleteError(null);
@@ -871,6 +1097,18 @@ export function SopList({ selectedId }: { selectedId?: string }) {
   function clearSelection() {
     setSelectedIds(new Set());
     setDeleteError(null);
+  }
+
+  function selectSopSortField(field: SopListSortField) {
+    const direction = sopSortDirectionForField(activeSort, field);
+    const nextSort: SopListSort = {
+      mode: "field",
+      field,
+      direction: direction === null
+        ? initialSopListSortDirection(field)
+        : direction === "asc" ? "desc" : "asc",
+    };
+    if (dataReady) preferenceController.saveSort(nextSort);
   }
 
   function handleEditSelection() {
@@ -1012,50 +1250,29 @@ export function SopList({ selectedId }: { selectedId?: string }) {
           </div>
         )}
 
-        <div className="task-table-wrap relative -ml-11 w-[calc(100%+2.75rem)] overflow-x-auto pl-11">
-        {rows.length > 0 && (
-          <div className="task-checkbox-rail pointer-events-none absolute left-0 top-0 z-10 flex w-11 flex-col pr-2">
-            <div className="flex h-9 items-center justify-end group/head pointer-events-auto">
-              <Checkbox
-                checked={allVisibleSelected}
-                indeterminate={someVisibleSelected}
-                onCheckedChange={toggleAllVisible}
-                disabled={rows.length === 0}
-                aria-label={allVisibleSelected ? "Unselect all SOPs" : "Select all SOPs"}
-                className={cn("transition-opacity", selectionCount > 0 ? "opacity-100" : "opacity-0 group-hover/head:opacity-100")}
-              />
-            </div>
-            {rows.map((sop) => {
-              const isChecked = selectedIds.has(sop._id);
-              return (
-                <div key={`rail-${sop._id}`} className="group/rail flex h-[41px] items-center justify-end pointer-events-auto">
-                  <Checkbox
-                    checked={isChecked}
-                    onCheckedChange={() => toggleOne(sop._id)}
-                    aria-label={isChecked ? `Unselect ${sop.title}` : `Select ${sop.title}`}
-                    className={cn("transition-opacity", isChecked ? "opacity-100" : "opacity-0 group-hover/row:opacity-100 group-hover/rail:opacity-100 focus-visible:opacity-100")}
-                  />
-                </div>
-              );
-            })}
-          </div>
-        )}
+        <div ref={dragWrapperRef} className="relative -ml-14 w-[calc(100%+3.5rem)] pl-14">
+        <DragDropProvider
+          onBeforeDragStart={drag.onBeforeDragStart}
+          onDragMove={drag.onDragMove}
+          onDragOver={drag.onDragOver}
+          onDragEnd={drag.onDragEnd}
+        >
+        <div className="task-table-wrap task-list-table-wrap overflow-x-auto">
         <table className="task-table">
           <thead>
-            <tr className="group/head">
-              <th className="w-[96px] whitespace-nowrap"><span className="inline-flex items-center gap-1.5"><Hash className="h-3.5 w-3.5" />CODE</span></th>
-              <th className="min-w-[200px] max-w-[360px]"><span className="inline-flex items-center gap-1.5"><FileText className="h-3.5 w-3.5" />TITLE</span></th>
-              <th className="w-28"><span className="inline-flex items-center gap-1.5"><Layers className="h-3.5 w-3.5" />TYPE</span></th>
-              <th className="min-w-[150px] max-w-[240px]"><span className="inline-flex items-center gap-1.5"><Users className="h-3.5 w-3.5" />ASSIGNED TO</span></th>
-              <th><span className="inline-flex items-center gap-1.5"><History className="h-3.5 w-3.5" />UPDATED</span></th>
-              <th><span className="inline-flex items-center gap-1.5"><Plus className="h-3.5 w-3.5" />CREATED AT</span></th>
+            <tr>
+              <ListSortHeader {...sopSortDirections(activeSort, "code")} label="CODE" icon={<Hash className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectSopSortField("code")} className="w-[96px] whitespace-nowrap" />
+              <ListSortHeader {...sopSortDirections(activeSort, "title")} label="TITLE" icon={<FileText className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectSopSortField("title")} className="min-w-[200px] max-w-[360px]" />
+              <ListSortHeader {...sopSortDirections(activeSort, "assignedTo")} label="ASSIGNED TO" icon={<Users className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectSopSortField("assignedTo")} className="min-w-[150px] max-w-[240px]" />
+              <ListSortHeader {...sopSortDirections(activeSort, "createdAt")} label="CREATED AT" icon={<CalendarDays className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectSopSortField("createdAt")} />
+              <ListSortHeader {...sopSortDirections(activeSort, "updatedAt")} label="UPDATED" icon={<History className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectSopSortField("updatedAt")} />
             </tr>
           </thead>
-          <tbody>
-            {isLoading ? (
+          <tbody ref={dragBodyRef}>
+            {!dataReady ? (
               Array.from({ length: 6 }).map((_, index) => (
                 <tr key={`skel-${index}`}>
-                  <td colSpan={6} className="pl-4">
+                  <td colSpan={5} className="pl-4">
                     <div className="flex items-center gap-3">
                       <div className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-[var(--surface-muted)]" />
                       <div className="h-3 w-2/5 animate-pulse rounded bg-[var(--surface-muted)]" />
@@ -1063,9 +1280,9 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                   </td>
                 </tr>
               ))
-            ) : rows.length === 0 ? (
+            ) : renderedRows.length === 0 ? (
               <tr>
-                <td colSpan={6} className="!h-auto py-2">
+                <td colSpan={5} className="!h-auto py-2">
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
                     <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{hasActiveFilters ? "No matching SOPs" : "No SOPs yet"}</div>
@@ -1081,7 +1298,7 @@ export function SopList({ selectedId }: { selectedId?: string }) {
               </tr>
             ) : (
               <>
-                {rows.map((sop) => {
+                {renderedRows.map((sop, index) => {
                   const isChecked = selectedIds.has(sop._id);
                   const sopScope = sop.scopeType as ScopeType;
                   const rowCanEdit = Boolean(sop.canUpdate ?? canManageSop(active, sopScope));
@@ -1091,24 +1308,18 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                   const prefetchDetails = () => router.prefetch(detailsHref);
                   const openDetails = () => router.push(detailsHref);
                   return (
-                    <tr
+                    <SortableSopRow
                       key={sop._id}
-                      data-row="sop"
-                      data-clickable={!rowCanEdit ? "true" : undefined}
-                      data-selected={sop._id === selectedId}
-                      data-checked={isChecked ? "true" : undefined}
-                      tabIndex={!rowCanEdit ? 0 : undefined}
-                      onMouseEnter={prefetchDetails}
-                      onFocus={prefetchDetails}
-                      onClick={(event) => {
-                        if (rowCanEdit) return;
-                        if ((event.target as HTMLElement).closest("[data-interactive='true']")) return;
-                        openDetails();
-                      }}
-                      onKeyDown={(event) => {
-                        if (!rowCanEdit && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openDetails(); }
-                      }}
-                      className="group/row"
+                      sop={sop}
+                      index={index}
+                      scope={preferenceScope}
+                      dragDisabled={dragDisabled}
+                      checked={isChecked}
+                      selected={sop._id === selectedId}
+                      rowCanEdit={rowCanEdit}
+                      drag={drag}
+                      onOpenDetails={openDetails}
+                      onPrefetchDetails={prefetchDetails}
                     >
                       <td className="w-[96px] whitespace-nowrap font-mono text-[12px] text-[var(--ink-muted)]">{sop.reference}</td>
                       <td className="col-task max-w-[360px]">
@@ -1136,20 +1347,17 @@ export function SopList({ selectedId }: { selectedId?: string }) {
                           )}
                         </div>
                       </td>
-                      <td className="w-28 whitespace-nowrap">
-                        <ScopePill scopeType={sopScope} />
-                      </td>
                       <td className="min-w-[150px] max-w-[240px] text-[13px] text-[var(--ink-secondary)]">
                         <SopTargetValue scopeType={sopScope} targetName={targetName} user={sop.scopeTargetUser} showFullName />
                       </td>
-                      <td className="task-col-meta" title={`Updated ${formatDate(sop.updatedAt)}`}>{relativeTime(sop.updatedAt)}</td>
                       <td className="task-col-meta" title={`Created ${formatDate(sop.createdAt)}`}>{relativeTime(sop.createdAt)}</td>
-                    </tr>
+                      <td className="task-col-meta" title={`Updated ${formatDate(sop.updatedAt)}`}>{relativeTime(sop.updatedAt)}</td>
+                    </SortableSopRow>
                   );
                 })}
                 {canCreate && (
                   <tr className="task-add-row">
-                    <td colSpan={6}>
+                    <td colSpan={5}>
                       <button type="button" className="task-add-label inline-flex items-center gap-1.5" onClick={() => setCreateOpen(true)}>
                         <Plus className="h-3.5 w-3.5" />New SOP
                       </button>
@@ -1160,6 +1368,49 @@ export function SopList({ selectedId }: { selectedId?: string }) {
             )}
           </tbody>
         </table>
+        </div>
+        {renderedRows.length > 0 && (
+          <div className="task-checkbox-rail pointer-events-none absolute left-0 top-0 z-10 w-14 pr-2">
+            <div className="task-list-rail-row pointer-events-auto flex h-9 items-center justify-end" data-active={selectionCount > 0 ? "true" : undefined}>
+              <Checkbox
+                checked={allVisibleSelected}
+                indeterminate={someVisibleSelected}
+                onCheckedChange={toggleAllVisible}
+                aria-label={allVisibleSelected ? "Unselect all rendered SOPs" : "Select all rendered SOPs"}
+                className="task-list-rail-control"
+              />
+            </div>
+            {renderedRows.map((sop) => {
+              const isChecked = selectedIds.has(sop._id);
+              return (
+                <ListDragRailRow
+                  key={`rail-${sop._id}`}
+                  id={sop._id}
+                  label={`Reorder ${sop.reference}: ${sop.title}`}
+                  disabled={dragDisabled}
+                  disabledReason={dragDisabledReason}
+                  checked={isChecked}
+                  drag={drag}
+                >
+                  <Checkbox
+                    className="task-list-rail-control"
+                    checked={isChecked}
+                    onCheckedChange={() => toggleOne(sop._id)}
+                    aria-label={isChecked ? `Unselect ${sop.title}` : `Select ${sop.title}`}
+                  />
+                </ListDragRailRow>
+              );
+            })}
+          </div>
+        )}
+        <ListDragOverlay table={drag.overlay} />
+        </DragDropProvider>
+        </div>
+        <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center py-2" aria-live="polite">
+          {!dataReady && <span className="text-[12px] text-[var(--ink-muted)]">Loading all SOPs…</span>}
+          {hasMoreRenderedRows && (
+            <Button size="sm" variant="ghost" onClick={() => setRenderedCount((current) => Math.min(current + SOP_PAGE_SIZE, filteredRows.length))}>Load more SOPs</Button>
+          )}
         </div>
       </div>
 

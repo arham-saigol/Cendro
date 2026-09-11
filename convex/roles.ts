@@ -162,15 +162,20 @@ export const update = mutation({
         capabilityChanges: new Map([[name, capabilities]]),
       });
       const now = Date.now();
+      const beforeUpdatedAt = new Map(memberships.map((m) => [m._id, m.updatedAt]));
       for (const membership of memberships) {
         await ctx.db.patch(membership._id, { role: name, updatedAt: now });
       }
-      const renamedMembershipIds = new Set(memberships.map((m) => m._id));
       for (const invitation of await pendingInvitations(ctx, args.companyId)) {
         const patch: { role?: string; targetMembershipUpdatedAt?: number } = {};
         if (invitation.role === role.name) patch.role = name;
-        if (invitation.targetMembershipId && renamedMembershipIds.has(invitation.targetMembershipId)) {
-          patch.targetMembershipUpdatedAt = now;
+        if (invitation.targetMembershipId) {
+          const previous = beforeUpdatedAt.get(invitation.targetMembershipId);
+          // Refresh the snapshot only when it still matched the membership
+          // before this rename; an already-stale invitation must stay stale.
+          if (previous !== undefined && invitation.targetMembershipUpdatedAt === previous) {
+            patch.targetMembershipUpdatedAt = now;
+          }
         }
         if (patch.role !== undefined || patch.targetMembershipUpdatedAt !== undefined) {
           await ctx.db.patch(invitation._id, patch);

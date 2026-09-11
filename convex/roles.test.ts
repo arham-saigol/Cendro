@@ -350,6 +350,18 @@ describe("company roles", () => {
         createdAt: Date.now(),
         expiresAt: Date.now() + 86_400_000,
       });
+      // An invitation whose snapshot is already stale must stay rejected.
+      await ctx.db.insert("invitations", {
+        companyId: f.companyA,
+        email: "inactivea@example.com",
+        role: "Employee",
+        token: "stale-token",
+        status: "pending",
+        targetMembershipId: f.inactiveM,
+        targetMembershipUpdatedAt: membership!.updatedAt - 1,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 86_400_000,
+      });
     });
     const employeeRoleId = await f.t.run(async (ctx) => {
       const role = await ctx.db
@@ -367,6 +379,12 @@ describe("company roles", () => {
       name: "Crew",
       capabilities: [...defaultRoleCapabilities.Employee],
     });
+
+    await expect(
+      f.t.withIdentity(identity("inactiveA", "inactivea@example.com", true)).mutation(api.invitations.accept, {
+        token: "stale-token",
+      })
+    ).rejects.toThrow("Membership state has changed since invitation was issued.");
 
     await expect(
       f.t.withIdentity(identity("inactiveA", "inactivea@example.com", true)).mutation(api.invitations.accept, {

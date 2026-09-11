@@ -165,8 +165,16 @@ export const update = mutation({
       for (const membership of memberships) {
         await ctx.db.patch(membership._id, { role: name, updatedAt: now });
       }
+      const renamedMembershipIds = new Set(memberships.map((m) => m._id));
       for (const invitation of await pendingInvitations(ctx, args.companyId)) {
-        if (invitation.role === role.name) await ctx.db.patch(invitation._id, { role: name });
+        const patch: { role?: string; targetMembershipUpdatedAt?: number } = {};
+        if (invitation.role === role.name) patch.role = name;
+        if (invitation.targetMembershipId && renamedMembershipIds.has(invitation.targetMembershipId)) {
+          patch.targetMembershipUpdatedAt = now;
+        }
+        if (patch.role !== undefined || patch.targetMembershipUpdatedAt !== undefined) {
+          await ctx.db.patch(invitation._id, patch);
+        }
       }
     } else {
       await assertRoleManagerRemains(ctx, args.companyId, {

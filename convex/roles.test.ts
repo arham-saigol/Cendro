@@ -4,15 +4,11 @@ import { convexTest } from "convex-test";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
-import { createAuthzFixture } from "./authz.fixture";
+import { createAuthzFixture, identity } from "./authz.fixture";
 import { requireCompanyAccess } from "./permissions";
 import { defaultRoleCapabilities } from "../src/lib/permissions";
 
 const modules = import.meta.glob("./**/*.ts");
-
-function identity(key: string, email = `${key}@example.com`) {
-  return { tokenIdentifier: `clerk|${key}`, subject: key, issuer: "https://clerk.test", email, name: key };
-}
 
 describe("company roles", () => {
   beforeEach(() => {
@@ -337,6 +333,46 @@ describe("company roles", () => {
     expect(state.stale).toBeNull();
     expect(state.lastRole).toBe("Crew");
     expect(state.inviteRole).toBe("Crew");
+  });
+
+  test("role rename refreshes reactivation invitation snapshots", async () => {
+    const f = await createAuthzFixture();
+    await f.t.run(async (ctx) => {
+      const membership = await ctx.db.get(f.inactiveM);
+      await ctx.db.insert("invitations", {
+        companyId: f.companyA,
+        email: "inactivea@example.com",
+        role: "Employee",
+        token: "reactivate-token",
+        status: "pending",
+        targetMembershipId: f.inactiveM,
+        targetMembershipUpdatedAt: membership!.updatedAt,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 86_400_000,
+      });
+    });
+    const employeeRoleId = await f.t.run(async (ctx) => {
+      const role = await ctx.db
+        .query("roles")
+        .withIndex("by_company_and_name", (q) => q.eq("companyId", f.companyA).eq("name", "Employee"))
+        .unique();
+      return role!._id;
+    });
+
+    // Renaming the role patches the membership timestamp; the invitation
+    // snapshot must follow or acceptance rejects the still-valid token.
+    await f.asUser("adminA").mutation(api.roles.update, {
+      companyId: f.companyA,
+      roleId: employeeRoleId,
+      name: "Crew",
+      capabilities: [...defaultRoleCapabilities.Employee],
+    });
+
+    await expect(
+      f.t.withIdentity(identity("inactiveA", "inactivea@example.com", true)).mutation(api.invitations.accept, {
+        token: "reactivate-token",
+      })
+    ).resolves.toEqual({ companyId: f.companyA });
   });
 
   test("roles.duplicate terminates for a maximum-length role name", async () => {

@@ -5,6 +5,10 @@ import { Resend } from "resend";
 import { internal } from "./_generated/api";
 import { internalAction } from "./_generated/server";
 
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
+}
+
 export const sendInvitation = internalAction({
   args: { companyId: v.id("companies"), invitationId: v.id("invitations"), email: v.string(), role: v.string(), token: v.string() },
   handler: async (ctx, args) => {
@@ -17,7 +21,7 @@ export const sendInvitation = internalAction({
       from,
       to: args.email,
       subject: "You’re invited to Cendro",
-      html: `<p>You have been invited to join Cendro as <strong>${args.role}</strong>.</p><p><a href="${url}">Accept invitation</a></p>`,
+      html: `<p>You have been invited to join Cendro as <strong>${escapeHtml(args.role)}</strong>.</p><p><a href="${url}">Accept invitation</a></p>`,
       text: `You have been invited to join Cendro as ${args.role}. Accept: ${url}`,
     });
     if (result.error) throw new ConvexError("Could not send invitation email.");

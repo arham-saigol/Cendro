@@ -892,7 +892,7 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
     loadMore: loadMoreSopPage,
   } = usePaginatedQuery(api.sops.listOrderingRows, queryArgs, { initialNumItems: SOP_PAGE_SIZE });
   const allSops = useMemo<SopRow[]>(
-    () => (sopPageStatus === "LoadingFirstPage" ? [] : (sopPageResults as SopRow[])),
+    () => (sopPageStatus === "LoadingFirstPage" ? [] : sopPageResults),
     [sopPageResults, sopPageStatus],
   );
   const preferenceResult = useQuery(api.sops.getListPreference, activeCompanyId ? { companyId: activeCompanyId } : "skip");

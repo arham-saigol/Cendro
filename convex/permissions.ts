@@ -656,7 +656,7 @@ export async function assertCanDeleteTask(
   throw new ConvexError("You do not have access to delete this task.");
 }
 
-async function membershipBranchIds(
+export async function membershipBranchIds(
   ctx: Ctx,
   membershipIds: Set<Id<"companyMemberships">>,
   onTruncated?: TruncationObserver,
@@ -675,7 +675,7 @@ async function membershipBranchIds(
   return branchIds;
 }
 
-async function membershipDepartmentIds(
+export async function membershipDepartmentIds(
   ctx: Ctx,
   membershipIds: Set<Id<"companyMemberships">>,
   onTruncated?: TruncationObserver,
@@ -694,12 +694,18 @@ async function membershipDepartmentIds(
   return departmentIds;
 }
 
+export type SopListRowAuth = {
+  selfBranchIds?: () => Promise<Set<Id<"branches">>>;
+  selfDepartmentIds?: () => Promise<Set<Id<"departments">>>;
+};
+
 export async function visibleSopForSelf(
   ctx: Ctx,
   companyId: Id<"companies">,
   m: Doc<"companyMemberships">,
   sop: Doc<"sops">,
   onTruncated?: TruncationObserver,
+  auth?: SopListRowAuth,
 ) {
   if (sop.companyId !== companyId) return false;
   if (sop.scopeType === "company") return true;
@@ -714,7 +720,7 @@ export async function visibleSopForSelf(
     return rows.some((row) => row.userMembershipId === m._id);
   }
   if (sop.scopeType === "branch") {
-    const branchIds = await membershipBranchIds(ctx, new Set([m._id]), onTruncated);
+    const branchIds = auth?.selfBranchIds ? await auth.selfBranchIds() : await membershipBranchIds(ctx, new Set([m._id]), onTruncated);
     const sopBranches = await takeScopeRows(
       (limit) => ctx.db
         .query("sopBranchScopes")
@@ -724,7 +730,7 @@ export async function visibleSopForSelf(
     );
     return sopBranches.some((row) => branchIds.has(row.branchId));
   }
-  const departmentIds = await membershipDepartmentIds(ctx, new Set([m._id]), onTruncated);
+  const departmentIds = auth?.selfDepartmentIds ? await auth.selfDepartmentIds() : await membershipDepartmentIds(ctx, new Set([m._id]), onTruncated);
   const sopDepartments = await takeScopeRows(
     (limit) => ctx.db
       .query("sopDepartmentScopes")
@@ -794,6 +800,7 @@ export async function visibleSop(
   visibility?: SopVisibilityContext | null,
   precomputedCaps?: Set<Capability>,
   onTruncated?: TruncationObserver,
+  auth?: SopListRowAuth,
 ) {
   if (sop.companyId !== companyId) return false;
   const caps = precomputedCaps ?? (await membershipCapabilities(ctx, m));
@@ -839,7 +846,7 @@ export async function visibleSop(
     }
   }
   if (caps.has("sops:view:self")) {
-    return await visibleSopForSelf(ctx, companyId, m, sop, onTruncated);
+    return await visibleSopForSelf(ctx, companyId, m, sop, onTruncated, auth);
   }
   return false;
 }

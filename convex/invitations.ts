@@ -1,7 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { internalMutation, mutation, query } from "./_generated/server";
-import { assertPermissionManagerRemains, currentOrCreateUser, type OverrideChange } from "./permissions";
-import { capabilities, type Capability } from "../src/lib/permissions";
+import { assertRoleManagerRemains, currentOrCreateUser, ensureDefaultRoles, roleDocByName } from "./permissions";
 
 export const preview = query({
   args: { token: v.string() },
@@ -51,22 +50,21 @@ export const accept = mutation({
       }
     }
 
+    await ensureDefaultRoles(ctx, invitation.companyId);
+    const role = await roleDocByName(ctx, invitation.companyId, invitation.role);
+    if (!role) {
+      throw new ConvexError("The role on this invitation no longer exists. Please request a new invitation.");
+    }
     if (existing) {
-      const invited = (invitation.permissionOverrides ?? []).filter((o) => capabilities.includes(o.capability as Capability));
-      const invitedCapabilities = new Set(invited.map((o) => o.capability));
-      const persisted = await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", existing._id)).take(500);
-      const overrides: OverrideChange[] = [
-        ...invited.map((o) => ({ membershipId: existing._id, capability: o.capability as Capability, effect: o.effect })),
-        ...persisted
-          .filter((row) => !invitedCapabilities.has(row.capability as Capability))
-          .map((row) => ({ membershipId: existing._id, capability: row.capability as Capability, effect: "inherit" as const })),
-      ];
-      await assertPermissionManagerRemains(ctx, invitation.companyId, existing._id, invitation.role, overrides, true);
+      await assertRoleManagerRemains(ctx, invitation.companyId, {
+        roleChanges: new Map([[existing._id, role.name]]),
+        activeChanges: new Map([[existing._id, true]]),
+      });
     }
     const membershipId = existing
       ? existing._id
-      : await ctx.db.insert("companyMemberships", { companyId: invitation.companyId, userId: user._id, role: invitation.role, active: true, createdAt: now, updatedAt: now });
-    if (existing) await ctx.db.patch(existing._id, { role: invitation.role, active: true, updatedAt: now });
+      : await ctx.db.insert("companyMemberships", { companyId: invitation.companyId, userId: user._id, role: role.name, active: true, createdAt: now, updatedAt: now });
+    if (existing) await ctx.db.patch(existing._id, { role: role.name, active: true, updatedAt: now });
 
     const branchIds = invitation.branchIds ?? [];
     const departmentIds = invitation.departmentIds ?? [];
@@ -89,14 +87,8 @@ export const accept = mutation({
     for (const departmentId of managedDepartmentIds) await ctx.db.insert("managerDepartmentScopes", { companyId: invitation.companyId, managerMembershipId: membershipId, departmentId, updatedAt: now });
     for (const userMembershipId of managedUserMembershipIds) if (userMembershipId !== membershipId) await ctx.db.insert("managerUserScopes", { companyId: invitation.companyId, managerMembershipId: membershipId, userMembershipId, updatedAt: now });
 
-    for (const row of await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
-    for (const override of invitation.permissionOverrides ?? []) {
-      if (!capabilities.includes(override.capability as Capability)) continue;
-      await ctx.db.insert("permissionOverrides", { companyId: invitation.companyId, membershipId, capability: override.capability, effect: override.effect, updatedAt: now });
-    }
-
     await ctx.db.patch(invitation._id, { status: "accepted" });
-    await ctx.db.insert("auditEvents", { companyId: invitation.companyId, actorUserId: user._id, action: "invitation.accept", targetType: "membership", targetId: membershipId, metadata: { role: invitation.role }, createdAt: now });
+    await ctx.db.insert("auditEvents", { companyId: invitation.companyId, actorUserId: user._id, action: "invitation.accept", targetType: "membership", targetId: membershipId, metadata: { role: role.name }, createdAt: now });
     return { companyId: invitation.companyId };
   },
 });

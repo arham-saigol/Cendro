@@ -11,6 +11,7 @@ import {
   ChevronDown,
   ChevronRight,
   CirclePause,
+  Copy,
   GripVertical,
   Layers,
   LucideIcon,
@@ -45,15 +46,13 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { browserTimeZone, DEFAULT_TIME_ZONE, timeZoneOptions } from "@/lib/time-zones";
 import { cn, formatDate, initials } from "@/lib/utils";
-import { canAccessCompanyManagement, capabilityGroups, capabilityLabels, defaultRoleCapabilities, roles, type Capability, type Role } from "@/lib/permissions";
+import { canAccessCompanyManagement, capabilityGroups, capabilityLabels, type Capability } from "@/lib/permissions";
 
 /* ============================================================== */
 /*  Types                                                          */
 /* ============================================================== */
 
-type Effect = "allow" | "deny" | "inherit";
-type Override = { capability: string; effect: "allow" | "deny" };
-type MembershipCore = { _id: Id<"companyMemberships">; role: Role; active: boolean; createdAt: number };
+type MembershipCore = { _id: Id<"companyMemberships">; role: string; active: boolean; createdAt: number };
 type Scope = { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] };
 type UserRow = {
   membership: MembershipCore;
@@ -61,19 +60,18 @@ type UserRow = {
   branchIds: Id<"branches">[];
   departmentIds: Id<"departments">[];
   scope: Scope;
-  overrides: Override[];
 };
 type BranchRow = { _id: Id<"branches">; name: string; order?: number };
 type DepartmentRow = { _id: Id<"departments">; branchId: Id<"branches">; name: string; order?: number };
+type RoleRow = { _id: Id<"roles">; name: string; capabilities: Capability[]; memberCount: number };
 type InvitationRow = {
   _id: Id<"invitations">;
   email: string;
-  role: Role;
+  role: string;
   status: string;
   createdAt: number;
   branchIds: Id<"branches">[];
   departmentIds: Id<"departments">[];
-  permissionOverrides?: Override[];
 };
 type Overview = {
   isTruncated: boolean;
@@ -83,25 +81,12 @@ type Overview = {
   branches: BranchRow[];
   departments: DepartmentRow[];
   users: UserRow[];
+  roles: RoleRow[];
   invitations: InvitationRow[];
-  capabilities: Capability[];
 };
-type TabValue = "general" | "structure" | "people" | "permissions";
-type PermissionDraft = {
-  role: Role;
-  branchIds: Id<"branches">[];
-  departmentIds: Id<"departments">[];
-  managedBranchIds: Id<"branches">[];
-  managedDepartmentIds: Id<"departments">[];
-  managedUserMembershipIds: Id<"companyMemberships">[];
-  overrides: Record<Capability, Effect>;
-};
+type TabValue = "general" | "structure" | "people" | "roles";
 
-const emptyOverrides = Object.fromEntries(
-  capabilityGroups.flatMap((group) => group.capabilities.map((capability) => [capability, "inherit"])),
-) as Record<Capability, Effect>;
-
-const roleTone: Record<Role, "blue" | "green" | "neutral"> = {
+const roleTone: Record<string, "blue" | "green" | "neutral"> = {
   Admin: "blue",
   Manager: "green",
   Employee: "neutral",
@@ -111,14 +96,14 @@ const TABS: { value: TabValue; label: string; icon: LucideIcon }[] = [
   { value: "general", label: "General", icon: Settings },
   { value: "structure", label: "Hierarchy", icon: Network },
   { value: "people", label: "Users", icon: Users },
-  { value: "permissions", label: "Permissions", icon: ShieldCheck },
+  { value: "roles", label: "Roles", icon: ShieldCheck },
 ];
 
 function canViewCompanyTab(tab: TabValue, capabilities: readonly string[] | null | undefined) {
   if (tab === "general") return Boolean(capabilities?.includes("company:manage_settings"));
   if (tab === "structure") return Boolean(capabilities?.some((capability) => capability === "company:manage_branches" || capability === "company:manage_departments"));
-  if (tab === "people") return Boolean(capabilities?.some((capability) => capability === "company:manage_users" || capability === "company:invite_users" || capability === "company:manage_permissions"));
-  return Boolean(capabilities?.includes("company:manage_permissions"));
+  if (tab === "people") return Boolean(capabilities?.some((capability) => capability === "company:manage_users" || capability === "company:invite_users" || capability === "company:manage_roles"));
+  return Boolean(capabilities?.includes("company:manage_roles"));
 }
 
 const TAB_COPY: Record<TabValue, { title: string; description: string }> = {
@@ -134,35 +119,14 @@ const TAB_COPY: Record<TabValue, { title: string; description: string }> = {
     title: "Users",
     description: "Manage members, pending invitations, team placement, and access level.",
   },
-  permissions: {
-    title: "Permissions",
-    description: "Review role defaults and configure deliberate exceptions only where needed.",
+  roles: {
+    title: "Roles",
+    description: "Create roles and tune the permissions members inherit from them.",
   },
 };
 
-/* ============================================================== */
-/*  Helpers                                                        */
-/* ============================================================== */
-
-function draftFromUser(user: UserRow): PermissionDraft {
-  return {
-    role: user.membership.role,
-    branchIds: user.branchIds,
-    departmentIds: user.departmentIds,
-    managedBranchIds: user.scope?.branchIds ?? [],
-    managedDepartmentIds: user.scope?.departmentIds ?? [],
-    managedUserMembershipIds: user.scope?.userMembershipIds ?? [],
-    overrides: { ...emptyOverrides, ...Object.fromEntries(user.overrides.map((override) => [override.capability, override.effect])) },
-  };
-}
-
-function effectiveCapabilities(role: Role, overrides: Record<Capability, Effect>) {
-  const effective = new Set<Capability>(defaultRoleCapabilities[role]);
-  for (const capability of Object.keys(overrides) as Capability[]) {
-    if (overrides[capability] === "allow") effective.add(capability);
-    if (overrides[capability] === "deny") effective.delete(capability);
-  }
-  return effective;
+function roleBadgeTone(name: string) {
+  return roleTone[name] ?? "neutral";
 }
 
 /* ============================================================== */
@@ -258,14 +222,16 @@ function FilterSubmenu<T extends string>({ label, value, options, onChange }: { 
 
 function CompanyFilterMenu({
   roleFilter,
+  roleNames,
   activeCount,
   onRoleChange,
 }: {
-  roleFilter: Role | "all";
+  roleFilter: string | "all";
+  roleNames: string[];
   activeCount: number;
-  onRoleChange: (value: Role | "all") => void;
+  onRoleChange: (value: string | "all") => void;
 }) {
-  const roleOptions: { value: Role | "all"; label: string }[] = [{ value: "all", label: "All roles" }, ...roles.map((role) => ({ value: role, label: role }))];
+  const roleOptions: { value: string | "all"; label: string }[] = [{ value: "all", label: "All roles" }, ...roleNames.map((role) => ({ value: role, label: role }))];
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
@@ -1040,36 +1006,49 @@ function PeopleTab({
   onInvite,
   onUpdateName,
   onRoleChange,
+  onBulkRoleChange,
+  onManageAccess,
   onBranchChange,
   onDepartmentChange,
   onStatusChange,
   onRemoveUsers,
   canManageUsers,
-  canManagePermissions,
+  canManageRoles,
   canInvite,
 }: {
   data: Overview;
   onInvite: () => void;
   onUpdateName: (user: UserRow, firstName: string, secondName: string) => Promise<void>;
-  onRoleChange: (user: UserRow, role: Role) => Promise<void>;
+  onRoleChange: (user: UserRow, role: string) => Promise<void>;
+  onBulkRoleChange: (membershipIds: Id<"companyMemberships">[], role: string) => Promise<void>;
+  onManageAccess: (user: UserRow) => void;
   onBranchChange: (user: UserRow, branchId: Id<"branches"> | "") => Promise<void>;
   onDepartmentChange: (user: UserRow, departmentId: Id<"departments"> | "") => Promise<void>;
   onStatusChange: (user: UserRow, active: boolean) => Promise<void>;
   onRemoveUsers: (membershipIds: Id<"companyMemberships">[]) => Promise<void>;
   canManageUsers: boolean;
-  canManagePermissions: boolean;
+  canManageRoles: boolean;
   canInvite: boolean;
 }) {
   const [view, setView] = useState<PeopleView>("members");
   const [editingUser, setEditingUser] = useState<UserRow | undefined>();
   const [query, setQuery] = useState("");
-  const [roleFilter, setRoleFilter] = useState<Role | "all">("all");
+  const [roleFilter, setRoleFilter] = useState<string | "all">("all");
   const [searchOpen, setSearchOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<Id<"companyMemberships">>>(new Set());
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
+  const [assigningRole, setAssigningRole] = useState(false);
+  const [assignError, setAssignError] = useState<string | null>(null);
   const branchMap = useMemo(() => new Map(data.branches.map((b) => [b._id, b.name])), [data.branches]);
   const departmentMap = useMemo(() => new Map(data.departments.map((d) => [d._id, d.name])), [data.departments]);
+  const roleNames = useMemo(() => {
+    const names = new Set(data.roles.map((role) => role.name));
+    for (const user of data.users) names.add(user.membership.role);
+    for (const invitation of data.invitations) names.add(invitation.role);
+    names.delete("");
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [data.roles, data.users, data.invitations]);
   const normalized = query.trim().toLowerCase();
   const filteredUsers = useMemo(() => data.users.filter((user) => (!normalized || `${user.user.name} ${user.user.email}`.toLowerCase().includes(normalized)) && (roleFilter === "all" || user.membership.role === roleFilter)), [data.users, normalized, roleFilter]);
   const filteredInvitations = useMemo(() => data.invitations.filter((invitation) => (!normalized || invitation.email.toLowerCase().includes(normalized)) && (roleFilter === "all" || invitation.role === roleFilter)), [data.invitations, normalized, roleFilter]);
@@ -1096,13 +1075,20 @@ function PeopleTab({
     setSelectedIds((current) => { const next = new Set(current); if (allVisibleSelected) for (const id of visibleUserIds) next.delete(id); else for (const id of visibleUserIds) next.add(id); return next; });
     setRemoveError(null);
   }
-  function clearSelection() { setSelectedIds(new Set()); setRemoveError(null); }
+  function clearSelection() { setSelectedIds(new Set()); setRemoveError(null); setAssignError(null); }
   async function removeSelected() {
     if (selectionCount === 0 || removing) return;
     setRemoving(true); setRemoveError(null);
     try { await onRemoveUsers(Array.from(selectedIds)); setSelectedIds(new Set()); }
     catch (err) { setRemoveError(err instanceof Error ? err.message : "Could not remove selected users."); }
     finally { setRemoving(false); }
+  }
+  async function assignRoleToSelected(role: string) {
+    if (selectionCount === 0 || assigningRole) return;
+    setAssigningRole(true); setAssignError(null);
+    try { await onBulkRoleChange(Array.from(selectedIds), role); setSelectedIds(new Set()); }
+    catch (err) { setAssignError(err instanceof Error ? err.message : "Could not assign role."); }
+    finally { setAssigningRole(false); }
   }
 
   const filterCount = (roleFilter !== "all" ? 1 : 0) + (query.trim() !== "" ? 1 : 0);
@@ -1120,16 +1106,16 @@ function PeopleTab({
             <Input value={query} onChange={(event) => setQuery(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder={view === "members" ? "Search by name or email" : "Search invitations"} aria-label={view === "members" ? "Search members" : "Search invitations"} tabIndex={searchOpen || query.trim() !== "" ? 0 : -1} />
             <button type="button" className="task-search-button" aria-label={query ? "Clear search" : "Search people"} onClick={() => { if (query) setQuery(""); else setSearchOpen((open) => !open); }}>{query ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}</button>
           </div>
-          <CompanyFilterMenu roleFilter={roleFilter} activeCount={filterCount} onRoleChange={setRoleFilter} />
+          <CompanyFilterMenu roleFilter={roleFilter} roleNames={roleNames} activeCount={filterCount} onRoleChange={setRoleFilter} />
           {canInvite && <Button variant="primary" size="sm" onClick={onInvite}><MailPlus className="h-4 w-4" />Invite</Button>}
         </div>
       </div>
 
       {view === "members" ? (
         <div className="relative">
-          {selectionCount > 0 && <div className="task-selection-layer"><div className="task-selection-pill" role="status" aria-live="polite"><span className="task-selection-pill-count">{selectionCount} selected</span><span className="task-selection-pill-divider" aria-hidden="true" /><button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={removing} aria-label="Cancel selection"><X className="h-4 w-4" /></button><span className="task-selection-pill-divider" aria-hidden="true" /><button type="button" className="task-selection-pill-btn" data-danger="true" onClick={() => void removeSelected()} disabled={removing} aria-label={selectionCount === 1 ? "Remove selected user" : `Remove ${selectionCount} selected users`} title="Remove user"><UserMinus className="h-4 w-4" /></button></div>{removeError && <p className="alert-error task-selection-error" role="alert">{removeError}</p>}</div>}
+          {selectionCount > 0 && <div className="task-selection-layer"><div className="task-selection-pill" role="status" aria-live="polite"><span className="task-selection-pill-count">{selectionCount} selected</span><span className="task-selection-pill-divider" aria-hidden="true" /><button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={removing || assigningRole} aria-label="Cancel selection"><X className="h-4 w-4" /></button>{canManageRoles && (<><span className="task-selection-pill-divider" aria-hidden="true" /><DropdownMenu.Root><DropdownMenu.Trigger asChild><button type="button" className="task-selection-pill-btn" disabled={removing || assigningRole} aria-label={selectionCount === 1 ? "Assign role to selected user" : `Assign role to ${selectionCount} selected users`} title="Assign role"><UserCog className="h-4 w-4" /></button></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content align="center" sideOffset={6} className="task-menu min-w-44" aria-label="Assign role">{roleNames.length === 0 ? <DropdownMenu.Item disabled className="task-menu-item">No roles yet</DropdownMenu.Item> : roleNames.map((roleName) => <DropdownMenu.Item key={roleName} onSelect={() => void assignRoleToSelected(roleName)} className="task-menu-item"><span className="min-w-0 flex-1 truncate">{roleName}</span></DropdownMenu.Item>)}</DropdownMenu.Content></DropdownMenu.Portal></DropdownMenu.Root></>)}{canManageUsers && (<><span className="task-selection-pill-divider" aria-hidden="true" /><button type="button" className="task-selection-pill-btn" data-danger="true" onClick={() => void removeSelected()} disabled={removing || assigningRole} aria-label={selectionCount === 1 ? "Remove selected user" : `Remove ${selectionCount} selected users`} title="Remove user"><UserMinus className="h-4 w-4" /></button></>)}</div>{removeError && <p className="alert-error task-selection-error" role="alert">{removeError}</p>}{assignError && <p className="alert-error task-selection-error" role="alert">{assignError}</p>}</div>}
           <div className="company-table-wrap task-table-wrap relative -ml-11 w-[calc(100%+2.75rem)] overflow-x-auto pl-11">
-            {canManageUsers && filteredUsers.length > 0 && <div className="task-checkbox-rail pointer-events-none absolute left-0 top-0 z-10 flex w-11 flex-col pr-2"><div className="flex h-9 items-center justify-end group/head pointer-events-auto"><Checkbox checked={allVisibleSelected} indeterminate={someVisibleSelected} onCheckedChange={toggleAllVisible} aria-label={allVisibleSelected ? "Unselect all users" : "Select all users"} className={cn("transition-opacity", selectionCount > 0 ? "opacity-100" : "opacity-0 group-hover/head:opacity-100")} /></div>{filteredUsers.map((user) => { const isChecked = selectedIds.has(user.membership._id); return <div key={`rail-${user.membership._id}`} className="group/rail flex h-[41px] items-center justify-end pointer-events-auto"><Checkbox checked={isChecked} onCheckedChange={() => toggleOne(user.membership._id)} aria-label={isChecked ? `Unselect ${user.user.name || user.user.email}` : `Select ${user.user.name || user.user.email}`} className={cn("transition-opacity", isChecked ? "opacity-100" : "opacity-0 group-hover/rail:opacity-100 focus-visible:opacity-100")} /></div>; })}</div>}
+            {(canManageUsers || canManageRoles) && filteredUsers.length > 0 && <div className="task-checkbox-rail pointer-events-none absolute left-0 top-0 z-10 flex w-11 flex-col pr-2"><div className="flex h-9 items-center justify-end group/head pointer-events-auto"><Checkbox checked={allVisibleSelected} indeterminate={someVisibleSelected} onCheckedChange={toggleAllVisible} aria-label={allVisibleSelected ? "Unselect all users" : "Select all users"} className={cn("transition-opacity", selectionCount > 0 ? "opacity-100" : "opacity-0 group-hover/head:opacity-100")} /></div>{filteredUsers.map((user) => { const isChecked = selectedIds.has(user.membership._id); return <div key={`rail-${user.membership._id}`} className="group/rail flex h-[41px] items-center justify-end pointer-events-auto"><Checkbox checked={isChecked} onCheckedChange={() => toggleOne(user.membership._id)} aria-label={isChecked ? `Unselect ${user.user.name || user.user.email}` : `Select ${user.user.name || user.user.email}`} className={cn("transition-opacity", isChecked ? "opacity-100" : "opacity-0 group-hover/rail:opacity-100 focus-visible:opacity-100")} /></div>; })}</div>}
             <table className="task-table">
               <thead><tr className="group/head"><th className="min-w-[220px]"><ColumnHeading icon={Users}>Member</ColumnHeading></th><th className="w-32"><ColumnHeading icon={UserCog}>Role</ColumnHeading></th><th className="min-w-[140px]"><ColumnHeading icon={Building2}>Branch</ColumnHeading></th><th className="min-w-[160px]"><ColumnHeading icon={Layers}>Department</ColumnHeading></th><th className="w-28"><ColumnHeading icon={CirclePause}>Status</ColumnHeading></th><th className="w-32"><ColumnHeading icon={CalendarDays}>Joined</ColumnHeading></th></tr></thead>
               <tbody>
@@ -1155,7 +1141,7 @@ function PeopleTab({
                               type="button"
                               data-interactive="true"
                               data-tooltip="Edit name"
-                              className="task-title-open"
+                              className="task-title-open task-title-open--secondary"
                               onClick={(event) => {
                                 event.stopPropagation();
                                 setEditingUser(user);
@@ -1166,9 +1152,25 @@ function PeopleTab({
                               <span>EDIT</span>
                             </button>
                           )}
+                          {(canManageUsers || canManageRoles) && (
+                            <button
+                              type="button"
+                              data-interactive="true"
+                              data-tooltip="Manage access"
+                              className="task-title-open"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onManageAccess(user);
+                              }}
+                              aria-label={`Manage access for ${user.user.name || user.user.email}`}
+                            >
+                              <PanelRight className="h-3.5 w-3.5" />
+                              <span>OPEN</span>
+                            </button>
+                          )}
                         </div>
                       </td>
-                      <td><PeopleCellMenu value={user.membership.role} options={roles.map((role) => ({ value: role, label: role }))} onChange={(role) => { if (role !== user.membership.role) void onRoleChange(user, role); }} ariaLabel={`Change role for ${user.user.name || user.user.email}`} disabled={!canManagePermissions} renderValue={(option) => <Badge tone={roleTone[(option?.value ?? user.membership.role) as Role]}>{option?.label ?? user.membership.role}</Badge>} /></td>
+                      <td><PeopleCellMenu value={user.membership.role} options={roleNames.map((role) => ({ value: role, label: role }))} onChange={(role) => { if (role !== user.membership.role) void onRoleChange(user, role); }} ariaLabel={`Change role for ${user.user.name || user.user.email}`} disabled={!canManageRoles} renderValue={(option) => <Badge tone={roleBadgeTone(option?.value ?? user.membership.role)}>{option?.label ?? user.membership.role}</Badge>} /></td>
                       <td><PeopleCellMenu value={branchId} options={branchOptions} onChange={(nextBranchId) => { if (nextBranchId !== branchId) void onBranchChange(user, nextBranchId); }} ariaLabel={`Change branch for ${user.user.name || user.user.email}`} disabled={!canManageUsers} /></td>
                       <td><PeopleCellMenu value={departmentId} options={departmentOptions} onChange={(nextDepartmentId) => { if (nextDepartmentId !== departmentId) void onDepartmentChange(user, nextDepartmentId); }} ariaLabel={`Change department for ${user.user.name || user.user.email}`} disabled={!canManageUsers || !branchId} placeholder={branchId ? "—" : "Select branch first"} /></td>
                       <td><PeopleCellMenu value={user.membership.active ? "active" : "inactive"} options={[{ value: "active", label: "Active" }, { value: "inactive", label: "Inactive" }]} onChange={(status) => { const active = status === "active"; if (active !== user.membership.active) void onStatusChange(user, active); }} ariaLabel={`Change status for ${user.user.name || user.user.email}`} disabled={!canManageUsers} renderValue={(option) => <Badge tone={(option?.value ?? (user.membership.active ? "active" : "inactive")) === "active" ? "green" : "neutral"}>{option?.label ?? (user.membership.active ? "Active" : "Inactive")}</Badge>} /></td>
@@ -1182,7 +1184,7 @@ function PeopleTab({
         </div>
       ) : (
         <div className="company-table-wrap"><table className="task-table"><thead><tr><th className="min-w-[220px]"><ColumnHeading icon={MailPlus}>Invitation</ColumnHeading></th><th className="w-28"><ColumnHeading icon={UserCog}>Role</ColumnHeading></th><th className="min-w-[120px]"><ColumnHeading icon={Building2}>Branch</ColumnHeading></th><th className="min-w-[140px]"><ColumnHeading icon={Layers}>Department</ColumnHeading></th><th className="w-28"><ColumnHeading icon={CirclePause}>Status</ColumnHeading></th><th className="w-32"><ColumnHeading icon={CalendarDays}>Invited</ColumnHeading></th></tr></thead><tbody>
-          {isEmpty ? <tr><td colSpan={6} className="!h-auto !border-0 !bg-transparent py-2"><EmptyState icon={MailPlus} title={query || roleFilter !== "all" ? "No matching invitations" : "No pending invitations"} message={query || roleFilter !== "all" ? "Try adjusting your search or filters." : "Invite a person to send them a join link."} action={canInvite && !query && roleFilter === "all" ? <Button size="sm" variant="primary" onClick={onInvite}><MailPlus className="h-3.5 w-3.5" />Invite member</Button> : undefined} /></td></tr> : filteredInvitations.map((invitation) => <tr key={invitation._id} className="group/row"><td><div className="flex items-center gap-2.5"><span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-[var(--surface-muted)] text-[var(--ink-faint)]"><MailPlus className="h-3.5 w-3.5" /></span><div className="min-w-0"><div className="truncate text-[13px] font-medium text-[var(--ink)]">{invitation.email}</div><div className="truncate text-[12px] text-[var(--ink-muted)]">Pending invitation</div></div></div></td><td><Badge tone={roleTone[invitation.role]}>{invitation.role}</Badge></td><td className="text-[var(--ink-secondary)]"><span className="truncate">{invitation.branchIds.map((id) => branchMap.get(id)).filter(Boolean).join(", ") || "—"}</span></td><td className="text-[var(--ink-secondary)]"><span className="truncate">{invitation.departmentIds.map((id) => departmentMap.get(id)).filter(Boolean).join(", ") || "—"}</span></td><td><Badge tone="yellow" className="capitalize">{invitation.status}</Badge></td><td className="text-[12.5px] text-[var(--ink-secondary)]">{formatDate(invitation.createdAt)}</td></tr>)}
+          {isEmpty ? <tr><td colSpan={6} className="!h-auto !border-0 !bg-transparent py-2"><EmptyState icon={MailPlus} title={query || roleFilter !== "all" ? "No matching invitations" : "No pending invitations"} message={query || roleFilter !== "all" ? "Try adjusting your search or filters." : "Invite a person to send them a join link."} action={canInvite && !query && roleFilter === "all" ? <Button size="sm" variant="primary" onClick={onInvite}><MailPlus className="h-3.5 w-3.5" />Invite member</Button> : undefined} /></td></tr> : filteredInvitations.map((invitation) => <tr key={invitation._id} className="group/row"><td><div className="flex items-center gap-2.5"><span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-[var(--surface-muted)] text-[var(--ink-faint)]"><MailPlus className="h-3.5 w-3.5" /></span><div className="min-w-0"><div className="truncate text-[13px] font-medium text-[var(--ink)]">{invitation.email}</div><div className="truncate text-[12px] text-[var(--ink-muted)]">Pending invitation</div></div></div></td><td><Badge tone={roleBadgeTone(invitation.role)}>{invitation.role}</Badge></td><td className="text-[var(--ink-secondary)]"><span className="truncate">{invitation.branchIds.map((id) => branchMap.get(id)).filter(Boolean).join(", ") || "—"}</span></td><td className="text-[var(--ink-secondary)]"><span className="truncate">{invitation.departmentIds.map((id) => departmentMap.get(id)).filter(Boolean).join(", ") || "—"}</span></td><td><Badge tone="yellow" className="capitalize">{invitation.status}</Badge></td><td className="text-[12.5px] text-[var(--ink-secondary)]">{formatDate(invitation.createdAt)}</td></tr>)}
         </tbody></table></div>
       )}
 
@@ -1197,22 +1199,201 @@ function PeopleTab({
 }
 
 /* ============================================================== */
-/*  Permissions tab                                                */
+/*  Roles tab                                                      */
 /* ============================================================== */
 
-function PermissionsTab({ data, onOpenDetails, selectedMembershipId }: { data: Overview; onOpenDetails: (user: UserRow) => void; selectedMembershipId?: Id<"companyMemberships"> }) {
+type RoleDraft = { name: string; capabilities: Set<Capability> };
+
+function RoleCapabilityPicker({
+  draft,
+  onChange,
+  disabled = false,
+}: {
+  draft: RoleDraft;
+  onChange: (next: RoleDraft) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="space-y-5">
+      {capabilityGroups.map((group) => (
+        <section key={group.title}>
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]">{group.title}</div>
+          <div className="grid gap-px lg:grid-cols-2">
+            {group.capabilities.map((capability) => {
+              const checked = draft.capabilities.has(capability);
+              const toggle = () => {
+                const next = new Set(draft.capabilities);
+                if (next.has(capability)) next.delete(capability);
+                else next.add(capability);
+                onChange({ ...draft, capabilities: next });
+              };
+              return (
+                <div key={capability} className="flex items-start gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--surface-hover)]">
+                  <Checkbox checked={checked} disabled={disabled} aria-label={capabilityLabels[capability]} onCheckedChange={toggle} />
+                  <button type="button" className="min-w-0 flex-1 text-left disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled} onClick={toggle}>
+                    <span className="block text-[13px] text-[var(--ink)]">{capabilityLabels[capability]}</span>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function RoleDialog({
+  open,
+  onOpenChange,
+  role,
+  existingNames,
+  onSave,
+  canEdit,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  role?: RoleRow;
+  existingNames: string[];
+  onSave: (draft: { name: string; capabilities: string[] }) => Promise<void>;
+  canEdit: boolean;
+}) {
+  const [name, setName] = useState("");
+  const [capabilities, setCapabilities] = useState<Set<Capability>>(new Set());
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const existingNameSet = useMemo(() => new Set(existingNames.map((value) => value.trim().toLowerCase())), [existingNames]);
+
+  useEffect(() => {
+    if (open) {
+      setName(role?.name ?? "");
+      setCapabilities(new Set(role?.capabilities ?? []));
+      setError(null);
+    }
+  }, [open, role]);
+
+  async function submit() {
+    if (saving) return;
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError("Role name is required.");
+      return;
+    }
+    if (!role && existingNameSet.has(trimmed.toLowerCase())) {
+      setError("A role with this name already exists.");
+      return;
+    }
+    if (role && trimmed.toLowerCase() !== role.name.trim().toLowerCase() && existingNameSet.has(trimmed.toLowerCase())) {
+      setError("A role with this name already exists.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave({ name: trimmed, capabilities: Array.from(capabilities) });
+      onOpenChange(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save role.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/35 backdrop-blur-[2px]" />
+        <Dialog.Content
+          onPointerDownOutside={(e) => e.preventDefault()}
+          onInteractOutside={(e) => e.preventDefault()}
+          className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(720px,94dvh)] w-[min(680px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]"
+        >
+          <div className="flex items-start justify-between border-b border-[var(--hairline)] px-5 py-4">
+            <div>
+              <Dialog.Title className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">
+                {role ? "Edit role" : "New role"}
+              </Dialog.Title>
+              <Dialog.Description className="mt-0.5 text-[12.5px] text-[var(--ink-muted)]">
+                {role ? `Rename ${role.name} or change what its members can do.` : "Name the role and choose what its members can do."}
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button type="button" className="task-icon-btn" aria-label="Close">
+                <X className="h-4 w-4" />
+              </button>
+            </Dialog.Close>
+          </div>
+          <form
+            className="flex min-h-0 flex-1 flex-col"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submit();
+            }}
+          >
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+              <label className="block">
+                <span className="mb-1.5 block text-[12px] font-medium text-[var(--ink-muted)]">Name</span>
+                <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Role name" autoFocus disabled={!canEdit} />
+              </label>
+              <div className="mt-5">
+                <RoleCapabilityPicker
+                  draft={{ name, capabilities }}
+                  onChange={(next) => setCapabilities(next.capabilities)}
+                  disabled={!canEdit}
+                />
+              </div>
+              {error && (
+                <p className="alert-error mt-4 rounded-md px-3 py-2 text-[12.5px]" role="alert">
+                  {error}
+                </p>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-[var(--hairline)] bg-[var(--surface)] px-5 py-3">
+              <Dialog.Close asChild>
+                <Button type="button">Cancel</Button>
+              </Dialog.Close>
+              {canEdit && (
+                <Button type="submit" variant="primary" disabled={saving || !name.trim()}>
+                  {saving ? "Saving..." : role ? "Save changes" : "Create role"}
+                </Button>
+              )}
+            </div>
+          </form>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function RolesTab({
+  data,
+  canManageRoles,
+  onSaveRole,
+  onDuplicateRole,
+  onDeleteRole,
+}: {
+  data: Overview;
+  canManageRoles: boolean;
+  onSaveRole: (roleId: Id<"roles"> | undefined, draft: { name: string; capabilities: string[] }) => Promise<void>;
+  onDuplicateRole: (roleId: Id<"roles">) => Promise<void>;
+  onDeleteRole: (roleId: Id<"roles">) => Promise<void>;
+}) {
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingRole, setEditingRole] = useState<RoleRow | undefined>();
+  const [actionError, setActionError] = useState<string | null>(null);
   const normalized = query.trim().toLowerCase();
+  const roles = useMemo(() => data.roles.filter((role) => !normalized || role.name.toLowerCase().includes(normalized)), [data.roles, normalized]);
 
-  const usersWithOverrides = useMemo(() => {
-    return data.users
-      .filter((user) => {
-        if (!normalized) return true;
-        return `${user.user.name} ${user.user.email}`.toLowerCase().includes(normalized);
-      })
-      .sort((a, b) => b.overrides.length - a.overrides.length);
-  }, [data.users, normalized]);
+  function openCreate() {
+    setEditingRole(undefined);
+    setDialogOpen(true);
+  }
+  function openEdit(role: RoleRow) {
+    setEditingRole(role);
+    setDialogOpen(true);
+  }
 
   return (
     <div className="company-tab-body company-permissions-body">
@@ -1223,14 +1404,14 @@ function PermissionsTab({ data, onOpenDetails, selectedMembershipId }: { data: O
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               className="task-search-input border-none focus:border-none bg-transparent"
-              placeholder="Search people"
-              aria-label="Search people by name or email"
+              placeholder="Search roles"
+              aria-label="Search roles by name"
               tabIndex={searchOpen || query.trim() !== "" ? 0 : -1}
             />
             <button
               type="button"
               className="task-search-button"
-              aria-label={query ? "Clear search" : "Search people"}
+              aria-label={query ? "Clear search" : "Search roles"}
               onClick={() => {
                 if (query) setQuery("");
                 else setSearchOpen((open) => !open);
@@ -1239,77 +1420,108 @@ function PermissionsTab({ data, onOpenDetails, selectedMembershipId }: { data: O
               {query ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
             </button>
           </div>
+          {canManageRoles && <Button variant="primary" size="sm" onClick={openCreate}><Plus className="h-4 w-4" />New role</Button>}
         </div>
       </div>
+
+      {actionError && <p className="alert-error rounded-md px-3 py-2 text-[12.5px]" role="alert">{actionError}</p>}
 
       <div className="company-table-wrap">
         <table className="task-table">
           <thead>
             <tr>
-              <th className="min-w-[220px]"><ColumnHeading icon={Users}>Member</ColumnHeading></th>
-              <th className="w-28"><ColumnHeading icon={UserCog}>Role</ColumnHeading></th>
-              <th className="min-w-[260px]"><ColumnHeading icon={ShieldCheck}>Overrides</ColumnHeading></th>
+              <th className="min-w-[200px]"><ColumnHeading icon={ShieldCheck}>Role</ColumnHeading></th>
+              <th className="w-28"><ColumnHeading icon={Users}>Members</ColumnHeading></th>
+              <th className="min-w-[280px]"><ColumnHeading icon={Check}>Permissions</ColumnHeading></th>
+              {canManageRoles && <th className="w-28"><span className="sr-only">Actions</span></th>}
             </tr>
           </thead>
           <tbody>
-            {usersWithOverrides.length === 0 ? (
+            {roles.length === 0 ? (
               <tr>
-                <td colSpan={3} className="!h-auto !border-0 !bg-transparent py-2">
+                <td colSpan={canManageRoles ? 4 : 3} className="!h-auto !border-0 !bg-transparent py-2">
                   <EmptyState
                     icon={ShieldCheck}
-                    title={query ? "No matching members" : "No manual exceptions"}
-                    message={
-                      query
-                        ? "Try a different name or email."
-                        : "Everyone follows their role defaults. Open a member's permissions drawer to add an override if needed."
-                    }
+                    title={query ? "No matching roles" : "No roles yet"}
+                    message={query ? "Try a different name." : "Create a role to assign a set of permissions to members."}
+                    action={canManageRoles && !query ? <Button size="sm" variant="primary" onClick={openCreate}><Plus className="h-3.5 w-3.5" />New role</Button> : undefined}
                   />
                 </td>
               </tr>
             ) : (
-              usersWithOverrides.map((user) => {
-                const overrideLabels = user.overrides
-                  .map((override) => capabilityLabels[override.capability as Capability] ?? override.capability)
-                  .slice(0, 3);
-                const extra = user.overrides.length - overrideLabels.length;
+              roles.map((role) => {
+                const labels = role.capabilities.map((capability) => capabilityLabels[capability] ?? capability);
+                const preview = labels.slice(0, 3);
+                const extra = labels.length - preview.length;
                 return (
-                  <tr key={user.membership._id} data-selected={user.membership._id === selectedMembershipId ? "true" : undefined} className="group/row">
+                  <tr key={role._id} className="group/row">
                     <td className="col-task max-w-[320px]">
                       <div className="task-title-cell">
                         <div className="flex min-w-0 items-center gap-2.5">
-                          <MemberAvatar name={user.user.name} email={user.user.email} />
+                          <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-[var(--surface-muted)] text-[var(--ink-faint)]"><ShieldCheck className="h-3.5 w-3.5" /></span>
                           <div className="min-w-0">
-                            <div className="truncate text-[13px] font-medium text-[var(--ink)]">{user.user.name || user.user.email}</div>
-                            <div className="truncate text-[12px] text-[var(--ink-muted)]">{user.user.email}</div>
+                            <div className="truncate text-[13px] font-medium text-[var(--ink)]">{role.name}</div>
                           </div>
                         </div>
                         <button
                           type="button"
                           data-interactive="true"
-                          data-tooltip="Open permissions"
+                          data-tooltip={canManageRoles ? "Edit role" : "View role"}
                           className="task-title-open"
-                          onClick={(event) => { event.stopPropagation(); onOpenDetails(user); }}
-                          aria-label={`Open permissions for ${user.user.name || user.user.email}`}
+                          onClick={(event) => { event.stopPropagation(); openEdit(role); }}
+                          aria-label={`${canManageRoles ? "Edit" : "View"} role ${role.name}`}
                         >
                           <PanelRight className="h-3.5 w-3.5" />
                           <span>OPEN</span>
                         </button>
                       </div>
                     </td>
-                    <td>
-                      <Badge tone={roleTone[user.membership.role]}>{user.membership.role}</Badge>
-                    </td>
+                    <td className="text-[12.5px] text-[var(--ink-secondary)] tabular-nums">{role.memberCount} member{role.memberCount === 1 ? "" : "s"}</td>
                     <td className="max-w-[320px]">
                       <div className="flex min-w-0 flex-col">
                         <span className="text-[12.5px] text-[var(--ink-secondary)] tabular-nums">
-                          {user.overrides.length} override{user.overrides.length === 1 ? "" : "s"}
+                          {role.capabilities.length} permission{role.capabilities.length === 1 ? "" : "s"}
                         </span>
                         <span className="truncate text-[11.5px] text-[var(--ink-faint)]">
-                          {overrideLabels.join(", ")}
+                          {preview.join(", ")}
                           {extra > 0 && `, +${extra} more`}
                         </span>
                       </div>
                     </td>
+                    {canManageRoles && (
+                      <td>
+                        <div className="flex items-center justify-end gap-1">
+                          <button type="button" className="task-icon-btn" onClick={() => openEdit(role)} aria-label={`Edit role ${role.name}`} title="Edit role">
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            className="task-icon-btn"
+                            aria-label={`Duplicate role ${role.name}`}
+                            title="Duplicate role"
+                            onClick={() => {
+                              setActionError(null);
+                              void onDuplicateRole(role._id).catch((err) => setActionError(err instanceof Error ? err.message : "Could not duplicate role."));
+                            }}
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            className="task-icon-btn"
+                            aria-label={`Delete role ${role.name}`}
+                            title="Delete role"
+                            onClick={() => {
+                              if (!window.confirm(role.memberCount > 0 ? `Delete ${role.name}? It is assigned to ${role.memberCount} member${role.memberCount === 1 ? "" : "s"}.` : `Delete ${role.name}?`)) return;
+                              setActionError(null);
+                              void onDeleteRole(role._id).catch((err) => setActionError(err instanceof Error ? err.message : "Could not delete role."));
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 );
               })
@@ -1317,6 +1529,15 @@ function PermissionsTab({ data, onOpenDetails, selectedMembershipId }: { data: O
           </tbody>
         </table>
       </div>
+
+      <RoleDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        role={editingRole}
+        existingNames={data.roles.map((role) => role.name)}
+        onSave={(draft) => onSaveRole(editingRole?._id, draft)}
+        canEdit={canManageRoles}
+      />
     </div>
   );
 }
@@ -1334,10 +1555,10 @@ function InviteDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   data: Overview;
-  onInvite: (args: { email: string; role: Role; branchId: Id<"branches"> | ""; departmentId: Id<"departments"> | "" }) => Promise<void>;
+  onInvite: (args: { email: string; role: string; branchId: Id<"branches"> | ""; departmentId: Id<"departments"> | "" }) => Promise<void>;
 }) {
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<Role>("Employee");
+  const [role, setRole] = useState("Employee");
   const [branchId, setBranchId] = useState<Id<"branches"> | "">("");
   const [departmentId, setDepartmentId] = useState<Id<"departments"> | "">("");
   const [saving, setSaving] = useState(false);
@@ -1346,12 +1567,12 @@ function InviteDialog({
   useEffect(() => {
     if (open) {
       setEmail("");
-      setRole("Employee");
+      setRole(data.roles.find((item) => item.name === "Employee")?.name ?? data.roles[0]?.name ?? "");
       setBranchId("");
       setDepartmentId("");
       setError(null);
     }
-  }, [open]);
+  }, [open, data.roles]);
 
   // Reset department when branch changes (departments are scoped to branches)
   useEffect(() => {
@@ -1374,6 +1595,10 @@ function InviteDialog({
   async function submit() {
     if (!email.trim()) {
       setError("Email is required.");
+      return;
+    }
+    if (!role) {
+      setError("Select a role.");
       return;
     }
     setSaving(true);
@@ -1425,9 +1650,10 @@ function InviteDialog({
                   <label className="block">
                     <span className="mb-1.5 block text-[12px] font-medium text-[var(--ink-muted)]">Role</span>
                     <SelectField value={role} onChange={setRole}>
-                      {roles.map((item) => (
-                        <option key={item} value={item}>
-                          {item}
+                      {role === "" && <option value="" disabled>Select a role</option>}
+                      {data.roles.map((item) => (
+                        <option key={item._id} value={item.name}>
+                          {item.name}
                         </option>
                       ))}
                     </SelectField>
@@ -1480,8 +1706,28 @@ function InviteDialog({
 }
 
 /* ============================================================== */
-/*  Permissions dialog                                             */
+/*  Member access dialog                                           */
 /* ============================================================== */
+
+type AccessDraft = {
+  role: string;
+  branchIds: Id<"branches">[];
+  departmentIds: Id<"departments">[];
+  managedBranchIds: Id<"branches">[];
+  managedDepartmentIds: Id<"departments">[];
+  managedUserMembershipIds: Id<"companyMemberships">[];
+};
+
+function draftFromUser(user: UserRow): AccessDraft {
+  return {
+    role: user.membership.role,
+    branchIds: user.branchIds,
+    departmentIds: user.departmentIds,
+    managedBranchIds: user.scope?.branchIds ?? [],
+    managedDepartmentIds: user.scope?.departmentIds ?? [],
+    managedUserMembershipIds: user.scope?.userMembershipIds ?? [],
+  };
+}
 
 function PermissionProperty({ icon, label, children, muted = false, className }: { icon: React.ReactNode; label: string; children: React.ReactNode; muted?: boolean; className?: string }) {
   return (
@@ -1590,74 +1836,34 @@ function PermissionMultiSelectPopover<T extends string>({
   );
 }
 
-function PermissionGroups({
-  role,
-  overrides,
-  onChange,
-  disabled = false,
-}: {
-  role: Role;
-  overrides: Record<Capability, Effect>;
-  onChange: (next: Record<Capability, Effect>) => void;
-  disabled?: boolean;
-}) {
-  const effective = useMemo(() => effectiveCapabilities(role, overrides), [role, overrides]);
-  return (
-    <div className="space-y-5">
-      {capabilityGroups.map((group) => (
-        <section key={group.title}>
-          <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]">{group.title}</div>
-          <div className="grid gap-px lg:grid-cols-2">
-            {group.capabilities.map((capability) => {
-              const inherited = defaultRoleCapabilities[role].includes(capability);
-              const checked = effective.has(capability);
-              const effect = overrides[capability];
-              const toggle = () => {
-                const nextChecked = !checked;
-                const nextEffect: Effect = nextChecked === inherited ? "inherit" : nextChecked ? "allow" : "deny";
-                onChange({ ...overrides, [capability]: nextEffect });
-              };
-              return (
-                <div key={capability} className="flex items-start gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--surface-hover)]">
-                  <Checkbox checked={checked} disabled={disabled} aria-label={capabilityLabels[capability]} onCheckedChange={toggle} />
-                  <button type="button" className="min-w-0 flex-1 text-left disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled} onClick={toggle}>
-                    <span className="block text-[13px] text-[var(--ink)]">{capabilityLabels[capability]}</span>
-                    <span className="text-[11px] text-[var(--ink-muted)]">
-                      {effect === "inherit" ? (inherited ? "Inherited from role" : "Off by default") : effect === "allow" ? "Manually allowed" : "Manually denied"}
-                    </span>
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-      ))}
-    </div>
-  );
-}
-
-function PermissionsDialog({
+function MemberAccessDialog({
   open,
   onOpenChange,
   data,
   user,
-  onSave,
-  canManagePermissions,
+  onChangeRole,
+  onChangeAssignments,
+  onChangeScope,
+  canManageRoles,
+  canManageUsers,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   data: Overview;
   user?: UserRow;
-  onSave: (user: UserRow, draft: PermissionDraft) => Promise<void>;
-  canManagePermissions: boolean;
+  onChangeRole: (user: UserRow, role: string) => Promise<void>;
+  onChangeAssignments: (user: UserRow, branchIds: Id<"branches">[], departmentIds: Id<"departments">[]) => Promise<void>;
+  onChangeScope: (user: UserRow, scope: Scope) => Promise<void>;
+  canManageRoles: boolean;
+  canManageUsers: boolean;
 }) {
   const reduceMotion = useReducedMotion();
   const [closing, setClosing] = useState(false);
   const closeTimerRef = useRef<number | null>(null);
-  const [draft, setDraft] = useState<PermissionDraft>(() =>
+  const [draft, setDraft] = useState<AccessDraft>(() =>
     user
       ? draftFromUser(user)
-      : { role: "Employee", branchIds: [], departmentIds: [], managedBranchIds: [], managedDepartmentIds: [], managedUserMembershipIds: [], overrides: { ...emptyOverrides } },
+      : { role: "Employee", branchIds: [], departmentIds: [], managedBranchIds: [], managedDepartmentIds: [], managedUserMembershipIds: [] },
   );
   const [error, setError] = useState<string | null>(null);
   const saveVersionRef = useRef(0);
@@ -1691,6 +1897,12 @@ function PermissionsDialog({
   const people = data.users
     .filter((row) => row.membership._id !== user.membership._id)
     .map((row) => ({ id: row.membership._id, label: row.user.name || row.user.email, helper: row.membership.role }));
+  const roleNames = new Set(data.roles.map((role) => role.name));
+  roleNames.add(draft.role);
+  const roleOptions = Array.from(roleNames).sort((a, b) => a.localeCompare(b)).map((name) => {
+    const role = data.roles.find((item) => item.name === name);
+    return { value: name, label: name, helper: role ? `${role.capabilities.length} permission${role.capabilities.length === 1 ? "" : "s"}` : "Role no longer exists" };
+  });
   const managedBranchIds = new Set(draft.managedBranchIds);
   const managedDepartments = data.departments
     .filter((department) => managedBranchIds.has(department.branchId))
@@ -1708,7 +1920,7 @@ function PermissionsDialog({
   const branchText = branchNames.length === 0 ? "No branch" : branchNames.length === 1 ? branchNames[0] : `${branchNames.length} branches`;
   const departmentText = draft.branchIds.length === 0 ? "Select branch first" : departmentNames.length === 0 ? "No department" : departmentNames.length === 1 ? departmentNames[0] : `${departmentNames.length} departments`;
 
-  function closePermissions() {
+  function closeAccess() {
     if (closing) return;
     setClosing(true);
     if (closeTimerRef.current != null) window.clearTimeout(closeTimerRef.current);
@@ -1719,34 +1931,48 @@ function PermissionsDialog({
     }, DETAIL_DRAWER_CLOSE_MS);
   }
 
-  function updateDraft(next: PermissionDraft) {
-    setDraft(next);
-    if (!canManagePermissions) return;
+  function queueSave(enabled: boolean, run: (currentUser: UserRow) => Promise<void>, message: string) {
+    if (!enabled || !user) return;
     const version = ++saveVersionRef.current;
     setError(null);
-    const save = saveQueueRef.current.catch(() => undefined).then(() => onSave(user!, next));
+    const target = user;
+    const save = saveQueueRef.current.catch(() => undefined).then(() => run(target));
     saveQueueRef.current = save;
     void save.catch((err) => {
-      if (version === saveVersionRef.current) setError(err instanceof Error ? err.message : "Could not save permissions.");
+      if (version === saveVersionRef.current) setError(err instanceof Error ? err.message : message);
     });
+  }
+
+  function updateRole(role: string) {
+    if (!user || role === draft.role) return;
+    setDraft({ ...draft, role });
+    queueSave(canManageRoles, (target) => onChangeRole(target, role), "Could not update role.");
   }
 
   function updateBranches(branchIds: Id<"branches">[]) {
     const branchSet = new Set(branchIds);
-    updateDraft({
-      ...draft,
-      branchIds,
-      departmentIds: draft.departmentIds.filter((departmentId) => {
-        const department = data.departments.find((item) => item._id === departmentId);
-        return Boolean(department && branchSet.has(department.branchId));
-      }),
+    const departmentIds = draft.departmentIds.filter((departmentId) => {
+      const department = data.departments.find((item) => item._id === departmentId);
+      return Boolean(department && branchSet.has(department.branchId));
     });
+    setDraft({ ...draft, branchIds, departmentIds });
+    queueSave(canManageUsers, (target) => onChangeAssignments(target, branchIds, departmentIds), "Could not update team placement.");
+  }
+
+  function updateDepartments(departmentIds: Id<"departments">[]) {
+    setDraft({ ...draft, departmentIds });
+    queueSave(canManageUsers, (target) => onChangeAssignments(target, draft.branchIds, departmentIds), "Could not update team placement.");
+  }
+
+  function saveManagedScope(managed: Partial<Pick<AccessDraft, "managedBranchIds" | "managedDepartmentIds" | "managedUserMembershipIds">>) {
+    const next = { ...draft, ...managed };
+    setDraft(next);
+    queueSave(canManageRoles, (target) => onChangeScope(target, { branchIds: next.managedBranchIds, departmentIds: next.managedDepartmentIds, userMembershipIds: next.managedUserMembershipIds }), "Could not update managed scope.");
   }
 
   function updateManagedBranches(managedBranchIds: Id<"branches">[]) {
     const branchSet = new Set(managedBranchIds);
-    updateDraft({
-      ...draft,
+    saveManagedScope({
       managedBranchIds,
       managedDepartmentIds: draft.managedDepartmentIds.filter((departmentId) => {
         const department = data.departments.find((item) => item._id === departmentId);
@@ -1756,7 +1982,7 @@ function PermissionsDialog({
   }
 
   return (
-    <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (nextOpen) onOpenChange(true); else closePermissions(); }}>
+    <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (nextOpen) onOpenChange(true); else closeAccess(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-transparent" />
         <Dialog.Content
@@ -1773,14 +1999,14 @@ function PermissionsDialog({
             <div className="task-drawer-inner">
               <div className="mx-auto flex min-h-full w-full max-w-[560px] flex-col px-6 py-7 md:px-9 md:py-8">
                 <div className="peek-bar -mt-7 -mx-6 px-2 md:-mt-8 md:-mx-9 md:px-3">
-                  <button type="button" className="task-icon-btn" aria-label="Close permissions" onClick={closePermissions}>
+                  <button type="button" className="task-icon-btn" aria-label="Close access settings" onClick={closeAccess}>
                     <ChevronsRight className="h-5 w-5" />
                   </button>
                 </div>
 
                 <div className="pt-6">
-                  <Dialog.Title className="text-[26px] font-bold leading-tight tracking-[-0.025em] text-[var(--ink)]">Permissions</Dialog.Title>
-                  <Dialog.Description className="sr-only">Manage permissions for {user.user.name || user.user.email}</Dialog.Description>
+                  <Dialog.Title className="text-[26px] font-bold leading-tight tracking-[-0.025em] text-[var(--ink)]">Access</Dialog.Title>
+                  <Dialog.Description className="sr-only">Manage role, team placement, and managed scope for {user.user.name || user.user.email}</Dialog.Description>
                 </div>
 
                 <section className="task-section !mt-8">
@@ -1788,13 +2014,13 @@ function PermissionsDialog({
                     <div className="prop-row">
                       <span className="prop-label"><UserCog className="h-3.5 w-3.5" />Role</span>
                       <div className="prop-value">
-                        <PeopleCellMenu value={draft.role} options={roles.map((role) => ({ value: role, label: role }))} onChange={(role) => updateDraft({ ...draft, role })} ariaLabel={`Change role for ${user.user.name || user.user.email}`} disabled={!canManagePermissions} renderValue={(option) => <Badge tone={roleTone[(option?.value ?? draft.role) as Role]}>{option?.label ?? draft.role}</Badge>} />
+                        <PeopleCellMenu value={draft.role} options={roleOptions} onChange={updateRole} ariaLabel={`Change role for ${user.user.name || user.user.email}`} disabled={!canManageRoles} renderValue={(option) => <Badge tone={roleBadgeTone(option?.value ?? draft.role)}>{option?.label ?? draft.role}</Badge>} />
                       </div>
                     </div>
                     <div className="prop-row">
                       <span className="prop-label"><Building2 className="h-3.5 w-3.5" />Branch</span>
                       <div className="prop-value truncate">
-                        <PermissionMultiSelectPopover ariaLabel="Change branches" empty="No branches" header={<span className="min-w-0 flex-1 truncate">Branches</span>} options={branches} selected={draft.branchIds} disabled={!canManagePermissions} onChange={updateBranches}>
+                        <PermissionMultiSelectPopover ariaLabel="Change branches" empty="No branches" header={<span className="min-w-0 flex-1 truncate">Branches</span>} options={branches} selected={draft.branchIds} disabled={!canManageUsers} onChange={updateBranches}>
                           <span className="truncate">{branchText}</span>
                         </PermissionMultiSelectPopover>
                       </div>
@@ -1802,7 +2028,7 @@ function PermissionsDialog({
                     <div className="prop-row">
                       <span className="prop-label"><Layers className="h-3.5 w-3.5" />Department</span>
                       <div className={cn("prop-value truncate", draft.departmentIds.length === 0 && "prop-value--muted")}>
-                        <PermissionMultiSelectPopover ariaLabel="Change departments" empty="No departments in selected branches" header={<span className="min-w-0 flex-1 truncate">Departments</span>} options={departments} selected={draft.departmentIds} disabled={!canManagePermissions || draft.branchIds.length === 0} onChange={(departmentIds) => updateDraft({ ...draft, departmentIds })}>
+                        <PermissionMultiSelectPopover ariaLabel="Change departments" empty="No departments in selected branches" header={<span className="min-w-0 flex-1 truncate">Departments</span>} options={departments} selected={draft.departmentIds} disabled={!canManageUsers || draft.branchIds.length === 0} onChange={updateDepartments}>
                           <span className="truncate">{departmentText}</span>
                         </PermissionMultiSelectPopover>
                       </div>
@@ -1814,25 +2040,28 @@ function PermissionsDialog({
                   <h2 className="task-section-title">Managed scope</h2>
                   <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
                     <PermissionProperty icon={<Users className="h-3.5 w-3.5" />} label="People" className="min-w-[120px]">
-                      <PermissionMultiSelectPopover ariaLabel="Change people under this user" empty="No other people" header={<span className="min-w-0 flex-1 truncate">People under this user</span>} options={people} selected={draft.managedUserMembershipIds} disabled={!canManagePermissions} onChange={(managedUserMembershipIds) => updateDraft({ ...draft, managedUserMembershipIds })}>
+                      <PermissionMultiSelectPopover ariaLabel="Change people under this user" empty="No other people" header={<span className="min-w-0 flex-1 truncate">People under this user</span>} options={people} selected={draft.managedUserMembershipIds} disabled={!canManageRoles} onChange={(managedUserMembershipIds) => saveManagedScope({ managedUserMembershipIds })}>
                         <span className="block w-full rounded-md py-1 text-[20px] font-semibold leading-none tracking-[-0.02em] tabular-nums">{draft.managedUserMembershipIds.length}</span>
                       </PermissionMultiSelectPopover>
                     </PermissionProperty>
                     <PermissionProperty icon={<Building2 className="h-3.5 w-3.5" />} label="Branches" className="min-w-[120px]">
-                      <PermissionMultiSelectPopover ariaLabel="Change branches under this user" empty="No branches" header={<span className="min-w-0 flex-1 truncate">Branches under this user</span>} options={branches} selected={draft.managedBranchIds} disabled={!canManagePermissions} onChange={updateManagedBranches}>
+                      <PermissionMultiSelectPopover ariaLabel="Change branches under this user" empty="No branches" header={<span className="min-w-0 flex-1 truncate">Branches under this user</span>} options={branches} selected={draft.managedBranchIds} disabled={!canManageRoles} onChange={updateManagedBranches}>
                         <span className="block w-full rounded-md py-1 text-[20px] font-semibold leading-none tracking-[-0.02em] tabular-nums">{draft.managedBranchIds.length}</span>
                       </PermissionMultiSelectPopover>
                     </PermissionProperty>
                     <PermissionProperty icon={<Layers className="h-3.5 w-3.5" />} label="Departments" muted={draft.managedDepartmentIds.length === 0} className="min-w-[120px]">
-                      <PermissionMultiSelectPopover ariaLabel="Change departments under this user" empty="No departments in selected branches" header={<span className="min-w-0 flex-1 truncate">Departments under this user</span>} options={managedDepartments} selected={draft.managedDepartmentIds} disabled={!canManagePermissions || draft.managedBranchIds.length === 0} onChange={(managedDepartmentIds) => updateDraft({ ...draft, managedDepartmentIds })}>
+                      <PermissionMultiSelectPopover ariaLabel="Change departments under this user" empty="No departments in selected branches" header={<span className="min-w-0 flex-1 truncate">Departments under this user</span>} options={managedDepartments} selected={draft.managedDepartmentIds} disabled={!canManageRoles || draft.managedBranchIds.length === 0} onChange={(managedDepartmentIds) => saveManagedScope({ managedDepartmentIds })}>
                         <span className="block w-full rounded-md py-1 text-[20px] font-semibold leading-none tracking-[-0.02em] tabular-nums">{draft.managedDepartmentIds.length}</span>
                       </PermissionMultiSelectPopover>
                     </PermissionProperty>
                   </div>
                 </section>
 
-                <section className="task-section !mt-10">
-                  <PermissionGroups role={draft.role} overrides={draft.overrides} disabled={!canManagePermissions} onChange={(overrides) => updateDraft({ ...draft, overrides })} />
+                <section className="task-section">
+                  <h2 className="task-section-title">Role permissions</h2>
+                  <p className="text-[13px] text-[var(--ink-muted)]">
+                    Permissions come from the <span className="font-medium text-[var(--ink)]">{draft.role}</span> role. Edit them on the Roles tab.
+                  </p>
                 </section>
 
                 {error && (
@@ -1959,12 +2188,32 @@ export default function Company() {
   const reorderBranches = useMutation(api.companyManagement.reorderBranches);
   const moveDepartment = useMutation(api.companyManagement.moveDepartment);
   const invite = useAction(api.companyManagement.inviteUser);
-  const setUserRole = useMutation(api.companyManagement.setUserRole).withOptimisticUpdate((localStore, args) => {
+  const ensureRoles = useMutation(api.roles.ensureDefaults);
+  const assignRole = useMutation(api.roles.assign).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
+    if (!current) return;
+    const assigned = new Set(args.membershipIds);
+    const memberCount = new Map<string, number>();
+    for (const row of current.users) {
+      const name = assigned.has(row.membership._id) ? args.role : row.membership.role;
+      memberCount.set(name, (memberCount.get(name) ?? 0) + 1);
+    }
+    localStore.setQuery(api.companyManagement.overview, { companyId: args.companyId }, {
+      ...current,
+      users: current.users.map((row) => assigned.has(row.membership._id) ? { ...row, membership: { ...row.membership, role: args.role } } : row),
+      roles: current.roles.map((role) => ({ ...role, memberCount: memberCount.get(role.name) ?? 0 })),
+    } as any);
+  });
+  const createRole = useMutation(api.roles.create);
+  const updateRole = useMutation(api.roles.update);
+  const duplicateRole = useMutation(api.roles.duplicate);
+  const removeRole = useMutation(api.roles.remove);
+  const setManagerScope = useMutation(api.companyManagement.setManagerScope).withOptimisticUpdate((localStore, args) => {
     const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
     if (!current) return;
     localStore.setQuery(api.companyManagement.overview, { companyId: args.companyId }, {
       ...current,
-      users: current.users.map((row) => row.membership._id === args.membershipId ? { ...row, membership: { ...row.membership, role: args.role }, overrides: [] } : row),
+      users: current.users.map((row) => row.membership._id === args.managerMembershipId ? { ...row, scope: { branchIds: args.branchIds, departmentIds: args.departmentIds, userMembershipIds: args.userMembershipIds } } : row),
     } as any);
   });
   const setAssignments = useMutation(api.companyManagement.setAssignments).withOptimisticUpdate((localStore, args) => {
@@ -1996,7 +2245,7 @@ export default function Company() {
     const removing = new Set(args.membershipIds);
     localStore.setQuery(api.companyManagement.overview, { companyId: args.companyId }, {
       ...current,
-      users: current.users.map((row) => removing.has(row.membership._id) ? { ...row, membership: { ...row.membership, active: false }, branchIds: [], departmentIds: [], scope: { branchIds: [], departmentIds: [], userMembershipIds: [] }, overrides: [] } : row),
+      users: current.users.map((row) => removing.has(row.membership._id) ? { ...row, membership: { ...row.membership, active: false }, branchIds: [], departmentIds: [], scope: { branchIds: [], departmentIds: [], userMembershipIds: [] } } : row),
     } as any);
     const access = localStore.getQuery(api.companies.accessStatus, {}) as any;
     if (access?.status === "ready") {
@@ -2044,29 +2293,13 @@ export default function Company() {
       });
     }
   });
-  const setUserPermissions = useMutation(api.companyManagement.setUserPermissions).withOptimisticUpdate((localStore, args) => {
-    const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
-    if (!current) return;
-    localStore.setQuery(api.companyManagement.overview, { companyId: args.companyId }, {
-      ...current,
-      users: current.users.map((row) => row.membership._id === args.membershipId ? {
-        ...row,
-        membership: { ...row.membership, role: args.role },
-        branchIds: args.branchIds,
-        departmentIds: args.departmentIds,
-        scope: { branchIds: args.managedBranchIds, departmentIds: args.managedDepartmentIds, userMembershipIds: args.managedUserMembershipIds },
-        overrides: args.permissionOverrides.flatMap((override) => override.effect === "inherit" ? [] : [{ capability: override.capability, effect: override.effect }]),
-      } : row),
-    } as any);
-  });
-
   const [tab, setTab] = useState<TabValue>("general");
   const [companyName, setCompanyName] = useState("");
   const [companyTimeZone, setCompanyTimeZone] = useState(DEFAULT_TIME_ZONE);
   const [savingName, setSavingName] = useState(false);
   const [savingTimeZone, setSavingTimeZone] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
-  const [permissionsMembershipId, setPermissionsMembershipId] = useState<Id<"companyMemberships"> | undefined>();
+  const [accessMembershipId, setAccessMembershipId] = useState<Id<"companyMemberships"> | undefined>();
   const [error, setError] = useState<string | null>(null);
   const autoTimeZoneAttempts = useRef<Set<string>>(new Set());
 
@@ -2077,7 +2310,14 @@ export default function Company() {
     }
   }, [active?.company.name, active?.company.timeZone, data]);
 
-  const permissionsUser = useMemo(() => data?.users.find((user) => user.membership._id === permissionsMembershipId), [data?.users, permissionsMembershipId]);
+  const rolesMissing = Boolean(data && data.roles.length === 0);
+  const canSeedRoles = Boolean(active?.capabilities.includes("company:manage_roles"));
+  useEffect(() => {
+    if (!activeCompanyId || !rolesMissing || !canSeedRoles) return;
+    void ensureRoles({ companyId: activeCompanyId }).catch(() => undefined);
+  }, [activeCompanyId, rolesMissing, canSeedRoles, ensureRoles]);
+
+  const accessUser = useMemo(() => data?.users.find((user) => user.membership._id === accessMembershipId), [data?.users, accessMembershipId]);
   const visibleTabs = useMemo(() => TABS.filter((item) => canViewCompanyTab(item.value, active?.capabilities)), [active?.capabilities]);
 
   useEffect(() => {
@@ -2106,7 +2346,7 @@ export default function Company() {
   const canManageBranches = active?.capabilities.includes("company:manage_branches") ?? false;
   const canManageDepartments = active?.capabilities.includes("company:manage_departments") ?? false;
   const canManageUsers = active?.capabilities.includes("company:manage_users") ?? false;
-  const canManagePermissions = active?.capabilities.includes("company:manage_permissions") ?? false;
+  const canManageRoles = active?.capabilities.includes("company:manage_roles") ?? false;
   const canInvite = active?.capabilities.includes("company:invite_users") ?? false;
   const activeTab = visibleTabs.some((item) => item.value === tab) ? tab : visibleTabs[0].value;
 
@@ -2144,7 +2384,7 @@ export default function Company() {
     }
   }
 
-  async function inviteMember(args: { email: string; role: Role; branchId: Id<"branches"> | ""; departmentId: Id<"departments"> | "" }) {
+  async function inviteMember(args: { email: string; role: string; branchId: Id<"branches"> | ""; departmentId: Id<"departments"> | "" }) {
     if (!activeCompanyId) return;
     await invite({
       companyId: activeCompanyId,
@@ -2155,28 +2395,38 @@ export default function Company() {
       managedBranchIds: [],
       managedDepartmentIds: [],
       managedUserMembershipIds: [],
-      permissionOverrides: [],
     });
   }
 
-  async function savePermissions(user: UserRow, draft: PermissionDraft) {
-    if (!activeCompanyId || !data) return;
-    await setUserPermissions({
-      companyId: activeCompanyId,
-      membershipId: user.membership._id,
-      role: draft.role,
-      branchIds: draft.branchIds,
-      departmentIds: draft.departmentIds,
-      managedBranchIds: draft.managedBranchIds,
-      managedDepartmentIds: draft.managedDepartmentIds,
-      managedUserMembershipIds: draft.managedUserMembershipIds,
-      permissionOverrides: data.capabilities.map((capability) => ({ capability, effect: draft.overrides[capability] })),
-    });
-  }
-
-  async function changeUserRole(user: UserRow, role: Role) {
+  async function changeUserRole(user: UserRow, role: string) {
     if (!activeCompanyId) return;
-    await setUserRole({ companyId: activeCompanyId, membershipId: user.membership._id, role });
+    await assignRole({ companyId: activeCompanyId, membershipIds: [user.membership._id], role });
+  }
+
+  async function changeUsersRole(membershipIds: Id<"companyMemberships">[], role: string) {
+    if (!activeCompanyId || membershipIds.length === 0) return;
+    await assignRole({ companyId: activeCompanyId, membershipIds, role });
+  }
+
+  async function saveRole(roleId: Id<"roles"> | undefined, draft: { name: string; capabilities: string[] }) {
+    if (!activeCompanyId) return;
+    if (roleId) await updateRole({ companyId: activeCompanyId, roleId, name: draft.name, capabilities: draft.capabilities });
+    else await createRole({ companyId: activeCompanyId, name: draft.name, capabilities: draft.capabilities });
+  }
+
+  async function duplicateExistingRole(roleId: Id<"roles">) {
+    if (!activeCompanyId) return;
+    await duplicateRole({ companyId: activeCompanyId, roleId });
+  }
+
+  async function deleteExistingRole(roleId: Id<"roles">) {
+    if (!activeCompanyId) return;
+    await removeRole({ companyId: activeCompanyId, roleId });
+  }
+
+  async function changeUserScope(user: UserRow, scope: Scope) {
+    if (!activeCompanyId) return;
+    await setManagerScope({ companyId: activeCompanyId, managerMembershipId: user.membership._id, branchIds: scope.branchIds, departmentIds: scope.departmentIds, userMembershipIds: scope.userMembershipIds });
   }
 
   async function changeUserBranch(user: UserRow, branchId: Id<"branches"> | "") {
@@ -2288,22 +2538,42 @@ export default function Company() {
                 onInvite={() => setInviteOpen(true)}
                 onUpdateName={(user, firstName, secondName) => run(() => changeUserName(user, firstName, secondName), "Could not update user name.")}
                 onRoleChange={(user, role) => run(() => changeUserRole(user, role), "Could not update role.")}
+                onBulkRoleChange={(membershipIds, role) => run(() => changeUsersRole(membershipIds, role), "Could not assign role.")}
+                onManageAccess={(user) => setAccessMembershipId(user.membership._id)}
                 onBranchChange={(user, branchId) => run(() => changeUserBranch(user, branchId), "Could not update branch.")}
                 onDepartmentChange={(user, departmentId) => run(() => changeUserDepartment(user, departmentId), "Could not update department.")}
                 onStatusChange={(user, active) => run(() => changeUserStatus(user, active), "Could not update status.")}
                 onRemoveUsers={removeSelectedUsers}
                 canManageUsers={canManageUsers}
-                canManagePermissions={canManagePermissions}
+                canManageRoles={canManageRoles}
                 canInvite={canInvite}
               />
             )}
-            {activeTab === "permissions" && <PermissionsTab data={data} selectedMembershipId={permissionsMembershipId} onOpenDetails={(user) => setPermissionsMembershipId(user.membership._id)} />}
+            {activeTab === "roles" && (
+              <RolesTab
+                data={data}
+                canManageRoles={canManageRoles}
+                onSaveRole={(roleId, draft) => saveRole(roleId, draft)}
+                onDuplicateRole={duplicateExistingRole}
+                onDeleteRole={deleteExistingRole}
+              />
+            )}
           </div>
         </main>
       </div>
 
       <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} data={data} onInvite={inviteMember} />
-      <PermissionsDialog open={Boolean(permissionsMembershipId)} onOpenChange={(open) => !open && setPermissionsMembershipId(undefined)} data={data} user={permissionsUser} onSave={savePermissions} canManagePermissions={canManagePermissions} />
+      <MemberAccessDialog
+        open={Boolean(accessMembershipId)}
+        onOpenChange={(open) => !open && setAccessMembershipId(undefined)}
+        data={data}
+        user={accessUser}
+        onChangeRole={(user, role) => changeUserRole(user, role)}
+        onChangeAssignments={async (user, branchIds, departmentIds) => { await setAssignments({ companyId: activeCompanyId!, membershipId: user.membership._id, branchIds, departmentIds }); }}
+        onChangeScope={changeUserScope}
+        canManageRoles={canManageRoles}
+        canManageUsers={canManageUsers}
+      />
     </div>
   );
 }

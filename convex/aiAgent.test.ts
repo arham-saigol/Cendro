@@ -5,6 +5,7 @@ import { describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 import { createAiPersistencePayload, signAiPersistencePayload } from "../src/lib/ai-chat-hmac";
+import { defaultRoleCapabilities } from "../src/lib/permissions";
 
 const modules = import.meta.glob("./**/*.ts");
 const MESSAGE_HISTORY_LIMIT = 100;
@@ -166,18 +167,19 @@ describe("AI agent Convex boundaries", () => {
     ).rejects.toThrow();
   });
 
-  test("ai:use capability deny blocks appendMessage and aiWorkspace.context", async () => {
-    const { t, companyId, employeeMembershipId } = await seed();
+  test("ai:use capability removal blocks appendMessage and aiWorkspace.context", async () => {
+    const { t, companyId } = await seed();
     const sessionId = await t.withIdentity(identity("employee")).mutation(api.aiChat.createSession, { companyId });
 
-    // Deny ai:use for employee
+    // Remove ai:use from the Employee role
     await t.run(async (ctx) => {
-      await ctx.db.insert("permissionOverrides", {
+      const now = Date.now();
+      await ctx.db.insert("roles", {
         companyId,
-        membershipId: employeeMembershipId,
-        capability: "ai:use",
-        effect: "deny",
-        updatedAt: Date.now(),
+        name: "Employee",
+        capabilities: defaultRoleCapabilities.Employee.filter((capability) => capability !== "ai:use"),
+        createdAt: now,
+        updatedAt: now,
       });
     });
 
@@ -282,7 +284,7 @@ describe("AI agent Convex boundaries", () => {
   });
 
   test("enforces ai:use capability when reading individual sessions after revocation", async () => {
-    const { t, companyId, employeeMembershipId } = await seed();
+    const { t, companyId } = await seed();
     const sessionId = await t.withIdentity(identity("employee")).mutation(api.aiChat.createSession, { companyId });
     await t.withIdentity(identity("employee")).mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "user", content: "Hello AI" });
 
@@ -291,14 +293,15 @@ describe("AI agent Convex boundaries", () => {
     const msgsBefore = await t.withIdentity(identity("employee")).query(api.aiChat.listMessages, { companyId, sessionId });
     expect(msgsBefore).toHaveLength(1);
 
-    // Revoke ai:use capability
+    // Revoke ai:use by removing it from the Employee role
     await t.run(async (ctx) => {
-      await ctx.db.insert("permissionOverrides", {
+      const now = Date.now();
+      await ctx.db.insert("roles", {
         companyId,
-        membershipId: employeeMembershipId,
-        capability: "ai:use",
-        effect: "deny",
-        updatedAt: Date.now(),
+        name: "Employee",
+        capabilities: defaultRoleCapabilities.Employee.filter((capability) => capability !== "ai:use"),
+        createdAt: now,
+        updatedAt: now,
       });
     });
 

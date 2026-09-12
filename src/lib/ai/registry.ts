@@ -3,7 +3,7 @@ import type { ConvexHttpClient } from "convex/browser";
 import { z } from "zod";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
-import type { Capability, Role } from "@/lib/permissions";
+import type { Capability } from "@/lib/permissions";
 import { cendroAiActivityLabels, type CendroAiToolName } from "./activity";
 import { firecrawlFetch, firecrawlSearch } from "./web";
 
@@ -20,7 +20,7 @@ export type CendroAiToolContext = {
   companyId: Id<"companies">;
   sessionId: Id<"aiChatSessions">;
   membershipId: Id<"companyMemberships">;
-  role: Role;
+  role: string;
   capabilities: Set<Capability>;
   refs: Map<string, RefValue>;
   counters: Record<RefKind, number>;

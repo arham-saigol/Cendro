@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import { createAuthzFixture, identity } from "./authz.fixture";
+import { defaultRoleCapabilities } from "../src/lib/permissions";
 
 describe("company management & invitation hardening", () => {
   beforeEach(() => {
@@ -10,11 +11,11 @@ describe("company management & invitation hardening", () => {
     vi.unstubAllEnvs();
   });
 
-  test("User without company:manage_permissions cannot invite non-Employee or grant scopes/overrides", async () => {
+  test("User without company:manage_roles can only invite baseline roles and cannot grant scopes", async () => {
     const f = await createAuthzFixture();
 
-    // Manager A has company:invite_users but NOT company:manage_permissions
-    await f.setOverride(f.companyA, f.managerM, "company:invite_users", "allow");
+    // Manager role gains company:invite_users but not company:manage_roles
+    await f.setRoleCapabilities(f.companyA, "Manager", [...defaultRoleCapabilities.Manager, "company:invite_users"]);
 
     await expect(
       f.asUser("managerA").mutation(internal.companyManagement.createInvitationRecord, {
@@ -22,7 +23,7 @@ describe("company management & invitation hardening", () => {
         email: "newmanager@example.com",
         role: "Manager",
       })
-    ).rejects.toThrow("You cannot invite non-Employees.");
+    ).rejects.toThrow("You do not have access to invite with this role.");
 
     await expect(
       f.asUser("managerA").mutation(internal.companyManagement.createInvitationRecord, {
@@ -30,7 +31,7 @@ describe("company management & invitation hardening", () => {
         email: "newadmin@example.com",
         role: "Admin",
       })
-    ).rejects.toThrow("You cannot invite non-Employees.");
+    ).rejects.toThrow("You do not have access to invite with this role.");
 
     await expect(
       f.asUser("managerA").mutation(internal.companyManagement.createInvitationRecord, {
@@ -39,9 +40,17 @@ describe("company management & invitation hardening", () => {
         role: "Employee",
         managedBranchIds: [f.branchA1],
       })
-    ).rejects.toThrow("You cannot grant managed scopes or permission overrides.");
+    ).rejects.toThrow("You cannot grant managed scopes.");
 
-    // Admin CAN invite Manager or Employee with scopes
+    // Manager CAN invite Employee (baseline capabilities only)
+    const baseline = await f.asUser("managerA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "newemployee@example.com",
+      role: "Employee",
+    });
+    expect(baseline.token).toBeDefined();
+
+    // Admin CAN invite Manager with scopes
     const res = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
       companyId: f.companyA,
       email: "newmanager@example.com",
@@ -139,7 +148,7 @@ describe("company management & invitation hardening", () => {
     expect(auditEvent).not.toBeNull();
   });
 
-  test("Sole permission manager cannot be deactivated or downgraded", async () => {
+  test("Sole role manager cannot be deactivated or downgraded", async () => {
     const f = await createAuthzFixture();
 
     // Try to deactivate sole admin
@@ -149,16 +158,16 @@ describe("company management & invitation hardening", () => {
         membershipId: f.adminM,
         active: false,
       })
-    ).rejects.toThrow("At least one active member must be able to manage permissions.");
+    ).rejects.toThrow("At least one active member must be able to manage roles.");
 
     // Try to downgrade sole admin to Employee
     await expect(
-      f.asUser("adminA").mutation(api.companyManagement.setUserRole, {
+      f.asUser("adminA").mutation(api.roles.assign, {
         companyId: f.companyA,
-        membershipId: f.adminM,
+        membershipIds: [f.adminM],
         role: "Employee",
       })
-    ).rejects.toThrow("At least one active member must be able to manage permissions.");
+    ).rejects.toThrow("At least one active member must be able to manage roles.");
   });
 
   test("Reissuing invitation revokes matching pending records even with over 500 invitations in the company", async () => {
@@ -211,11 +220,16 @@ describe("company management & invitation hardening", () => {
     ).resolves.toBeDefined();
   });
 
-  test("Deactivating member preserves permission overrides, and non-permission-admin cannot reactivate a member with manage_permissions", async () => {
+  test("Deactivating member preserves their role, and non-role-admin cannot reactivate a member whose role manages roles", async () => {
     const f = await createAuthzFixture();
 
-    // Give employee1M an override: company:manage_permissions
-    await f.setOverride(f.companyA, f.employee1M, "company:manage_permissions", "allow");
+    // Create a privileged custom role and assign it to employee1M
+    await f.setRoleCapabilities(f.companyA, "Coordinator", ["company:manage_roles", "tasks:comment"]);
+    await f.asUser("adminA").mutation(api.roles.assign, {
+      companyId: f.companyA,
+      membershipIds: [f.employee1M],
+      role: "Coordinator",
+    });
 
     // Deactivate employee1M
     await f.asUser("adminA").mutation(api.companyManagement.setUserActive, {
@@ -224,29 +238,23 @@ describe("company management & invitation hardening", () => {
       active: false,
     });
 
-    // Verify permission overrides are STILL preserved
-    const overrides = await f.t.run(async (ctx) => {
-      return await ctx.db
-        .query("permissionOverrides")
-        .withIndex("by_membership", (q) => q.eq("membershipId", f.employee1M))
-        .collect();
-    });
-    expect(overrides.length).toBe(1);
-    expect(overrides[0].capability).toBe("company:manage_permissions");
+    // Verify the role assignment is STILL preserved
+    const membership = await f.t.run(async (ctx) => await ctx.db.get(f.employee1M));
+    expect(membership?.role).toBe("Coordinator");
 
-    // Give managerA company:manage_users so managerA can activate/deactivate regular users
-    await f.setOverride(f.companyA, f.managerM, "company:manage_users", "allow");
+    // Give Manager role company:manage_users so managerA can activate/deactivate regular users
+    await f.setRoleCapabilities(f.companyA, "Manager", [...defaultRoleCapabilities.Manager, "company:manage_users"]);
 
-    // Manager A does NOT have company:manage_permissions, so trying to reactivate employee1M (who holds company:manage_permissions override) must fail
+    // Manager A does NOT have company:manage_roles, so reactivating employee1M (whose role manages roles) must fail
     await expect(
       f.asUser("managerA").mutation(api.companyManagement.setUserActive, {
         companyId: f.companyA,
         membershipId: f.employee1M,
         active: true,
       })
-    ).rejects.toThrow("You do not have access to activate a permission administrator.");
+    ).rejects.toThrow("You do not have access to activate a role administrator.");
 
-    // Admin A (who has company:manage_permissions) CAN reactivate employee1M
+    // Admin A (who has company:manage_roles) CAN reactivate employee1M
     await expect(
       f.asUser("adminA").mutation(api.companyManagement.setUserActive, {
         companyId: f.companyA,

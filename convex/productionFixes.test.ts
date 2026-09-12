@@ -4,6 +4,7 @@ import { convexTest } from "convex-test";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import schema from "./schema";
+import { defaultRoleCapabilities, defaultRoleNames, type Capability } from "../src/lib/permissions";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -24,17 +25,31 @@ async function seedCompany() {
     const adminMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: adminUserId, role: "Admin", active: true, createdAt: now, updatedAt: now });
     const secondAdminMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: secondAdminUserId, role: "Admin", active: true, createdAt: now, updatedAt: now });
     const employeeMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: employeeUserId, role: "Employee", active: true, createdAt: now, updatedAt: now });
+    for (const name of defaultRoleNames) {
+      await ctx.db.insert("roles", { companyId, name, capabilities: [...defaultRoleCapabilities[name]], createdAt: now, updatedAt: now });
+    }
     return { companyId, adminMembershipId, secondAdminMembershipId, employeeMembershipId };
   });
   return { t, ...ids };
 }
 
-async function allowEmployeeCreate({ t, companyId, employeeMembershipId }: Seed) {
+async function setRoleCaps({ t, companyId }: Pick<Seed, "t" | "companyId">, roleName: string, capabilities: Capability[]) {
   await t.run(async (ctx) => {
-    const now = Date.now();
-    await ctx.db.insert("permissionOverrides", { companyId, membershipId: employeeMembershipId, capability: "tasks:one_time:create", effect: "allow", updatedAt: now });
-    await ctx.db.insert("permissionOverrides", { companyId, membershipId: employeeMembershipId, capability: "tasks:one_time:assign:self", effect: "allow", updatedAt: now });
+    const role = await ctx.db
+      .query("roles")
+      .withIndex("by_company_and_name", (q) => q.eq("companyId", companyId).eq("name", roleName))
+      .unique();
+    if (!role) throw new Error(`Role ${roleName} not found`);
+    await ctx.db.patch(role._id, { capabilities, updatedAt: Date.now() });
   });
+}
+
+async function allowEmployeeCreate(seed: Seed) {
+  await setRoleCaps(seed, "Employee", [
+    ...defaultRoleCapabilities.Employee,
+    "tasks:one_time:create",
+    "tasks:one_time:assign:self",
+  ]);
 }
 
 describe("production permission and validation fixes", () => {
@@ -301,17 +316,17 @@ describe("production permission and validation fixes", () => {
   });
 
   test("analytics requires an effective analytics:view capability", async () => {
-    const { t, companyId, employeeMembershipId } = await seedCompany();
-    await t.run(async (ctx) => {
-      await ctx.db.insert("permissionOverrides", { companyId, membershipId: employeeMembershipId, capability: "analytics:view:self", effect: "deny", updatedAt: Date.now() });
-    });
+    const seeded = await seedCompany();
+    const { t, companyId } = seeded;
+    await setRoleCaps(seeded, "Employee", defaultRoleCapabilities.Employee.filter((capability) => capability !== "analytics:view:self"));
 
     await expect(t.withIdentity(identity("employee")).query(api.analytics.summary, { companyId })).rejects.toThrow("analytics");
   });
 
   test("SOP create requires sops:create even when scope management is allowed", async () => {
-    const { t, companyId, secondAdminMembershipId } = await seedCompany();
-    await t.withIdentity(identity("admin2", "admin2@example.com")).mutation(api.companyManagement.setPermissionOverride, { companyId, membershipId: secondAdminMembershipId, capability: "sops:create", effect: "deny" });
+    const seeded = await seedCompany();
+    const { t, companyId } = seeded;
+    await setRoleCaps(seeded, "Admin", defaultRoleCapabilities.Admin.filter((capability) => capability !== "sops:create"));
 
     await expect(t.withIdentity(identity("admin2", "admin2@example.com")).mutation(api.sops.create, { companyId, title: "Policy", content: "Body", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] })).rejects.toThrow("access");
   });
@@ -395,9 +410,9 @@ describe("production permission and validation fixes", () => {
       await ctx.db.insert("managerBranchScopes", { companyId, managerMembershipId, branchId: managedBranchId, updatedAt: now });
       await ctx.db.insert("managerDepartmentScopes", { companyId, managerMembershipId, departmentId: managedDepartmentId, updatedAt: now });
       await ctx.db.insert("managerUserScopes", { companyId, managerMembershipId, userMembershipId: employeeMembershipId, updatedAt: now });
-      await ctx.db.insert("permissionOverrides", { companyId, membershipId: managerMembershipId, capability: "sops:manage:user", effect: "allow", updatedAt: now });
       return { managerMembershipId, managedBranchId, unmanagedBranchId, managedDepartmentId, unmanagedDepartmentId, unmanagedUserMembershipId };
     });
+    await setRoleCaps({ t, companyId }, "Manager", [...defaultRoleCapabilities.Manager, "sops:manage:user"]);
 
     const managedBranchSopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Managed branch SOP", content: "Body", scopeType: "branch", branchIds: [managedBranchId], departmentIds: [], userMembershipIds: [] });
     const unmanagedBranchSopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Unmanaged branch SOP", content: "Body", scopeType: "branch", branchIds: [unmanagedBranchId], departmentIds: [], userMembershipIds: [] });
@@ -466,16 +481,18 @@ describe("production permission and validation fixes", () => {
     expect(result.remainingDepartment).toMatchObject({ branchId: ids.firstBranchId, order: 0 });
   });
 
-  test("permission overrides cannot remove the last effective permission manager", async () => {
-    const { t, companyId, secondAdminMembershipId } = await seedCompany();
-    await t.withIdentity(identity("admin")).mutation(api.companyManagement.setUserRole, { companyId, membershipId: secondAdminMembershipId, role: "Employee" });
+  test("role edits cannot remove the last effective role manager", async () => {
+    const { t, companyId, adminMembershipId, secondAdminMembershipId } = await seedCompany();
+    await t.withIdentity(identity("admin")).mutation(api.roles.assign, { companyId, membershipIds: [secondAdminMembershipId], role: "Employee" });
 
-    await expect(t.withIdentity(identity("admin")).mutation(api.companyManagement.setPermissionOverride, { companyId, membershipId: secondAdminMembershipId, capability: "company:manage_permissions", effect: "deny" })).resolves.toBeNull();
-    const { adminMembershipId } = await t.run(async (ctx) => {
-      const memberships = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(10);
-      return { adminMembershipId: memberships.find((m) => m.role === "Admin")!._id };
+    const adminRoleId = await t.run(async (ctx) => {
+      const role = await ctx.db.query("roles").withIndex("by_company_and_name", (q) => q.eq("companyId", companyId).eq("name", "Admin")).unique();
+      return role!._id;
     });
-    await expect(t.withIdentity(identity("admin")).mutation(api.companyManagement.setPermissionOverride, { companyId, membershipId: adminMembershipId, capability: "company:manage_permissions", effect: "deny" })).rejects.toThrow("At least one active member");
+    // Removing manage_roles from the only remaining role-managing role fails.
+    await expect(t.withIdentity(identity("admin")).mutation(api.roles.update, { companyId, roleId: adminRoleId, name: "Admin", capabilities: ["tasks:comment"] })).rejects.toThrow("At least one active member");
+    // Reassigning the last role admin also fails.
+    await expect(t.withIdentity(identity("admin")).mutation(api.roles.assign, { companyId, membershipIds: [adminMembershipId], role: "Employee" })).rejects.toThrow("At least one active member");
   });
 
   test("blank comments are rejected", async () => {
@@ -499,14 +516,14 @@ describe("production permission and validation fixes", () => {
     expect(activity.items.find((row) => row.kind === "log" && row.event === "status_changed")).toMatchObject({ fromStatus: "due", toStatus: "completed", actor: { user: { name: "Admin" } } });
   });
 
-  test("accepting an invitation applies assignments, managed scope, and permission overrides", async () => {
+  test("accepting an invitation applies the role, assignments, and managed scope", async () => {
     const { t, companyId, employeeMembershipId } = await seedCompany();
     const token = "invite-token";
     const { branchId, departmentId } = await t.run(async (ctx) => {
       const now = Date.now();
       const branchId = await ctx.db.insert("branches", { companyId, name: "HQ", createdAt: now, updatedAt: now });
       const departmentId = await ctx.db.insert("departments", { companyId, branchId, name: "Ops", createdAt: now, updatedAt: now });
-      await ctx.db.insert("invitations", { companyId, email: "new@example.com", role: "Employee", branchIds: [branchId], departmentIds: [departmentId], managedBranchIds: [branchId], managedDepartmentIds: [departmentId], managedUserMembershipIds: [employeeMembershipId], permissionOverrides: [{ capability: "tasks:one_time:create", effect: "allow" }, { capability: "tasks:one_time:assign:self", effect: "allow" }], token, status: "pending", createdAt: now, expiresAt: now + 86_400_000 });
+      await ctx.db.insert("invitations", { companyId, email: "new@example.com", role: "Employee", branchIds: [branchId], departmentIds: [departmentId], managedBranchIds: [branchId], managedDepartmentIds: [departmentId], managedUserMembershipIds: [employeeMembershipId], token, status: "pending", createdAt: now, expiresAt: now + 86_400_000 });
       return { branchId, departmentId };
     });
 
@@ -519,8 +536,7 @@ describe("production permission and validation fixes", () => {
       const managedBranches = membership ? await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(10) : [];
       const managedDepartments = membership ? await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(10) : [];
       const managedUsers = membership ? await ctx.db.query("managerUserScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(10) : [];
-      const overrides = membership ? await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", membership._id)).take(10) : [];
-      return { membership, branchAssignments, departmentAssignments, managedBranches, managedDepartments, managedUsers, overrides };
+      return { membership, branchAssignments, departmentAssignments, managedBranches, managedDepartments, managedUsers };
     });
     expect(result.membership?.role).toBe("Employee");
     expect(result.branchAssignments.map((row) => row.branchId)).toEqual([branchId]);
@@ -528,7 +544,6 @@ describe("production permission and validation fixes", () => {
     expect(result.managedBranches.map((row) => row.branchId)).toEqual([branchId]);
     expect(result.managedDepartments.map((row) => row.departmentId)).toEqual([departmentId]);
     expect(result.managedUsers.map((row) => row.userMembershipId)).toEqual([employeeMembershipId]);
-    expect(result.overrides.map((row) => [row.capability, row.effect]).sort()).toEqual([["tasks:one_time:assign:self", "allow"], ["tasks:one_time:create", "allow"]]);
   });
 
   test("invitation email config failures are surfaced and not marked sent", async () => {

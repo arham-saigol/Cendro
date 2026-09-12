@@ -4,6 +4,7 @@ import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
+import { defaultRoleCapabilities } from "../src/lib/permissions";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -60,13 +61,13 @@ describe("dashboard analytics scoping", () => {
     const { t, companyId, branchAId, branchBId, departmentBId, employeeMembershipId, hiddenMembershipId } = await seedDashboardCompany();
 
     const admin = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId });
-    expect(admin.role).toBe("Admin");
+    expect(admin.scopeLevel).toBe("company");
     expect(admin.metrics.totalTasks).toBe(2);
     expect(admin.filterOptions.branches.map((branch) => branch._id).sort()).toEqual([branchAId, branchBId].sort());
     await expect(t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, branchId: branchBId })).resolves.toMatchObject({ metrics: { totalTasks: 1 } });
 
     const manager = await t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId });
-    expect(manager.role).toBe("Manager");
+    expect(manager.scopeLevel).toBe("managed");
     expect(manager.metrics.totalTasks).toBe(1);
     expect(manager.filterOptions.branches.map((branch) => branch._id)).toEqual([branchAId]);
     expect(manager.filterOptions.employees.map((employee) => employee._id)).toContain(employeeMembershipId);
@@ -76,7 +77,7 @@ describe("dashboard analytics scoping", () => {
     await expect(t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId, departmentId: departmentBId })).rejects.toThrow("outside your analytics scope");
 
     const employee = await t.withIdentity(identity("employee")).query(api.analytics.dashboard, { companyId });
-    expect(employee.role).toBe("Employee");
+    expect(employee.scopeLevel).toBe("self");
     expect(employee.metrics.totalTasks).toBe(1);
     expect(employee.filterOptions.employees).toEqual([]);
     expect(employee.comparisons.employees).toEqual([]);
@@ -183,11 +184,18 @@ describe("dashboard analytics scoping", () => {
       priority: "medium",
     });
     await t.run(async (ctx) => {
-      await ctx.db.insert("permissionOverrides", { companyId, membershipId: managerMembershipId, capability: "analytics:view:self", effect: "deny", updatedAt: Date.now() });
+      const now = Date.now();
+      await ctx.db.insert("roles", {
+        companyId,
+        name: "Manager",
+        capabilities: defaultRoleCapabilities.Manager.filter((capability) => capability !== "analytics:view:self"),
+        createdAt: now,
+        updatedAt: now,
+      });
     });
 
     const dashboard = await t.withIdentity(identity("manager")).query(api.analytics.dashboard, { companyId });
-    expect(dashboard.role).toBe("Manager");
+    expect(dashboard.scopeLevel).toBe("managed");
     expect(dashboard.metrics.totalTasks).toBe(1);
     expect(dashboard.filterOptions.employees.map((employee) => employee._id)).not.toContain(managerMembershipId);
     const summary = await t.withIdentity(identity("manager")).query(api.analytics.aiSummary, { companyId });

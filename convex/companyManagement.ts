@@ -3,22 +3,21 @@ import { action, internalMutation, mutation, query, type QueryCtx } from "./_gen
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
-  assertPermissionManagerRemains,
-  assertPermissionManagerRemainsAfterActiveChanges,
+  assertRoleManagerRemains,
+  ensureDefaultRoles,
   memberFirstName,
   memberFullName,
   membershipCapabilities,
   requireCapability,
   requireMembership,
+  roleDocByName,
+  roleDocCapabilities,
 } from "./permissions";
-import { capabilities, companyManagementCapabilities, type Capability } from "../src/lib/permissions";
+import { baselineInvitationCapabilities, companyManagementCapabilities, isKnownCapability } from "../src/lib/permissions";
 import { defaultTimeZone } from "./taskCycles";
 import { nonEmpty, normalizeEmail } from "./validation";
 import { takeWithOverflow } from "./queryLimits";
 
-const roleValidator = v.union(v.literal("Admin"), v.literal("Manager"), v.literal("Employee"));
-const invitationOverrideValidator = v.object({ capability: v.string(), effect: v.union(v.literal("allow"), v.literal("deny")) });
-const permissionDraftOverrideValidator = v.object({ capability: v.string(), effect: v.union(v.literal("allow"), v.literal("deny"), v.literal("inherit")) });
 const overviewListLimit = 500;
 
 function cleanTimeZone(value: string) {
@@ -53,16 +52,6 @@ function assertSameIdSet<T>(actual: T[], expected: T[], message: string) {
   if (actual.some((id) => !expectedSet.has(id))) throw new ConvexError(message);
 }
 
-async function validatePermissionOverrides(overrides: { capability: string }[], requireAll = false) {
-  const seen = new Set<string>();
-  for (const override of overrides) {
-    if (!capabilities.includes(override.capability as Capability)) throw new ConvexError("Unknown permission.");
-    if (seen.has(override.capability)) throw new ConvexError("Duplicate permission override.");
-    seen.add(override.capability);
-  }
-  if (requireAll && seen.size !== capabilities.length) throw new ConvexError("Permission draft is incomplete.");
-}
-
 async function managerScope(
   ctx: QueryCtx,
   managerMembershipId: Id<"companyMemberships">,
@@ -81,7 +70,7 @@ async function managerScope(
   };
 }
 
-async function clearUserManagementRows(ctx: any, membershipId: Id<"companyMemberships">, preserveOverrides = false) {
+async function clearUserManagementRows(ctx: any, membershipId: Id<"companyMemberships">) {
   while (true) {
     const rows = await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500);
     if (!rows.length) break;
@@ -112,13 +101,6 @@ async function clearUserManagementRows(ctx: any, membershipId: Id<"companyMember
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
-  if (!preserveOverrides) {
-    while (true) {
-      const rows = await ctx.db.query("permissionOverrides").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500);
-      if (!rows.length) break;
-      for (const row of rows) await ctx.db.delete(row._id);
-    }
-  }
 }
 
 export const overview = query({
@@ -129,10 +111,10 @@ export const overview = query({
     if (!companyManagementCapabilities.some((capability) => caps.has(capability))) throw new ConvexError("You do not have access to do that.");
     if (company.deletedAt) throw new ConvexError("Company not found.");
 
-    const canReadStructure = caps.has("company:manage_branches") || caps.has("company:manage_departments") || caps.has("company:manage_users") || caps.has("company:invite_users") || caps.has("company:manage_permissions");
-    const canReadUsers = caps.has("company:manage_users") || caps.has("company:manage_permissions");
-    const canReadInvitations = caps.has("company:invite_users") || caps.has("company:manage_permissions");
-    const canReadPermissions = caps.has("company:manage_permissions");
+    const canReadStructure = caps.has("company:manage_branches") || caps.has("company:manage_departments") || caps.has("company:manage_users") || caps.has("company:invite_users") || caps.has("company:manage_roles");
+    const canReadUsers = caps.has("company:manage_users") || caps.has("company:manage_roles");
+    const canReadInvitations = caps.has("company:invite_users") || caps.has("company:manage_roles");
+    const canReadRoles = caps.has("company:manage_roles");
     const branchResult = canReadStructure
       ? await takeWithOverflow((limit) => ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
       : { rows: [], isTruncated: false };
@@ -159,16 +141,10 @@ export const overview = query({
         (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(limit),
         overviewListLimit,
       );
-      const scope = canReadPermissions
+      const scope = canReadRoles
         ? await managerScope(ctx, m._id, () => { userDetailsTruncated = true; })
         : { branchIds: [], departmentIds: [], userMembershipIds: [] };
-      const overrideResult = canReadPermissions
-        ? await takeWithOverflow(
-          (limit) => ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(limit),
-          overviewListLimit,
-        )
-        : { rows: [], isTruncated: false };
-      if (branchAssignmentResult.isTruncated || departmentAssignmentResult.isTruncated || overrideResult.isTruncated) {
+      if (branchAssignmentResult.isTruncated || departmentAssignmentResult.isTruncated) {
         userDetailsTruncated = true;
       }
       if (user) {
@@ -181,10 +157,20 @@ export const overview = query({
           branchIds: branchAssignmentResult.rows.map((assignment) => assignment.branchId),
           departmentIds: departmentAssignmentResult.rows.map((assignment) => assignment.departmentId),
           scope,
-          overrides: overrideResult.rows.map((override) => ({ _id: override._id, capability: override.capability, effect: override.effect })),
         });
       }
     }
+    const memberCountByRole = new Map<string, number>();
+    for (const m of membershipResult.rows) {
+      memberCountByRole.set(m.role, (memberCountByRole.get(m.role) ?? 0) + 1);
+    }
+    const roleDocs = canReadStructure
+      ? (await takeWithOverflow(
+        (limit) => ctx.db.query("roles").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
+        overviewListLimit,
+      )).rows
+      : [];
+    roleDocs.sort((a, b) => a.name.localeCompare(b.name));
     const truncated = {
       branches: branchResult.isTruncated,
       departments: departmentResult.isTruncated,
@@ -201,8 +187,13 @@ export const overview = query({
       branches: branches.map((b) => ({ _id: b._id, name: b.name, order: b.order })),
       departments: departments.map((d) => ({ _id: d._id, branchId: d.branchId, name: d.name, order: d.order })),
       users,
-      invitations: invitationResult.rows.map((i) => ({ _id: i._id, email: i.email, role: i.role, status: i.status, createdAt: i.createdAt, expiresAt: i.expiresAt, branchIds: i.branchIds ?? [], departmentIds: i.departmentIds ?? [], managedBranchIds: canReadPermissions ? i.managedBranchIds ?? [] : [], managedDepartmentIds: canReadPermissions ? i.managedDepartmentIds ?? [] : [], managedUserMembershipIds: canReadPermissions ? i.managedUserMembershipIds ?? [] : [], permissionOverrides: canReadPermissions ? i.permissionOverrides ?? [] : [] })),
-      capabilities,
+      roles: roleDocs.map((role) => ({
+        _id: role._id,
+        name: role.name,
+        capabilities: canReadRoles ? role.capabilities.filter(isKnownCapability) : [],
+        memberCount: memberCountByRole.get(role.name) ?? 0,
+      })),
+      invitations: invitationResult.rows.map((i) => ({ _id: i._id, email: i.email, role: i.role, status: i.status, createdAt: i.createdAt, expiresAt: i.expiresAt, branchIds: i.branchIds ?? [], departmentIds: i.departmentIds ?? [], managedBranchIds: canReadRoles ? i.managedBranchIds ?? [] : [], managedDepartmentIds: canReadRoles ? i.managedDepartmentIds ?? [] : [], managedUserMembershipIds: canReadRoles ? i.managedUserMembershipIds ?? [] : [] })),
     };
   },
 });
@@ -283,40 +274,6 @@ export const moveDepartment = mutation({
     }
   },
 });
-export const setUserRole = mutation({
-  args: { companyId: v.id("companies"), membershipId: v.id("companyMemberships"), role: roleValidator },
-  handler: async (ctx, args) => {
-    const { user } = await requireCapability(ctx, args.companyId, "company:manage_permissions");
-    const membership = await assertMembership(ctx, args.companyId, args.membershipId);
-    const inheritAll = capabilities.map((capability) => ({ membershipId: args.membershipId, capability, effect: "inherit" as const }));
-    await assertPermissionManagerRemains(ctx, args.companyId, args.membershipId, args.role, inheritAll);
-    const now = Date.now();
-    await ctx.db.patch(args.membershipId, { role: args.role, updatedAt: now });
-    for (const row of await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", args.membershipId)).take(500)) await ctx.db.delete(row._id);
-
-    const pendingTargeted = await ctx.db
-      .query("invitations")
-      .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
-      .take(500);
-    for (const invite of pendingTargeted) {
-      if (invite.status === "pending" && invite.targetMembershipId === args.membershipId) {
-        await ctx.db.patch(invite._id, { status: "revoked" });
-      }
-    }
-
-    await ctx.db.insert("auditEvents", {
-      companyId: args.companyId,
-      actorUserId: user._id,
-      action: "member.role_change",
-      targetType: "membership",
-      targetId: args.membershipId,
-      metadata: { previousRole: membership.role, nextRole: args.role },
-      createdAt: now,
-    });
-    return null;
-  },
-});
-
 export const setUserActive = mutation({
   args: { companyId: v.id("companies"), membershipId: v.id("companyMemberships"), active: v.boolean() },
   handler: async (ctx, args) => {
@@ -326,11 +283,11 @@ export const setUserActive = mutation({
     const now = Date.now();
     if (!args.active) {
       const targetCaps = await membershipCapabilities(ctx, membership);
-      if (targetCaps.has("company:manage_permissions") && !actorCaps.has("company:manage_permissions")) {
-        throw new ConvexError("You do not have access to deactivate a permission administrator.");
+      if (targetCaps.has("company:manage_roles") && !actorCaps.has("company:manage_roles")) {
+        throw new ConvexError("You do not have access to deactivate a role administrator.");
       }
-      await assertPermissionManagerRemainsAfterActiveChanges(ctx, args.companyId, new Map([[args.membershipId, false]]));
-      await clearUserManagementRows(ctx, args.membershipId, true);
+      await assertRoleManagerRemains(ctx, args.companyId, { activeChanges: new Map([[args.membershipId, false]]) });
+      await clearUserManagementRows(ctx, args.membershipId);
       const pendingTargeted = await ctx.db
         .query("invitations")
         .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
@@ -351,8 +308,8 @@ export const setUserActive = mutation({
       });
     } else {
       const targetCaps = await membershipCapabilities(ctx, membership);
-      if (targetCaps.has("company:manage_permissions") && !actorCaps.has("company:manage_permissions")) {
-        throw new ConvexError("You do not have access to activate a permission administrator.");
+      if (targetCaps.has("company:manage_roles") && !actorCaps.has("company:manage_roles")) {
+        throw new ConvexError("You do not have access to activate a role administrator.");
       }
       await ctx.db.patch(args.membershipId, { active: true, updatedAt: now });
       await ctx.db.insert("auditEvents", {
@@ -376,11 +333,11 @@ export const removeUsers = mutation({
     for (const membershipId of membershipIds) {
       const membership = await assertMembership(ctx, args.companyId, membershipId);
       const targetCaps = await membershipCapabilities(ctx, membership);
-      if (targetCaps.has("company:manage_permissions") && !actorCaps.has("company:manage_permissions")) {
-        throw new ConvexError("You do not have access to remove a permission administrator.");
+      if (targetCaps.has("company:manage_roles") && !actorCaps.has("company:manage_roles")) {
+        throw new ConvexError("You do not have access to remove a role administrator.");
       }
     }
-    await assertPermissionManagerRemainsAfterActiveChanges(ctx, args.companyId, new Map(membershipIds.map((membershipId) => [membershipId, false])));
+    await assertRoleManagerRemains(ctx, args.companyId, { activeChanges: new Map(membershipIds.map((membershipId) => [membershipId, false])) });
     const now = Date.now();
     for (const membershipId of membershipIds) {
       await clearUserManagementRows(ctx, membershipId);
@@ -468,7 +425,7 @@ export const setAssignments = mutation({
 export const setManagerScope = mutation({
   args: { companyId: v.id("companies"), managerMembershipId: v.id("companyMemberships"), branchIds: v.array(v.id("branches")), departmentIds: v.array(v.id("departments")), userMembershipIds: v.array(v.id("companyMemberships")) },
   handler: async (ctx, args) => {
-    await requireCapability(ctx, args.companyId, "company:manage_permissions");
+    await requireCapability(ctx, args.companyId, "company:manage_roles");
     await assertMembership(ctx, args.companyId, args.managerMembershipId);
     const branchIds = unique(args.branchIds);
     const departmentIds = unique(args.departmentIds);
@@ -486,91 +443,38 @@ export const setManagerScope = mutation({
   },
 });
 
-export const setPermissionOverride = mutation({
-  args: { companyId: v.id("companies"), membershipId: v.id("companyMemberships"), capability: v.string(), effect: v.union(v.literal("allow"), v.literal("deny"), v.literal("inherit")) },
-  handler: async (ctx, args) => {
-    await requireCapability(ctx, args.companyId, "company:manage_permissions");
-    await assertMembership(ctx, args.companyId, args.membershipId);
-    if (!capabilities.includes(args.capability as any)) throw new ConvexError("Unknown permission.");
-    await assertPermissionManagerRemains(ctx, args.companyId, args.membershipId, undefined, { membershipId: args.membershipId, capability: args.capability as Capability, effect: args.effect });
-    const rows = await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", args.membershipId)).take(500);
-    for (const row of rows.filter((r) => r.capability === args.capability)) await ctx.db.delete(row._id);
-    if (args.effect !== "inherit") await ctx.db.insert("permissionOverrides", { companyId: args.companyId, membershipId: args.membershipId, capability: args.capability, effect: args.effect, updatedAt: Date.now() });
-  },
-});
-
-export const setUserPermissions = mutation({
-  args: {
-    companyId: v.id("companies"),
-    membershipId: v.id("companyMemberships"),
-    role: roleValidator,
-    branchIds: v.array(v.id("branches")),
-    departmentIds: v.array(v.id("departments")),
-    managedBranchIds: v.array(v.id("branches")),
-    managedDepartmentIds: v.array(v.id("departments")),
-    managedUserMembershipIds: v.array(v.id("companyMemberships")),
-    permissionOverrides: v.array(permissionDraftOverrideValidator),
-  },
-  handler: async (ctx, args) => {
-    const { capabilities: caps } = await requireCapability(ctx, args.companyId, "company:manage_permissions");
-    if (!caps.has("company:manage_users")) throw new ConvexError("You do not have access to do that.");
-    await assertMembership(ctx, args.companyId, args.membershipId);
-    const branchIds = unique(args.branchIds);
-    const departmentIds = unique(args.departmentIds);
-    const managedBranchIds = unique(args.managedBranchIds);
-    const managedDepartmentIds = unique(args.managedDepartmentIds);
-    const managedUserMembershipIds = unique(args.managedUserMembershipIds).filter((id) => id !== args.membershipId);
-    await validatePermissionOverrides(args.permissionOverrides, true);
-    const overrideChanges = args.permissionOverrides.map((override) => ({ membershipId: args.membershipId, capability: override.capability as Capability, effect: override.effect }));
-    await assertPermissionManagerRemains(ctx, args.companyId, args.membershipId, args.role, overrideChanges);
-    for (const branchId of [...branchIds, ...managedBranchIds]) await assertBranch(ctx, args.companyId, branchId);
-    for (const departmentId of [...departmentIds, ...managedDepartmentIds]) await assertDepartment(ctx, args.companyId, departmentId);
-    for (const membershipId of managedUserMembershipIds) await assertMembership(ctx, args.companyId, membershipId);
-    const now = Date.now();
-    await ctx.db.patch(args.membershipId, { role: args.role, updatedAt: now });
-    for (const r of await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", args.membershipId)).take(500)) await ctx.db.delete(r._id);
-    for (const r of await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", args.membershipId)).take(500)) await ctx.db.delete(r._id);
-    for (const branchId of branchIds) await ctx.db.insert("userBranchAssignments", { companyId: args.companyId, membershipId: args.membershipId, branchId });
-    for (const departmentId of departmentIds) await ctx.db.insert("userDepartmentAssignments", { companyId: args.companyId, membershipId: args.membershipId, departmentId });
-    for (const r of await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", args.membershipId)).take(500)) await ctx.db.delete(r._id);
-    for (const r of await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", args.membershipId)).take(500)) await ctx.db.delete(r._id);
-    for (const r of await ctx.db.query("managerUserScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", args.membershipId)).take(500)) await ctx.db.delete(r._id);
-    for (const branchId of managedBranchIds) await ctx.db.insert("managerBranchScopes", { companyId: args.companyId, managerMembershipId: args.membershipId, branchId, updatedAt: now });
-    for (const departmentId of managedDepartmentIds) await ctx.db.insert("managerDepartmentScopes", { companyId: args.companyId, managerMembershipId: args.membershipId, departmentId, updatedAt: now });
-    for (const userMembershipId of managedUserMembershipIds) await ctx.db.insert("managerUserScopes", { companyId: args.companyId, managerMembershipId: args.membershipId, userMembershipId, updatedAt: now });
-    for (const row of await ctx.db.query("permissionOverrides").withIndex("by_membership", (q) => q.eq("membershipId", args.membershipId)).take(500)) await ctx.db.delete(row._id);
-    for (const override of args.permissionOverrides) if (override.effect !== "inherit") await ctx.db.insert("permissionOverrides", { companyId: args.companyId, membershipId: args.membershipId, capability: override.capability, effect: override.effect, updatedAt: now });
-  },
-});
-
 export const createInvitationRecord = internalMutation({
   args: {
     companyId: v.id("companies"),
     email: v.string(),
-    role: roleValidator,
+    role: v.string(),
     branchIds: v.optional(v.array(v.id("branches"))),
     departmentIds: v.optional(v.array(v.id("departments"))),
     managedBranchIds: v.optional(v.array(v.id("branches"))),
     managedDepartmentIds: v.optional(v.array(v.id("departments"))),
     managedUserMembershipIds: v.optional(v.array(v.id("companyMemberships"))),
-    permissionOverrides: v.optional(v.array(invitationOverrideValidator)),
   },
   handler: async (ctx, args) => {
     const { user, company, capabilities: caps } = await requireCapability(ctx, args.companyId, "company:invite_users");
-    if (args.role !== "Employee" && !caps.has("company:manage_permissions")) {
-      throw new ConvexError("You cannot invite non-Employees.");
+    await ensureDefaultRoles(ctx, args.companyId);
+    const role = await roleDocByName(ctx, args.companyId, args.role);
+    if (!role) throw new ConvexError("Role not found.");
+    const canManageRoles = caps.has("company:manage_roles");
+    const baseline = new Set<string>(baselineInvitationCapabilities);
+    const roleCaps = roleDocCapabilities(role);
+    if (!canManageRoles && !Array.from(roleCaps).every((cap) => baseline.has(cap))) {
+      throw new ConvexError("You do not have access to invite with this role.");
     }
     const branchIds = unique(args.branchIds ?? []);
     const departmentIds = unique(args.departmentIds ?? []);
     const managedBranchIds = unique(args.managedBranchIds ?? []);
     const managedDepartmentIds = unique(args.managedDepartmentIds ?? []);
     const managedUserMembershipIds = unique(args.managedUserMembershipIds ?? []);
-    const permissionOverrides = args.permissionOverrides ?? [];
     if (
-      (managedBranchIds.length || managedDepartmentIds.length || managedUserMembershipIds.length || permissionOverrides.length) &&
-      !caps.has("company:manage_permissions")
+      (managedBranchIds.length || managedDepartmentIds.length || managedUserMembershipIds.length) &&
+      !canManageRoles
     ) {
-      throw new ConvexError("You cannot grant managed scopes or permission overrides.");
+      throw new ConvexError("You cannot grant managed scopes.");
     }
     for (const branchId of [...branchIds, ...managedBranchIds]) await assertBranch(ctx, args.companyId, branchId);
     for (const departmentId of [...departmentIds, ...managedDepartmentIds]) await assertDepartment(ctx, args.companyId, departmentId);
@@ -578,7 +482,6 @@ export const createInvitationRecord = internalMutation({
       const m = await assertMembership(ctx, args.companyId, membershipId);
       if (!m.active) throw new ConvexError("Inactive users cannot be target scopes.");
     }
-    await validatePermissionOverrides(permissionOverrides);
     const email = normalizeEmail(args.email);
     const now = Date.now();
 
@@ -607,13 +510,12 @@ export const createInvitationRecord = internalMutation({
     const companyAuthVersion = company.authVersion ?? 1;
     const token = crypto.randomUUID();
     const patch = {
-      role: args.role,
+      role: role.name,
       branchIds,
       departmentIds,
       managedBranchIds,
       managedDepartmentIds,
       managedUserMembershipIds,
-      permissionOverrides,
       expiresAt: now + 1_209_600_000,
     };
     const id = await ctx.db.insert("invitations", {
@@ -636,7 +538,7 @@ export const createInvitationRecord = internalMutation({
       action: "invitation.create",
       targetType: "invitation",
       targetId: id,
-      metadata: { email, role: args.role },
+      metadata: { email, role: role.name },
       createdAt: now,
     });
 
@@ -645,7 +547,7 @@ export const createInvitationRecord = internalMutation({
 });
 
 export const inviteUser = action({
-  args: { companyId: v.id("companies"), email: v.string(), role: roleValidator, branchIds: v.optional(v.array(v.id("branches"))), departmentIds: v.optional(v.array(v.id("departments"))), managedBranchIds: v.optional(v.array(v.id("branches"))), managedDepartmentIds: v.optional(v.array(v.id("departments"))), managedUserMembershipIds: v.optional(v.array(v.id("companyMemberships"))), permissionOverrides: v.optional(v.array(invitationOverrideValidator)) },
+  args: { companyId: v.id("companies"), email: v.string(), role: v.string(), branchIds: v.optional(v.array(v.id("branches"))), departmentIds: v.optional(v.array(v.id("departments"))), managedBranchIds: v.optional(v.array(v.id("branches"))), managedDepartmentIds: v.optional(v.array(v.id("departments"))), managedUserMembershipIds: v.optional(v.array(v.id("companyMemberships"))) },
   handler: async (ctx, args): Promise<{ ok: boolean }> => {
     const invite = await ctx.runMutation(internal.companyManagement.createInvitationRecord, args);
     await ctx.runAction(internal.email.sendInvitation, { companyId: args.companyId, invitationId: invite.id, email: args.email, role: args.role, token: invite.token });

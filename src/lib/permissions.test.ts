@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   capabilities,
   defaultRoleCapabilities,
-  resolveEffectiveCapabilities,
+  isKnownCapability,
+  legacyRoleCapabilities,
   getHighestScope,
   type Capability,
 } from "./permissions";
@@ -81,59 +82,24 @@ describe("permissions catalog and defaults", () => {
   });
 });
 
-describe("resolveEffectiveCapabilities", () => {
-  it("resolves role defaults when no overrides are present", () => {
-    const caps = resolveEffectiveCapabilities("Employee", []);
-    expect(caps.has("tasks:comment")).toBe(true);
-    expect(caps.has("tasks:jd:create")).toBe(false);
+describe("legacyRoleCapabilities", () => {
+  it("preserves the built-in defaults for legacy role names", () => {
+    expect(new Set(legacyRoleCapabilities("Admin"))).toEqual(new Set(defaultRoleCapabilities.Admin));
+    expect(new Set(legacyRoleCapabilities("Manager"))).toEqual(new Set(defaultRoleCapabilities.Manager));
+    expect(new Set(legacyRoleCapabilities("Employee"))).toEqual(new Set(defaultRoleCapabilities.Employee));
   });
 
-  it("adds capabilities when effect is allow", () => {
-    const caps = resolveEffectiveCapabilities("Employee", [
-      { capability: "tasks:jd:create", effect: "allow" },
-    ]);
-    expect(caps.has("tasks:jd:create")).toBe(true);
-    expect(caps.has("tasks:comment")).toBe(true);
+  it("grants nothing for unknown role names", () => {
+    expect(legacyRoleCapabilities("Superadmin")).toEqual([]);
+    expect(legacyRoleCapabilities("")).toEqual([]);
   });
+});
 
-  it("removes capabilities when effect is deny", () => {
-    const caps = resolveEffectiveCapabilities("Admin", [
-      { capability: "tasks:jd:create", effect: "deny" },
-    ]);
-    expect(caps.has("tasks:jd:create")).toBe(false);
-    expect(caps.has("tasks:comment")).toBe(true);
-  });
-
-  it("resolves duplicate allow/deny deterministically with deny winning", () => {
-    // allow first, then deny
-    const caps1 = resolveEffectiveCapabilities("Employee", [
-      { capability: "tasks:jd:create", effect: "allow" },
-      { capability: "tasks:jd:create", effect: "deny" },
-    ]);
-    expect(caps1.has("tasks:jd:create")).toBe(false);
-
-    // deny first, then allow -> deny must still win!
-    const caps2 = resolveEffectiveCapabilities("Employee", [
-      { capability: "tasks:jd:create", effect: "deny" },
-      { capability: "tasks:jd:create", effect: "allow" },
-    ]);
-    expect(caps2.has("tasks:jd:create")).toBe(false);
-  });
-
-  it("ignores unknown stored capability strings and does not grant access", () => {
-    const caps = resolveEffectiveCapabilities("Employee", [
-      { capability: "unknown:super:admin", effect: "allow" },
-      { capability: "arbitrary_garbage", effect: "allow" },
-    ]);
-    expect(caps.has("unknown:super:admin" as any)).toBe(false);
-    expect(caps.has("arbitrary_garbage" as any)).toBe(false);
-  });
-
-  it("handles inherit effect by reverting to role default", () => {
-    const caps = resolveEffectiveCapabilities("Employee", [
-      { capability: "tasks:comment", effect: "inherit" },
-    ]);
-    expect(caps.has("tasks:comment")).toBe(true);
+describe("isKnownCapability", () => {
+  it("accepts catalog capabilities and rejects arbitrary strings", () => {
+    expect(isKnownCapability("company:manage_roles")).toBe(true);
+    expect(isKnownCapability("unknown:super:admin")).toBe(false);
+    expect(isKnownCapability("arbitrary_garbage")).toBe(false);
   });
 });
 

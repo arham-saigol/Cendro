@@ -6,6 +6,7 @@ import { api } from "./_generated/api";
 import schema from "./schema";
 import { currentJdCycle, defaultTimeZone } from "./taskCycles";
 import { MAX_REFERENCE_NUMBER, nextReference, syncReferenceCounter } from "./references";
+import { defaultRoleCapabilities } from "../src/lib/permissions";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -594,9 +595,9 @@ describe("task import backend", () => {
     const { employeeMembershipId } = await t.run(async (ctx) => {
       const now = Date.now();
       const empUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|importer", email: "importer@example.com", firstName: "Importer", createdAt: now, updatedAt: now });
-      const membershipId = await ctx.db.insert("companyMemberships", { companyId, userId: empUserId, role: "Employee", active: true, createdAt: now, updatedAt: now });
-      // Grant tasks:jd:import override, but NOT tasks:jd:create
-      await ctx.db.insert("permissionOverrides", { companyId, membershipId, capability: "tasks:jd:import", effect: "allow", updatedAt: now });
+      const membershipId = await ctx.db.insert("companyMemberships", { companyId, userId: empUserId, role: "Importer", active: true, createdAt: now, updatedAt: now });
+      // Custom role grants tasks:jd:import but NOT tasks:jd:create
+      await ctx.db.insert("roles", { companyId, name: "Importer", capabilities: [...defaultRoleCapabilities.Employee, "tasks:jd:import"], createdAt: now, updatedAt: now });
       return { employeeMembershipId: membershipId };
     });
 
@@ -1047,14 +1048,18 @@ describe("task import backend", () => {
       const membershipId = await ctx.db.insert("companyMemberships", {
         companyId,
         userId,
-        role: "Employee",
+        role: "Importer",
         active: true,
         createdAt: now,
         updatedAt: now,
       });
-      await ctx.db.insert("permissionOverrides", { companyId, membershipId, capability: "tasks:jd:import", effect: "allow", updatedAt: now });
-      await ctx.db.insert("permissionOverrides", { companyId, membershipId, capability: "tasks:jd:create", effect: "allow", updatedAt: now });
-      await ctx.db.insert("permissionOverrides", { companyId, membershipId, capability: "tasks:jd:assign:self", effect: "allow", updatedAt: now });
+      await ctx.db.insert("roles", {
+        companyId,
+        name: "Importer",
+        capabilities: [...defaultRoleCapabilities.Employee, "tasks:jd:import", "tasks:jd:create", "tasks:jd:assign:self"],
+        createdAt: now,
+        updatedAt: now,
+      });
       return { selfMembershipId: membershipId };
     });
 

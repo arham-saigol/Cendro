@@ -415,6 +415,7 @@ button:disabled { cursor: not-allowed; }
   transition: opacity 0.12s ease, border-color 0.12s ease, color 0.12s ease, background-color 0.12s ease;
   white-space: nowrap;
 }
+.task-title-open--secondary { right: 58px; }
 .task-title-open:hover,
 .task-title-open:focus-visible { border-color: var(--hairline-strong); color: var(--ink); outline: none; }
 .task-table .col-task:hover .task-title-open,

@@ -3,7 +3,7 @@ import { v } from "convex/values";
 import { taskListOrderEntryValidator, taskListPreferenceValidator } from "./taskListPreferences";
 import { sopListPreferenceValidator } from "./sopListPreferences";
 
-const role = v.union(v.literal("Admin"), v.literal("Manager"), v.literal("Employee"));
+const role = v.string();
 const priority = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
 const rec = v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("quarterly"), v.literal("semiannually"), v.literal("annually"));
 const taskStatus = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
@@ -21,6 +21,9 @@ export default defineSchema({
   managerBranchScopes: defineTable({ companyId: v.id("companies"), managerMembershipId: v.id("companyMemberships"), branchId: v.id("branches"), updatedAt: v.number() }).index("by_manager", ["managerMembershipId"]).index("by_branch", ["branchId"]).index("by_company", ["companyId"]).index("by_managerMembershipId_and_branchId", ["managerMembershipId", "branchId"]),
   managerDepartmentScopes: defineTable({ companyId: v.id("companies"), managerMembershipId: v.id("companyMemberships"), departmentId: v.id("departments"), updatedAt: v.number() }).index("by_manager", ["managerMembershipId"]).index("by_department", ["departmentId"]).index("by_company", ["companyId"]).index("by_managerMembershipId_and_departmentId", ["managerMembershipId", "departmentId"]),
   managerUserScopes: defineTable({ companyId: v.id("companies"), managerMembershipId: v.id("companyMemberships"), userMembershipId: v.id("companyMemberships"), updatedAt: v.number() }).index("by_manager", ["managerMembershipId"]).index("by_user", ["userMembershipId"]).index("by_company", ["companyId"]).index("by_managerMembershipId_and_userMembershipId", ["managerMembershipId", "userMembershipId"]),
+  roles: defineTable({ companyId: v.id("companies"), name: v.string(), capabilities: v.array(v.string()), createdAt: v.number(), updatedAt: v.number() }).index("by_company", ["companyId"]).index("by_company_and_name", ["companyId", "name"]),
+  // Deprecated: superseded by role-owned capabilities. Retained only so the
+  // legacy-cleanup path can still read and delete any remaining rows.
   permissionOverrides: defineTable({ companyId: v.id("companies"), membershipId: v.id("companyMemberships"), capability: v.string(), effect: v.union(v.literal("allow"), v.literal("deny")), updatedAt: v.number() }).index("by_membership", ["membershipId"]).index("by_membershipId_and_capability", ["membershipId", "capability"]),
   invitations: defineTable({
     companyId: v.id("companies"),
@@ -31,6 +34,8 @@ export default defineSchema({
     managedBranchIds: v.optional(v.array(v.id("branches"))),
     managedDepartmentIds: v.optional(v.array(v.id("departments"))),
     managedUserMembershipIds: v.optional(v.array(v.id("companyMemberships"))),
+    // Deprecated: no longer written or read. Retained so older invitation
+    // documents remain valid until the cleanup clears the field.
     permissionOverrides: v.optional(v.array(v.object({ capability: v.string(), effect: v.union(v.literal("allow"), v.literal("deny")) }))),
     token: v.string(),
     status: v.union(v.literal("pending"), v.literal("accepted"), v.literal("revoked")),

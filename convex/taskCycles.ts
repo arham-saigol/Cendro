@@ -9,7 +9,7 @@ const dayMs = 86_400_000;
 const mondayAnchorDay = 4; // 1970-01-05, a stable Monday anchor for week windows.
 const partFormatters = new Map<string, Intl.DateTimeFormat>();
 
-function timeZoneOrDefault(timeZone?: string | null) {
+export function timeZoneOrDefault(timeZone?: string | null) {
   if (!timeZone) return defaultTimeZone;
   try {
     new Intl.DateTimeFormat("en-US", { timeZone }).format(0);
@@ -70,6 +70,21 @@ function localMonthAdd(parts: { year: number; month: number }, months: number) {
 
 function boundaryUtc(timeZone: string, parts: { year: number; month: number; day: number }) {
   return localToUtc(timeZone, parts.year, parts.month, parts.day, 0, 0, 0);
+}
+
+/**
+ * UTC instant of local midnight for a calendar date, or null when the
+ * year/month/day do not describe a real date (e.g. February 30).
+ */
+export function localDayStart(timeZone: string | null | undefined, year: number, month: number, day: number): number | null {
+  if (!Number.isInteger(month) || month < 1 || month > 12) return null;
+  if (!Number.isInteger(day) || day < 1 || day > 31) return null;
+  if (!Number.isInteger(year)) return null;
+  const zone = timeZoneOrDefault(timeZone);
+  const start = boundaryUtc(zone, { year, month, day });
+  const parts = localParts(start, zone);
+  if (parts.year !== year || parts.month !== month || parts.day !== day) return null;
+  return start;
 }
 
 export function nextJdCycleStart(start: number, recurrence: JdRecurrence, timeZone?: string | null) {

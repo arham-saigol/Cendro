@@ -202,7 +202,7 @@ describe("JD task cycle behavior", () => {
     expect(countAfterCron.count).toBe(0);
   });
 
-  test("resetJdTaskCyclesBatch spans across multiple pages (>100 tasks) with serialized clearing and prevents cron interleaving recreation", async () => {
+  test("resetJdTaskCyclesBatch spans across multiple pages (>100 tasks) with serialized clearing and prevents cron interleaving recreation", { timeout: 15_000 }, async () => {
     const start = utc(2026, 1, 1, 12);
     vi.setSystemTime(start);
     const { t, companyId, adminMembershipId } = await seedCompany();

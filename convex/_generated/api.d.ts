@@ -14,6 +14,7 @@ import type * as analytics from "../analytics.js";
 import type * as companies from "../companies.js";
 import type * as companyManagement from "../companyManagement.js";
 import type * as crons from "../crons.js";
+import type * as dashboardTime from "../dashboardTime.js";
 import type * as email from "../email.js";
 import type * as invitations from "../invitations.js";
 import type * as permissions from "../permissions.js";
@@ -43,6 +44,7 @@ declare const fullApi: ApiFromModules<{
   companies: typeof companies;
   companyManagement: typeof companyManagement;
   crons: typeof crons;
+  dashboardTime: typeof dashboardTime;
   email: typeof email;
   invitations: typeof invitations;
   permissions: typeof permissions;

@@ -3,6 +3,7 @@
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import { api } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 import { defaultRoleCapabilities } from "../src/lib/permissions";
 import { currentJdCycle } from "./taskCycles";
@@ -339,5 +340,128 @@ describe("dashboard analytics scoping", () => {
     await expect(admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "custom", startDate: "2026-02-30", endDate: "2026-03-01" } })).rejects.toThrow("Invalid date range");
     await expect(admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "custom", startDate: "2026-03-10", endDate: "2026-03-01" } })).rejects.toThrow("Invalid date range");
     await expect(admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "custom", startDate: "2024-01-01", endDate: "2026-01-02" } })).rejects.toThrow("two years");
+  });
+});
+
+describe("dashboard historical JD cycles", () => {
+  // Fixed timestamps in the default company time zone (GMT+5).
+  const day = (iso: string) => new Date(`${iso}T00:00:00+05:00`).getTime();
+
+  function jdDoc(
+    ids: { companyId: Id<"companies">; adminMembershipId: Id<"companyMemberships">; employeeMembershipId: Id<"companyMemberships"> },
+    fields: { recurrence: "daily" | "monthly"; csa: number; scs: number; status?: "due" | "in_progress" | "completed"; createdAt?: number },
+  ) {
+    return {
+      companyId: ids.companyId,
+      reference: "JD-X",
+      title: "jd",
+      recurrence: fields.recurrence,
+      cycleStartedAt: fields.csa,
+      status: fields.status ?? "due",
+      statusCycleStart: fields.scs,
+      assigneeMembershipIds: [ids.employeeMembershipId],
+      createdByMembershipId: ids.adminMembershipId,
+      createdAt: fields.createdAt ?? fields.csa,
+      updatedAt: fields.csa,
+    };
+  }
+
+  test("missed records keep their own deadline across recurrence changes", { timeout: 15_000 }, async () => {
+    const ids = await seedDashboardCompany();
+    const { t, companyId } = ids;
+    // The task ran weekly and missed Aug 31–Sep 7 (deadline Sep 6); the
+    // recurrence was later switched to monthly, moving the doc to that grid.
+    const jdTaskId = await t.run(async (ctx) => await ctx.db.insert("jdTasks", jdDoc(ids, { recurrence: "monthly", csa: day("2026-09-01"), scs: day("2026-09-01"), createdAt: day("2026-08-20") })));
+    await t.run(async (ctx) => {
+      await ctx.db.insert("jdTaskCycleRecords", { companyId, jdTaskId, cycleStart: day("2026-08-31"), cycleEnd: day("2026-09-07"), status: "missed", recordedAt: day("2026-09-08") });
+    });
+    const now = day("2026-09-12") + 15 * 3_600_000;
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
+    expect(dashboard.jd).toEqual({ due: 2, completed: 0, outstanding: 2, completionRate: 0 });
+  });
+
+  test("legacy completions off the current grid count by their completion date", { timeout: 15_000 }, async () => {
+    const ids = await seedDashboardCompany();
+    const { t, companyId, employeeMembershipId } = ids;
+    // A weekly Sep 7–14 cycle completed on Sep 8 (real deadline Sep 13); the
+    // recurrence was later switched to monthly and the row predates cycleEnd.
+    const jdTaskId = await t.run(async (ctx) => await ctx.db.insert("jdTasks", jdDoc(ids, { recurrence: "monthly", csa: day("2026-09-01"), scs: day("2026-09-01") })));
+    await t.run(async (ctx) => {
+      await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId, cycleStart: day("2026-09-07"), completedByMembershipId: employeeMembershipId, completedAt: day("2026-09-08") + 3_600_000 });
+    });
+    const now = day("2026-09-12") + 15 * 3_600_000;
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_week" } });
+    expect(dashboard.jd).toEqual({ due: 1, completed: 1, outstanding: 0, completionRate: 100 });
+  });
+
+  test("legacy completions on the current grid keep their reconstructed deadline", { timeout: 15_000 }, async () => {
+    const ids = await seedDashboardCompany();
+    const { t, companyId, employeeMembershipId } = ids;
+    // Monthly task completed early on Sep 5; the September deadline is Sep 30.
+    const jdTaskId = await t.run(async (ctx) => await ctx.db.insert("jdTasks", jdDoc(ids, { recurrence: "monthly", csa: day("2026-09-01"), scs: day("2026-09-01") })));
+    await t.run(async (ctx) => {
+      await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId, cycleStart: day("2026-09-01"), completedByMembershipId: employeeMembershipId, completedAt: day("2026-09-05") + 3_600_000 });
+    });
+    const now = day("2026-09-12") + 15 * 3_600_000;
+    const admin = t.withIdentity(identity("admin"));
+    // No deadline falls inside Sep 1–6 even though the completion happened there.
+    const early = await admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "custom", startDate: "2026-09-01", endDate: "2026-09-06" } });
+    expect(early.jd).toEqual({ due: 0, completed: 0, outstanding: 0, completionRate: 0 });
+    const month = await admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
+    expect(month.jd).toEqual({ due: 1, completed: 1, outstanding: 0, completionRate: 100 });
+  });
+
+  test("a task more than 200 cycles behind still reports its recent in-range cycles", { timeout: 15_000 }, async () => {
+    const ids = await seedDashboardCompany();
+    const { t, companyId } = ids;
+    // Daily task whose cycleStartedAt lagged ~250 cycles without cron records.
+    await t.run(async (ctx) => await ctx.db.insert("jdTasks", jdDoc(ids, { recurrence: "daily", csa: day("2026-01-05"), scs: day("2026-01-05") })));
+    const now = day("2026-09-12") + 15 * 3_600_000;
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
+    // Sep 1–11 elapsed plus the current Sep 12 cycle.
+    expect(dashboard.jd.due).toBe(12);
+    expect(dashboard.isTruncated).toBe(false);
+  });
+
+  test("more in-range elapsed cycles than the cap are flagged as truncated", { timeout: 15_000 }, async () => {
+    const ids = await seedDashboardCompany();
+    const { t, companyId } = ids;
+    await t.run(async (ctx) => await ctx.db.insert("jdTasks", jdDoc(ids, { recurrence: "daily", csa: day("2026-01-01"), scs: day("2026-01-01") })));
+    const now = day("2026-12-31") + 12 * 3_600_000;
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_year" } });
+    expect(dashboard.jd.due).toBe(201);
+    expect(dashboard.isTruncated).toBe(true);
+  });
+
+  test("a task marked completed before the completion ledger counts its stamped cycle", { timeout: 15_000 }, async () => {
+    const ids = await seedDashboardCompany();
+    const { t, companyId } = ids;
+    // Legacy task: marked completed in the Sep 9 daily cycle, but no completion
+    // row exists and the cron recorded that cycle as missed anyway.
+    const jdTaskId = await t.run(async (ctx) => await ctx.db.insert("jdTasks", jdDoc(ids, { recurrence: "daily", csa: day("2026-09-12"), scs: day("2026-09-09"), status: "completed", createdAt: day("2026-09-08") })));
+    await t.run(async (ctx) => {
+      for (const d of [8, 9, 10, 11]) {
+        const iso = `2026-09-${String(d).padStart(2, "0")}`;
+        await ctx.db.insert("jdTaskCycleRecords", { companyId, jdTaskId, cycleStart: day(iso), cycleEnd: day(iso) + dayMs, status: "missed", recordedAt: day("2026-09-12") });
+      }
+    });
+    const now = day("2026-09-12") + 15 * 3_600_000;
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
+    // Sep 8, 9, 10, 11 elapsed plus the current Sep 12 cycle; Sep 9 completed.
+    expect(dashboard.jd).toEqual({ due: 5, completed: 1, outstanding: 4, completionRate: 20 });
+  });
+
+  test("a completion and a missed record for the same cycle count once as completed", { timeout: 15_000 }, async () => {
+    const ids = await seedDashboardCompany();
+    const { t, companyId, employeeMembershipId } = ids;
+    const jdTaskId = await t.run(async (ctx) => await ctx.db.insert("jdTasks", jdDoc(ids, { recurrence: "daily", csa: day("2026-09-09"), scs: day("2026-09-09"), createdAt: day("2026-09-09") })));
+    await t.run(async (ctx) => {
+      await ctx.db.insert("jdTaskCycleRecords", { companyId, jdTaskId, cycleStart: day("2026-09-09"), cycleEnd: day("2026-09-10"), status: "missed", recordedAt: day("2026-09-12") });
+      await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId, cycleStart: day("2026-09-09"), cycleEnd: day("2026-09-10"), completedByMembershipId: employeeMembershipId, completedAt: day("2026-09-09") + 3_600_000 });
+    });
+    const now = day("2026-09-12") + 15 * 3_600_000;
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
+    // Sep 9–11 elapsed plus the current Sep 12 cycle; Sep 9 is a single completed cycle.
+    expect(dashboard.jd).toEqual({ due: 4, completed: 1, outstanding: 3, completionRate: 25 });
   });
 });

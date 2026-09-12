@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
 import { analyticsScopedMembershipIds, assertAnalyticsViewAccess, buildSopVisibilityContext, membershipCapabilities, requireMembership, taskHasVisibleAssignee, visibleAssigneeMembershipIds, visibleSop } from "./permissions";
-import { currentJdCycle, elapsedJdCyclesSince, nextJdCycleStart } from "./taskCycles";
+import { currentJdCycle, elapsedJdCyclesDueBetween, nextJdCycleStart } from "./taskCycles";
 import { bucketIndexFor, buildDashboardBuckets, dashboardRangeValidator, resolveDashboardRange } from "./dashboardTime";
 import type { Doc, Id } from "./_generated/dataModel";
 import { takeWithOverflow } from "./queryLimits";
@@ -22,6 +22,10 @@ type OrgAssignments = {
 };
 
 const dashboardTakeLimit = 500;
+
+// Any JD cycle whose deadline lands inside a dashboard range started at most
+// ~366 days earlier (the longest recurrence is annual), plus slack.
+const jdCompletionLookbackMs = 368 * 86_400_000;
 
 type QueryCompleteness = { isTruncated: boolean };
 
@@ -272,38 +276,52 @@ export const dashboard = query({
       const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds);
       if (!assignees.length) continue;
 
-      const lowerBound = currentJdCycle(task.recurrence, range.start, timeZone).start;
       const cycles = new Map<number, { dueAt: number; completed: boolean }>();
       const put = (start: number, dueAt: number, completed: boolean) => {
         const existing = cycles.get(start);
         cycles.set(start, { dueAt, completed: (existing?.completed ?? false) || completed });
       };
 
+      // A cycle that ends inside the range started at most ~366 days before it
+      // (the longest recurrence is annual), so this lookback covers every
+      // completion that could still be due in range. Newer completions record
+      // their own cycleEnd; legacy rows fall back to the current grid.
       const completions = await takeDashboardRows(
         completeness,
-        (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_completedAt", (q) => q.eq("jdTaskId", task._id).gte("completedAt", lowerBound).lte("completedAt", range.end)).take(limit),
+        (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit),
       );
       for (const completion of completions) {
-        put(completion.cycleStart, nextJdCycleStart(completion.cycleStart, task.recurrence, timeZone) - 1, true);
+        // Legacy rows predate cycleEnd. When the stored start no longer sits on
+        // the task's grid the recurrence or timezone changed since, so the
+        // reconstructed deadline is unreliable and the recorded completion
+        // time is the only trustworthy instant inside that cycle.
+        const end = completion.cycleEnd ?? (
+          currentJdCycle(task.recurrence, completion.cycleStart, timeZone).start === completion.cycleStart
+            ? nextJdCycleStart(completion.cycleStart, task.recurrence, timeZone)
+            : completion.completedAt + 1
+        );
+        put(completion.cycleStart, end - 1, true);
       }
 
+      // Missed records store their own deadline, so they stay exact across
+      // recurrence and timezone changes; match on that deadline directly.
       const missed = await takeDashboardRows(
         completeness,
-        (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", lowerBound).lte("cycleStart", range.end)).take(limit),
+        (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
       );
       for (const record of missed) put(record.cycleStart, record.cycleEnd - 1, false);
 
-      for (const cycle of elapsedJdCyclesSince(task.recurrence, task.cycleStartedAt, now, 200, timeZone).cycles) {
-        put(cycle.start, cycle.end - 1, false);
-      }
+      const elapsed = elapsedJdCyclesDueBetween(task.recurrence, task.cycleStartedAt, now, range.start, range.end, 200, timeZone);
+      if (elapsed.truncated) completeness.isTruncated = true;
+      for (const cycle of elapsed.cycles) put(cycle.start, cycle.end - 1, false);
 
       const current = currentJdCycle(task.recurrence, now, timeZone);
-      const currentDone = Boolean(cycles.get(current.start)?.completed) || (task.statusCycleStart === current.start && task.status === "completed");
-      put(current.start, current.end - 1, currentDone);
+      put(current.start, current.end - 1, Boolean(cycles.get(current.start)?.completed));
 
       for (const [start, cycle] of cycles) {
         if (start <= now && cycle.dueAt >= range.start && cycle.dueAt <= range.end) {
-          items.push({ kind: "jd", at: cycle.dueAt, completed: cycle.completed, assigneeIds: assignees });
+          const completed = cycle.completed || (task.status === "completed" && task.statusCycleStart === start);
+          items.push({ kind: "jd", at: cycle.dueAt, completed, assigneeIds: assignees });
         }
       }
     }

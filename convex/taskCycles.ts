@@ -177,3 +177,32 @@ export function elapsedJdCyclesSince(recurrence: JdRecurrence, activeAt: number,
   }
   return { cycles, nextActiveAt: start };
 }
+
+/**
+ * Elapsed cycles whose deadlines fall inside [rangeStart, rangeEnd], walked
+ * back from the current cycle so a lagging `activeAt` can never push recent
+ * deadlines past `maxCycles`. Cycles that end after rangeEnd are skipped
+ * without consuming the cap; the walk stops once deadlines fall below
+ * rangeStart or before the cycle containing `activeAt`.
+ */
+export function elapsedJdCyclesDueBetween(recurrence: JdRecurrence, activeAt: number, now: number, rangeStart: number, rangeEnd: number, maxCycles = 200, timeZone?: string | null): { cycles: JdCycle[]; truncated: boolean } {
+  const current = currentJdCycle(recurrence, now, timeZone);
+  const floor = currentJdCycle(recurrence, activeAt, timeZone).start;
+  const cycles: JdCycle[] = [];
+  let truncated = false;
+  let end = current.start;
+  while (end > floor) {
+    const start = previousJdCycleStart(end, recurrence, timeZone);
+    if (start < floor) break;
+    if (end - 1 < rangeStart) break;
+    if (end - 1 <= rangeEnd) {
+      if (cycles.length >= maxCycles) {
+        truncated = true;
+        break;
+      }
+      cycles.push({ start, end });
+    }
+    end = start;
+  }
+  return { cycles, truncated };
+}

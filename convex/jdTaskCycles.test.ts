@@ -174,6 +174,26 @@ describe("JD task cycle behavior", () => {
     expect(after?.statusCycleStart).toBe(before?.statusCycleStart);
   });
 
+  test("a legacy completed cycle without a completion row is not recorded as missed", async () => {
+    vi.setSystemTime(utc(2026, 1, 1, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Daily check", description: "", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    await t.withIdentity(identity("admin")).mutation(api.tasks.completeJd, { companyId, taskId });
+    // Simulate pre-ledger data: the stamped status survives, the row is gone.
+    await t.run(async (ctx) => {
+      for (const row of await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect()) {
+        await ctx.db.delete(row._id);
+      }
+    });
+
+    vi.setSystemTime(utc(2026, 1, 4, 12));
+    await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
+    const records = await t.run(async (ctx) => await ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
+
+    // Jan 1 stays completed via statusCycleStart; only Jan 2–3 are missed.
+    expect(records.map((record) => record.cycleStart).sort()).toEqual([utc(2026, 1, 2), utc(2026, 1, 3)]);
+  });
+
   test("resetAndClearMissedJdCycles deletes missed cycle records, resets cycleStartedAt to current, and prevents re-recording old cycles", async () => {
     vi.setSystemTime(utc(2026, 1, 1, 12));
     const { t, companyId, adminMembershipId } = await seedCompany();

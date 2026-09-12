@@ -1,11 +1,12 @@
 "use client";
 
 import { useMemo } from "react";
-import { barY, defineChart } from "@tanstack/charts";
-import { scaleBand } from "@tanstack/charts/scales/band";
+import { areaY, defineChart, d3Curve, lineY } from "@tanstack/charts";
 import { scaleLinear } from "@tanstack/charts/scales/linear";
+import { scalePoint } from "@tanstack/charts/scales/point";
 import { tooltip } from "@tanstack/charts/tooltip";
 import { Chart } from "@tanstack/charts/react";
+import { curveMonotoneX } from "d3-shape";
 
 export type DashboardTrendPoint = {
   bucketStart: number;
@@ -43,17 +44,24 @@ export function DashboardTrendChart({
   const definition = useMemo(() => {
     if (data.length === 0) return null;
     const maxTotal = Math.max(4, ...data.map((row) => row.total));
+    const curve = d3Curve(curveMonotoneX);
+    const tickCount = Math.min(6, data.length);
+    const tickStep = (data.length - 1) / (tickCount - 1);
+    const tickValues = tickCount === 1
+      ? [data[0].label]
+      : Array.from({ length: tickCount }, (_, index) => data[Math.round(index * tickStep)].label);
     return defineChart({
       marks: [
-        barY(data, { x: "label", y: "total", fill: "var(--hairline-strong)", radius: 2 }),
-        barY(data, { x: "label", y: "completed", fill: "var(--ink)", radius: 2 }),
+        areaY(data, { x: "label", y: "completed", fill: "var(--ink)", fillOpacity: 0.07, curve }),
+        lineY(data, { x: "label", y: "total", stroke: "var(--ink-faint)", strokeWidth: 1.5, strokeDasharray: "3 3", curve }),
+        lineY(data, { x: "label", y: "completed", stroke: "var(--ink)", strokeWidth: 2, curve }),
       ],
       x: {
-        scale: () => scaleBand<string>().domain(data.map((row) => row.label)).padding(0.35),
+        scale: () => scalePoint<string>().domain(data.map((row) => row.label)),
         axis: {
           line: false,
-          ticks: { size: 0, padding: 8 },
-          tickLabels: { fontSize: 11, thin: data.length > 12 ? { priority: "ends" } : false },
+          ticks: { size: 0, padding: 8, values: tickValues },
+          tickLabels: { fontSize: 11, thin: { priority: "ends" } },
         },
       },
       y: {
@@ -92,11 +100,11 @@ export function DashboardTrendChart({
   if (!definition) return null;
 
   return (
-    <div className="dashboard-chart w-full">
+    <div className="w-full">
       <Chart
         definition={definition}
         height={height}
-        ariaLabel={mode === "jd" ? "Job description work due per period" : "Tasks assigned per period"}
+        ariaLabel={mode === "jd" ? "Job description work due and completed over time" : "Tasks assigned and completed over time"}
       />
     </div>
   );

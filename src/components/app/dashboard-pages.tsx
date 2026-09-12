@@ -351,11 +351,11 @@ function ChartCard({ data, mode, onModeChange }: { data: DashboardData; mode: Da
       <div className={cn(cardTitleClass, "flex items-center justify-between gap-3")}>
         <div className="flex items-center gap-4 text-[12px] text-[var(--ink-muted)]">
           <span className="flex items-center gap-1.5">
-            <span className="h-2 w-2 rounded-[2px] bg-[var(--hairline-strong)]" />
+            <span className="w-4 border-t-2 border-dashed border-[var(--ink-muted)]" />
             {mode === "jd" ? "Due" : "Assigned"}
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="h-2 w-2 rounded-[2px] bg-[var(--ink)]" />
+            <span className="w-4 border-t-2 border-[var(--ink)]" />
             Completed
           </span>
         </div>

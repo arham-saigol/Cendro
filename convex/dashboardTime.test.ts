@@ -5,23 +5,24 @@ const now = Date.UTC(2026, 8, 12, 10); // Sat Sep 12 2026
 const timeZone = "UTC";
 
 describe("resolveDashboardRange", () => {
-  test("this_week covers the full Monday-to-Sunday period grouped by day", () => {
+  test("this_week covers the week to date grouped by day", () => {
     const range = resolveDashboardRange({ preset: "this_week" }, now, timeZone);
-    expect(range).toEqual({ start: Date.UTC(2026, 8, 7), end: Date.UTC(2026, 8, 14) - 1, grouping: "day" });
+    expect(range).toEqual({ start: Date.UTC(2026, 8, 7), end: Date.UTC(2026, 8, 13) - 1, grouping: "day" });
     const buckets = buildDashboardBuckets(range, timeZone);
-    expect(buckets).toHaveLength(7);
+    expect(buckets).toHaveLength(6);
     expect(buckets[0]).toMatchObject({ start: Date.UTC(2026, 8, 7), end: Date.UTC(2026, 8, 8) - 1, label: "Sep 7" });
+    expect(buckets[buckets.length - 1]).toMatchObject({ start: Date.UTC(2026, 8, 12), end: Date.UTC(2026, 8, 13) - 1, label: "Sep 12" });
   });
 
-  test("this_month covers the full calendar month grouped by day", () => {
+  test("this_month covers the month to date grouped by day", () => {
     const range = resolveDashboardRange({ preset: "this_month" }, now, timeZone);
-    expect(range).toEqual({ start: Date.UTC(2026, 8, 1), end: Date.UTC(2026, 9, 1) - 1, grouping: "day" });
-    expect(buildDashboardBuckets(range, timeZone)).toHaveLength(30);
+    expect(range).toEqual({ start: Date.UTC(2026, 8, 1), end: Date.UTC(2026, 8, 13) - 1, grouping: "day" });
+    expect(buildDashboardBuckets(range, timeZone)).toHaveLength(12);
   });
 
-  test("last_3_months starts two months back and groups by aligned weeks", () => {
+  test("last_3_months starts two months back and ends today grouped by aligned weeks", () => {
     const range = resolveDashboardRange({ preset: "last_3_months" }, now, timeZone);
-    expect(range).toEqual({ start: Date.UTC(2026, 6, 1), end: Date.UTC(2026, 9, 1) - 1, grouping: "week" });
+    expect(range).toEqual({ start: Date.UTC(2026, 6, 1), end: Date.UTC(2026, 8, 13) - 1, grouping: "week" });
     const buckets = buildDashboardBuckets(range, timeZone);
     expect(buckets[0].start).toBe(Date.UTC(2026, 6, 1));
     expect(buckets[0].label).toBe("Jul 1");
@@ -29,12 +30,12 @@ describe("resolveDashboardRange", () => {
     expect(buckets[buckets.length - 1].end).toBe(range.end);
   });
 
-  test("this_year groups into twelve calendar months", () => {
+  test("this_year groups the year to date into calendar months", () => {
     const range = resolveDashboardRange({ preset: "this_year" }, now, timeZone);
-    expect(range).toEqual({ start: Date.UTC(2026, 0, 1), end: Date.UTC(2027, 0, 1) - 1, grouping: "month" });
+    expect(range).toEqual({ start: Date.UTC(2026, 0, 1), end: Date.UTC(2026, 8, 13) - 1, grouping: "month" });
     const buckets = buildDashboardBuckets(range, timeZone);
-    expect(buckets).toHaveLength(12);
-    expect(buckets.map((bucket) => bucket.label)).toEqual(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]);
+    expect(buckets).toHaveLength(9);
+    expect(buckets.map((bucket) => bucket.label)).toEqual(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep"]);
   });
 
   test("custom range inside 140 days groups by week", () => {

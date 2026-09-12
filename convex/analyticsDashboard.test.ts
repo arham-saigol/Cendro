@@ -6,11 +6,17 @@ import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 import { defaultRoleCapabilities } from "../src/lib/permissions";
-import { currentJdCycle } from "./taskCycles";
+import { currentJdCycle, defaultTimeZone } from "./taskCycles";
 
 const modules = import.meta.glob("./**/*.ts");
 const dayMs = 86_400_000;
 const defaultRange = { preset: "last_3_months" } as const;
+
+const dateFieldParts = new Intl.DateTimeFormat("en-US", { timeZone: defaultTimeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+function dateField(ms: number) {
+  const parts = Object.fromEntries(dateFieldParts.formatToParts(ms).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
 
 function identity(key: string, email = `${key}@example.com`) {
   return { tokenIdentifier: `clerk|${key}`, subject: key, issuer: "https://clerk.test", email, name: key };
@@ -131,7 +137,8 @@ describe("dashboard analytics scoping", () => {
     });
 
     const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: defaultRange });
-    expect(dashboard.jd).toEqual({ due: 6, completed: 2, outstanding: 4, completionRate: 33 });
+    // k=2,4,5 are incomplete with deadlines before now; the current cycle due today is not overdue yet.
+    expect(dashboard.jd).toEqual({ due: 6, completed: 2, overdue: 3, completionRate: 33 });
     const trend = dashboard.trend.reduce(
       (sum, bucket) => ({ jdDue: sum.jdDue + bucket.jdDue, jdCompleted: sum.jdCompleted + bucket.jdCompleted }),
       { jdDue: 0, jdCompleted: 0 },
@@ -161,18 +168,21 @@ describe("dashboard analytics scoping", () => {
       updatedAt: now,
     }));
 
-    let dashboard = await admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "this_week" } });
+    // Named presets run to date, so the current cycle's future deadline only
+    // counts inside an explicit custom range covering the whole week.
+    const weekRange = { preset: "custom", startDate: dateField(weekly.start), endDate: dateField(weekly.end - 1) } as const;
+    let dashboard = await admin.query(api.analytics.dashboard, { companyId, now, range: weekRange });
     expect(dashboard.jd.due).toBe(1);
     expect(dashboard.jd.completed).toBe(0);
 
     await admin.mutation(api.tasks.completeJd, { companyId, taskId: weeklyTaskId });
-    dashboard = await admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "this_week" } });
+    dashboard = await admin.query(api.analytics.dashboard, { companyId, now, range: weekRange });
     expect(dashboard.jd.completed).toBe(1);
     expect(dashboard.jd.completionRate).toBe(100);
 
-    const monthRange = { preset: "this_month" } as const;
-    const before = (await admin.query(api.analytics.dashboard, { companyId, now, range: monthRange })).jd.due;
     const monthly = currentJdCycle("monthly", now, undefined);
+    const monthRange = { preset: "custom", startDate: dateField(monthly.start), endDate: dateField(monthly.end - 1) } as const;
+    const before = (await admin.query(api.analytics.dashboard, { companyId, now, range: monthRange })).jd.due;
     await t.run(async (ctx) => {
       await ctx.db.insert("jdTasks", {
         companyId,
@@ -212,15 +222,29 @@ describe("dashboard analytics scoping", () => {
         createdAt: now - 120 * dayMs,
         updatedAt: now,
       });
+      await ctx.db.insert("oneTimeTasks", {
+        companyId,
+        reference: "OT-OVERDUE",
+        title: "Past its due date",
+        description: "",
+        priority: "medium",
+        status: "due",
+        dueDate: now - dayMs,
+        assigneeMembershipIds: [employeeMembershipId],
+        createdByMembershipId: adminMembershipId,
+        createdAt: now,
+        updatedAt: now,
+      });
     });
     let dashboard = await admin.query(api.analytics.dashboard, { companyId, now, range: defaultRange });
-    expect(dashboard.tasks.assigned).toBe(2);
+    expect(dashboard.tasks.assigned).toBe(3);
 
     await admin.mutation(api.tasks.completeOneTime, { companyId, taskId: visibleTaskId });
     dashboard = await admin.query(api.analytics.dashboard, { companyId, now, range: defaultRange });
     expect(dashboard.tasks.completed).toBe(1);
-    expect(dashboard.tasks.open).toBe(1);
-    expect(dashboard.tasks.completionRate).toBe(50);
+    // The hidden task is incomplete but not due yet, so only the past-due one counts.
+    expect(dashboard.tasks.overdue).toBe(1);
+    expect(dashboard.tasks.completionRate).toBe(33);
   });
 
   test("overall completion is weighted by work volume, not averaged", { timeout: 15_000 }, async () => {
@@ -377,7 +401,8 @@ describe("dashboard historical JD cycles", () => {
     });
     const now = day("2026-09-12") + 15 * 3_600_000;
     const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
-    expect(dashboard.jd).toEqual({ due: 2, completed: 0, outstanding: 2, completionRate: 0 });
+    // Month-to-date ends Sep 12, so only the missed Sep 6 deadline is in range.
+    expect(dashboard.jd).toEqual({ due: 1, completed: 0, overdue: 1, completionRate: 0 });
   });
 
   test("legacy completions off the current grid count by their completion date", { timeout: 15_000 }, async () => {
@@ -391,7 +416,7 @@ describe("dashboard historical JD cycles", () => {
     });
     const now = day("2026-09-12") + 15 * 3_600_000;
     const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_week" } });
-    expect(dashboard.jd).toEqual({ due: 1, completed: 1, outstanding: 0, completionRate: 100 });
+    expect(dashboard.jd).toEqual({ due: 1, completed: 1, overdue: 0, completionRate: 100 });
   });
 
   test("legacy completions on the current grid keep their reconstructed deadline", { timeout: 15_000 }, async () => {
@@ -406,9 +431,11 @@ describe("dashboard historical JD cycles", () => {
     const admin = t.withIdentity(identity("admin"));
     // No deadline falls inside Sep 1–6 even though the completion happened there.
     const early = await admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "custom", startDate: "2026-09-01", endDate: "2026-09-06" } });
-    expect(early.jd).toEqual({ due: 0, completed: 0, outstanding: 0, completionRate: 0 });
-    const month = await admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
-    expect(month.jd).toEqual({ due: 1, completed: 1, outstanding: 0, completionRate: 100 });
+    expect(early.jd).toEqual({ due: 0, completed: 0, overdue: 0, completionRate: 0 });
+    // The reconstructed Sep 30 deadline lands outside the month-to-date window,
+    // so it only counts in a custom range covering the whole month.
+    const month = await admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "custom", startDate: "2026-09-01", endDate: "2026-09-30" } });
+    expect(month.jd).toEqual({ due: 1, completed: 1, overdue: 0, completionRate: 100 });
   });
 
   test("a task more than 200 cycles behind still reports its recent in-range cycles", { timeout: 15_000 }, async () => {
@@ -420,6 +447,7 @@ describe("dashboard historical JD cycles", () => {
     const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
     // Sep 1–11 elapsed plus the current Sep 12 cycle.
     expect(dashboard.jd.due).toBe(12);
+    expect(dashboard.jd.overdue).toBe(11);
     expect(dashboard.isTruncated).toBe(false);
   });
 
@@ -448,7 +476,7 @@ describe("dashboard historical JD cycles", () => {
     const now = day("2026-09-12") + 15 * 3_600_000;
     const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
     // Sep 8, 9, 10, 11 elapsed plus the current Sep 12 cycle; Sep 9 completed.
-    expect(dashboard.jd).toEqual({ due: 5, completed: 1, outstanding: 4, completionRate: 20 });
+    expect(dashboard.jd).toEqual({ due: 5, completed: 1, overdue: 3, completionRate: 20 });
   });
 
   test("a completion and a missed record for the same cycle count once as completed", { timeout: 15_000 }, async () => {
@@ -462,6 +490,6 @@ describe("dashboard historical JD cycles", () => {
     const now = day("2026-09-12") + 15 * 3_600_000;
     const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
     // Sep 9–11 elapsed plus the current Sep 12 cycle; Sep 9 is a single completed cycle.
-    expect(dashboard.jd).toEqual({ due: 4, completed: 1, outstanding: 3, completionRate: 25 });
+    expect(dashboard.jd).toEqual({ due: 4, completed: 1, overdue: 2, completionRate: 25 });
   });
 });

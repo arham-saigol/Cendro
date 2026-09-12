@@ -65,22 +65,20 @@ export function resolveDashboardRange(
     if (start > end) throw new ConvexError("Invalid date range.");
     // The two dates may span at most two years (a leap-inclusive 731 days).
     if (endDayStart - start > 731 * dayMs) throw new ConvexError("Date range cannot exceed two years.");
-  } else if (arg.preset === "this_week") {
-    const cycle = currentJdCycle("weekly", now, timeZone);
-    start = cycle.start;
-    end = cycle.end - 1;
-  } else if (arg.preset === "this_month") {
-    const cycle = currentJdCycle("monthly", now, timeZone);
-    start = cycle.start;
-    end = cycle.end - 1;
-  } else if (arg.preset === "last_3_months") {
-    const current = currentJdCycle("monthly", now, timeZone);
-    start = previousJdCycleStart(previousJdCycleStart(current.start, "monthly", timeZone), "monthly", timeZone);
-    end = current.end - 1;
   } else {
-    const cycle = currentJdCycle("annually", now, timeZone);
-    start = cycle.start;
-    end = cycle.end - 1;
+    if (arg.preset === "this_week") {
+      start = currentJdCycle("weekly", now, timeZone).start;
+    } else if (arg.preset === "this_month") {
+      start = currentJdCycle("monthly", now, timeZone).start;
+    } else if (arg.preset === "last_3_months") {
+      const current = currentJdCycle("monthly", now, timeZone).start;
+      start = previousJdCycleStart(previousJdCycleStart(current, "monthly", timeZone), "monthly", timeZone);
+    } else {
+      start = currentJdCycle("annually", now, timeZone).start;
+    }
+    // Named presets are to-date: the window ends today, not at the end of the
+    // calendar period.
+    end = currentJdCycle("daily", now, timeZone).end - 1;
   }
   const days = Math.round((end - start + 1) / dayMs);
   const grouping: DashboardGrouping = days <= 31 ? "day" : days <= 140 ? "week" : "month";

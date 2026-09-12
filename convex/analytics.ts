@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
 import { analyticsScopedMembershipIds, assertAnalyticsViewAccess, buildSopVisibilityContext, membershipCapabilities, requireMembership, taskHasVisibleAssignee, visibleAssigneeMembershipIds, visibleSop } from "./permissions";
-import { currentJdCycle, elapsedJdCyclesDueBetween, nextJdCycleStart } from "./taskCycles";
+import { currentJdCycle, elapsedJdCyclesDueBetween, localDateField, nextJdCycleStart } from "./taskCycles";
 import { bucketIndexFor, buildDashboardBuckets, dashboardRangeValidator, resolveDashboardRange } from "./dashboardTime";
 import type { Doc, Id } from "./_generated/dataModel";
 import { takeWithOverflow } from "./queryLimits";
@@ -217,6 +217,7 @@ type WorkItem = {
   kind: "jd" | "task";
   at: number;
   completed: boolean;
+  overdue: boolean;
   assigneeIds: Id<"companyMemberships">[];
 };
 
@@ -321,7 +322,7 @@ export const dashboard = query({
       for (const [start, cycle] of cycles) {
         if (start <= now && cycle.dueAt >= range.start && cycle.dueAt <= range.end) {
           const completed = cycle.completed || (task.status === "completed" && task.statusCycleStart === start);
-          items.push({ kind: "jd", at: cycle.dueAt, completed, assigneeIds: assignees });
+          items.push({ kind: "jd", at: cycle.dueAt, completed, overdue: !completed && cycle.dueAt < now, assigneeIds: assignees });
         }
       }
     }
@@ -333,13 +334,17 @@ export const dashboard = query({
     for (const task of oneTimeTasks) {
       const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds);
       if (!assignees.length) continue;
-      items.push({ kind: "task", at: task.createdAt, completed: task.status === "completed", assigneeIds: assignees });
+      const completed = task.status === "completed";
+      const overdue = !completed && (task.overdueAt !== undefined || (task.dueDate !== undefined && task.dueDate < now));
+      items.push({ kind: "task", at: task.createdAt, completed, overdue, assigneeIds: assignees });
     }
 
     let jdDue = 0;
     let jdCompleted = 0;
+    let jdOverdue = 0;
     let tasksAssigned = 0;
     let tasksCompleted = 0;
+    let tasksOverdue = 0;
     const trend = buckets.map((bucket) => ({
       bucketStart: bucket.start,
       label: bucket.label,
@@ -354,6 +359,7 @@ export const dashboard = query({
       if (item.kind === "jd") {
         jdDue += 1;
         if (item.completed) jdCompleted += 1;
+        if (item.overdue) jdOverdue += 1;
         if (bucket) {
           bucket.jdDue += 1;
           if (item.completed) bucket.jdCompleted += 1;
@@ -361,6 +367,7 @@ export const dashboard = query({
       } else {
         tasksAssigned += 1;
         if (item.completed) tasksCompleted += 1;
+        if (item.overdue) tasksOverdue += 1;
         if (bucket) {
           bucket.tasksAssigned += 1;
           if (item.completed) bucket.tasksCompleted += 1;
@@ -447,9 +454,15 @@ export const dashboard = query({
     return {
       isTruncated: completeness.isTruncated,
       level,
-      range: { start: range.start, end: range.end, grouping: range.grouping },
-      jd: { due: jdDue, completed: jdCompleted, outstanding: jdDue - jdCompleted, completionRate: safeRate(jdCompleted, jdDue) },
-      tasks: { assigned: tasksAssigned, completed: tasksCompleted, open: tasksAssigned - tasksCompleted, completionRate: safeRate(tasksCompleted, tasksAssigned) },
+      range: {
+        start: range.start,
+        end: range.end,
+        grouping: range.grouping,
+        startDate: localDateField(range.start, timeZone),
+        endDate: localDateField(range.end, timeZone),
+      },
+      jd: { due: jdDue, completed: jdCompleted, overdue: jdOverdue, completionRate: safeRate(jdCompleted, jdDue) },
+      tasks: { assigned: tasksAssigned, completed: tasksCompleted, overdue: tasksOverdue, completionRate: safeRate(tasksCompleted, tasksAssigned) },
       trend,
       rankings: { employees, groups },
     };

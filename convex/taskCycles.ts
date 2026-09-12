@@ -87,6 +87,11 @@ export function localDayStart(timeZone: string | null | undefined, year: number,
   return start;
 }
 
+export function localDateField(ms: number, timeZone?: string | null) {
+  const parts = localParts(ms, timeZoneOrDefault(timeZone));
+  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+}
+
 export function nextJdCycleStart(start: number, recurrence: JdRecurrence, timeZone?: string | null) {
   const zone = timeZoneOrDefault(timeZone);
   const parts = localParts(start, zone);

@@ -113,7 +113,15 @@ const rangePresets = [
   { preset: "this_year", label: "This year" },
 ] as const;
 
-function DateRangeControl({ value, onChange }: { value: DashboardRangeArg; onChange: (range: DashboardRangeArg) => void }) {
+function DateRangeControl({
+  value,
+  onChange,
+  resolvedRange,
+}: {
+  value: DashboardRangeArg;
+  onChange: (range: DashboardRangeArg) => void;
+  resolvedRange: { startDate: string; endDate: string };
+}) {
   const [open, setOpen] = useState(false);
   const appliedStart = value.preset === "custom" ? fromDateField(value.startDate) : null;
   const appliedEnd = value.preset === "custom" ? fromDateField(value.endDate) : null;
@@ -167,14 +175,10 @@ function DateRangeControl({ value, onChange }: { value: DashboardRangeArg; onCha
     onChange({ preset: "custom", startDate: toDateField(start), endDate: toDateField(end) });
   }
 
-  const triggerLabel = value.preset === "custom"
-    ? formatRangeLabel(value.startDate, value.endDate)
-    : (rangePresets.find((entry) => entry.preset === value.preset)?.label ?? "This month");
+  const triggerLabel = formatRangeLabel(resolvedRange.startDate, resolvedRange.endDate);
   const statusText = draftStart
     ? "Pick an end date"
-    : value.preset === "custom"
-      ? formatRangeLabel(value.startDate, value.endDate)
-      : "Pick a start date";
+    : formatRangeLabel(resolvedRange.startDate, resolvedRange.endDate);
 
   return (
     <DropdownMenu.Root open={open} onOpenChange={handleOpenChange}>
@@ -277,6 +281,7 @@ function FilterRow({
   departmentId,
   membershipId,
   range,
+  resolvedRange,
   onBranchChange,
   onDepartmentChange,
   onMembershipChange,
@@ -287,6 +292,7 @@ function FilterRow({
   departmentId: string;
   membershipId: string;
   range: DashboardRangeArg;
+  resolvedRange: { startDate: string; endDate: string };
   onBranchChange: (value: string) => void;
   onDepartmentChange: (value: string) => void;
   onMembershipChange: (value: string) => void;
@@ -339,7 +345,7 @@ function FilterRow({
           </SelectContent>
         </Select>
       )}
-      <DateRangeControl value={range} onChange={onRangeChange} />
+      <DateRangeControl value={range} onChange={onRangeChange} resolvedRange={resolvedRange} />
     </div>
   );
 }
@@ -494,6 +500,7 @@ export function DashboardView({
           departmentId={departmentId}
           membershipId={membershipId}
           range={range}
+          resolvedRange={data.range}
           onBranchChange={onBranchChange}
           onDepartmentChange={onDepartmentChange}
           onMembershipChange={onMembershipChange}
@@ -507,7 +514,7 @@ export function DashboardView({
           cards={[
             { label: "Due", value: numberFormat.format(data.jd.due) },
             { label: "Completed", value: numberFormat.format(data.jd.completed) },
-            { label: "Outstanding", value: numberFormat.format(data.jd.outstanding) },
+            { label: "Overdue", value: numberFormat.format(data.jd.overdue) },
             { label: "Completion", value: data.jd.due === 0 ? "—" : `${data.jd.completionRate}%` },
           ]}
         />
@@ -517,7 +524,7 @@ export function DashboardView({
           cards={[
             { label: "Assigned", value: numberFormat.format(data.tasks.assigned) },
             { label: "Completed", value: numberFormat.format(data.tasks.completed) },
-            { label: "Open", value: numberFormat.format(data.tasks.open) },
+            { label: "Overdue", value: numberFormat.format(data.tasks.overdue) },
             { label: "Completion", value: data.tasks.assigned === 0 ? "—" : `${data.tasks.completionRate}%` },
           ]}
         />

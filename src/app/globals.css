@@ -138,8 +138,8 @@ button:disabled { cursor: not-allowed; }
 
 /* TanStack Charts svg takes keyboard focus for point navigation; the mouse-click
    ring is noise, keyboard users keep the themed ring. */
-.ts-chart-host svg:focus { outline: none; }
-.ts-chart-host svg:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.dashboard-chart svg:focus { outline: none; }
+.dashboard-chart svg:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 .scrollbar-hidden {
   scrollbar-width: none;

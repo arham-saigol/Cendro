@@ -132,6 +132,7 @@ export function DashboardTrendChart({
       <Chart
         definition={definition}
         height={height}
+        className="dashboard-chart"
         ariaLabel={mode === "jd" ? "Job description work due and completed over time" : "Tasks assigned and completed over time"}
       />
     </div>

@@ -89,9 +89,15 @@ async function dashboardAccess(
   return { membership, company, caps, dashboardScope, scopedIds };
 }
 
-async function loadPeople(ctx: QueryCtx, membershipIds: Set<Id<"companyMemberships">>) {
+async function loadPeople(ctx: QueryCtx, membershipIds: Set<Id<"companyMemberships">>, completeness: QueryCompleteness) {
   const people = new Map<Id<"companyMemberships">, Person>();
   for (const membershipId of membershipIds) {
+    // Each membership costs up to two point reads; keep them inside the budget.
+    completeness.remaining -= 2;
+    if (completeness.remaining <= 0) {
+      completeness.isTruncated = true;
+      break;
+    }
     const membership = await ctx.db.get(membershipId);
     if (!membership || !membership.active) continue;
     const user = await ctx.db.get(membership.userId);
@@ -167,8 +173,18 @@ async function resolveDashboardScope(
   completeness: QueryCompleteness,
 ) {
   const { membership, company, dashboardScope, scopedIds } = await dashboardAccess(ctx, companyId, completeness);
-  const people = await loadPeople(ctx, scopedIds);
+  // Each authority source is tracked separately: membership-scope truncation
+  // only relaxes the employee check, and option-list truncation only relaxes
+  // branch/department checks, so unrelated exhaustion cannot widen access.
+  const scopedIdsComplete = !completeness.isTruncated;
+  const people = await loadPeople(ctx, scopedIds, completeness);
   const assignments = await loadAssignments(ctx, scopedIds, completeness);
+
+  // Option lists are complete only when the budget was still alive for this
+  // phase and no read truncated inside it; earlier unrelated truncation alone
+  // does not disqualify them.
+  const optionsBoundary = completeness.isTruncated;
+  const optionsBudgetAlive = completeness.remaining > 0;
   const org = await loadOrg(ctx, companyId, completeness);
 
   const memberBranchIds = new Map<Id<"companyMemberships">, Set<Id<"branches">>>();
@@ -202,8 +218,9 @@ async function resolveDashboardScope(
     branchOptions = org.branches.filter((branch) => branchScope.has(branch._id));
     departmentOptions = org.departments.filter((department) => branchScope.has(department.branchId) || departmentScope.has(department._id));
   }
+  const optionsComplete = optionsBudgetAlive && completeness.isTruncated === optionsBoundary;
 
-  return { membership, company, dashboardScope, scopedIds, people, assignments, org, branchOptions, departmentOptions, memberBranchIds, memberDepartmentIds };
+  return { membership, company, dashboardScope, scopedIds, people, assignments, org, branchOptions, departmentOptions, memberBranchIds, memberDepartmentIds, scopedIdsComplete, optionsComplete };
 }
 
 export const dashboardFilters = query({
@@ -261,21 +278,20 @@ export const dashboard = query({
     if (scope.dashboardScope === "self" && (args.branchId || args.departmentId)) {
       throw new ConvexError("Team filters are not available for your dashboard.");
     }
-    // Scope metadata loaded under the read budget may be incomplete; when it
-    // is, filters cannot be verified against it, so they are allowed through
-    // and the effective-scope intersection still confines results to the
-    // viewer's memberships. The report is flagged truncated either way.
-    const scopeTruncated = completeness.isTruncated;
-    if (!scopeTruncated && args.membershipId && !scope.scopedIds.has(args.membershipId)) {
+    // Scope metadata loaded under the read budget may be incomplete; a check
+    // only runs when its own authority source loaded completely. Filters that
+    // cannot be verified are allowed through, and the effective-scope
+    // intersection still confines results to the viewer's memberships.
+    if (scope.scopedIdsComplete && args.membershipId && !scope.scopedIds.has(args.membershipId)) {
       throw new ConvexError("Employee filter is outside your analytics scope.");
     }
     const branchOptionIds = new Set(scope.branchOptions.map((branch) => branch._id));
     const departmentOptionsById = new Map(scope.departmentOptions.map((department) => [department._id, department]));
-    if (!scopeTruncated && args.branchId && !branchOptionIds.has(args.branchId)) {
+    if (scope.optionsComplete && args.branchId && !branchOptionIds.has(args.branchId)) {
       throw new ConvexError("Branch filter is outside your analytics scope.");
     }
     const filteredDepartment = args.departmentId ? departmentOptionsById.get(args.departmentId) : undefined;
-    if (!scopeTruncated && args.departmentId && !filteredDepartment) {
+    if (scope.optionsComplete && args.departmentId && !filteredDepartment) {
       throw new ConvexError("Department filter is outside your analytics scope.");
     }
     if (args.branchId && filteredDepartment && filteredDepartment.branchId !== args.branchId) {

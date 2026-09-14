@@ -529,8 +529,8 @@ export function DashboardView({
           onMembershipChange={onMembershipChange}
           onRangeChange={onRangeChange}
         />
-        {data.isTruncated && (
-          <p className="mb-5 text-[12.5px] text-[var(--ink-muted)]">Some records were omitted because this workspace exceeds the reporting limit.</p>
+        {(data.isTruncated || filters.isTruncated) && (
+          <p className="mb-5 text-[12.5px] text-[var(--ink-muted)]">Some records and filter options were omitted because this workspace exceeds the reporting limit.</p>
         )}
         <StatRow
           heading="Job Description"

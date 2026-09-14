@@ -50,10 +50,14 @@ export function DashboardTrendChart({
     const tickValues = tickCount === 1
       ? [data[0].label]
       : Array.from({ length: tickCount }, (_, index) => data[Math.round(index * tickStep)].label);
+    const tickAnchor = (context: { index: number }): "start" | "middle" | "end" =>
+      tickValues.length > 1
+        ? context.index === 0 ? "start" : context.index === tickValues.length - 1 ? "end" : "middle"
+        : "middle";
     return defineChart({
       marks: [
-        areaY(data, { x: "label", y: "total", fill: "url(#dash-total-fill)", curve }),
-        areaY(data, { x: "label", y: "completed", fill: "url(#dash-completed-fill)", curve }),
+        areaY(data, { x: "label", y: "total", fill: "url(#dash-total-fill)", fillOpacity: 1, curve }),
+        areaY(data, { x: "label", y: "completed", fill: "url(#dash-completed-fill)", fillOpacity: 1, curve }),
         lineY(data, { x: "label", y: "total", stroke: "var(--ink-secondary)", strokeWidth: 1.5, curve }),
         lineY(data, { x: "label", y: "completed", stroke: "var(--badge-blue-fg)", strokeWidth: 2, curve }),
       ],
@@ -65,7 +69,8 @@ export function DashboardTrendChart({
           x2: 0,
           y2: 1,
           stops: [
-            { offset: 0, color: "var(--ink)", opacity: 0.06 },
+            { offset: 0, color: "var(--ink)", opacity: 0.07 },
+            { offset: 0.6, color: "var(--ink)", opacity: 0.02 },
             { offset: 1, color: "var(--ink)", opacity: 0 },
           ],
         },
@@ -76,17 +81,19 @@ export function DashboardTrendChart({
           x2: 0,
           y2: 1,
           stops: [
-            { offset: 0, color: "var(--badge-blue-fg)", opacity: 0.22 },
+            { offset: 0, color: "var(--badge-blue-fg)", opacity: 0.24 },
+            { offset: 0.6, color: "var(--badge-blue-fg)", opacity: 0.08 },
             { offset: 1, color: "var(--badge-blue-fg)", opacity: 0 },
           ],
         },
       ],
+      margin: { left: 0, right: 0 },
       x: {
         scale: () => scalePoint<string>().domain(data.map((row) => row.label)),
         axis: {
           line: false,
           ticks: { size: 0, padding: 8, values: tickValues },
-          tickLabels: { fontSize: 11, thin: { priority: "ends" } },
+          tickLabels: { fontSize: 11, thin: { priority: "ends" }, anchor: tickAnchor },
         },
       },
       y: {

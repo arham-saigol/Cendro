@@ -147,60 +147,39 @@ describe("dashboard analytics scoping", () => {
     expect(dashboard.tasks.assigned).toBe(2);
   });
 
-  test("long cycles count when their deadline is inside the period even before it passes", { timeout: 15_000 }, async () => {
+  test("a cycle counts while its deadline is inside the range even before it passes", { timeout: 15_000 }, async () => {
     const { t, companyId, adminMembershipId, employeeMembershipId } = await seedDashboardCompany();
     const now = Date.now();
     const admin = t.withIdentity(identity("admin"));
 
-    const weekly = currentJdCycle("weekly", now, undefined);
-    const weeklyTaskId = await t.run(async (ctx) => await ctx.db.insert("jdTasks", {
+    const daily = currentJdCycle("daily", now, undefined);
+    const dailyTaskId = await t.run(async (ctx) => await ctx.db.insert("jdTasks", {
       companyId,
       reference: "JD-0002",
-      title: "Weekly JD",
+      title: "Daily JD",
       description: "",
-      recurrence: "weekly",
-      cycleStartedAt: weekly.start,
+      recurrence: "daily",
+      cycleStartedAt: daily.start,
       status: "due",
-      statusCycleStart: weekly.start,
+      statusCycleStart: daily.start,
       assigneeMembershipIds: [employeeMembershipId],
       createdByMembershipId: adminMembershipId,
       createdAt: now,
       updatedAt: now,
     }));
 
-    // Named presets run to date, so the current cycle's future deadline only
-    // counts inside an explicit custom range covering the whole week.
-    const weekRange = { preset: "custom", startDate: dateField(weekly.start), endDate: dateField(weekly.end - 1) } as const;
-    let dashboard = await admin.query(api.analytics.dashboard, { companyId, now, range: weekRange });
+    // The current cycle's deadline is the end of today: inside the to-date
+    // range even though the instant has not passed yet.
+    const dayRange = { preset: "custom", startDate: dateField(now), endDate: dateField(now) } as const;
+    let dashboard = await admin.query(api.analytics.dashboard, { companyId, now, range: dayRange });
     expect(dashboard.jd.due).toBe(1);
     expect(dashboard.jd.completed).toBe(0);
+    expect(dashboard.jd.overdue).toBe(0);
 
-    await admin.mutation(api.tasks.completeJd, { companyId, taskId: weeklyTaskId });
-    dashboard = await admin.query(api.analytics.dashboard, { companyId, now, range: weekRange });
+    await admin.mutation(api.tasks.completeJd, { companyId, taskId: dailyTaskId });
+    dashboard = await admin.query(api.analytics.dashboard, { companyId, now, range: dayRange });
     expect(dashboard.jd.completed).toBe(1);
     expect(dashboard.jd.completionRate).toBe(100);
-
-    const monthly = currentJdCycle("monthly", now, undefined);
-    const monthRange = { preset: "custom", startDate: dateField(monthly.start), endDate: dateField(monthly.end - 1) } as const;
-    const before = (await admin.query(api.analytics.dashboard, { companyId, now, range: monthRange })).jd.due;
-    await t.run(async (ctx) => {
-      await ctx.db.insert("jdTasks", {
-        companyId,
-        reference: "JD-0003",
-        title: "Monthly JD",
-        description: "",
-        recurrence: "monthly",
-        cycleStartedAt: monthly.start,
-        status: "due",
-        statusCycleStart: monthly.start,
-        assigneeMembershipIds: [employeeMembershipId],
-        createdByMembershipId: adminMembershipId,
-        createdAt: now,
-        updatedAt: now,
-      });
-    });
-    dashboard = await admin.query(api.analytics.dashboard, { companyId, now, range: monthRange });
-    expect(dashboard.jd.due).toBe(before + 1);
   });
 
   test("tasks are a cohort by createdAt; completions outside the cohort don't count", { timeout: 15_000 }, async () => {
@@ -422,19 +401,19 @@ describe("dashboard historical JD cycles", () => {
   test("legacy completions on the current grid keep their reconstructed deadline", { timeout: 15_000 }, async () => {
     const ids = await seedDashboardCompany();
     const { t, companyId, employeeMembershipId } = ids;
-    // Monthly task completed early on Sep 5; the September deadline is Sep 30.
-    const jdTaskId = await t.run(async (ctx) => await ctx.db.insert("jdTasks", jdDoc(ids, { recurrence: "monthly", csa: day("2026-09-01"), scs: day("2026-09-01") })));
+    // Monthly task completed early on Aug 5; the August deadline is Aug 31.
+    // The completion row predates cycleEnd so the deadline is reconstructed.
+    const jdTaskId = await t.run(async (ctx) => await ctx.db.insert("jdTasks", jdDoc(ids, { recurrence: "monthly", csa: day("2026-08-01"), scs: day("2026-08-01") })));
     await t.run(async (ctx) => {
-      await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId, cycleStart: day("2026-09-01"), completedByMembershipId: employeeMembershipId, completedAt: day("2026-09-05") + 3_600_000 });
+      await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId, cycleStart: day("2026-08-01"), completedByMembershipId: employeeMembershipId, completedAt: day("2026-08-05") + 3_600_000 });
     });
-    const now = day("2026-09-12") + 15 * 3_600_000;
+    const now = Date.now();
     const admin = t.withIdentity(identity("admin"));
-    // No deadline falls inside Sep 1–6 even though the completion happened there.
-    const early = await admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "custom", startDate: "2026-09-01", endDate: "2026-09-06" } });
+    // No deadline falls inside Aug 1–10 even though the completion happened there.
+    const early = await admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "custom", startDate: "2026-08-01", endDate: "2026-08-10" } });
     expect(early.jd).toEqual({ due: 0, completed: 0, overdue: 0, completionRate: 0 });
-    // The reconstructed Sep 30 deadline lands outside the month-to-date window,
-    // so it only counts in a custom range covering the whole month.
-    const month = await admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "custom", startDate: "2026-09-01", endDate: "2026-09-30" } });
+    // The reconstructed Aug 31 deadline only counts in a range covering it.
+    const month = await admin.query(api.analytics.dashboard, { companyId, now, range: { preset: "custom", startDate: "2026-08-01", endDate: "2026-08-31" } });
     expect(month.jd).toEqual({ due: 1, completed: 1, overdue: 0, completionRate: 100 });
   });
 
@@ -454,11 +433,30 @@ describe("dashboard historical JD cycles", () => {
   test("more in-range elapsed cycles than the cap are flagged as truncated", { timeout: 15_000 }, async () => {
     const ids = await seedDashboardCompany();
     const { t, companyId } = ids;
-    await t.run(async (ctx) => await ctx.db.insert("jdTasks", jdDoc(ids, { recurrence: "daily", csa: day("2026-01-01"), scs: day("2026-01-01") })));
-    const now = day("2026-12-31") + 12 * 3_600_000;
-    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_year" } });
+    // Dates stay relative to now because the query clamps now to server time.
+    const now = Date.now();
+    const start = now - 260 * dayMs;
+    await t.run(async (ctx) => await ctx.db.insert("jdTasks", jdDoc(ids, { recurrence: "daily", csa: start, scs: start, createdAt: start })));
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "custom", startDate: dateField(start), endDate: dateField(now) } });
     expect(dashboard.jd.due).toBe(201);
     expect(dashboard.isTruncated).toBe(true);
+  });
+
+  test("a stored missed deadline survives a recurrence change onto the same cycle start", { timeout: 15_000 }, async () => {
+    const ids = await seedDashboardCompany();
+    const { t, companyId } = ids;
+    // The task was weekly and missed the Sep 1–8 cycle (deadline Sep 7); the
+    // recurrence was later switched to monthly, so the current grid cycle
+    // shares the same Sep 1 start but reconstructs a Sep 30 deadline.
+    const jdTaskId = await t.run(async (ctx) => await ctx.db.insert("jdTasks", jdDoc(ids, { recurrence: "monthly", csa: day("2026-09-01"), scs: day("2026-09-01") })));
+    await t.run(async (ctx) => {
+      await ctx.db.insert("jdTaskCycleRecords", { companyId, jdTaskId, cycleStart: day("2026-09-01"), cycleEnd: day("2026-09-08"), status: "missed", recordedAt: day("2026-09-08") });
+    });
+    const now = day("2026-09-12") + 15 * 3_600_000;
+    const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
+    // The stored Sep 7 deadline stays in range; the current-grid reconstruction
+    // must not overwrite it with Sep 30.
+    expect(dashboard.jd).toEqual({ due: 1, completed: 0, overdue: 1, completionRate: 0 });
   });
 
   test("a task marked completed before the completion ledger counts its stamped cycle", { timeout: 15_000 }, async () => {

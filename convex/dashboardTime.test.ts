@@ -45,6 +45,15 @@ describe("resolveDashboardRange", () => {
     expect(range.end).toBe(Date.UTC(2026, 1, 11) - 1);
   });
 
+  test("custom ranges collapse future days onto today", () => {
+    const range = resolveDashboardRange({ preset: "custom", startDate: "2026-09-10", endDate: "2026-09-30" }, now, timeZone);
+    expect(range.start).toBe(Date.UTC(2026, 8, 10));
+    expect(range.end).toBe(Date.UTC(2026, 8, 13) - 1);
+
+    const fully = resolveDashboardRange({ preset: "custom", startDate: "2026-09-20", endDate: "2026-09-30" }, now, timeZone);
+    expect(fully).toEqual({ start: Date.UTC(2026, 8, 12), end: Date.UTC(2026, 8, 13) - 1, grouping: "day" });
+  });
+
   test("custom range spanning calendar years labels months with the year", () => {
     const range = resolveDashboardRange({ preset: "custom", startDate: "2024-01-01", endDate: "2026-01-01" }, now, timeZone);
     expect(range.grouping).toBe("month");

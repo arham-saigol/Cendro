@@ -232,7 +232,10 @@ export const dashboard = query({
   },
   handler: async (ctx, args) => {
     if (!Number.isFinite(args.now)) throw new ConvexError("Invalid time.");
-    const now = args.now;
+    // The client supplies now for testability and subscription stability, but
+    // reporting never extends past server time: a forged future timestamp
+    // cannot push named ranges into future periods or mark work overdue early.
+    const now = Math.min(args.now, Date.now());
     const completeness: QueryCompleteness = { isTruncated: false };
     const scope = await resolveDashboardScope(ctx, args.companyId, completeness);
     const timeZone = scope.company.timeZone ?? null;
@@ -277,10 +280,17 @@ export const dashboard = query({
       const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds);
       if (!assignees.length) continue;
 
-      const cycles = new Map<number, { dueAt: number; completed: boolean }>();
-      const put = (start: number, dueAt: number, completed: boolean) => {
+      const cycles = new Map<number, { dueAt: number; completed: boolean; stored: boolean }>();
+      // Ledger rows (completions, missed records) keep their stored deadlines;
+      // reconstructed cycles only fill starts the ledger never recorded, so a
+      // recurrence or timezone change cannot rewrite history onto the new grid.
+      const put = (start: number, dueAt: number, completed: boolean, stored: boolean) => {
         const existing = cycles.get(start);
-        cycles.set(start, { dueAt, completed: (existing?.completed ?? false) || completed });
+        cycles.set(start, {
+          dueAt: existing?.stored && !stored ? existing.dueAt : dueAt,
+          completed: (existing?.completed ?? false) || completed,
+          stored: (existing?.stored ?? false) || stored,
+        });
       };
 
       // A cycle that ends inside the range started at most ~366 days before it
@@ -301,7 +311,7 @@ export const dashboard = query({
             ? nextJdCycleStart(completion.cycleStart, task.recurrence, timeZone)
             : completion.completedAt + 1
         );
-        put(completion.cycleStart, end - 1, true);
+        put(completion.cycleStart, end - 1, true, true);
       }
 
       // Missed records store their own deadline, so they stay exact across
@@ -310,14 +320,14 @@ export const dashboard = query({
         completeness,
         (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
       );
-      for (const record of missed) put(record.cycleStart, record.cycleEnd - 1, false);
+      for (const record of missed) put(record.cycleStart, record.cycleEnd - 1, false, true);
 
       const elapsed = elapsedJdCyclesDueBetween(task.recurrence, task.cycleStartedAt, now, range.start, range.end, 200, timeZone);
       if (elapsed.truncated) completeness.isTruncated = true;
-      for (const cycle of elapsed.cycles) put(cycle.start, cycle.end - 1, false);
+      for (const cycle of elapsed.cycles) put(cycle.start, cycle.end - 1, false, false);
 
       const current = currentJdCycle(task.recurrence, now, timeZone);
-      put(current.start, current.end - 1, Boolean(cycles.get(current.start)?.completed));
+      put(current.start, current.end - 1, Boolean(cycles.get(current.start)?.completed), false);
 
       for (const [start, cycle] of cycles) {
         if (start <= now && cycle.dueAt >= range.start && cycle.dueAt <= range.end) {
@@ -454,6 +464,7 @@ export const dashboard = query({
     return {
       isTruncated: completeness.isTruncated,
       level,
+      today: localDateField(now, timeZone),
       range: {
         start: range.start,
         end: range.end,

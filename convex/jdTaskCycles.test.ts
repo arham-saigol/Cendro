@@ -192,6 +192,11 @@ describe("JD task cycle behavior", () => {
 
     // Jan 1 stays completed via statusCycleStart; only Jan 2–3 are missed.
     expect(records.map((record) => record.cycleStart).sort()).toEqual([utc(2026, 1, 2), utc(2026, 1, 3)]);
+
+    // The stamped cycle is materialized as a completion row so analytics keep
+    // counting it once the task's cycle floor advances past it.
+    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
+    expect(completions).toMatchObject([{ cycleStart: utc(2026, 1, 1), cycleEnd: utc(2026, 1, 2) }]);
   });
 
   test("resetAndClearMissedJdCycles deletes missed cycle records, resets cycleStartedAt to current, and prevents re-recording old cycles", async () => {

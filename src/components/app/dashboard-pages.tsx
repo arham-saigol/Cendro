@@ -117,10 +117,12 @@ function DateRangeControl({
   value,
   onChange,
   resolvedRange,
+  today: todayField,
 }: {
   value: DashboardRangeArg;
   onChange: (range: DashboardRangeArg) => void;
   resolvedRange: { startDate: string; endDate: string };
+  today: string;
 }) {
   const [open, setOpen] = useState(false);
   const appliedStart = value.preset === "custom" ? fromDateField(value.startDate) : null;
@@ -138,7 +140,9 @@ function DateRangeControl({
     calendarStart.setDate(calendarStart.getDate() + 1);
   }
 
-  const today = new Date();
+  // The server resolves ranges in the company timezone, so the picker bounds
+  // selectable days by the company-local date rather than the browser's.
+  const today = fromDateField(todayField) ?? new Date();
   const todayStart = startOfDay(today);
   const currentMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
   const canGoNext = monthStart < currentMonthStart;
@@ -160,7 +164,7 @@ function DateRangeControl({
     if (nextOpen) {
       setDraftStart(null);
       setHoverDate(null);
-      setMonthDate(startOfDay(appliedStart ?? new Date()));
+      setMonthDate(startOfDay(appliedStart ?? today));
     }
   }
 
@@ -290,6 +294,7 @@ function FilterRow({
   membershipId,
   range,
   resolvedRange,
+  today,
   onBranchChange,
   onDepartmentChange,
   onMembershipChange,
@@ -301,6 +306,7 @@ function FilterRow({
   membershipId: string;
   range: DashboardRangeArg;
   resolvedRange: { startDate: string; endDate: string };
+  today: string;
   onBranchChange: (value: string) => void;
   onDepartmentChange: (value: string) => void;
   onMembershipChange: (value: string) => void;
@@ -353,7 +359,7 @@ function FilterRow({
           </SelectContent>
         </Select>
       )}
-      <DateRangeControl value={range} onChange={onRangeChange} resolvedRange={resolvedRange} />
+      <DateRangeControl value={range} onChange={onRangeChange} resolvedRange={resolvedRange} today={today} />
     </div>
   );
 }
@@ -509,6 +515,7 @@ export function DashboardView({
           membershipId={membershipId}
           range={range}
           resolvedRange={data.range}
+          today={data.today}
           onBranchChange={onBranchChange}
           onDepartmentChange={onDepartmentChange}
           onMembershipChange={onMembershipChange}
@@ -578,8 +585,8 @@ export function DashboardPage() {
   const [membershipId, setMembershipId] = useState<Id<"companyMemberships"> | "all">("all");
   const [range, setRange] = useState<DashboardRangeArg>({ preset: "this_month" });
   const [chartMode, setChartMode] = useState<DashboardTrendMode>("jd");
-  const [cachedData, setCachedData] = useState<DashboardData | null>(null);
-  const [cachedFilters, setCachedFilters] = useState<DashboardFilters | null>(null);
+  const [cachedData, setCachedData] = useState<{ companyId: Id<"companies">; data: DashboardData } | null>(null);
+  const [cachedFilters, setCachedFilters] = useState<{ companyId: Id<"companies">; filters: DashboardFilters } | null>(null);
 
   useEffect(() => {
     setBranchId("all");
@@ -631,11 +638,11 @@ export function DashboardPage() {
 
   const liveData = result.status === "success" ? result.data : null;
   useEffect(() => {
-    if (liveData) setCachedData(liveData);
-  }, [liveData]);
+    if (liveData && activeCompanyId) setCachedData({ companyId: activeCompanyId, data: liveData });
+  }, [liveData, activeCompanyId]);
   useEffect(() => {
-    if (filtersData) setCachedFilters(filtersData);
-  }, [filtersData]);
+    if (filtersData && activeCompanyId) setCachedFilters({ companyId: activeCompanyId, filters: filtersData });
+  }, [filtersData, activeCompanyId]);
 
   const queryError =
     filtersResult.status === "error" ? filtersResult.error : result.status === "error" ? result.error : null;
@@ -656,8 +663,8 @@ export function DashboardPage() {
     );
   }
 
-  const viewFilters = filtersData ?? cachedFilters;
-  const viewData = liveData ?? cachedData;
+  const viewFilters = filtersData ?? (cachedFilters?.companyId === activeCompanyId ? cachedFilters.filters : null);
+  const viewData = liveData ?? (cachedData?.companyId === activeCompanyId ? cachedData.data : null);
   if (!viewFilters || !viewData) return <DashboardSkeleton />;
 
   function handleBranchChange(next: string) {

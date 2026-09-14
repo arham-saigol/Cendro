@@ -60,11 +60,14 @@ export function resolveDashboardRange(
     const customStart = customDayStart(timeZone, arg.startDate);
     const endDayStart = customDayStart(timeZone, arg.endDate);
     if (customStart === null || endDayStart === null) throw new ConvexError("Invalid date range.");
-    start = customStart;
-    end = nextJdCycleStart(endDayStart, "daily", timeZone) - 1;
-    if (start > end) throw new ConvexError("Invalid date range.");
+    if (customStart > endDayStart) throw new ConvexError("Invalid date range.");
     // The two dates may span at most two years (a leap-inclusive 731 days).
-    if (endDayStart - start > 731 * dayMs) throw new ConvexError("Date range cannot exceed two years.");
+    if (endDayStart - customStart > 731 * dayMs) throw new ConvexError("Date range cannot exceed two years.");
+    // Custom ranges are also to-date: a selected day after today collapses
+    // onto today so callers cannot read future calendar periods.
+    const todayStart = currentJdCycle("daily", now, timeZone).start;
+    start = Math.min(customStart, todayStart);
+    end = nextJdCycleStart(Math.min(endDayStart, todayStart), "daily", timeZone) - 1;
   } else {
     if (arg.preset === "this_week") {
       start = currentJdCycle("weekly", now, timeZone).start;

@@ -199,6 +199,29 @@ describe("JD task cycle behavior", () => {
     expect(completions).toMatchObject([{ cycleStart: utc(2026, 1, 1), cycleEnd: utc(2026, 1, 2) }]);
   });
 
+  test("a stamped completed cycle with an existing missed record still gains a completion row", async () => {
+    vi.setSystemTime(utc(2026, 1, 1, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Daily check", description: "", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    await t.withIdentity(identity("admin")).mutation(api.tasks.completeJd, { companyId, taskId });
+    // Simulate pre-ledger data: the stamp survives, the completion row is gone,
+    // and an older run already recorded the same cycle as missed.
+    await t.run(async (ctx) => {
+      for (const row of await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect()) {
+        await ctx.db.delete(row._id);
+      }
+      await ctx.db.insert("jdTaskCycleRecords", { companyId, jdTaskId: taskId, cycleStart: utc(2026, 1, 1), cycleEnd: utc(2026, 1, 2), status: "missed", recordedAt: utc(2026, 1, 2) });
+    });
+
+    vi.setSystemTime(utc(2026, 1, 4, 12));
+    await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
+    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
+
+    // The missed record must not suppress the durable completion row; once the
+    // stamp advances, the row is the only evidence the cycle was completed.
+    expect(completions).toMatchObject([{ cycleStart: utc(2026, 1, 1), cycleEnd: utc(2026, 1, 2) }]);
+  });
+
   test("resetAndClearMissedJdCycles deletes missed cycle records, resets cycleStartedAt to current, and prevents re-recording old cycles", async () => {
     vi.setSystemTime(utc(2026, 1, 1, 12));
     const { t, companyId, adminMembershipId } = await seedCompany();

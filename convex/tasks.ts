@@ -143,12 +143,13 @@ export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks"
     // is the status pair stamped when the cycle was current.
     const markedDone = task.status === "completed" && task.statusCycleStart === cycle.start;
     const recorded = await currentJdCycleRecord(ctx, task._id, cycle.start);
-    if (done || recorded) continue;
+    if (done) continue;
     if (markedDone) {
       // Persist the stamped completion before cycleStartedAt advances past the
-      // cycle, or the dashboard loses it once the stamp moves on.
+      // cycle, or the dashboard loses it once the stamp moves on. An existing
+      // missed record is wrong history; the completion row still outranks it.
       await ctx.db.insert("jdTaskCompletions", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.end, completedAt: cycle.end });
-    } else {
+    } else if (!recorded) {
       await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.end, status: "missed", recordedAt: now });
     }
   }

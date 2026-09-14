@@ -34,20 +34,11 @@ const jdCompletionLookbackMs = 368 * 86_400_000;
 
 type QueryCompleteness = { isTruncated: boolean; remaining: number };
 
-// Scope and filter metadata is authoritative: an exhausted analytics budget
-// must not silently empty it, so these reads keep only the per-query cap.
-async function takeDashboardRows<T>(
-  completeness: QueryCompleteness,
-  take: (limit: number) => Promise<T[]>,
-) {
-  const result = await takeWithOverflow(take, dashboardTakeLimit);
-  if (result.isTruncated) completeness.isTruncated = true;
-  return result.rows;
-}
-
-// Analytics data reads share the read budget. The worst-case scan allowance is
-// reserved before yielding so concurrent callers split the budget instead of
-// each observing the same remaining balance.
+// All dashboard reads share the read budget so one query stays inside Convex's
+// transaction limit; the worst-case scan allowance is reserved before yielding
+// so concurrent callers split the budget instead of double-spending it. Scope
+// and filter metadata is authoritative: when it truncates, callers surface an
+// explicit incomplete-scope state instead of validating filters against it.
 async function takeBudgetedRows<T>(
   completeness: QueryCompleteness,
   take: (limit: number) => Promise<T[]>,
@@ -124,11 +115,11 @@ async function loadAssignments(
   const byMembership = new Map<Id<"companyMemberships">, OrgAssignments>();
 
   for (const membershipId of membershipIds) {
-    const membershipBranches = await takeDashboardRows(
+    const membershipBranches = await takeBudgetedRows(
       completeness,
       (limit) => ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(limit),
     );
-    const membershipDepartments = await takeDashboardRows(
+    const membershipDepartments = await takeBudgetedRows(
       completeness,
       (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(limit),
     );
@@ -146,11 +137,11 @@ async function loadOrg(
   companyId: Id<"companies">,
   completeness: QueryCompleteness,
 ) {
-  const branches = await takeDashboardRows(
+  const branches = await takeBudgetedRows(
     completeness,
     (limit) => ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
   );
-  const departments = await takeDashboardRows(
+  const departments = await takeBudgetedRows(
     completeness,
     (limit) => ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
   );
@@ -198,11 +189,11 @@ async function resolveDashboardScope(
     branchOptions = org.branches;
     departmentOptions = org.departments;
   } else if (dashboardScope === "managed") {
-    const managedBranches = await takeDashboardRows(
+    const managedBranches = await takeBudgetedRows(
       completeness,
       (limit) => ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(limit),
     );
-    const managedDepartments = await takeDashboardRows(
+    const managedDepartments = await takeBudgetedRows(
       completeness,
       (limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(limit),
     );
@@ -235,6 +226,7 @@ export const dashboardFilters = query({
       branches: scope.branchOptions.map((branch) => ({ _id: branch._id, name: branch.name })),
       departments: scope.departmentOptions.map((department) => ({ _id: department._id, name: department.name, branchId: department.branchId })),
       users,
+      isTruncated: completeness.isTruncated,
     };
   },
 });
@@ -269,16 +261,21 @@ export const dashboard = query({
     if (scope.dashboardScope === "self" && (args.branchId || args.departmentId)) {
       throw new ConvexError("Team filters are not available for your dashboard.");
     }
-    if (args.membershipId && !scope.scopedIds.has(args.membershipId)) {
+    // Scope metadata loaded under the read budget may be incomplete; when it
+    // is, filters cannot be verified against it, so they are allowed through
+    // and the effective-scope intersection still confines results to the
+    // viewer's memberships. The report is flagged truncated either way.
+    const scopeTruncated = completeness.isTruncated;
+    if (!scopeTruncated && args.membershipId && !scope.scopedIds.has(args.membershipId)) {
       throw new ConvexError("Employee filter is outside your analytics scope.");
     }
     const branchOptionIds = new Set(scope.branchOptions.map((branch) => branch._id));
     const departmentOptionsById = new Map(scope.departmentOptions.map((department) => [department._id, department]));
-    if (args.branchId && !branchOptionIds.has(args.branchId)) {
+    if (!scopeTruncated && args.branchId && !branchOptionIds.has(args.branchId)) {
       throw new ConvexError("Branch filter is outside your analytics scope.");
     }
     const filteredDepartment = args.departmentId ? departmentOptionsById.get(args.departmentId) : undefined;
-    if (args.departmentId && !filteredDepartment) {
+    if (!scopeTruncated && args.departmentId && !filteredDepartment) {
       throw new ConvexError("Department filter is outside your analytics scope.");
     }
     if (args.branchId && filteredDepartment && filteredDepartment.branchId !== args.branchId) {
@@ -327,18 +324,18 @@ export const dashboard = query({
       // (the longest recurrence is annual), so this lookback covers every
       // completion that could still be due in range. Newer completions record
       // their own cycleEnd; legacy rows fall back to the current grid.
-      const [completions, missed] = await Promise.all([
-        takeBudgetedRows(
-          completeness,
-          (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit),
-        ),
-        // Missed records store their own deadline, so they stay exact across
-        // recurrence and timezone changes; match on that deadline directly.
-        takeBudgetedRows(
-          completeness,
-          (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
-        ),
-      ]);
+      // Sequential so the second read sees the budget the first actually
+      // consumed rather than racing its reserved allowance.
+      const completions = await takeBudgetedRows(
+        completeness,
+        (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit),
+      );
+      // Missed records store their own deadline, so they stay exact across
+      // recurrence and timezone changes; match on that deadline directly.
+      const missed = await takeBudgetedRows(
+        completeness,
+        (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
+      );
       for (const completion of completions) {
         // Legacy rows predate cycleEnd. When the stored start no longer sits on
         // the task's grid the recurrence or timezone changed since, so the

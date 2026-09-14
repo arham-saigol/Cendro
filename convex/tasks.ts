@@ -101,6 +101,19 @@ async function canUpdateTask(
   return Boolean(caps.has(`${prefix}:update:self` as any) && targets.includes(membership._id));
 }
 
+// Status moves with the assignee, not the permission system: anyone assigned
+// can always change it. Everyone else needs normal task update access.
+async function assertCanUpdateTaskStatus(
+  ctx: MutationCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  task: Pick<Doc<"jdTasks"> | Doc<"oneTimeTasks">, "assigneeMembershipIds" | "createdByMembershipId">,
+  kind: TaskKind
+) {
+  if (task.assigneeMembershipIds.includes(membership._id)) return;
+  await assertCanUpdateTask(ctx, companyId, membership, updateAuthTargets(task), kind);
+}
+
 async function canDeleteTask(
   ctx: Ctx,
   companyId: Id<"companies">,
@@ -958,7 +971,7 @@ async function setJdStatus(ctx: MutationCtx, companyId: Id<"companies">, taskId:
   const { membership } = await requireMembership(ctx, companyId);
   const task = await ctx.db.get(taskId);
   if (!task || task.companyId !== companyId) throw new ConvexError("Task not found.");
-  await assertCanUpdateTask(ctx, companyId, membership, updateAuthTargets(task), "jd");
+  await assertCanUpdateTaskStatus(ctx, companyId, membership, task, "jd");
   const now = Date.now();
   const timeZone = await companyTimeZone(ctx, companyId);
   await recordMissedJdCycles(ctx, task, now, timeZone);
@@ -1267,7 +1280,7 @@ async function setOneTimeStatus(ctx: MutationCtx, companyId: Id<"companies">, ta
   const { membership } = await requireMembership(ctx, companyId);
   const task = await ctx.db.get(taskId);
   if (!task || task.companyId !== companyId) throw new ConvexError("Task not found.");
-  await assertCanUpdateTask(ctx, companyId, membership, updateAuthTargets(task), "one_time");
+  await assertCanUpdateTaskStatus(ctx, companyId, membership, task, "one_time");
   const state = oneState(task);
   if (state.isOverdue) {
     if (!task.overdueAt) await ctx.db.patch(taskId, { overdueAt: Date.now(), updatedAt: Date.now() });

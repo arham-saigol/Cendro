@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { cendroAiToolDefinitions, type CendroAiToolContext } from "./registry";
+import { buildCendroAiTools, cendroAiToolDefinitions, type CendroAiToolContext } from "./registry";
 import type { Id } from "../../../convex/_generated/dataModel";
 
 function mockContext(overrides: Partial<CendroAiToolContext> = {}): CendroAiToolContext {
@@ -141,5 +141,26 @@ describe("AI tool registry task notes", () => {
         notes: "Remember safety goggles",
       },
     });
+  });
+
+  test("complete_task is not gated on task update capabilities", async () => {
+    const ctx = mockContext({ capabilities: new Set() });
+    ctx.refs.set("task_1", { kind: "task", id: "one_time:task-1" });
+    (ctx.client.mutation as any).mockResolvedValueOnce({
+      kind: "one_time",
+      id: "task-1",
+      title: "Assigned task",
+      status: "completed",
+      dueAt: null,
+      assignees: [],
+    });
+
+    const tools = buildCendroAiTools(ctx);
+    const res = await (tools.complete_task.execute as any)({ taskRef: "task_1" });
+    expect(res).toMatchObject({ ok: true, task: { status: "completed" } });
+    expect(ctx.client.mutation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ kind: "one_time", taskId: "task-1" })
+    );
   });
 });

@@ -199,7 +199,7 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
     description: "Mark a visible task complete when the user explicitly asks. Requires a task ref from list_tasks or get_task_detail.",
     inputSchema: z.object({ taskRef, note: z.string().max(1000).optional() }),
     activityLabel: cendroAiActivityLabels.complete_task,
-    permission: ["tasks:jd:update:any", "tasks:jd:update:managed", "tasks:jd:update:self", "tasks:one_time:update:any", "tasks:one_time:update:managed", "tasks:one_time:update:self"],
+    permission: "member",
     risk: "write",
     execute: async (input, ctx) => {
       const ref = resolveRef(ctx, input.taskRef, "task");

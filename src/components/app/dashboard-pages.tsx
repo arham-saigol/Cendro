@@ -170,6 +170,10 @@ function DateRangeControl({
 
   function pick(date: Date) {
     if (startOfDay(date) > todayStart) return;
+    // The server rejects custom ranges spanning more than two years; keep the
+    // second pick inside that window so the control cannot dead-end on an
+    // invalid request.
+    if (draftStart && Math.abs(startOfDay(date).getTime() - startOfDay(draftStart).getTime()) > 731 * 86_400_000) return;
     if (!draftStart) {
       setDraftStart(date);
       setHoverDate(date);
@@ -254,23 +258,24 @@ function DateRangeControl({
                   const inMonth = date.getMonth() === monthDate.getMonth();
                   const isToday = sameCalendarDay(today, date);
                   const isFuture = day > todayStart;
+                  const outOfSpan = Boolean(draftStart && Math.abs(day.getTime() - startOfDay(draftStart).getTime()) > 731 * 86_400_000);
                   const isEnd = Boolean((rangeStart && sameCalendarDay(rangeStart, day)) || (rangeEnd && sameCalendarDay(rangeEnd, day)));
                   const isBetween = Boolean(rangeStart && rangeEnd && day > rangeStart && day < rangeEnd);
                   return (
                     <button
                       key={date.toISOString()}
                       type="button"
-                      disabled={isFuture}
+                      disabled={isFuture || outOfSpan}
                       onClick={() => pick(date)}
-                      onMouseEnter={() => { if (draftStart && !isFuture) setHoverDate(date); }}
-                      onFocus={() => { if (draftStart && !isFuture) setHoverDate(date); }}
+                      onMouseEnter={() => { if (draftStart && !isFuture && !outOfSpan) setHoverDate(date); }}
+                      onFocus={() => { if (draftStart && !isFuture && !outOfSpan) setHoverDate(date); }}
                       className={cn(
                         "h-8 rounded-md text-[13px] transition-colors",
                         inMonth ? "text-[var(--ink-secondary)] hover:bg-[var(--surface-muted)]" : "text-[var(--ink-faint)]",
                         isToday && "font-semibold text-[var(--ink)]",
                         isBetween && "bg-[var(--surface-muted)]",
                         isEnd && "bg-[var(--ink)] text-[var(--canvas)] hover:bg-[var(--ink)]",
-                        isFuture && "opacity-40 hover:bg-transparent",
+                        (isFuture || outOfSpan) && "opacity-40 hover:bg-transparent",
                       )}
                     >
                       {date.getDate()}

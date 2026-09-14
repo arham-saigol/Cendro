@@ -23,18 +23,29 @@ type OrgAssignments = {
 
 const dashboardTakeLimit = 500;
 
+// Convex bounds a transaction to ~32k document reads; a shared budget keeps a
+// workspace with many tasks and cycle records degrading to a truncated report
+// instead of a failed query.
+const dashboardReadBudget = 24_000;
+
 // Any JD cycle whose deadline lands inside a dashboard range started at most
 // ~366 days earlier (the longest recurrence is annual), plus slack.
 const jdCompletionLookbackMs = 368 * 86_400_000;
 
-type QueryCompleteness = { isTruncated: boolean };
+type QueryCompleteness = { isTruncated: boolean; remaining: number };
 
 async function takeDashboardRows<T>(
   completeness: QueryCompleteness,
   take: (limit: number) => Promise<T[]>,
 ) {
-  const result = await takeWithOverflow(take, dashboardTakeLimit);
-  if (result.isTruncated) completeness.isTruncated = true;
+  if (completeness.remaining <= 0) {
+    completeness.isTruncated = true;
+    return [];
+  }
+  const limit = Math.min(dashboardTakeLimit, completeness.remaining);
+  const result = await takeWithOverflow(take, limit);
+  completeness.remaining -= result.isTruncated ? limit + 1 : result.rows.length;
+  if (result.isTruncated || completeness.remaining <= 0) completeness.isTruncated = true;
   return result.rows;
 }
 
@@ -192,7 +203,7 @@ async function resolveDashboardScope(
 export const dashboardFilters = query({
   args: { companyId: v.id("companies") },
   handler: async (ctx, args) => {
-    const completeness: QueryCompleteness = { isTruncated: false };
+    const completeness: QueryCompleteness = { isTruncated: false, remaining: dashboardReadBudget };
     const scope = await resolveDashboardScope(ctx, args.companyId, completeness);
     const users = scope.dashboardScope === "self"
       ? []
@@ -236,7 +247,7 @@ export const dashboard = query({
     // reporting never extends past server time: a forged future timestamp
     // cannot push named ranges into future periods or mark work overdue early.
     const now = Math.min(args.now, Date.now());
-    const completeness: QueryCompleteness = { isTruncated: false };
+    const completeness: QueryCompleteness = { isTruncated: false, remaining: dashboardReadBudget };
     const scope = await resolveDashboardScope(ctx, args.companyId, completeness);
     const timeZone = scope.company.timeZone ?? null;
 
@@ -279,6 +290,10 @@ export const dashboard = query({
     for (const task of jdTasks) {
       const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds);
       if (!assignees.length) continue;
+      if (completeness.remaining <= 0) {
+        completeness.isTruncated = true;
+        break;
+      }
 
       const cycles = new Map<number, { dueAt: number; completed: boolean; stored: boolean }>();
       // Ledger rows (completions, missed records) keep their stored deadlines;
@@ -297,10 +312,18 @@ export const dashboard = query({
       // (the longest recurrence is annual), so this lookback covers every
       // completion that could still be due in range. Newer completions record
       // their own cycleEnd; legacy rows fall back to the current grid.
-      const completions = await takeDashboardRows(
-        completeness,
-        (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit),
-      );
+      const [completions, missed] = await Promise.all([
+        takeDashboardRows(
+          completeness,
+          (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit),
+        ),
+        // Missed records store their own deadline, so they stay exact across
+        // recurrence and timezone changes; match on that deadline directly.
+        takeDashboardRows(
+          completeness,
+          (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
+        ),
+      ]);
       for (const completion of completions) {
         // Legacy rows predate cycleEnd. When the stored start no longer sits on
         // the task's grid the recurrence or timezone changed since, so the
@@ -314,12 +337,6 @@ export const dashboard = query({
         put(completion.cycleStart, end - 1, true, true);
       }
 
-      // Missed records store their own deadline, so they stay exact across
-      // recurrence and timezone changes; match on that deadline directly.
-      const missed = await takeDashboardRows(
-        completeness,
-        (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
-      );
       for (const record of missed) put(record.cycleStart, record.cycleEnd - 1, false, true);
 
       const elapsed = elapsedJdCyclesDueBetween(task.recurrence, task.cycleStartedAt, now, range.start, range.end, 200, timeZone);
@@ -484,7 +501,7 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
   const { membership } = await requireMembership(ctx, args.companyId);
   const caps = await membershipCapabilities(ctx, membership);
   assertAnalyticsViewAccess(caps);
-  const completeness: QueryCompleteness = { isTruncated: false };
+  const completeness: QueryCompleteness = { isTruncated: false, remaining: dashboardReadBudget };
   const scoped = await analyticsScopedMembershipIds(
     ctx,
     args.companyId,

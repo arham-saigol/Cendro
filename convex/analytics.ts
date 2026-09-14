@@ -97,12 +97,12 @@ async function loadPeople(ctx: QueryCtx, membershipIds: Set<Id<"companyMembershi
   const people = new Map<Id<"companyMemberships">, Person>();
   for (const membershipId of membershipIds) {
     // Each membership costs up to two point reads; keep them inside the budget.
-    completeness.remaining -= 2;
-    if (completeness.remaining <= 0) {
+    if (completeness.remaining < 2) {
       completeness.isTruncated = true;
       completeness.truncatedReads++;
       break;
     }
+    completeness.remaining -= 2;
     const membership = await ctx.db.get(membershipId);
     if (!membership || !membership.active) continue;
     const user = await ctx.db.get(membership.userId);
@@ -271,11 +271,10 @@ export const dashboard = query({
     membershipId: v.optional(v.id("companyMemberships")),
   },
   handler: async (ctx, args) => {
-    if (!Number.isFinite(args.now)) throw new ConvexError("Invalid time.");
-    // The client supplies now for testability and subscription stability, but
-    // reporting never extends past server time: a forged future timestamp
-    // cannot push named ranges into future periods or mark work overdue early.
-    const now = Math.min(args.now, Date.now());
+    // args.now stays in the signature so its rotation re-runs the query, but
+    // all accounting uses server time: a skewed client clock can neither pull
+    // reporting into the future nor shrink it into the past.
+    const now = Date.now();
     const completeness: QueryCompleteness = { isTruncated: false, truncatedReads: 0, remaining: dashboardReadBudget };
     const scope = await resolveDashboardScope(ctx, args.companyId, completeness);
     const timeZone = scope.company.timeZone ?? null;

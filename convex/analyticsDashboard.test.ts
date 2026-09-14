@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
@@ -347,8 +347,11 @@ describe("dashboard analytics scoping", () => {
 });
 
 describe("dashboard historical JD cycles", () => {
-  // Fixed timestamps in the default company time zone (GMT+5).
+  // Fixed timestamps in the default company time zone (GMT+5); the query
+  // accounts in server time, so tests pin the clock to the fixture instant.
   const day = (iso: string) => new Date(`${iso}T00:00:00+05:00`).getTime();
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
 
   function jdDoc(
     ids: { companyId: Id<"companies">; adminMembershipId: Id<"companyMemberships">; employeeMembershipId: Id<"companyMemberships"> },
@@ -379,6 +382,7 @@ describe("dashboard historical JD cycles", () => {
       await ctx.db.insert("jdTaskCycleRecords", { companyId, jdTaskId, cycleStart: day("2026-08-31"), cycleEnd: day("2026-09-07"), status: "missed", recordedAt: day("2026-09-08") });
     });
     const now = day("2026-09-12") + 15 * 3_600_000;
+    vi.setSystemTime(now);
     const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
     // Month-to-date ends Sep 12, so only the missed Sep 6 deadline is in range.
     expect(dashboard.jd).toEqual({ due: 1, completed: 0, overdue: 1, completionRate: 0 });
@@ -394,6 +398,7 @@ describe("dashboard historical JD cycles", () => {
       await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId, cycleStart: day("2026-09-07"), completedByMembershipId: employeeMembershipId, completedAt: day("2026-09-08") + 3_600_000 });
     });
     const now = day("2026-09-12") + 15 * 3_600_000;
+    vi.setSystemTime(now);
     const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_week" } });
     expect(dashboard.jd).toEqual({ due: 1, completed: 1, overdue: 0, completionRate: 100 });
   });
@@ -423,6 +428,7 @@ describe("dashboard historical JD cycles", () => {
     // Daily task whose cycleStartedAt lagged ~250 cycles without cron records.
     await t.run(async (ctx) => await ctx.db.insert("jdTasks", jdDoc(ids, { recurrence: "daily", csa: day("2026-01-05"), scs: day("2026-01-05") })));
     const now = day("2026-09-12") + 15 * 3_600_000;
+    vi.setSystemTime(now);
     const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
     // Sep 1–11 elapsed plus the current Sep 12 cycle.
     expect(dashboard.jd.due).toBe(12);
@@ -453,6 +459,7 @@ describe("dashboard historical JD cycles", () => {
       await ctx.db.insert("jdTaskCycleRecords", { companyId, jdTaskId, cycleStart: day("2026-09-01"), cycleEnd: day("2026-09-08"), status: "missed", recordedAt: day("2026-09-08") });
     });
     const now = day("2026-09-12") + 15 * 3_600_000;
+    vi.setSystemTime(now);
     const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
     // The stored Sep 7 deadline stays in range; the current-grid reconstruction
     // must not overwrite it with Sep 30.
@@ -472,6 +479,7 @@ describe("dashboard historical JD cycles", () => {
       }
     });
     const now = day("2026-09-12") + 15 * 3_600_000;
+    vi.setSystemTime(now);
     const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
     // Sep 8, 9, 10, 11 elapsed plus the current Sep 12 cycle; Sep 9 completed.
     expect(dashboard.jd).toEqual({ due: 5, completed: 1, overdue: 3, completionRate: 20 });
@@ -486,6 +494,7 @@ describe("dashboard historical JD cycles", () => {
       await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId, cycleStart: day("2026-09-09"), cycleEnd: day("2026-09-10"), completedByMembershipId: employeeMembershipId, completedAt: day("2026-09-09") + 3_600_000 });
     });
     const now = day("2026-09-12") + 15 * 3_600_000;
+    vi.setSystemTime(now);
     const dashboard = await t.withIdentity(identity("admin")).query(api.analytics.dashboard, { companyId, now, range: { preset: "this_month" } });
     // Sep 9–11 elapsed plus the current Sep 12 cycle; Sep 9 is a single completed cycle.
     expect(dashboard.jd).toEqual({ due: 4, completed: 1, overdue: 2, completionRate: 25 });

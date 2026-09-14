@@ -216,10 +216,17 @@ describe("JD task cycle behavior", () => {
     vi.setSystemTime(utc(2026, 1, 4, 12));
     await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
     const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
+    const records = await t.run(async (ctx) => await ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
 
     // The missed record must not suppress the durable completion row; once the
     // stamp advances, the row is the only evidence the cycle was completed.
     expect(completions).toMatchObject([{ cycleStart: utc(2026, 1, 1), cycleEnd: utc(2026, 1, 2) }]);
+    // The stale missed record for that completed cycle is removed; Jan 2–3 are
+    // genuinely missed and keep their records.
+    expect(records).toMatchObject([
+      { cycleStart: utc(2026, 1, 2), status: "missed" },
+      { cycleStart: utc(2026, 1, 3), status: "missed" },
+    ]);
   });
 
   test("resetAndClearMissedJdCycles deletes missed cycle records, resets cycleStartedAt to current, and prevents re-recording old cycles", async () => {

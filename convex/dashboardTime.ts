@@ -49,6 +49,13 @@ function customDayStart(timeZone: string | null | undefined, value: string) {
   return localDayStart(timeZone, Number(match[1]), Number(match[2]), Number(match[3]));
 }
 
+// Calendar-day ordinal of a YYYY-MM-DD field. Only called after customDayStart
+// has validated the value, so the pattern is guaranteed to match.
+function dateFieldOrdinal(value: string) {
+  const match = customDatePattern.exec(value)!;
+  return Math.floor(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) / dayMs);
+}
+
 export function resolveDashboardRange(
   arg: DashboardRangeArg,
   now: number,
@@ -61,8 +68,11 @@ export function resolveDashboardRange(
     const endDayStart = customDayStart(timeZone, arg.endDate);
     if (customStart === null || endDayStart === null) throw new ConvexError("Invalid date range.");
     if (customStart > endDayStart) throw new ConvexError("Invalid date range.");
-    // The two dates may span at most two years (a leap-inclusive 731 days).
-    if (endDayStart - customStart > 731 * dayMs) throw new ConvexError("Date range cannot exceed two years.");
+    // The two dates may span at most two years (a leap-inclusive 731 days),
+    // counted in calendar days so a DST shift cannot skew the comparison.
+    if (dateFieldOrdinal(arg.endDate) - dateFieldOrdinal(arg.startDate) > 731) {
+      throw new ConvexError("Date range cannot exceed two years.");
+    }
     // Custom ranges are also to-date: a selected day after today collapses
     // onto today so callers cannot read future calendar periods.
     const todayStart = currentJdCycle("daily", now, timeZone).start;

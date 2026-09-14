@@ -144,6 +144,9 @@ function DateRangeControl({
   // selectable days by the company-local date rather than the browser's.
   const today = fromDateField(todayField) ?? new Date();
   const todayStart = startOfDay(today);
+  // Calendar-day ordinal so the two-year span check matches the server, which
+  // compares the same date fields — a DST shift cannot skew either side.
+  const dayOrdinal = (date: Date) => Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86_400_000);
   const currentMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
   const canGoNext = monthStart < currentMonthStart;
   const monthLabel = monthDate.toLocaleString("en-US", { month: "long", year: "numeric" });
@@ -173,7 +176,7 @@ function DateRangeControl({
     // The server rejects custom ranges spanning more than two years; keep the
     // second pick inside that window so the control cannot dead-end on an
     // invalid request.
-    if (draftStart && Math.abs(startOfDay(date).getTime() - startOfDay(draftStart).getTime()) > 731 * 86_400_000) return;
+    if (draftStart && Math.abs(dayOrdinal(date) - dayOrdinal(draftStart)) > 731) return;
     if (!draftStart) {
       setDraftStart(date);
       setHoverDate(date);
@@ -258,7 +261,7 @@ function DateRangeControl({
                   const inMonth = date.getMonth() === monthDate.getMonth();
                   const isToday = sameCalendarDay(today, date);
                   const isFuture = day > todayStart;
-                  const outOfSpan = Boolean(draftStart && Math.abs(day.getTime() - startOfDay(draftStart).getTime()) > 731 * 86_400_000);
+                  const outOfSpan = Boolean(draftStart && Math.abs(dayOrdinal(day) - dayOrdinal(draftStart)) > 731);
                   const isEnd = Boolean((rangeStart && sameCalendarDay(rangeStart, day)) || (rangeEnd && sameCalendarDay(rangeEnd, day)));
                   const isBetween = Boolean(rangeStart && rangeEnd && day > rangeStart && day < rangeEnd);
                   return (

@@ -34,7 +34,21 @@ const jdCompletionLookbackMs = 368 * 86_400_000;
 
 type QueryCompleteness = { isTruncated: boolean; remaining: number };
 
+// Scope and filter metadata is authoritative: an exhausted analytics budget
+// must not silently empty it, so these reads keep only the per-query cap.
 async function takeDashboardRows<T>(
+  completeness: QueryCompleteness,
+  take: (limit: number) => Promise<T[]>,
+) {
+  const result = await takeWithOverflow(take, dashboardTakeLimit);
+  if (result.isTruncated) completeness.isTruncated = true;
+  return result.rows;
+}
+
+// Analytics data reads share the read budget. The worst-case scan allowance is
+// reserved before yielding so concurrent callers split the budget instead of
+// each observing the same remaining balance.
+async function takeBudgetedRows<T>(
   completeness: QueryCompleteness,
   take: (limit: number) => Promise<T[]>,
 ) {
@@ -43,9 +57,10 @@ async function takeDashboardRows<T>(
     return [];
   }
   const limit = Math.min(dashboardTakeLimit, completeness.remaining);
+  completeness.remaining -= limit + 1;
   const result = await takeWithOverflow(take, limit);
-  completeness.remaining -= result.isTruncated ? limit + 1 : result.rows.length;
-  if (result.isTruncated || completeness.remaining <= 0) completeness.isTruncated = true;
+  completeness.remaining += limit + 1 - (result.isTruncated ? limit + 1 : result.rows.length);
+  if (result.isTruncated) completeness.isTruncated = true;
   return result.rows;
 }
 
@@ -283,7 +298,7 @@ export const dashboard = query({
 
     const items: WorkItem[] = [];
 
-    const jdTasks = await takeDashboardRows(
+    const jdTasks = await takeBudgetedRows(
       completeness,
       (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
     );
@@ -313,13 +328,13 @@ export const dashboard = query({
       // completion that could still be due in range. Newer completions record
       // their own cycleEnd; legacy rows fall back to the current grid.
       const [completions, missed] = await Promise.all([
-        takeDashboardRows(
+        takeBudgetedRows(
           completeness,
           (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit),
         ),
         // Missed records store their own deadline, so they stay exact across
         // recurrence and timezone changes; match on that deadline directly.
-        takeDashboardRows(
+        takeBudgetedRows(
           completeness,
           (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
         ),
@@ -354,7 +369,7 @@ export const dashboard = query({
       }
     }
 
-    const oneTimeTasks = await takeDashboardRows(
+    const oneTimeTasks = await takeBudgetedRows(
       completeness,
       (limit) => ctx.db.query("oneTimeTasks").withIndex("by_companyId_and_createdAt", (q) => q.eq("companyId", args.companyId).gte("createdAt", range.start).lte("createdAt", range.end)).take(limit),
     );
@@ -509,11 +524,11 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
     caps,
     () => { completeness.isTruncated = true; },
   );
-  const jd = await takeDashboardRows(
+  const jd = await takeBudgetedRows(
     completeness,
     (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
   );
-  const one = await takeDashboardRows(
+  const one = await takeBudgetedRows(
     completeness,
     (limit) => ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
   );
@@ -521,7 +536,7 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
   const visibleOne = one.filter((task) => taskHasVisibleAssignee(task, scoped));
   const overdueOne = visibleOne.filter((t) => t.status !== "completed" && (t.overdueAt || (t.dueDate && t.dueDate < Date.now()))).length;
   const completedOne = visibleOne.filter((t) => t.status === "completed").length;
-  const sops = await takeDashboardRows(
+  const sops = await takeBudgetedRows(
     completeness,
     (limit) => ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
   );

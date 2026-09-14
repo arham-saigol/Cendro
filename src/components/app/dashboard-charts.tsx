@@ -1,167 +1,139 @@
 "use client";
 
 import { useMemo } from "react";
-import { defineChart, lineY, areaY } from "@tanstack/charts";
+import { areaY, defineChart, d3Curve, lineY } from "@tanstack/charts";
 import { scaleLinear } from "@tanstack/charts/scales/linear";
 import { scalePoint } from "@tanstack/charts/scales/point";
 import { tooltip } from "@tanstack/charts/tooltip";
 import { Chart } from "@tanstack/charts/react";
+import { curveMonotoneX } from "d3-shape";
 
-export type TrendMetricMode = "all" | "completed" | "workload" | "overdue";
-
-export type TrendPointData = {
+export type DashboardTrendPoint = {
   bucketStart: number;
   label: string;
-  completed: number;
-  overdue: number;
-  workload: number;
+  jdDue: number;
+  jdCompleted: number;
+  tasksAssigned: number;
+  tasksCompleted: number;
 };
 
-/**
- * High-performance, responsive TanStack Trend Chart with multi-series area & line encodings.
- */
-export function TanStackTrendChart({
-  data,
-  mode = "all",
+export type DashboardTrendMode = "jd" | "tasks";
+
+type ChartRow = { label: string; total: number; completed: number };
+
+export function DashboardTrendChart({
+  points,
+  mode,
   height = 260,
 }: {
-  data: TrendPointData[];
-  mode?: TrendMetricMode;
+  points: DashboardTrendPoint[];
+  mode: DashboardTrendMode;
   height?: number;
 }) {
-  const chartDefinition = useMemo(() => {
-    if (!data || data.length === 0) return null;
+  const totalLabel = mode === "jd" ? "Due" : "Assigned";
+  const data = useMemo<ChartRow[]>(
+    () =>
+      points.map((point) => ({
+        label: point.label,
+        total: mode === "jd" ? point.jdDue : point.tasksAssigned,
+        completed: mode === "jd" ? point.jdCompleted : point.tasksCompleted,
+      })),
+    [points, mode],
+  );
 
-    const marks = [];
-
-    if (mode === "all" || mode === "completed") {
-      marks.push(
-        areaY(data, {
-          x: "label",
-          y: "completed",
-          fill: "url(#trend-green-grad)",
-          fillOpacity: 0.85,
-        }),
-        lineY(data, {
-          x: "label",
-          y: "completed",
-          stroke: "var(--badge-green-fg, #10b981)",
-          strokeWidth: 2.2,
-          points: true,
-        })
-      );
-    }
-
-    if (mode === "all" || mode === "workload") {
-      if (mode === "workload") {
-        marks.push(
-          areaY(data, {
-            x: "label",
-            y: "workload",
-            fill: "url(#trend-blue-grad)",
-            fillOpacity: 0.75,
-          })
-        );
-      }
-      marks.push(
-        lineY(data, {
-          x: "label",
-          y: "workload",
-          stroke: "var(--primary, #3b82f6)",
-          strokeWidth: 2,
-          points: true,
-        })
-      );
-    }
-
-    if (mode === "all" || mode === "overdue") {
-      if (mode === "overdue") {
-        marks.push(
-          areaY(data, {
-            x: "label",
-            y: "overdue",
-            fill: "url(#trend-red-grad)",
-            fillOpacity: 0.75,
-          })
-        );
-      }
-      marks.push(
-        lineY(data, {
-          x: "label",
-          y: "overdue",
-          stroke: "var(--danger, #ef4444)",
-          strokeWidth: 2,
-          points: true,
-        })
-      );
-    }
-
-    const maxVal = Math.max(
-      4,
-      ...data.flatMap((d) => [d.completed, d.workload, d.overdue])
-    );
-
+  const definition = useMemo(() => {
+    if (data.length === 0) return null;
+    const maxTotal = Math.max(4, ...data.map((row) => row.total));
+    const curve = d3Curve(curveMonotoneX);
+    const tickCount = Math.min(6, data.length);
+    const tickStep = (data.length - 1) / (tickCount - 1);
+    const tickValues = tickCount === 1
+      ? [data[0].label]
+      : Array.from({ length: tickCount }, (_, index) => data[Math.round(index * tickStep)].label);
+    const tickAnchor = (context: { index: number }): "start" | "middle" | "end" =>
+      tickValues.length > 1
+        ? context.index === 0 ? "start" : context.index === tickValues.length - 1 ? "end" : "middle"
+        : "middle";
     return defineChart({
-      marks,
-      x: {
-        scale: () => scalePoint<string>().domain(data.map((d) => d.label)).padding(0.1),
-        axis: {
-          ticks: {
-            format: (v) => String(v),
-          },
-        },
-      },
-      y: {
-        scale: () => scaleLinear().domain([0, maxVal]),
-        nice: true,
-        grid: true,
-      },
+      marks: [
+        areaY(data, { x: "label", y: "total", fill: "url(#dash-total-fill)", fillOpacity: 1, curve }),
+        areaY(data, { x: "label", y: "completed", fill: "url(#dash-completed-fill)", fillOpacity: 1, curve }),
+        lineY(data, { x: "label", y: "total", stroke: "var(--ink-secondary)", strokeWidth: 1.5, curve }),
+        lineY(data, { x: "label", y: "completed", stroke: "var(--badge-blue-fg)", strokeWidth: 2, curve }),
+      ],
       gradients: [
         {
-          id: "trend-green-grad",
+          id: "dash-total-fill",
           x1: 0,
-          y1: 1,
+          y1: 0,
           x2: 0,
-          y2: 0,
+          y2: 1,
           stops: [
-            { offset: 0, color: "#10b981", opacity: 0.02 },
-            { offset: 1, color: "#10b981", opacity: 0.28 },
+            { offset: 0, color: "var(--ink)", opacity: 0.07 },
+            { offset: 0.6, color: "var(--ink)", opacity: 0.02 },
+            { offset: 1, color: "var(--ink)", opacity: 0 },
           ],
         },
         {
-          id: "trend-blue-grad",
+          id: "dash-completed-fill",
           x1: 0,
-          y1: 1,
+          y1: 0,
           x2: 0,
-          y2: 0,
+          y2: 1,
           stops: [
-            { offset: 0, color: "#3b82f6", opacity: 0.02 },
-            { offset: 1, color: "#3b82f6", opacity: 0.28 },
-          ],
-        },
-        {
-          id: "trend-red-grad",
-          x1: 0,
-          y1: 1,
-          x2: 0,
-          y2: 0,
-          stops: [
-            { offset: 0, color: "#ef4444", opacity: 0.02 },
-            { offset: 1, color: "#ef4444", opacity: 0.28 },
+            { offset: 0, color: "var(--badge-blue-fg)", opacity: 0.24 },
+            { offset: 0.6, color: "var(--badge-blue-fg)", opacity: 0.08 },
+            { offset: 1, color: "var(--badge-blue-fg)", opacity: 0 },
           ],
         },
       ],
-      tooltip,
+      margin: { left: 0, right: 0 },
+      x: {
+        scale: () => scalePoint<string>().domain(data.map((row) => row.label)),
+        axis: {
+          line: false,
+          ticks: { size: 0, padding: 8, values: tickValues },
+          tickLabels: { fontSize: 11, thin: { priority: "ends" }, anchor: tickAnchor },
+        },
+      },
+      y: {
+        scale: () => scaleLinear().domain([0, maxTotal]),
+        nice: true,
+        grid: true,
+        axis: false,
+      },
+      theme: {
+        foreground: "var(--ink-faint)",
+        muted: "var(--ink-faint)",
+        grid: "var(--hairline)",
+        background: "transparent",
+      },
+      tooltip: {
+        use: tooltip,
+        content: (chartPoints) => {
+          const row = chartPoints[0]?.datum;
+          if (!row) return { rows: [] };
+          return {
+            title: row.label,
+            rows: [
+              { label: "Completed", value: String(row.completed) },
+              { label: totalLabel, value: String(row.total) },
+            ],
+          };
+        },
+      },
     });
-  }, [data, mode]);
+  }, [data, totalLabel]);
 
-  if (!chartDefinition) {
-    return null;
-  }
+  if (!definition) return null;
 
   return (
-    <div className="dash-chart-container w-full">
-      <Chart definition={chartDefinition} height={height} ariaLabel="Performance trend chart" />
+    <div className="w-full">
+      <Chart
+        definition={definition}
+        height={height}
+        ariaLabel={mode === "jd" ? "Job description work due and completed over time" : "Tasks assigned and completed over time"}
+      />
     </div>
   );
 }

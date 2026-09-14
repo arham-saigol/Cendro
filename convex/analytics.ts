@@ -1,29 +1,12 @@
 import { ConvexError, v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
 import { analyticsScopedMembershipIds, assertAnalyticsViewAccess, buildSopVisibilityContext, membershipCapabilities, requireMembership, taskHasVisibleAssignee, visibleAssigneeMembershipIds, visibleSop } from "./permissions";
-import { currentJdCycle } from "./taskCycles";
+import { currentJdCycle, elapsedJdCyclesDueBetween, localDateField, nextJdCycleStart } from "./taskCycles";
+import { bucketIndexFor, buildDashboardBuckets, dashboardRangeValidator, resolveDashboardRange } from "./dashboardTime";
 import type { Doc, Id } from "./_generated/dataModel";
 import { takeWithOverflow } from "./queryLimits";
 
 type DashboardScope = "company" | "managed" | "self";
-type TaskKind = "jd" | "one_time";
-type ManualStatus = "due" | "in_progress" | "completed";
-type DashboardStatus = ManualStatus | "overdue";
-type DatePreset = "7d" | "30d" | "90d" | "365d";
-type Priority = "low" | "medium" | "high";
-type Frequency = "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "quarterly" | "semiannually" | "annually";
-
-type DashboardArgs = {
-  companyId: Id<"companies">;
-  datePreset?: DatePreset;
-  branchId?: Id<"branches">;
-  departmentId?: Id<"departments">;
-  membershipId?: Id<"companyMemberships">;
-  taskType?: "all" | TaskKind;
-  status?: "all" | DashboardStatus;
-  priority?: "all" | Priority;
-  frequency?: "all" | Frequency;
-};
 
 type Person = {
   _id: Id<"companyMemberships">;
@@ -38,58 +21,43 @@ type OrgAssignments = {
   departmentIds: Set<Id<"departments">>;
 };
 
-type DashboardTask = {
-  id: string;
-  kind: TaskKind;
-  title: string;
-  status: DashboardStatus;
-  createdAt: number;
-  updatedAt: number;
-  dueAt: number | null;
-  overdueAt: number | null;
-  completedAt: number | null;
-  isLate: boolean;
-  priority: Priority | null;
-  frequency: Frequency | null;
-  assigneeIds: Id<"companyMemberships">[];
-  branchIds: Id<"branches">[];
-  departmentIds: Id<"departments">[];
-};
-
-type CompletionEvent = {
-  taskId: string;
-  kind: TaskKind;
-  title: string;
-  at: number;
-  byMembershipId: Id<"companyMemberships"> | null;
-  isLate: boolean;
-};
-
-type MissedEvent = {
-  taskId: string;
-  title: string;
-  at: number;
-};
-
-const dayMs = 86_400_000;
 const dashboardTakeLimit = 500;
 
-type QueryCompleteness = { isTruncated: boolean };
+// Convex bounds a transaction to ~32k document reads; a shared budget keeps a
+// workspace with many tasks and cycle records degrading to a truncated report
+// instead of a failed query.
+const dashboardReadBudget = 24_000;
 
-async function takeDashboardRows<T>(
+// Any JD cycle whose deadline lands inside a dashboard range started at most
+// ~366 days earlier (the longest recurrence is annual), plus slack.
+const jdCompletionLookbackMs = 368 * 86_400_000;
+
+type QueryCompleteness = { isTruncated: boolean; truncatedReads: number; remaining: number };
+
+// All dashboard reads share the read budget so one query stays inside Convex's
+// transaction limit; the worst-case scan allowance is reserved before yielding
+// so concurrent callers split the budget instead of double-spending it. Scope
+// and filter metadata is authoritative: when it truncates, callers surface an
+// explicit incomplete-scope state instead of validating filters against it.
+async function takeBudgetedRows<T>(
   completeness: QueryCompleteness,
   take: (limit: number) => Promise<T[]>,
 ) {
-  const result = await takeWithOverflow(take, dashboardTakeLimit);
-  if (result.isTruncated) completeness.isTruncated = true;
+  if (completeness.remaining <= 0) {
+    completeness.isTruncated = true;
+    completeness.truncatedReads++;
+    return [];
+  }
+  const limit = Math.min(dashboardTakeLimit, completeness.remaining);
+  completeness.remaining -= limit + 1;
+  const result = await takeWithOverflow(take, limit);
+  completeness.remaining += limit + 1 - (result.isTruncated ? limit + 1 : result.rows.length);
+  if (result.isTruncated) {
+    completeness.isTruncated = true;
+    completeness.truncatedReads++;
+  }
   return result.rows;
 }
-
-const datePresetValidator = v.union(v.literal("7d"), v.literal("30d"), v.literal("90d"), v.literal("365d"));
-const taskTypeFilterValidator = v.union(v.literal("all"), v.literal("jd"), v.literal("one_time"));
-const statusFilterValidator = v.union(v.literal("all"), v.literal("due"), v.literal("in_progress"), v.literal("completed"), v.literal("overdue"));
-const priorityFilterValidator = v.union(v.literal("all"), v.literal("low"), v.literal("medium"), v.literal("high"));
-const frequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("quarterly"), v.literal("semiannually"), v.literal("annually"));
 
 function firstName(membership: { firstName?: string } | null | undefined, user: Doc<"appUsers">) {
   return membership?.firstName?.trim() || user.firstName.trim() || "Unknown";
@@ -103,18 +71,6 @@ function fullName(membership: { firstName?: string; secondName?: string } | null
 
 function safeRate(part: number, total: number) {
   return total > 0 ? Math.round((part / total) * 100) : 0;
-}
-
-function dateWindow(preset: DatePreset | undefined, now: number) {
-  const selected = preset ?? "30d";
-  const days = selected === "7d" ? 7 : selected === "90d" ? 90 : selected === "365d" ? 365 : 30;
-  const labels: Record<DatePreset, string> = {
-    "7d": "Last 7 days",
-    "30d": "Last 30 days",
-    "90d": "Last 90 days",
-    "365d": "Last 12 months",
-  };
-  return { preset: selected, start: now - days * dayMs, end: now, label: labels[selected] };
 }
 
 async function dashboardAccess(
@@ -137,9 +93,16 @@ async function dashboardAccess(
   return { membership, company, caps, dashboardScope, scopedIds };
 }
 
-async function loadPeople(ctx: QueryCtx, membershipIds: Set<Id<"companyMemberships">>) {
+async function loadPeople(ctx: QueryCtx, membershipIds: Set<Id<"companyMemberships">>, completeness: QueryCompleteness) {
   const people = new Map<Id<"companyMemberships">, Person>();
   for (const membershipId of membershipIds) {
+    // Each membership costs up to two point reads; keep them inside the budget.
+    if (completeness.remaining < 2) {
+      completeness.isTruncated = true;
+      completeness.truncatedReads++;
+      break;
+    }
+    completeness.remaining -= 2;
     const membership = await ctx.db.get(membershipId);
     if (!membership || !membership.active) continue;
     const user = await ctx.db.get(membership.userId);
@@ -161,28 +124,23 @@ async function loadAssignments(
   completeness: QueryCompleteness,
 ) {
   const byMembership = new Map<Id<"companyMemberships">, OrgAssignments>();
-  const branchIds = new Set<Id<"branches">>();
-  const departmentIds = new Set<Id<"departments">>();
 
   for (const membershipId of membershipIds) {
-    const membershipBranches = await takeDashboardRows(
+    const membershipBranches = await takeBudgetedRows(
       completeness,
       (limit) => ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(limit),
     );
-    const membershipDepartments = await takeDashboardRows(
+    const membershipDepartments = await takeBudgetedRows(
       completeness,
       (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(limit),
     );
-    const assignments = {
+    byMembership.set(membershipId, {
       branchIds: new Set(membershipBranches.map((row) => row.branchId)),
       departmentIds: new Set(membershipDepartments.map((row) => row.departmentId)),
-    };
-    for (const branchId of assignments.branchIds) branchIds.add(branchId);
-    for (const departmentId of assignments.departmentIds) departmentIds.add(departmentId);
-    byMembership.set(membershipId, assignments);
+    });
   }
 
-  return { byMembership, branchIds, departmentIds };
+  return { byMembership };
 }
 
 async function loadOrg(
@@ -190,11 +148,11 @@ async function loadOrg(
   companyId: Id<"companies">,
   completeness: QueryCompleteness,
 ) {
-  const branches = await takeDashboardRows(
+  const branches = await takeBudgetedRows(
     completeness,
     (limit) => ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
   );
-  const departments = await takeDashboardRows(
+  const departments = await takeBudgetedRows(
     completeness,
     (limit) => ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
   );
@@ -208,548 +166,365 @@ async function loadOrg(
   };
 }
 
-async function allowedOrgIds(
+/**
+ * Loads everything the dashboard endpoints share: the caller's analytics
+ * scope, the people and org units inside it, and the branch/department
+ * options the caller is allowed to filter by. Branch options never expand
+ * through department scopes — only direct manager branch scopes apply.
+ */
+async function resolveDashboardScope(
   ctx: QueryCtx,
   companyId: Id<"companies">,
-  scope: DashboardScope,
-  viewerMembershipId: Id<"companyMemberships">,
-  org: Awaited<ReturnType<typeof loadOrg>>,
-  assignedBranchIds: Set<Id<"branches">>,
-  assignedDepartmentIds: Set<Id<"departments">>,
   completeness: QueryCompleteness,
 ) {
-  if (scope === "company") {
-    return {
-      branchIds: new Set(org.branches.map((branch) => branch._id)),
-      departmentIds: new Set(org.departments.map((department) => department._id)),
-    };
-  }
+  const { membership, company, dashboardScope, scopedIds } = await dashboardAccess(ctx, companyId, completeness);
+  // Each authority source is tracked separately: membership-scope truncation
+  // only relaxes the employee check, and option-list truncation only relaxes
+  // branch/department checks, so unrelated exhaustion cannot widen access.
+  const scopedIdsComplete = !completeness.isTruncated;
+  const people = await loadPeople(ctx, scopedIds, completeness);
+  const assignments = await loadAssignments(ctx, scopedIds, completeness);
 
-  if (scope === "managed") {
-    const branchIds = new Set<Id<"branches">>();
-    const departmentIds = new Set<Id<"departments">>();
-    const managedBranches = await takeDashboardRows(
-      completeness,
-      (limit) => ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", viewerMembershipId)).take(limit),
-    );
-    const managedDepartments = await takeDashboardRows(
-      completeness,
-      (limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", viewerMembershipId)).take(limit),
-    );
-    for (const row of managedBranches) if (row.companyId === companyId) branchIds.add(row.branchId);
-    for (const row of managedDepartments) if (row.companyId === companyId) departmentIds.add(row.departmentId);
-    for (const department of org.departments) if (branchIds.has(department.branchId)) departmentIds.add(department._id);
-    for (const departmentId of departmentIds) {
+  // Option lists are complete only when the budget was still alive for this
+  // phase and no read truncated inside it; earlier unrelated truncation alone
+  // does not disqualify them.
+  const optionsTruncations = completeness.truncatedReads;
+  const optionsBudgetAlive = completeness.remaining > 0;
+  const org = await loadOrg(ctx, companyId, completeness);
+
+  const memberBranchIds = new Map<Id<"companyMemberships">, Set<Id<"branches">>>();
+  const memberDepartmentIds = new Map<Id<"companyMemberships">, Set<Id<"departments">>>();
+  for (const [membershipId, assigned] of assignments.byMembership) {
+    const branchIds = new Set(assigned.branchIds);
+    for (const departmentId of assigned.departmentIds) {
       const department = org.departmentById.get(departmentId);
       if (department) branchIds.add(department.branchId);
     }
-    return { branchIds, departmentIds };
+    memberBranchIds.set(membershipId, branchIds);
+    memberDepartmentIds.set(membershipId, new Set(assigned.departmentIds));
   }
 
-  return { branchIds: new Set(assignedBranchIds), departmentIds: new Set(assignedDepartmentIds) };
-}
-
-function assigneeOrg(assigneeIds: Id<"companyMemberships">[], assignments: Map<Id<"companyMemberships">, OrgAssignments>) {
-  const branchIds = new Set<Id<"branches">>();
-  const departmentIds = new Set<Id<"departments">>();
-  for (const assigneeId of assigneeIds) {
-    const row = assignments.get(assigneeId);
-    if (!row) continue;
-    for (const branchId of row.branchIds) branchIds.add(branchId);
-    for (const departmentId of row.departmentIds) departmentIds.add(departmentId);
-  }
-  return { branchIds: Array.from(branchIds), departmentIds: Array.from(departmentIds) };
-}
-
-function currentJdStatus(task: Doc<"jdTasks">, completion: Doc<"jdTaskCompletions"> | null, now: number, timeZone?: string | null) {
-  const cycle = currentJdCycle(task.recurrence, now, timeZone);
-  const status: ManualStatus = completion || (task.statusCycleStart === cycle.start && task.status === "completed") ? "completed" : task.statusCycleStart === cycle.start ? task.status : "due";
-  return { cycle, status };
-}
-
-function currentOneTimeStatus(task: Doc<"oneTimeTasks">, now: number): DashboardStatus {
-  return task.status !== "completed" && (Boolean(task.overdueAt) || Boolean(task.dueDate && task.dueDate < now)) ? "overdue" : task.status;
-}
-
-function matchesDashboardFilters(task: DashboardTask, args: DashboardArgs) {
-  if (args.taskType && args.taskType !== "all" && task.kind !== args.taskType) return false;
-  if (args.status && args.status !== "all" && task.status !== args.status) return false;
-  if (args.priority && args.priority !== "all" && task.priority !== args.priority) return false;
-  if (args.frequency && args.frequency !== "all" && task.frequency !== args.frequency) return false;
-  if (args.membershipId && !task.assigneeIds.includes(args.membershipId)) return false;
-  if (args.branchId && !task.branchIds.includes(args.branchId)) return false;
-  if (args.departmentId && !task.departmentIds.includes(args.departmentId)) return false;
-  return true;
-}
-
-async function buildTasks(
-  ctx: QueryCtx,
-  companyId: Id<"companies">,
-  allowedMembershipIds: Set<Id<"companyMemberships">>,
-  assignments: Map<Id<"companyMemberships">, OrgAssignments>,
-  now: number,
-  timeZone: string | null | undefined,
-  completeness: QueryCompleteness,
-) {
-  const tasks: DashboardTask[] = [];
-  const completionEvents: CompletionEvent[] = [];
-  const missedEvents: MissedEvent[] = [];
-
-  const jdTasks = await takeDashboardRows(
-    completeness,
-    (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
-  );
-  for (const task of jdTasks) {
-    const scopedAssignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, allowedMembershipIds);
-    if (!scopedAssignees.length) continue;
-
-    const cycle = currentJdCycle(task.recurrence, now, timeZone);
-    const currentCompletion = await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", cycle.start)).unique();
-    const state = currentJdStatus(task, currentCompletion, now, timeZone);
-    const org = assigneeOrg(scopedAssignees, assignments);
-    const completedAt = currentCompletion?.completedAt ?? null;
-    const row: DashboardTask = {
-      id: task._id,
-      kind: "jd",
-      title: task.title,
-      status: state.status,
-      createdAt: task.createdAt,
-      updatedAt: task.updatedAt,
-      dueAt: state.cycle.end,
-      overdueAt: null,
-      completedAt,
-      isLate: false,
-      priority: null,
-      frequency: task.recurrence,
-      assigneeIds: scopedAssignees,
-      branchIds: org.branchIds,
-      departmentIds: org.departmentIds,
-    };
-    tasks.push(row);
-
-    const completions = await takeDashboardRows(
+  let branchOptions: Doc<"branches">[] = [];
+  let departmentOptions: Doc<"departments">[] = [];
+  if (dashboardScope === "company") {
+    branchOptions = org.branches;
+    departmentOptions = org.departments;
+  } else if (dashboardScope === "managed") {
+    const managedBranches = await takeBudgetedRows(
       completeness,
-      (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", task._id)).take(limit),
+      (limit) => ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(limit),
     );
-    for (const completion of completions) {
-      if (!allowedMembershipIds.has(completion.completedByMembershipId)) continue;
-      completionEvents.push({
-        taskId: task._id,
-        kind: "jd",
-        title: task.title,
-        at: completion.completedAt,
-        byMembershipId: completion.completedByMembershipId,
-        isLate: false,
-      });
-    }
-
-    const missed = await takeDashboardRows(
+    const managedDepartments = await takeBudgetedRows(
       completeness,
-      (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", task._id)).take(limit),
+      (limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(limit),
     );
-    for (const record of missed) missedEvents.push({ taskId: task._id, title: task.title, at: record.cycleEnd });
+    const branchScope = new Set(managedBranches.filter((row) => row.companyId === companyId).map((row) => row.branchId));
+    const departmentScope = new Set(managedDepartments.filter((row) => row.companyId === companyId).map((row) => row.departmentId));
+    branchOptions = org.branches.filter((branch) => branchScope.has(branch._id));
+    departmentOptions = org.departments.filter((department) => branchScope.has(department.branchId) || departmentScope.has(department._id));
   }
+  const optionsComplete = optionsBudgetAlive && completeness.truncatedReads === optionsTruncations;
 
-  const oneTimeTasks = await takeDashboardRows(
-    completeness,
-    (limit) => ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
-  );
-  for (const task of oneTimeTasks) {
-    const scopedAssignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, allowedMembershipIds);
-    if (!scopedAssignees.length) continue;
-    const org = assigneeOrg(scopedAssignees, assignments);
-    const status = currentOneTimeStatus(task, now);
-    const completedAt = task.completedAt ?? null;
-    const completedByMembershipId = task.completedByMembershipId ?? null;
-    const row: DashboardTask = {
-      id: task._id,
-      kind: "one_time",
-      title: task.title,
-      status,
-      createdAt: task.createdAt,
-      updatedAt: task.updatedAt,
-      dueAt: task.dueDate ?? null,
-      overdueAt: task.overdueAt ?? (status === "overdue" ? task.dueDate ?? null : null),
-      completedAt,
-      isLate: Boolean(completedAt && task.dueDate && completedAt > task.dueDate),
-      priority: task.priority,
-      frequency: null,
-      assigneeIds: scopedAssignees,
-      branchIds: org.branchIds,
-      departmentIds: org.departmentIds,
+  return { membership, company, dashboardScope, scopedIds, people, assignments, org, branchOptions, departmentOptions, memberBranchIds, memberDepartmentIds, scopedIdsComplete, optionsComplete };
+}
+
+export const dashboardFilters = query({
+  args: { companyId: v.id("companies") },
+  handler: async (ctx, args) => {
+    const completeness: QueryCompleteness = { isTruncated: false, truncatedReads: 0, remaining: dashboardReadBudget };
+    const scope = await resolveDashboardScope(ctx, args.companyId, completeness);
+    const users = scope.dashboardScope === "self"
+      ? []
+      : Array.from(scope.people.values())
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((person) => ({
+            _id: person._id,
+            name: person.name,
+            branchIds: Array.from(scope.memberBranchIds.get(person._id) ?? []),
+            departmentIds: Array.from(scope.memberDepartmentIds.get(person._id) ?? []),
+          }));
+    return {
+      viewer: { membershipId: scope.membership._id },
+      branches: scope.branchOptions.map((branch) => ({ _id: branch._id, name: branch.name })),
+      departments: scope.departmentOptions.map((department) => ({ _id: department._id, name: department.name, branchId: department.branchId })),
+      users,
+      isTruncated: completeness.isTruncated,
     };
-    tasks.push(row);
+  },
+});
 
-    if (completedAt && (!completedByMembershipId || allowedMembershipIds.has(completedByMembershipId))) {
-      completionEvents.push({
-        taskId: task._id,
-        kind: "one_time",
-        title: task.title,
-        at: completedAt,
-        byMembershipId: completedByMembershipId,
-        isLate: row.isLate,
-      });
-    }
-  }
-
-  return { tasks, completionEvents, missedEvents };
-}
-
-function assertAllowedFilters(args: DashboardArgs, scope: DashboardScope, scopedIds: Set<Id<"companyMemberships">>, branchIds: Set<Id<"branches">>, departmentIds: Set<Id<"departments">>, viewerId: Id<"companyMemberships">) {
-  if (args.membershipId && !scopedIds.has(args.membershipId)) throw new ConvexError("Employee filter is outside your analytics scope.");
-  if (scope === "self" && args.membershipId && args.membershipId !== viewerId) throw new ConvexError("Employee filter is outside your analytics scope.");
-  if (scope === "self" && (args.branchId || args.departmentId)) throw new ConvexError("Team filters are not available for your dashboard.");
-  if (args.branchId && !branchIds.has(args.branchId)) throw new ConvexError("Branch filter is outside your analytics scope.");
-  if (args.departmentId && !departmentIds.has(args.departmentId)) throw new ConvexError("Department filter is outside your analytics scope.");
-}
-
-function makeBreakdown<T extends string>(values: readonly T[], counts: Map<T, number>, labels: Record<T, string>) {
-  return values.map((value) => ({ key: value, label: labels[value], value: counts.get(value) ?? 0 }));
-}
-
-function bucketLabel(ms: number) {
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(ms));
-}
-
-function buildTrend(tasks: DashboardTask[], completionEvents: CompletionEvent[], missedEvents: MissedEvent[], start: number, end: number) {
-  const span = Math.max(1, end - start);
-  const rangeDays = Math.max(1, Math.round(span / dayMs));
-  const bucketCount = Math.min(8, rangeDays);
-  const bucketSize = Math.ceil(span / bucketCount);
-  const buckets = Array.from({ length: bucketCount }, (_, index) => {
-    const bucketStart = start + index * bucketSize;
-    const bucketEnd = index === bucketCount - 1 ? end : Math.min(end, bucketStart + bucketSize - 1);
-    return { bucketStart, label: bucketLabel(bucketStart), start: bucketStart, end: bucketEnd, completed: 0, overdue: 0, workload: 0 };
-  });
-  const add = (at: number, key: "completed" | "overdue" | "workload") => {
-    if (at < start || at > end) return;
-    const index = Math.min(bucketCount - 1, Math.max(0, Math.floor((at - start) / bucketSize)));
-    buckets[index][key] += 1;
-  };
-  for (const event of completionEvents) add(event.at, "completed");
-  for (const event of missedEvents) add(event.at, "overdue");
-  for (const task of tasks) {
-    add(task.createdAt, "workload");
-    if (task.kind === "one_time" && task.overdueAt) add(task.overdueAt, "overdue");
-  }
-  return buckets.map((bucket) => ({ bucketStart: bucket.bucketStart, label: bucket.label, completed: bucket.completed, overdue: bucket.overdue, workload: bucket.workload }));
-}
-
-function buildPersonPerformance(tasks: DashboardTask[], people: Map<Id<"companyMemberships">, Person>, allowedIds: Set<Id<"companyMemberships">>) {
-  const rows = new Map<Id<"companyMemberships">, { person: Person; assigned: number; completed: number; overdue: number }>();
-  for (const id of allowedIds) {
-    const person = people.get(id);
-    if (person) rows.set(id, { person, assigned: 0, completed: 0, overdue: 0 });
-  }
-  for (const task of tasks) {
-    for (const id of task.assigneeIds) {
-      const row = rows.get(id);
-      if (!row) continue;
-      row.assigned += 1;
-      if (task.status === "completed") row.completed += 1;
-      if (task.status === "overdue") row.overdue += 1;
-    }
-  }
-  return Array.from(rows.values())
-    .filter((row) => row.assigned > 0)
-    .map((row) => ({
-      id: row.person._id,
-      name: row.person.name,
-      firstName: row.person.firstName,
-      role: row.person.role,
-      assigned: row.assigned,
-      completed: row.completed,
-      overdue: row.overdue,
-      completionRate: safeRate(row.completed, row.assigned),
-    }))
-    .sort((a, b) => b.assigned - a.assigned || a.name.localeCompare(b.name));
-}
-
-function buildOrgPerformance<T extends Id<"branches"> | Id<"departments">>(
-  tasks: DashboardTask[],
-  ids: Set<T>,
-  nameFor: (id: T) => { name: string; parentId: Id<"branches"> | null } | null,
-  taskIdsFor: (task: DashboardTask) => T[],
-) {
-  const rows = new Map<T, { id: T; name: string; parentId: Id<"branches"> | null; assigned: number; completed: number; overdue: number }>();
-  for (const id of ids) {
-    const named = nameFor(id);
-    if (named) rows.set(id, { id, name: named.name, parentId: named.parentId, assigned: 0, completed: 0, overdue: 0 });
-  }
-  for (const task of tasks) {
-    const seen = new Set<T>();
-    for (const id of taskIdsFor(task)) {
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const row = rows.get(id);
-      if (!row) continue;
-      row.assigned += 1;
-      if (task.status === "completed") row.completed += 1;
-      if (task.status === "overdue") row.overdue += 1;
-    }
-  }
-  return Array.from(rows.values())
-    .filter((row) => row.assigned > 0)
-    .map((row) => ({ ...row, completionRate: safeRate(row.completed, row.assigned) }))
-    .sort((a, b) => b.assigned - a.assigned || a.name.localeCompare(b.name));
-}
-
-async function visibleSopStats(
-  ctx: QueryCtx,
-  companyId: Id<"companies">,
-  membership: Doc<"companyMemberships">,
-  caps: Awaited<ReturnType<typeof membershipCapabilities>>,
-  completeness: QueryCompleteness,
-) {
-  const sops = await takeDashboardRows(
-    completeness,
-    (limit) => ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
-  );
-  const markTruncated = () => { completeness.isTruncated = true; };
-  const visibility = sops.length
-    ? await buildSopVisibilityContext(ctx, companyId, membership, caps, markTruncated)
-    : null;
-  const counts = new Map<Doc<"sops">["scopeType"], number>([
-    ["company", 0],
-    ["branch", 0],
-    ["department", 0],
-    ["user", 0],
-  ]);
-  let total = 0;
-  for (const sop of sops) {
-    if (!(await visibleSop(ctx, companyId, membership, sop, visibility, caps, markTruncated))) continue;
-    total += 1;
-    counts.set(sop.scopeType, (counts.get(sop.scopeType) ?? 0) + 1);
-  }
-  return {
-    visible: total,
-    byScope: [
-      { key: "company", label: "Company", value: counts.get("company") ?? 0 },
-      { key: "branch", label: "Branch", value: counts.get("branch") ?? 0 },
-      { key: "department", label: "Department", value: counts.get("department") ?? 0 },
-      { key: "user", label: "User", value: counts.get("user") ?? 0 },
-    ],
-  };
-}
+type WorkItem = {
+  kind: "jd" | "task";
+  at: number;
+  completed: boolean;
+  overdue: boolean;
+  assigneeIds: Id<"companyMemberships">[];
+};
 
 export const dashboard = query({
   args: {
     companyId: v.id("companies"),
-    datePreset: v.optional(datePresetValidator),
+    now: v.number(),
+    range: dashboardRangeValidator,
     branchId: v.optional(v.id("branches")),
     departmentId: v.optional(v.id("departments")),
     membershipId: v.optional(v.id("companyMemberships")),
-    taskType: v.optional(taskTypeFilterValidator),
-    status: v.optional(statusFilterValidator),
-    priority: v.optional(priorityFilterValidator),
-    frequency: v.optional(frequencyFilterValidator),
   },
-  handler: async (ctx, args: DashboardArgs) => {
+  handler: async (ctx, args) => {
+    // args.now stays in the signature so its rotation re-runs the query, but
+    // all accounting uses server time: a skewed client clock can neither pull
+    // reporting into the future nor shrink it into the past.
     const now = Date.now();
-    const range = dateWindow(args.datePreset, now);
-    const completeness: QueryCompleteness = { isTruncated: false };
-    const access = await dashboardAccess(ctx, args.companyId, completeness);
-    const people = await loadPeople(ctx, access.scopedIds);
-    const assignments = await loadAssignments(ctx, access.scopedIds, completeness);
-    const org = await loadOrg(ctx, args.companyId, completeness);
-    const allowedOrg = await allowedOrgIds(
-      ctx,
-      args.companyId,
-      access.dashboardScope,
-      access.membership._id,
-      org,
-      assignments.branchIds,
-      assignments.departmentIds,
-      completeness,
-    );
+    const completeness: QueryCompleteness = { isTruncated: false, truncatedReads: 0, remaining: dashboardReadBudget };
+    const scope = await resolveDashboardScope(ctx, args.companyId, completeness);
+    const timeZone = scope.company.timeZone ?? null;
 
-    assertAllowedFilters(args, access.dashboardScope, access.scopedIds, allowedOrg.branchIds, allowedOrg.departmentIds, access.membership._id);
-
-    const built = await buildTasks(
-      ctx,
-      args.companyId,
-      access.scopedIds,
-      assignments.byMembership,
-      now,
-      access.company.timeZone,
-      completeness,
-    );
-    const filteredTasks = built.tasks.filter((task) => matchesDashboardFilters(task, args));
-    const filteredTaskIds = new Set(filteredTasks.map((task) => task.id));
-    const completionEvents = built.completionEvents.filter((event) => filteredTaskIds.has(event.taskId) && event.at >= range.start && event.at <= range.end);
-    const missedEvents = built.missedEvents.filter((event) => filteredTaskIds.has(event.taskId) && event.at >= range.start && event.at <= range.end);
-
-    const statusCounts = new Map<DashboardStatus, number>();
-    const priorityCounts = new Map<Priority, number>();
-    const frequencyCounts = new Map<Frequency, number>();
-    const typeCounts = new Map<TaskKind, number>();
-    for (const task of filteredTasks) {
-      statusCounts.set(task.status, (statusCounts.get(task.status) ?? 0) + 1);
-      typeCounts.set(task.kind, (typeCounts.get(task.kind) ?? 0) + 1);
-      if (task.priority) priorityCounts.set(task.priority, (priorityCounts.get(task.priority) ?? 0) + 1);
-      if (task.frequency) frequencyCounts.set(task.frequency, (frequencyCounts.get(task.frequency) ?? 0) + 1);
+    if (scope.dashboardScope === "self" && (args.branchId || args.departmentId)) {
+      throw new ConvexError("Team filters are not available for your dashboard.");
+    }
+    // Scope metadata loaded under the read budget may be incomplete; a check
+    // only runs when its own authority source loaded completely. Filters that
+    // cannot be verified are allowed through, and the effective-scope
+    // intersection still confines results to the viewer's memberships.
+    if (scope.scopedIdsComplete && args.membershipId && !scope.scopedIds.has(args.membershipId)) {
+      throw new ConvexError("Employee filter is outside your analytics scope.");
+    }
+    const branchOptionIds = new Set(scope.branchOptions.map((branch) => branch._id));
+    const departmentOptionsById = new Map(scope.departmentOptions.map((department) => [department._id, department]));
+    if (scope.optionsComplete && args.branchId && !branchOptionIds.has(args.branchId)) {
+      throw new ConvexError("Branch filter is outside your analytics scope.");
+    }
+    const filteredDepartment = args.departmentId ? departmentOptionsById.get(args.departmentId) : undefined;
+    if (scope.optionsComplete && args.departmentId && !filteredDepartment) {
+      throw new ConvexError("Department filter is outside your analytics scope.");
+    }
+    if (args.branchId && filteredDepartment && filteredDepartment.branchId !== args.branchId) {
+      throw new ConvexError("Department filter is outside your analytics scope.");
     }
 
-    const totalTasks = filteredTasks.length;
-    const completedTasks = statusCounts.get("completed") ?? 0;
-    const overdueTasks = statusCounts.get("overdue") ?? 0;
-    const inProgressTasks = statusCounts.get("in_progress") ?? 0;
-    const notStartedTasks = statusCounts.get("due") ?? 0;
-    const openTasks = totalTasks - completedTasks;
-    const lateCompletions = completionEvents.filter((event) => event.isLate).length;
-    const jdCompletions = completionEvents.filter((event) => event.kind === "jd").length;
-    const jdMissedCycles = missedEvents.length;
-    const personPerformance = access.dashboardScope === "self" ? [] : buildPersonPerformance(filteredTasks, people, access.scopedIds);
-    const topPerformers = personPerformance
-      .filter((row) => row.assigned > 0)
-      .sort((a, b) => b.completionRate - a.completionRate || b.completed - a.completed || a.overdue - b.overdue || a.name.localeCompare(b.name))
-      .slice(0, 5);
-    const needsAttention = personPerformance
-      .filter((row) => row.overdue > 0 || (row.assigned >= 3 && row.completionRate < 70))
-      .sort((a, b) => b.overdue - a.overdue || a.completionRate - b.completionRate || b.assigned - a.assigned)
-      .slice(0, 5);
+    const effectiveIds = new Set<Id<"companyMemberships">>();
+    for (const id of scope.scopedIds) {
+      if (args.branchId && !scope.memberBranchIds.get(id)?.has(args.branchId)) continue;
+      if (args.departmentId && !scope.memberDepartmentIds.get(id)?.has(args.departmentId)) continue;
+      if (args.membershipId && id !== args.membershipId) continue;
+      effectiveIds.add(id);
+    }
 
-    const branchPerformance = access.dashboardScope === "self" ? [] : buildOrgPerformance(
-      filteredTasks,
-      allowedOrg.branchIds,
-      (id) => {
-        const branch = org.branchById.get(id);
-        return branch ? { name: branch.name, parentId: null } : null;
-      },
-      (task) => task.branchIds as Id<"branches">[],
+    const range = resolveDashboardRange(args.range, now, timeZone);
+    const buckets = buildDashboardBuckets(range, timeZone);
+
+    const items: WorkItem[] = [];
+
+    const jdTasks = await takeBudgetedRows(
+      completeness,
+      (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
     );
-    const departmentIdsForPerformance = new Set(Array.from(allowedOrg.departmentIds).filter((id) => {
-      if (!args.branchId) return true;
-      return org.departmentById.get(id)?.branchId === args.branchId;
+    for (const task of jdTasks) {
+      const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds);
+      if (!assignees.length) continue;
+      if (completeness.remaining <= 0) {
+        completeness.isTruncated = true;
+        break;
+      }
+
+      const cycles = new Map<number, { dueAt: number; completed: boolean; stored: boolean }>();
+      // Ledger rows (completions, missed records) keep their stored deadlines;
+      // reconstructed cycles only fill starts the ledger never recorded, so a
+      // recurrence or timezone change cannot rewrite history onto the new grid.
+      const put = (start: number, dueAt: number, completed: boolean, stored: boolean) => {
+        const existing = cycles.get(start);
+        cycles.set(start, {
+          dueAt: existing?.stored && !stored ? existing.dueAt : dueAt,
+          completed: (existing?.completed ?? false) || completed,
+          stored: (existing?.stored ?? false) || stored,
+        });
+      };
+
+      // A cycle that ends inside the range started at most ~366 days before it
+      // (the longest recurrence is annual), so this lookback covers every
+      // completion that could still be due in range. Newer completions record
+      // their own cycleEnd; legacy rows fall back to the current grid.
+      // Sequential so the second read sees the budget the first actually
+      // consumed rather than racing its reserved allowance.
+      const completions = await takeBudgetedRows(
+        completeness,
+        (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit),
+      );
+      // Missed records store their own deadline, so they stay exact across
+      // recurrence and timezone changes; match on that deadline directly.
+      const missed = await takeBudgetedRows(
+        completeness,
+        (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
+      );
+      for (const completion of completions) {
+        // Legacy rows predate cycleEnd. When the stored start no longer sits on
+        // the task's grid the recurrence or timezone changed since, so the
+        // reconstructed deadline is unreliable and the recorded completion
+        // time is the only trustworthy instant inside that cycle.
+        const end = completion.cycleEnd ?? (
+          currentJdCycle(task.recurrence, completion.cycleStart, timeZone).start === completion.cycleStart
+            ? nextJdCycleStart(completion.cycleStart, task.recurrence, timeZone)
+            : completion.completedAt + 1
+        );
+        put(completion.cycleStart, end - 1, true, true);
+      }
+
+      for (const record of missed) put(record.cycleStart, record.cycleEnd - 1, false, true);
+
+      const elapsed = elapsedJdCyclesDueBetween(task.recurrence, task.cycleStartedAt, now, range.start, range.end, 200, timeZone);
+      if (elapsed.truncated) completeness.isTruncated = true;
+      for (const cycle of elapsed.cycles) put(cycle.start, cycle.end - 1, false, false);
+
+      const current = currentJdCycle(task.recurrence, now, timeZone);
+      put(current.start, current.end - 1, Boolean(cycles.get(current.start)?.completed), false);
+
+      for (const [start, cycle] of cycles) {
+        if (start <= now && cycle.dueAt >= range.start && cycle.dueAt <= range.end) {
+          const completed = cycle.completed || (task.status === "completed" && task.statusCycleStart === start);
+          items.push({ kind: "jd", at: cycle.dueAt, completed, overdue: !completed && cycle.dueAt < now, assigneeIds: assignees });
+        }
+      }
+    }
+
+    const oneTimeTasks = await takeBudgetedRows(
+      completeness,
+      (limit) => ctx.db.query("oneTimeTasks").withIndex("by_companyId_and_createdAt", (q) => q.eq("companyId", args.companyId).gte("createdAt", range.start).lte("createdAt", range.end)).take(limit),
+    );
+    for (const task of oneTimeTasks) {
+      const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds);
+      if (!assignees.length) continue;
+      const completed = task.status === "completed";
+      const overdue = !completed && (task.overdueAt !== undefined || (task.dueDate !== undefined && task.dueDate < now));
+      items.push({ kind: "task", at: task.createdAt, completed, overdue, assigneeIds: assignees });
+    }
+
+    let jdDue = 0;
+    let jdCompleted = 0;
+    let jdOverdue = 0;
+    let tasksAssigned = 0;
+    let tasksCompleted = 0;
+    let tasksOverdue = 0;
+    const trend = buckets.map((bucket) => ({
+      bucketStart: bucket.start,
+      label: bucket.label,
+      jdDue: 0,
+      jdCompleted: 0,
+      tasksAssigned: 0,
+      tasksCompleted: 0,
     }));
-    const departmentPerformance = access.dashboardScope === "self" ? [] : buildOrgPerformance(
-      filteredTasks,
-      departmentIdsForPerformance,
-      (id) => {
-        const department = org.departmentById.get(id);
-        return department ? { name: department.name, parentId: department.branchId } : null;
-      },
-      (task) => task.departmentIds as Id<"departments">[],
-    );
-    const sopStats = await visibleSopStats(ctx, args.companyId, access.membership, access.caps, completeness);
-    const viewer = people.get(access.membership._id);
-    const isTruncated = completeness.isTruncated;
+    for (const item of items) {
+      const bucketIndex = bucketIndexFor(buckets, item.at);
+      const bucket = bucketIndex === -1 ? undefined : trend[bucketIndex];
+      if (item.kind === "jd") {
+        jdDue += 1;
+        if (item.completed) jdCompleted += 1;
+        if (item.overdue) jdOverdue += 1;
+        if (bucket) {
+          bucket.jdDue += 1;
+          if (item.completed) bucket.jdCompleted += 1;
+        }
+      } else {
+        tasksAssigned += 1;
+        if (item.completed) tasksCompleted += 1;
+        if (item.overdue) tasksOverdue += 1;
+        if (bucket) {
+          bucket.tasksAssigned += 1;
+          if (item.completed) bucket.tasksCompleted += 1;
+        }
+      }
+    }
 
-    const branches = access.dashboardScope === "self" ? [] : org.branches
-      .filter((branch) => allowedOrg.branchIds.has(branch._id))
-      .map((branch) => ({ _id: branch._id, name: branch.name }));
-    const departments = access.dashboardScope === "self" ? [] : org.departments
-      .filter((department) => allowedOrg.departmentIds.has(department._id))
-      .map((department) => ({ _id: department._id, branchId: department.branchId, name: department.name, branchName: org.branchById.get(department.branchId)?.name ?? "Unknown branch" }));
-    const employees = access.dashboardScope === "self" ? [] : Array.from(people.values())
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((person) => {
-        const orgRow = assignments.byMembership.get(person._id);
-        return {
-          _id: person._id,
-          name: person.name,
-          firstName: person.firstName,
-          role: person.role,
-          branchIds: Array.from(orgRow?.branchIds ?? []),
-          departmentIds: Array.from(orgRow?.departmentIds ?? []),
-        };
-      });
+    const singleMember = scope.scopedIds.size <= 1 || scope.dashboardScope === "self";
+    let level: "company" | "branch" | "department" | "user";
+    let groupKind: "branch" | "department" | null = null;
+    let groupCandidates: (Doc<"branches"> | Doc<"departments">)[] = [];
+    if (args.membershipId || singleMember) {
+      level = "user";
+    } else if (args.departmentId) {
+      level = "department";
+    } else {
+      const branchCandidates = args.branchId ? [] : scope.branchOptions;
+      if (branchCandidates.length >= 2) {
+        level = "company";
+        groupKind = "branch";
+        groupCandidates = branchCandidates;
+      } else {
+        const departmentCandidates = scope.departmentOptions.filter((department) => !args.branchId || department.branchId === args.branchId);
+        if (departmentCandidates.length >= 2) {
+          level = "branch";
+          groupKind = "department";
+          groupCandidates = departmentCandidates;
+        } else {
+          level = "department";
+        }
+      }
+    }
 
-    const recentCompletions = completionEvents
-      .slice()
-      .sort((a, b) => b.at - a.at)
-      .slice(0, 8)
-      .map((event) => {
-        const actor = event.byMembershipId ? people.get(event.byMembershipId) : null;
-        return {
-          id: `${event.kind}:${event.taskId}:${event.at}`,
-          kind: event.kind,
-          title: event.title,
-          completedAt: event.at,
-          actorName: actor ? actor.name : null,
-        };
-      });
-    const recentAudit = access.caps.has("company:view_audit_log")
-      ? (await ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(6)).map((event) => ({
-        id: event._id,
-        action: event.action,
-        targetType: event.targetType,
-        createdAt: event.createdAt,
-      }))
-      : [];
+    const employeeTotals = new Map<Id<"companyMemberships">, { id: Id<"companyMemberships">; name: string; jdDue: number; jdCompleted: number; tasksAssigned: number; tasksCompleted: number }>();
+    if (level !== "user") {
+      for (const id of effectiveIds) {
+        const person = scope.people.get(id);
+        if (person) employeeTotals.set(id, { id, name: person.name, jdDue: 0, jdCompleted: 0, tasksAssigned: 0, tasksCompleted: 0 });
+      }
+      for (const item of items) {
+        for (const assigneeId of item.assigneeIds) {
+          const row = employeeTotals.get(assigneeId);
+          if (!row) continue;
+          if (item.kind === "jd") {
+            row.jdDue += 1;
+            if (item.completed) row.jdCompleted += 1;
+          } else {
+            row.tasksAssigned += 1;
+            if (item.completed) row.tasksCompleted += 1;
+          }
+        }
+      }
+    }
+    const employees = Array.from(employeeTotals.values())
+      .map((row) => {
+        const total = row.jdDue + row.tasksAssigned;
+        const completed = row.jdCompleted + row.tasksCompleted;
+        return { ...row, total, completed, completionRate: safeRate(completed, total) };
+      })
+      .filter((row) => row.total > 0)
+      .sort((a, b) => b.completionRate - a.completionRate || b.total - a.total || a.name.localeCompare(b.name))
+      .slice(0, 5);
+
+    let groups: { kind: "branch" | "department"; rows: { id: string; name: string; total: number; completed: number; completionRate: number }[] } | null = null;
+    if (groupKind) {
+      const memberSets: ReadonlyMap<Id<"companyMemberships">, ReadonlySet<string>> = groupKind === "branch" ? scope.memberBranchIds : scope.memberDepartmentIds;
+      const rows = groupCandidates
+        .map((candidate) => {
+          let total = 0;
+          let completed = 0;
+          for (const item of items) {
+            if (!item.assigneeIds.some((id) => memberSets.get(id)?.has(candidate._id))) continue;
+            total += 1;
+            if (item.completed) completed += 1;
+          }
+          return { id: candidate._id as string, name: candidate.name, total, completed, completionRate: safeRate(completed, total) };
+        })
+        .filter((row) => row.total > 0)
+        .sort((a, b) => b.completionRate - a.completionRate || b.total - a.total || a.name.localeCompare(b.name))
+        .slice(0, 5);
+      groups = { kind: groupKind, rows };
+    }
 
     return {
-      isTruncated,
-      reportState: isTruncated ? "incomplete" as const : "complete" as const,
-      scopeLevel: access.dashboardScope,
-      viewer: {
-        membershipId: access.membership._id,
-        role: access.membership.role,
-        name: viewer?.name ?? "You",
-        firstName: viewer?.firstName ?? "You",
+      isTruncated: completeness.isTruncated,
+      level,
+      today: localDateField(now, timeZone),
+      range: {
+        start: range.start,
+        end: range.end,
+        grouping: range.grouping,
+        startDate: localDateField(range.start, timeZone),
+        endDate: localDateField(range.end, timeZone),
       },
-      company: { _id: access.company._id, name: access.company.name, timeZone: access.company.timeZone ?? null },
-      generatedAt: now,
-      range,
-      appliedFilters: {
-        branchId: args.branchId ?? null,
-        departmentId: args.departmentId ?? null,
-        membershipId: args.membershipId ?? null,
-        taskType: args.taskType ?? "all",
-        status: args.status ?? "all",
-        priority: args.priority ?? "all",
-        frequency: args.frequency ?? "all",
-      },
-      filterOptions: { branches, departments, employees },
-      scope: {
-        people: access.scopedIds.size,
-        branches: access.dashboardScope === "self" ? 0 : branches.length,
-        departments: access.dashboardScope === "self" ? 0 : departments.length,
-      },
-      metrics: {
-        totalTasks,
-        completedTasks,
-        completionRate: safeRate(completedTasks, totalTasks),
-        openTasks,
-        periodCompletions: completionEvents.length,
-        notStartedTasks,
-        inProgressTasks,
-        overdueTasks,
-        oneTimeTasks: typeCounts.get("one_time") ?? 0,
-        recurringTasks: typeCounts.get("jd") ?? 0,
-        lateCompletions,
-        lateCompletionRate: safeRate(lateCompletions, completionEvents.filter((event) => event.kind === "one_time").length),
-        isTruncated,
-      },
-      breakdowns: {
-        status: makeBreakdown(["due", "in_progress", "completed", "overdue"] as const, statusCounts, { due: "Pending", in_progress: "In progress", completed: "Completed", overdue: "Overdue" }),
-        priority: makeBreakdown(["high", "medium", "low"] as const, priorityCounts, { high: "High", medium: "Medium", low: "Low" }),
-        frequency: makeBreakdown(["daily", "every_other_day", "weekly", "semimonthly", "monthly", "quarterly", "semiannually", "annually"] as const, frequencyCounts, { daily: "Daily", every_other_day: "Alternate days", weekly: "Weekly", semimonthly: "Semi-monthly", monthly: "Monthly", quarterly: "Quarterly", semiannually: "Bi-yearly", annually: "Yearly" }),
-        type: makeBreakdown(["one_time", "jd"] as const, typeCounts, { one_time: "One-time", jd: "JD / recurring" }),
-      },
-      jdCycleHealth: {
-        completedCycles: jdCompletions,
-        missedCycles: jdMissedCycles,
-        healthyRate: safeRate(jdCompletions, jdCompletions + jdMissedCycles),
-      },
-      sopStats,
-      trends: buildTrend(filteredTasks, completionEvents, missedEvents, range.start, range.end),
-      comparisons: {
-        branches: branchPerformance.slice(0, 12),
-        departments: departmentPerformance.slice(0, 12),
-        employees: personPerformance.slice(0, 12),
-        topPerformers,
-        needsAttention,
-      },
-      recent: {
-        completions: recentCompletions,
-        audit: recentAudit,
-      },
-      limitations: {
-        sopCompliance: false,
-        lateJdCompletionRate: false,
-        dataTruncated: isTruncated,
-      },
+      jd: { due: jdDue, completed: jdCompleted, overdue: jdOverdue, completionRate: safeRate(jdCompleted, jdDue) },
+      tasks: { assigned: tasksAssigned, completed: tasksCompleted, overdue: tasksOverdue, completionRate: safeRate(tasksCompleted, tasksAssigned) },
+      trend,
+      rankings: { employees, groups },
     };
   },
 });
@@ -758,7 +533,7 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
   const { membership } = await requireMembership(ctx, args.companyId);
   const caps = await membershipCapabilities(ctx, membership);
   assertAnalyticsViewAccess(caps);
-  const completeness: QueryCompleteness = { isTruncated: false };
+  const completeness: QueryCompleteness = { isTruncated: false, truncatedReads: 0, remaining: dashboardReadBudget };
   const scoped = await analyticsScopedMembershipIds(
     ctx,
     args.companyId,
@@ -766,11 +541,11 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
     caps,
     () => { completeness.isTruncated = true; },
   );
-  const jd = await takeDashboardRows(
+  const jd = await takeBudgetedRows(
     completeness,
     (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
   );
-  const one = await takeDashboardRows(
+  const one = await takeBudgetedRows(
     completeness,
     (limit) => ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
   );
@@ -778,7 +553,7 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
   const visibleOne = one.filter((task) => taskHasVisibleAssignee(task, scoped));
   const overdueOne = visibleOne.filter((t) => t.status !== "completed" && (t.overdueAt || (t.dueDate && t.dueDate < Date.now()))).length;
   const completedOne = visibleOne.filter((t) => t.status === "completed").length;
-  const sops = await takeDashboardRows(
+  const sops = await takeBudgetedRows(
     completeness,
     (limit) => ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
   );

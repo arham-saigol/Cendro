@@ -139,8 +139,21 @@ export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks"
   const { cycles, nextActiveAt } = elapsedJdCyclesSince(task.recurrence, task.cycleStartedAt, now, 200, timeZone ?? await companyTimeZone(ctx, task.companyId));
   for (const cycle of cycles) {
     const done = await currentJdCompletion(ctx, task._id, cycle.start);
+    // Legacy tasks predate jdTaskCompletions; their only completed-cycle signal
+    // is the status pair stamped when the cycle was current.
+    const markedDone = task.status === "completed" && task.statusCycleStart === cycle.start;
     const recorded = await currentJdCycleRecord(ctx, task._id, cycle.start);
-    if (!done && !recorded) await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.end, status: "missed", recordedAt: now });
+    if (done) continue;
+    if (markedDone) {
+      // Persist the stamped completion before cycleStartedAt advances past the
+      // cycle, or the dashboard loses it once the stamp moves on. A missed
+      // record for the same cycle is wrong history, so remove it rather than
+      // leave a completed cycle listed as missed.
+      if (recorded) await ctx.db.delete(recorded._id);
+      await ctx.db.insert("jdTaskCompletions", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.end, completedAt: cycle.end });
+    } else if (!recorded) {
+      await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.end, status: "missed", recordedAt: now });
+    }
   }
   if (cycles.length > 0) {
     await ctx.db.patch(task._id, { cycleStartedAt: nextActiveAt });
@@ -953,7 +966,7 @@ async function setJdStatus(ctx: MutationCtx, companyId: Id<"companies">, taskId:
   const previousStatus = state.rawStatus;
   const existing = await currentJdCompletion(ctx, taskId, state.currentCycleStart);
   if (status === "completed") {
-    if (!existing) await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId: taskId, cycleStart: state.currentCycleStart, completedByMembershipId: membership._id, completedAt: now, note: cleanOptionalText(note) });
+    if (!existing) await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId: taskId, cycleStart: state.currentCycleStart, cycleEnd: state.currentCycleEnd, completedByMembershipId: membership._id, completedAt: now, note: cleanOptionalText(note) });
   } else if (existing) {
     await ctx.db.delete(existing._id);
   }

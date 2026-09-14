@@ -1,1141 +1,718 @@
 "use client";
 
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { ConvexError } from "convex/values";
 import { useQuery_experimental } from "convex/react";
-import {
-  AlertCircle,
-  AlertTriangle,
-  BarChart3,
-  Building2,
-  Calendar,
-  Check,
-  CheckCircle2,
-  Inbox,
-  Layers,
-  ListTodo,
-  RotateCcw,
-  Timer,
-  Trophy,
-  Users,
-} from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import type { FunctionReturnType } from "convex/server";
+import { ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
+import { useEffect, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { PageHeader } from "./page-header";
 import { useCompany } from "./company-context";
-import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { canViewDashboard } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
-import {
-  TanStackTrendChart,
-  type TrendMetricMode,
-} from "./dashboard-charts";
+import { DashboardTrendChart, type DashboardTrendMode } from "./dashboard-charts";
 
-type DashboardScope = "company" | "managed" | "self";
-type DatePreset = "7d" | "30d" | "90d" | "365d";
-type TaskTypeFilter = "all" | "jd" | "one_time";
-type StatusFilter = "all" | "due" | "in_progress" | "completed" | "overdue";
-type PriorityFilter = "all" | "low" | "medium" | "high";
-type FrequencyFilter = "all" | "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "quarterly" | "semiannually" | "annually";
-type DashboardTab = "overview" | "attention" | "organization" | "team" | "breakdowns";
+export type DashboardRangeArg =
+  | { preset: "this_week" | "this_month" | "last_3_months" | "this_year" }
+  | { preset: "custom"; startDate: string; endDate: string };
 
-type BreakdownItem = { key: string; label: string; value: number };
-type TrendPoint = { bucketStart: number; label: string; completed: number; overdue: number; workload: number };
-type PerformanceRow = {
-  id: string;
-  name: string;
-  firstName?: string;
-  role?: string;
-  parentId?: string | null;
-  assigned: number;
-  completed: number;
-  overdue: number;
-  completionRate: number;
-};
+type DashboardFilters = FunctionReturnType<typeof api.analytics.dashboardFilters>;
+type DashboardData = FunctionReturnType<typeof api.analytics.dashboard>;
+type EmployeeRow = DashboardData["rankings"]["employees"][number];
+type GroupRow = { id: string; name: string; completionRate: number };
 
-type DashboardData = {
-  isTruncated: boolean;
-  reportState: "complete" | "incomplete";
-  scopeLevel: DashboardScope;
-  viewer: { membershipId: string; role: string; name: string; firstName: string };
-  company: { _id: string; name: string; timeZone: string | null };
-  generatedAt: number;
-  range: { preset: DatePreset; start: number; end: number; label: string };
-  appliedFilters: {
-    branchId: string | null;
-    departmentId: string | null;
-    membershipId: string | null;
-    taskType: TaskTypeFilter;
-    status: StatusFilter;
-    priority: PriorityFilter;
-    frequency: FrequencyFilter;
-  };
-  filterOptions: {
-    branches: { _id: string; name: string }[];
-    departments: { _id: string; branchId: string; name: string; branchName: string }[];
-    employees: { _id: string; name: string; firstName: string; role: string; branchIds: string[]; departmentIds: string[] }[];
-  };
-  scope: { people: number; branches: number; departments: number };
-  metrics: {
-    totalTasks: number;
-    completedTasks: number;
-    completionRate: number;
-    openTasks: number;
-    periodCompletions: number;
-    notStartedTasks: number;
-    inProgressTasks: number;
-    overdueTasks: number;
-    oneTimeTasks: number;
-    recurringTasks: number;
-    lateCompletions: number;
-    lateCompletionRate: number;
-    isTruncated: boolean;
-  };
-  breakdowns: { status: BreakdownItem[]; priority: BreakdownItem[]; frequency: BreakdownItem[]; type: BreakdownItem[] };
-  jdCycleHealth: { completedCycles: number; missedCycles: number; healthyRate: number };
-  sopStats: { visible: number; byScope: BreakdownItem[] };
-  trends: TrendPoint[];
-  comparisons: {
-    branches: PerformanceRow[];
-    departments: PerformanceRow[];
-    employees: PerformanceRow[];
-    topPerformers: PerformanceRow[];
-    needsAttention: PerformanceRow[];
-  };
-  recent: {
-    completions: { id: string; kind: "jd" | "one_time"; title: string; completedAt: number; actorName: string | null }[];
-    audit: { id: string; action: string; targetType: string; createdAt: number }[];
-  };
-  limitations: { sopCompliance: boolean; lateJdCompletionRate: boolean; dataTruncated: boolean };
-};
+const numberFormat = new Intl.NumberFormat("en-US");
 
-const datePresets: { value: DatePreset; label: string }[] = [
-  { value: "7d", label: "7 days" },
-  { value: "30d", label: "30 days" },
-  { value: "90d", label: "90 days" },
-  { value: "365d", label: "12 months" },
-];
+const filterTriggerClass =
+  "h-8 min-w-[132px] rounded-md border-[var(--hairline)] bg-[var(--surface)] px-2.5 text-[13px] font-normal text-[var(--ink-secondary)] shadow-none hover:bg-[var(--surface-muted)] data-[state=open]:bg-[var(--surface-muted)]";
 
-function formatNumber(val: number) {
-  return new Intl.NumberFormat().format(val);
+function Frame({ className, children }: { className?: string; children: React.ReactNode }) {
+  return <div className={cn("rounded-xl border border-[var(--hairline)] bg-[var(--surface)] p-2", className)}>{children}</div>;
 }
 
-function formatPercent(val: number) {
-  return `${Math.round(val)}%`;
+function Inset({ className, children }: { className?: string; children: React.ReactNode }) {
+  return <div className={cn("rounded-lg border border-[var(--hairline)] bg-[var(--surface-muted)]", className)}>{children}</div>;
 }
 
-function formatTimeAgo(timestamp: number) {
-  const diff = Date.now() - timestamp;
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+const cardTitleClass = "px-1.5 pb-2 pt-1";
+
+function useRoundedNow() {
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 300_000) * 300_000);
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setNow((previous) => {
+        const next = Math.floor(Date.now() / 300_000) * 300_000;
+        return previous === next ? previous : next;
+      });
+    }, 60_000);
+    return () => clearInterval(interval);
+  }, []);
+  return now;
 }
 
-function statusDotColor(key: string) {
-  if (key === "completed" || key === "low") return "bg-[#10b981]";
-  if (key === "overdue" || key === "high") return "bg-[#ef4444]";
-  if (key === "in_progress" || key === "medium") return "bg-[#3b82f6]";
-  return "bg-[var(--ink-faint)]";
-}
-
-// ------------------------------------------------------------------
-// Notion 4-Metric Strip
-// ------------------------------------------------------------------
-
-function NotionMetricStrip({ data }: { data: DashboardData }) {
+function StatCard({ label, value }: { label: string; value: string }) {
   return (
-    <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-      {/* 1. Period Done */}
-      <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-3.5 transition-colors hover:border-[var(--hairline-strong)]">
-        <div className="flex items-center justify-between text-[11.5px] font-medium text-[var(--ink-muted)]">
-          <span>Period Completions</span>
-          <CheckCircle2 className="h-3.5 w-3.5 text-[#10b981]" />
-        </div>
-        <div className="mt-2 text-[24px] font-semibold tracking-tight text-[var(--ink)] tabular-nums">
-          {formatNumber(data.metrics.periodCompletions)}
-        </div>
-        <div className="mt-1 text-[11px] text-[var(--ink-faint)]">
-          {formatPercent(data.metrics.completionRate)} total completion rate
-        </div>
-      </div>
-
-      {/* 2. Open Workload */}
-      <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-3.5 transition-colors hover:border-[var(--hairline-strong)]">
-        <div className="flex items-center justify-between text-[11.5px] font-medium text-[var(--ink-muted)]">
-          <span>Active Workload</span>
-          <ListTodo className="h-3.5 w-3.5 text-[#3b82f6]" />
-        </div>
-        <div className="mt-2 text-[24px] font-semibold tracking-tight text-[var(--ink)] tabular-nums">
-          {formatNumber(data.metrics.openTasks)}
-        </div>
-        <div className="mt-1 text-[11px] text-[var(--ink-faint)]">
-          {formatNumber(data.metrics.inProgressTasks)} in progress · {formatNumber(data.metrics.notStartedTasks)} pending
-        </div>
-      </div>
-
-      {/* 3. Overdue Tasks */}
-      <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-3.5 transition-colors hover:border-[var(--hairline-strong)]">
-        <div className="flex items-center justify-between text-[11.5px] font-medium text-[var(--ink-muted)]">
-          <span>Overdue Work</span>
-          <AlertCircle className={cn("h-3.5 w-3.5", data.metrics.overdueTasks > 0 ? "text-[#ef4444]" : "text-[var(--ink-faint)]")} />
-        </div>
-        <div className={cn("mt-2 text-[24px] font-semibold tracking-tight tabular-nums", data.metrics.overdueTasks > 0 ? "text-[#ef4444]" : "text-[var(--ink)]")}>
-          {formatNumber(data.metrics.overdueTasks)}
-        </div>
-        <div className="mt-1 text-[11px] text-[var(--ink-faint)]">
-          {formatNumber(data.metrics.lateCompletions)} late deliveries
-        </div>
-      </div>
-
-      {/* 4. Cycle Health */}
-      <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-3.5 transition-colors hover:border-[var(--hairline-strong)]">
-        <div className="flex items-center justify-between text-[11.5px] font-medium text-[var(--ink-muted)]">
-          <span>Recurring Cycle Health</span>
-          <Timer className={cn("h-3.5 w-3.5", data.jdCycleHealth.missedCycles > 0 ? "text-[#ef4444]" : "text-[#10b981]")} />
-        </div>
-        <div className={cn("mt-2 text-[24px] font-semibold tracking-tight tabular-nums", data.jdCycleHealth.missedCycles > 0 ? "text-[#ef4444]" : "text-[var(--ink)]")}>
-          {data.jdCycleHealth.missedCycles > 0 ? `${formatNumber(data.jdCycleHealth.missedCycles)} missed` : `${formatPercent(data.jdCycleHealth.healthyRate)}`}
-        </div>
-        <div className="mt-1 text-[11px] text-[var(--ink-faint)]">
-          {formatNumber(data.jdCycleHealth.completedCycles)} cycles completed on time
-        </div>
-      </div>
-    </div>
+    <Frame>
+      <div className="px-1.5 pb-1.5 pt-0.5 text-[12px] font-medium text-[var(--ink-muted)]">{label}</div>
+      <Inset className="rounded-md px-3 py-2.5">
+        <div className="text-[24px] font-semibold leading-none tracking-[-0.02em] tabular-nums text-[var(--ink)]">{value}</div>
+      </Inset>
+    </Frame>
   );
 }
 
-// ------------------------------------------------------------------
-// Notion Inline Filter Row (Ultra Compact Horizontal Pills)
-// ------------------------------------------------------------------
+function StatRow({ heading, cards, className }: { heading: string; cards: { label: string; value: string }[]; className?: string }) {
+  return (
+    <section className={className}>
+      <h2 className="mb-2.5 text-[12px] font-medium text-[var(--ink-muted)]">{heading}</h2>
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        {cards.map((card) => <StatCard key={card.label} label={card.label} value={card.value} />)}
+      </div>
+    </section>
+  );
+}
 
-function NotionInlineFilters({
-  data,
-  datePreset,
+function toDateField(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function fromDateField(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return date.getFullYear() === Number(match[1]) && date.getMonth() === Number(match[2]) - 1 && date.getDate() === Number(match[3]) ? date : null;
+}
+
+const shortDayFormat = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
+const fullDayFormat = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" });
+
+function formatRangeLabel(startDate: string, endDate: string) {
+  const start = fromDateField(startDate);
+  const end = fromDateField(endDate);
+  if (!start || !end) return "Custom";
+  const sameYear = start.getFullYear() === end.getFullYear();
+  return `${sameYear ? shortDayFormat.format(start) : fullDayFormat.format(start)} – ${fullDayFormat.format(end)}`;
+}
+
+function sameCalendarDay(a: Date, b: Date) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function startOfDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+const rangePresets = [
+  { preset: "this_week", label: "This week" },
+  { preset: "this_month", label: "This month" },
+  { preset: "last_3_months", label: "Last 3 months" },
+  { preset: "this_year", label: "This year" },
+] as const;
+
+function DateRangeControl({
+  value,
+  onChange,
+  resolvedRange,
+  today: todayField,
+}: {
+  value: DashboardRangeArg;
+  onChange: (range: DashboardRangeArg) => void;
+  resolvedRange: { startDate: string; endDate: string };
+  today: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const appliedStart = value.preset === "custom" ? fromDateField(value.startDate) : null;
+  const appliedEnd = value.preset === "custom" ? fromDateField(value.endDate) : null;
+  const [monthDate, setMonthDate] = useState(() => startOfDay(appliedStart ?? new Date()));
+  const [draftStart, setDraftStart] = useState<Date | null>(null);
+  const [hoverDate, setHoverDate] = useState<Date | null>(null);
+
+  const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+  const calendarStart = new Date(monthStart);
+  calendarStart.setDate(1 - ((monthStart.getDay() + 6) % 7));
+  const calendarDays: Date[] = [];
+  for (let index = 0; index < 42; index++) {
+    calendarDays.push(new Date(calendarStart));
+    calendarStart.setDate(calendarStart.getDate() + 1);
+  }
+
+  // The server resolves ranges in the company timezone, so the picker bounds
+  // selectable days by the company-local date rather than the browser's.
+  const today = fromDateField(todayField) ?? new Date();
+  const todayStart = startOfDay(today);
+  // Calendar-day ordinal so the two-year span check matches the server, which
+  // compares the same date fields — a DST shift cannot skew either side.
+  const dayOrdinal = (date: Date) => Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86_400_000);
+  const currentMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  const canGoNext = monthStart < currentMonthStart;
+  const monthLabel = monthDate.toLocaleString("en-US", { month: "long", year: "numeric" });
+
+  let rangeStart: Date | null = null;
+  let rangeEnd: Date | null = null;
+  if (draftStart) {
+    const previewEnd = hoverDate ?? draftStart;
+    rangeStart = startOfDay(previewEnd < draftStart ? previewEnd : draftStart);
+    rangeEnd = startOfDay(previewEnd < draftStart ? draftStart : previewEnd);
+  } else if (appliedStart && appliedEnd) {
+    rangeStart = startOfDay(appliedStart);
+    rangeEnd = startOfDay(appliedEnd);
+  }
+
+  function handleOpenChange(nextOpen: boolean) {
+    setOpen(nextOpen);
+    if (nextOpen) {
+      setDraftStart(null);
+      setHoverDate(null);
+      setMonthDate(startOfDay(appliedStart ?? today));
+    }
+  }
+
+  function pick(date: Date) {
+    if (startOfDay(date) > todayStart) return;
+    // The server rejects custom ranges spanning more than two years; keep the
+    // second pick inside that window so the control cannot dead-end on an
+    // invalid request.
+    if (draftStart && Math.abs(dayOrdinal(date) - dayOrdinal(draftStart)) > 731) return;
+    if (!draftStart) {
+      setDraftStart(date);
+      setHoverDate(date);
+      return;
+    }
+    const start = date < draftStart ? date : draftStart;
+    const end = date < draftStart ? draftStart : date;
+    setDraftStart(null);
+    setHoverDate(null);
+    setOpen(false);
+    onChange({ preset: "custom", startDate: toDateField(start), endDate: toDateField(end) });
+  }
+
+  const triggerLabel = formatRangeLabel(resolvedRange.startDate, resolvedRange.endDate);
+  const statusText = draftStart
+    ? "Pick an end date"
+    : formatRangeLabel(resolvedRange.startDate, resolvedRange.endDate);
+
+  return (
+    <DropdownMenu.Root open={open} onOpenChange={handleOpenChange}>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type="button"
+          className={cn(
+            "inline-flex items-center justify-between gap-2 whitespace-nowrap outline-none focus:border-[var(--focus-ring)]",
+            filterTriggerClass,
+            value.preset === "custom" && "text-[var(--ink)]",
+          )}
+        >
+          <span className="min-w-0 truncate">{triggerLabel}</span>
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--ink-faint)]" />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content align="start" sideOffset={6} className="task-menu p-0">
+          <div className="flex flex-col sm:flex-row">
+            <div className="border-b border-[var(--hairline)] p-1.5 sm:w-[150px] sm:border-b-0 sm:border-r">
+              {rangePresets.map((entry) => (
+                <button
+                  key={entry.preset}
+                  type="button"
+                  className={cn(
+                    "task-menu-item w-full text-left",
+                    value.preset === entry.preset && "bg-[var(--surface-muted)] text-[var(--ink)]",
+                  )}
+                  onClick={() => {
+                    onChange({ preset: entry.preset });
+                    handleOpenChange(false);
+                  }}
+                >
+                  {entry.label}
+                </button>
+              ))}
+            </div>
+            <div className="w-[260px] p-3">
+              <div className="mb-2 flex items-center gap-1.5">
+                <div className="flex-1 text-[13px] font-medium text-[var(--ink)]">{monthLabel}</div>
+                <button
+                  type="button"
+                  className="task-icon-btn h-7 w-7"
+                  aria-label="Previous month"
+                  onClick={() => setMonthDate(new Date(monthDate.getFullYear(), monthDate.getMonth() - 1, 1))}
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  className="task-icon-btn h-7 w-7"
+                  aria-label="Next month"
+                  disabled={!canGoNext}
+                  onClick={() => setMonthDate(new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 1))}
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="grid grid-cols-7 text-center text-[11px] font-medium text-[var(--ink-faint)]">
+                {["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map((day) => <div key={day} className="py-1">{day}</div>)}
+              </div>
+              <div className="mt-1 grid grid-cols-7 gap-0.5">
+                {calendarDays.map((date) => {
+                  const day = startOfDay(date);
+                  const inMonth = date.getMonth() === monthDate.getMonth();
+                  const isToday = sameCalendarDay(today, date);
+                  const isFuture = day > todayStart;
+                  const outOfSpan = Boolean(draftStart && Math.abs(dayOrdinal(day) - dayOrdinal(draftStart)) > 731);
+                  const isEnd = Boolean((rangeStart && sameCalendarDay(rangeStart, day)) || (rangeEnd && sameCalendarDay(rangeEnd, day)));
+                  const isBetween = Boolean(rangeStart && rangeEnd && day > rangeStart && day < rangeEnd);
+                  return (
+                    <button
+                      key={date.toISOString()}
+                      type="button"
+                      disabled={isFuture || outOfSpan}
+                      onClick={() => pick(date)}
+                      onMouseEnter={() => { if (draftStart && !isFuture && !outOfSpan) setHoverDate(date); }}
+                      onFocus={() => { if (draftStart && !isFuture && !outOfSpan) setHoverDate(date); }}
+                      className={cn(
+                        "h-8 rounded-md text-[13px] transition-colors",
+                        inMonth ? "text-[var(--ink-secondary)] hover:bg-[var(--surface-muted)]" : "text-[var(--ink-faint)]",
+                        isToday && "font-semibold text-[var(--ink)]",
+                        isBetween && "bg-[var(--surface-muted)]",
+                        isEnd && "bg-[var(--ink)] text-[var(--canvas)] hover:bg-[var(--ink)]",
+                        (isFuture || outOfSpan) && "opacity-40 hover:bg-transparent",
+                      )}
+                    >
+                      {date.getDate()}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-2.5 text-[12px] text-[var(--ink-muted)]">{statusText}</p>
+            </div>
+          </div>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
+function FilterRow({
+  filters,
   branchId,
   departmentId,
   membershipId,
-  taskType,
-  onDatePreset,
-  onBranch,
-  onDepartment,
-  onMembership,
-  onTaskType,
-  onReset,
+  range,
+  resolvedRange,
+  today,
+  onBranchChange,
+  onDepartmentChange,
+  onMembershipChange,
+  onRangeChange,
 }: {
-  data: DashboardData;
-  datePreset: DatePreset;
+  filters: DashboardFilters;
   branchId: string;
   departmentId: string;
   membershipId: string;
-  taskType: TaskTypeFilter;
-  onDatePreset: (v: DatePreset) => void;
-  onBranch: (v: string) => void;
-  onDepartment: (v: string) => void;
-  onMembership: (v: string) => void;
-  onTaskType: (v: TaskTypeFilter) => void;
-  onReset: () => void;
+  range: DashboardRangeArg;
+  resolvedRange: { startDate: string; endDate: string };
+  today: string;
+  onBranchChange: (value: string) => void;
+  onDepartmentChange: (value: string) => void;
+  onMembershipChange: (value: string) => void;
+  onRangeChange: (range: DashboardRangeArg) => void;
 }) {
-  const showScope = data.scopeLevel !== "self";
-
-  const branchOptions = useMemo(
-    () => [{ value: "all", label: "All branches" }, ...(data.filterOptions.branches ?? []).map((b) => ({ value: b._id, label: b.name }))],
-    [data],
+  const departments = branchId === "all" ? filters.departments : filters.departments.filter((department) => department.branchId === branchId);
+  const users = filters.users.filter(
+    (user) =>
+      (branchId === "all" || user.branchIds.includes(branchId as Id<"branches">)) &&
+      (departmentId === "all" || user.departmentIds.includes(departmentId as Id<"departments">)),
   );
-  const departmentOptions = useMemo(() => {
-    const departments = (data.filterOptions.departments ?? []).filter((d) => branchId === "all" || d.branchId === branchId);
-    return [{ value: "all", label: "All departments" }, ...departments.map((d) => ({ value: d._id, label: d.name }))];
-  }, [branchId, data]);
-  const employeeOptions = useMemo(() => {
-    const employees = (data.filterOptions.employees ?? []).filter((e) => {
-      if (branchId !== "all" && !e.branchIds.includes(branchId)) return false;
-      if (departmentId !== "all" && !e.departmentIds.includes(departmentId)) return false;
-      return true;
-    });
-    return [{ value: "all", label: "All people" }, ...employees.map((e) => ({ value: e._id, label: e.name }))];
-  }, [branchId, data, departmentId]);
-
-  const hasActiveFilters = datePreset !== "30d" || branchId !== "all" || departmentId !== "all" || membershipId !== "all" || taskType !== "all";
-
   return (
-    <div className="mb-5 flex flex-wrap items-center justify-between gap-2 border-b border-[var(--hairline)] pb-2.5">
-      <div className="flex flex-wrap items-center gap-2">
-        {/* Date Filter */}
-        <Select value={datePreset} onValueChange={(v) => onDatePreset(v as DatePreset)}>
-          <SelectTrigger className="h-7.5 w-auto min-w-[115px] rounded-md border-[var(--hairline)] bg-[var(--surface)] px-2.5 text-[12px] font-normal shadow-none hover:bg-[var(--surface-muted)]">
-            <Calendar className="mr-1.5 h-3 w-3 shrink-0 text-[var(--ink-faint)]" />
+    <div className="mb-7 flex flex-wrap items-center gap-2">
+      {filters.branches.length >= 2 && (
+        <Select value={branchId} onValueChange={onBranchChange}>
+          <SelectTrigger className={cn(filterTriggerClass, branchId !== "all" && "text-[var(--ink)]")}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {datePresets.map((opt) => (
-              <SelectItem key={opt.value} value={opt.value} className="text-[12px]">
-                {opt.label}
-              </SelectItem>
+            <SelectItem value="all" className="text-[13px]">All branches</SelectItem>
+            {filters.branches.map((branch) => (
+              <SelectItem key={branch._id} value={branch._id} className="text-[13px]">{branch.name}</SelectItem>
             ))}
           </SelectContent>
         </Select>
-
-        {showScope && (
-          <>
-            {/* Branch Filter */}
-            <Select
-              value={branchId}
-              onValueChange={(val) => {
-                onBranch(val);
-                onDepartment("all");
-                onMembership("all");
-              }}
-            >
-              <SelectTrigger
-                className={cn(
-                  "h-7.5 w-auto min-w-[125px] rounded-md border-[var(--hairline)] bg-[var(--surface)] px-2.5 text-[12px] shadow-none hover:bg-[var(--surface-muted)]",
-                  branchId !== "all" ? "border-[var(--primary)] text-[var(--primary)] font-medium" : "text-[var(--ink-secondary)] font-normal"
-                )}
-              >
-                <Building2 className="mr-1.5 h-3 w-3 shrink-0 text-[var(--ink-faint)]" />
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {branchOptions.map((b) => (
-                  <SelectItem key={b.value} value={b.value} className="text-[12px]">
-                    {b.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            {/* Department Filter */}
-            <Select
-              value={departmentId}
-              onValueChange={(val) => {
-                onDepartment(val);
-                onMembership("all");
-              }}
-              disabled={departmentOptions.length <= 1}
-            >
-              <SelectTrigger
-                className={cn(
-                  "h-7.5 w-auto min-w-[135px] rounded-md border-[var(--hairline)] bg-[var(--surface)] px-2.5 text-[12px] shadow-none hover:bg-[var(--surface-muted)]",
-                  departmentId !== "all" ? "border-[var(--primary)] text-[var(--primary)] font-medium" : "text-[var(--ink-secondary)] font-normal"
-                )}
-              >
-                <Layers className="mr-1.5 h-3 w-3 shrink-0 text-[var(--ink-faint)]" />
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {departmentOptions.map((d) => (
-                  <SelectItem key={d.value} value={d.value} className="text-[12px]">
-                    {d.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            {/* People Filter */}
-            <Select value={membershipId} onValueChange={onMembership} disabled={employeeOptions.length <= 1}>
-              <SelectTrigger
-                className={cn(
-                  "h-7.5 w-auto min-w-[120px] rounded-md border-[var(--hairline)] bg-[var(--surface)] px-2.5 text-[12px] shadow-none hover:bg-[var(--surface-muted)]",
-                  membershipId !== "all" ? "border-[var(--primary)] text-[var(--primary)] font-medium" : "text-[var(--ink-secondary)] font-normal"
-                )}
-              >
-                <Users className="mr-1.5 h-3 w-3 shrink-0 text-[var(--ink-faint)]" />
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {employeeOptions.map((e) => (
-                  <SelectItem key={e.value} value={e.value} className="text-[12px]">
-                    {e.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </>
-        )}
-
-        {/* Task Type Filter */}
-        <Select value={taskType} onValueChange={(v) => onTaskType(v as TaskTypeFilter)}>
-          <SelectTrigger
-            className={cn(
-              "h-7.5 w-auto min-w-[125px] rounded-md border-[var(--hairline)] bg-[var(--surface)] px-2.5 text-[12px] shadow-none hover:bg-[var(--surface-muted)]",
-              taskType !== "all" ? "border-[var(--primary)] text-[var(--primary)] font-medium" : "text-[var(--ink-secondary)] font-normal"
-            )}
-          >
-            <ListTodo className="mr-1.5 h-3 w-3 shrink-0 text-[var(--ink-faint)]" />
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all" className="text-[12px]">All task kinds</SelectItem>
-            <SelectItem value="jd" className="text-[12px]">Recurring JD</SelectItem>
-            <SelectItem value="one_time" className="text-[12px]">One-time tasks</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-
-      {hasActiveFilters && (
-        <button
-          type="button"
-          onClick={onReset}
-          className="inline-flex items-center gap-1 text-[11.5px] font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
-        >
-          <RotateCcw className="h-3 w-3" />
-          Reset filters
-        </button>
       )}
+      {filters.departments.length >= 2 && (
+        <Select value={departmentId} onValueChange={onDepartmentChange}>
+          <SelectTrigger className={cn(filterTriggerClass, departmentId !== "all" && "text-[var(--ink)]")}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all" className="text-[13px]">All departments</SelectItem>
+            {departments.map((department) => (
+              <SelectItem key={department._id} value={department._id} className="text-[13px]">{department.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
+      {filters.users.length >= 2 && (
+        <Select value={membershipId} onValueChange={onMembershipChange}>
+          <SelectTrigger className={cn(filterTriggerClass, membershipId !== "all" && "text-[var(--ink)]")}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all" className="text-[13px]">All users</SelectItem>
+            {users.map((user) => (
+              <SelectItem key={user._id} value={user._id} className="text-[13px]">{user.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
+      <DateRangeControl value={range} onChange={onRangeChange} resolvedRange={resolvedRange} today={today} />
     </div>
   );
 }
 
-// ------------------------------------------------------------------
-// Overview View
-// ------------------------------------------------------------------
-
-function OverviewView({ data }: { data: DashboardData }) {
-  const [metricMode, setMetricMode] = useState<TrendMetricMode>("all");
-  const isEmptyTrend = data.trends.every((p) => p.completed === 0 && p.overdue === 0 && p.workload === 0);
-
+function ChartCard({ data, mode, onModeChange }: { data: DashboardData; mode: DashboardTrendMode; onModeChange: (mode: DashboardTrendMode) => void }) {
+  const empty = data.trend.every((bucket) => (mode === "jd" ? bucket.jdDue === 0 : bucket.tasksAssigned === 0));
   return (
-    <div className="space-y-6">
-      {/* TanStack Charts Performance Trend */}
-      <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-4 shadow-2xs">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--hairline)] pb-3">
-          <div className="flex items-center gap-2">
-            <BarChart3 className="h-4 w-4 text-[var(--ink-secondary)]" />
-            <span className="text-[13px] font-semibold text-[var(--ink)]">Performance Throughput</span>
-            <span className="text-[11.5px] text-[var(--ink-faint)]">({data.range.label})</span>
-          </div>
-
-          <div className="flex items-center gap-1 rounded bg-[var(--surface-muted)]/70 p-0.5">
-            <button
-              type="button"
-              onClick={() => setMetricMode("all")}
-              className={cn(
-                "rounded px-2 py-0.5 text-[11px] font-medium transition-colors",
-                metricMode === "all" ? "bg-[var(--surface)] text-[var(--ink)] shadow-2xs font-semibold" : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
-              )}
-            >
-              All Series
-            </button>
-            <button
-              type="button"
-              onClick={() => setMetricMode("completed")}
-              className={cn(
-                "rounded px-2 py-0.5 text-[11px] font-medium transition-colors",
-                metricMode === "completed" ? "bg-[var(--surface)] text-[#10b981] shadow-2xs font-semibold" : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
-              )}
-            >
-              Done
-            </button>
-            <button
-              type="button"
-              onClick={() => setMetricMode("workload")}
-              className={cn(
-                "rounded px-2 py-0.5 text-[11px] font-medium transition-colors",
-                metricMode === "workload" ? "bg-[var(--surface)] text-[#3b82f6] shadow-2xs font-semibold" : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
-              )}
-            >
-              Workload
-            </button>
-            <button
-              type="button"
-              onClick={() => setMetricMode("overdue")}
-              className={cn(
-                "rounded px-2 py-0.5 text-[11px] font-medium transition-colors",
-                metricMode === "overdue" ? "bg-[var(--surface)] text-[#ef4444] shadow-2xs font-semibold" : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
-              )}
-            >
-              Overdue
-            </button>
-          </div>
+    <Frame className="mt-6">
+      <div className={cn(cardTitleClass, "flex items-center justify-between gap-3")}>
+        <div className="flex items-center gap-4 text-[12px] text-[var(--ink-muted)]">
+          <span className="flex items-center gap-1.5">
+            <span className="w-4 border-t-2 border-[var(--badge-blue-fg)]" />
+            Completed
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-4 border-t-2 border-[var(--ink-secondary)]" />
+            {mode === "jd" ? "Due" : "Assigned"}
+          </span>
         </div>
-
-        <div className="pt-3">
-          {isEmptyTrend ? (
-            <div className="flex h-48 flex-col items-center justify-center text-center">
-              <Inbox className="h-5 w-5 text-[var(--ink-faint)]" />
-              <p className="mt-1.5 text-[12.5px] font-medium text-[var(--ink)]">No activity during this period</p>
-              <p className="text-[11px] text-[var(--ink-faint)]">Tasks scheduled or completed will automatically graph here.</p>
-            </div>
-          ) : (
-            <TanStackTrendChart data={data.trends} mode={metricMode} height={200} />
-          )}
-        </div>
+        <Tabs value={mode} onValueChange={(value) => onModeChange(value as DashboardTrendMode)}>
+          <TabsList>
+            <TabsTrigger value="jd" className="px-2.5 py-1 text-[12.5px]">Job Description</TabsTrigger>
+            <TabsTrigger value="tasks" className="px-2.5 py-1 text-[12.5px]">Tasks</TabsTrigger>
+          </TabsList>
+        </Tabs>
       </div>
-
-      {/* Grid: Status Distribution + Activity Stream */}
-      <div className="grid gap-5 sm:grid-cols-2">
-        {/* Status Distribution */}
-        <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-4 shadow-2xs">
-          <div className="flex items-center justify-between border-b border-[var(--hairline)] pb-2.5">
-            <span className="text-[13px] font-semibold text-[var(--ink)]">Workload by Status</span>
-            <span className="text-[11.5px] tabular-nums text-[var(--ink-faint)]">{data.metrics.totalTasks} total</span>
+      <Inset className="p-4 sm:p-6">
+        {empty ? (
+          <div className="grid h-[260px] place-items-center">
+            <p className="text-[12.5px] text-[var(--ink-faint)]">No activity in this period</p>
           </div>
+        ) : (
+          <DashboardTrendChart points={data.trend} mode={mode} height={260} />
+        )}
+      </Inset>
+    </Frame>
+  );
+}
 
-          <div className="mt-3 space-y-2.5">
-            {data.breakdowns.status.map((item) => (
-              <div key={item.key} className="flex items-center justify-between text-[12px]">
-                <div className="flex items-center gap-2">
-                  <span className={cn("h-2 w-2 rounded-full", statusDotColor(item.key))} />
-                  <span className="text-[var(--ink-secondary)]">{item.label}</span>
-                </div>
-                <div className="flex items-center gap-2 tabular-nums">
-                  <span className="font-medium text-[var(--ink)]">{item.value}</span>
-                  <span className="text-[11px] text-[var(--ink-faint)]">
-                    ({data.metrics.totalTasks > 0 ? `${Math.round((item.value / data.metrics.totalTasks) * 100)}%` : "0%"})
-                  </span>
-                </div>
+const emptyRankings = <p className="py-6 text-center text-[12.5px] text-[var(--ink-faint)]">No work recorded in this period.</p>;
+
+function RankingList({ title, rows }: { title: string; rows: GroupRow[] }) {
+  return (
+    <Frame>
+      <div className={cn(cardTitleClass, "text-[13px] font-medium text-[var(--ink)]")}>{title}</div>
+      <Inset className="px-3.5 py-1.5">
+        {rows.length === 0 ? (
+          emptyRankings
+        ) : (
+          <div className="divide-y divide-[var(--hairline)]">
+            {rows.map((row, index) => (
+              <div key={row.id} className="flex items-center gap-3 py-2.5 text-[13px]">
+                <span className="w-4 text-[12px] tabular-nums text-[var(--ink-faint)]">{index + 1}</span>
+                <span className="min-w-0 flex-1 truncate text-[var(--ink)]">{row.name}</span>
+                <span className="tabular-nums text-[var(--ink-secondary)]">{row.completionRate}%</span>
               </div>
             ))}
           </div>
-
-          <div className="mt-3.5 flex h-1.5 overflow-hidden rounded-full bg-[var(--surface-muted)]">
-            {data.breakdowns.status
-              .filter((i) => i.value > 0)
-              .map((i) => (
-                <span
-                  key={i.key}
-                  style={{ width: `${(i.value / (data.metrics.totalTasks || 1)) * 100}%` }}
-                  className={statusDotColor(i.key)}
-                />
-              ))}
-          </div>
-        </div>
-
-        {/* Live Activity Feed */}
-        <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-4 shadow-2xs">
-          <div className="flex items-center justify-between border-b border-[var(--hairline)] pb-2.5">
-            <span className="text-[13px] font-semibold text-[var(--ink)]">Recent Completions</span>
-            <span className="text-[11px] text-[var(--ink-faint)]">Live Stream</span>
-          </div>
-
-          <div className="mt-3">
-            {data.recent.completions.length === 0 ? (
-              <div className="py-6 text-center text-[12px] text-[var(--ink-faint)]">
-                No completions in this timeframe yet.
-              </div>
-            ) : (
-              <div className="space-y-1.5">
-                {data.recent.completions.slice(0, 5).map((item) => (
-                  <div
-                    key={item.id}
-                    className="flex items-center justify-between rounded p-1.5 text-[12px] transition-colors hover:bg-[var(--surface-muted)]"
-                  >
-                    <div className="flex min-w-0 items-center gap-2">
-                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[#10b981]" />
-                      <span className="truncate font-medium text-[var(--ink)]">{item.title}</span>
-                    </div>
-                    <span className="shrink-0 text-[11px] text-[var(--ink-faint)]">
-                      {item.actorName ? `${item.actorName} · ` : ""}
-                      {formatTimeAgo(item.completedAt)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
+        )}
+      </Inset>
+    </Frame>
   );
 }
 
-// ------------------------------------------------------------------
-// Attention View
-// ------------------------------------------------------------------
-
-function AttentionView({
-  data,
-  onSelectEmployee,
-}: {
-  data: DashboardData;
-  onSelectEmployee: (id: string) => void;
-}) {
-  const isClean = data.metrics.overdueTasks === 0 && data.jdCycleHealth.missedCycles === 0 && data.metrics.lateCompletions === 0;
-
+function EmployeeTable({ title, rows }: { title: string; rows: EmployeeRow[] }) {
+  const gridClass = "grid grid-cols-[minmax(0,1fr)_88px] sm:grid-cols-[minmax(0,1fr)_120px_120px_96px]";
   return (
-    <div className="space-y-5">
-      <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-4 shadow-2xs">
-        <div className="flex items-center justify-between border-b border-[var(--hairline)] pb-3">
+    <Frame>
+      <div className={cn(cardTitleClass, "text-[13px] font-medium text-[var(--ink)]")}>{title}</div>
+      <Inset className="px-3.5 py-2">
+        {rows.length === 0 ? (
+          emptyRankings
+        ) : (
           <div>
-            <h3 className="text-[13.5px] font-semibold text-[var(--ink)]">Attention Queue</h3>
-            <p className="text-[11.5px] text-[var(--ink-muted)]">Bottlenecks and overdue deliverables.</p>
-          </div>
-          {isClean && (
-            <Badge tone="green" className="text-[11px]">
-              <Check className="mr-1 h-3 w-3" />
-              All Clear
-            </Badge>
-          )}
-        </div>
-
-        <div className="mt-3.5 grid gap-3 sm:grid-cols-3">
-          <div className="rounded-md border border-[var(--hairline)] bg-[var(--surface-muted)]/30 p-3">
-            <div className="text-[11.5px] font-medium text-[var(--ink-muted)]">Overdue Tasks</div>
-            <div className={cn("mt-1 text-[20px] font-semibold tabular-nums", data.metrics.overdueTasks > 0 ? "text-[#ef4444]" : "text-[var(--ink)]")}>
-              {formatNumber(data.metrics.overdueTasks)}
+            <div className={cn(gridClass, "border-b border-[var(--hairline)] pb-2 text-[11.5px] font-medium text-[var(--ink-faint)]")}>
+              <div>Employee</div>
+              <div className="hidden text-right sm:block">Job Description</div>
+              <div className="hidden text-right sm:block">Tasks</div>
+              <div className="text-right">Completion</div>
             </div>
-            <div className="mt-0.5 text-[11px] text-[var(--ink-faint)]">Past deadline</div>
-          </div>
-
-          <div className="rounded-md border border-[var(--hairline)] bg-[var(--surface-muted)]/30 p-3">
-            <div className="text-[11.5px] font-medium text-[var(--ink-muted)]">Missed JD Cycles</div>
-            <div className={cn("mt-1 text-[20px] font-semibold tabular-nums", data.jdCycleHealth.missedCycles > 0 ? "text-[#ef4444]" : "text-[var(--ink)]")}>
-              {formatNumber(data.jdCycleHealth.missedCycles)}
-            </div>
-            <div className="mt-0.5 text-[11px] text-[var(--ink-faint)]">Missed recurring cycles</div>
-          </div>
-
-          <div className="rounded-md border border-[var(--hairline)] bg-[var(--surface-muted)]/30 p-3">
-            <div className="text-[11.5px] font-medium text-[var(--ink-muted)]">Late Completions</div>
-            <div className={cn("mt-1 text-[20px] font-semibold tabular-nums", data.metrics.lateCompletions > 0 ? "text-[#ef4444]" : "text-[var(--ink)]")}>
-              {formatNumber(data.metrics.lateCompletions)}
-            </div>
-            <div className="mt-0.5 text-[11px] text-[var(--ink-faint)]">
-              {formatPercent(data.metrics.lateCompletionRate)} late rate
-            </div>
-          </div>
-        </div>
-
-        {data.scopeLevel !== "self" && (
-          <div className="mt-5 border-t border-[var(--hairline)] pt-3.5">
-            <div className="mb-2.5 flex items-center justify-between">
-              <span className="text-[12px] font-semibold text-[var(--ink)]">Team Members with Bottlenecks</span>
-              <span className="text-[11px] text-[var(--ink-faint)]">{data.comparisons.needsAttention.length} listed</span>
-            </div>
-
-            {data.comparisons.needsAttention.length === 0 ? (
-              <p className="py-2 text-[12px] text-[var(--ink-faint)]">No team members flagged for overdue tasks or poor throughput.</p>
-            ) : (
-              <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-3">
-                {data.comparisons.needsAttention.map((person) => (
-                  <button
-                    key={person.id}
-                    type="button"
-                    onClick={() => onSelectEmployee(person.id)}
-                    className="flex items-center justify-between rounded border border-[var(--hairline)] bg-[var(--surface)] p-2.5 text-left transition-colors hover:bg-[var(--surface-muted)]"
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate text-[12.5px] font-medium text-[var(--ink)]">{person.name}</div>
-                      <div className="text-[11px] text-[var(--ink-faint)]">{formatPercent(person.completionRate)} done · {person.assigned} tasks</div>
-                    </div>
-                    <Badge tone="red" className="shrink-0 text-[10px]">
-                      {person.overdue} overdue
-                    </Badge>
-                  </button>
-                ))}
+            {rows.map((row) => (
+              <div key={row.id} className={cn(gridClass, "items-center border-b border-[var(--hairline)] py-2.5 text-[13px] tabular-nums last:border-0")}>
+                <div className="min-w-0 truncate text-[var(--ink)]">{row.name}</div>
+                <div className="hidden text-right text-[var(--ink-secondary)] sm:block">{row.jdCompleted}/{row.jdDue}</div>
+                <div className="hidden text-right text-[var(--ink-secondary)] sm:block">{row.tasksCompleted}/{row.tasksAssigned}</div>
+                <div className="text-right text-[var(--ink)]">{row.completionRate}%</div>
               </div>
-            )}
+            ))}
           </div>
         )}
-      </div>
-    </div>
+      </Inset>
+    </Frame>
   );
 }
 
-// ------------------------------------------------------------------
-// Notion Database Table Component
-// ------------------------------------------------------------------
-
-function NotionDatabaseTable({
-  title,
-  rows,
-  emptyMessage,
-  onSelectRow,
-}: {
-  title: string;
-  rows: PerformanceRow[];
-  emptyMessage: string;
-  onSelectRow?: (row: PerformanceRow) => void;
-}) {
-  const maxAssigned = Math.max(1, ...rows.map((r) => r.assigned));
-
-  return (
-    <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] shadow-2xs">
-      <div className="flex items-center justify-between border-b border-[var(--hairline)] px-4 py-2.5">
-        <span className="text-[13px] font-semibold text-[var(--ink)]">{title}</span>
-        <span className="text-[11px] tabular-nums text-[var(--ink-faint)]">{rows.length} rows</span>
+function RankingsSection({ data }: { data: DashboardData }) {
+  const groups = data.rankings.groups;
+  if (data.level === "user") return null;
+  if (data.level === "department") {
+    return (
+      <div className="mt-6">
+        <EmployeeTable title="Top performing employees" rows={data.rankings.employees} />
       </div>
-
-      {rows.length === 0 ? (
-        <div className="py-8 text-center text-[12px] text-[var(--ink-faint)]">{emptyMessage}</div>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="task-table w-full text-left text-[12.5px]">
-            <thead>
-              <tr className="border-b border-[var(--hairline)] text-[11px] font-semibold text-[var(--ink-faint)]">
-                <th className="px-4 py-2">Name</th>
-                <th className="px-4 py-2">Workload</th>
-                <th className="px-4 py-2 text-right">Completion</th>
-                <th className="px-4 py-2 text-right">Overdue</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr
-                  key={row.id}
-                  tabIndex={onSelectRow ? 0 : undefined}
-                  role={onSelectRow ? "button" : undefined}
-                  onClick={() => onSelectRow?.(row)}
-                  onKeyDown={
-                    onSelectRow
-                      ? (e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            onSelectRow(row);
-                          }
-                        }
-                      : undefined
-                  }
-                  className={cn(
-                    "border-b border-[var(--hairline)]/50 transition-colors hover:bg-[var(--surface-muted)]/50",
-                    onSelectRow && "cursor-pointer focus-visible:outline-none focus-visible:bg-[var(--surface-muted)]"
-                  )}
-                >
-                  <td className="px-4 py-2.5 font-medium text-[var(--ink)]">
-                    <div className="flex items-center gap-1.5">
-                      <span>{row.name}</span>
-                      {row.role && (
-                        <Badge tone="neutral" className="text-[10px]">
-                          {row.role}
-                        </Badge>
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <div className="flex max-w-[180px] items-center gap-2">
-                      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--surface-muted)]">
-                        <div
-                          className="h-full rounded-full bg-[var(--primary)]"
-                          style={{ width: `${(row.assigned / maxAssigned) * 100}%` }}
-                        />
-                      </div>
-                      <span className="text-[11px] tabular-nums text-[var(--ink-faint)]">
-                        {row.assigned}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-[var(--ink)]">
-                    {formatPercent(row.completionRate)}
-                  </td>
-                  <td className="px-4 py-2.5 text-right tabular-nums">
-                    {row.overdue > 0 ? (
-                      <span className="font-semibold text-[#ef4444]">{row.overdue}</span>
-                    ) : (
-                      <span className="text-[var(--ink-faint)]">0</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+    );
+  }
+  return (
+    <div className="mt-6 grid gap-4 md:grid-cols-2">
+      <RankingList title="Top performing employees" rows={data.rankings.employees} />
+      {groups && (
+        <RankingList title={groups.kind === "branch" ? "Top performing branches" : "Top departments"} rows={groups.rows} />
       )}
     </div>
   );
 }
 
-// ------------------------------------------------------------------
-// Main Dashboard Page
-// ------------------------------------------------------------------
+export function DashboardView({
+  filters,
+  data,
+  pending = false,
+  branchId,
+  departmentId,
+  membershipId,
+  range,
+  chartMode,
+  onBranchChange,
+  onDepartmentChange,
+  onMembershipChange,
+  onRangeChange,
+  onChartModeChange,
+}: {
+  filters: DashboardFilters;
+  data: DashboardData;
+  pending?: boolean;
+  branchId: string;
+  departmentId: string;
+  membershipId: string;
+  range: DashboardRangeArg;
+  chartMode: DashboardTrendMode;
+  onBranchChange: (value: string) => void;
+  onDepartmentChange: (value: string) => void;
+  onMembershipChange: (value: string) => void;
+  onRangeChange: (range: DashboardRangeArg) => void;
+  onChartModeChange: (mode: DashboardTrendMode) => void;
+}) {
+  return (
+    <div className="app-page">
+      <PageHeader title="Dashboard" />
+      <div className={cn("transition-opacity", pending && "opacity-60")} aria-busy={pending || undefined}>
+        <FilterRow
+          filters={filters}
+          branchId={branchId}
+          departmentId={departmentId}
+          membershipId={membershipId}
+          range={range}
+          resolvedRange={data.range}
+          today={data.today}
+          onBranchChange={onBranchChange}
+          onDepartmentChange={onDepartmentChange}
+          onMembershipChange={onMembershipChange}
+          onRangeChange={onRangeChange}
+        />
+        {(data.isTruncated || filters.isTruncated) && (
+          <p className="mb-5 text-[12.5px] text-[var(--ink-muted)]">Some records and filter options were omitted because this workspace exceeds the reporting limit.</p>
+        )}
+        <StatRow
+          heading="Job Description"
+          cards={[
+            { label: "Due", value: numberFormat.format(data.jd.due) },
+            { label: "Completed", value: numberFormat.format(data.jd.completed) },
+            { label: "Overdue", value: numberFormat.format(data.jd.overdue) },
+            { label: "Completion", value: data.jd.due === 0 ? "—" : `${data.jd.completionRate}%` },
+          ]}
+        />
+        <StatRow
+          heading="Tasks"
+          className="mt-6"
+          cards={[
+            { label: "Assigned", value: numberFormat.format(data.tasks.assigned) },
+            { label: "Completed", value: numberFormat.format(data.tasks.completed) },
+            { label: "Overdue", value: numberFormat.format(data.tasks.overdue) },
+            { label: "Completion", value: data.tasks.assigned === 0 ? "—" : `${data.tasks.completionRate}%` },
+          ]}
+        />
+        <ChartCard data={data} mode={chartMode} onModeChange={onChartModeChange} />
+        <RankingsSection data={data} />
+      </div>
+    </div>
+  );
+}
+
+function DashboardSkeleton() {
+  const block = "animate-pulse rounded-xl bg-[var(--surface-muted)]";
+  return (
+    <div className="app-page">
+      <div className={cn(block, "mb-7 h-7 w-40")} />
+      <div className="mb-7 flex flex-wrap gap-2">
+        {[0, 1, 2].map((index) => <div key={index} className={cn(block, "h-8 w-[132px]")} />)}
+      </div>
+      {[0, 1].map((row) => (
+        <div key={row} className={cn("grid grid-cols-2 gap-3 md:grid-cols-4", row === 1 && "mt-6")}>
+          {[0, 1, 2, 3].map((cell) => <div key={cell} className={cn(block, "h-[80px]")} />)}
+        </div>
+      ))}
+      <div className={cn(block, "mt-6 h-[356px]")} />
+      <div className="mt-6 grid gap-4 md:grid-cols-2">
+        {[0, 1].map((index) => <div key={index} className={cn(block, "h-[220px]")} />)}
+      </div>
+    </div>
+  );
+}
+
+function errorMessage(error: unknown) {
+  if (error instanceof ConvexError && typeof error.data === "string") return error.data;
+  if (error instanceof Error) return error.message;
+  return "Could not load the dashboard.";
+}
 
 export function DashboardPage() {
   const { activeCompanyId, active } = useCompany();
-  const canViewActiveDashboard = canViewDashboard(active?.capabilities);
-  const [activeTab, setActiveTab] = useState<DashboardTab>("overview");
-
-  // Filters
-  const [datePreset, setDatePreset] = useState<DatePreset>("30d");
-  const [taskType, setTaskType] = useState<TaskTypeFilter>("all");
-  const [status, setStatus] = useState<StatusFilter>("all");
-  const [priority, setPriority] = useState<PriorityFilter>("all");
-  const [frequency, setFrequency] = useState<FrequencyFilter>("all");
-  const [branchId, setBranchId] = useState("all");
-  const [departmentId, setDepartmentId] = useState("all");
-  const [membershipId, setMembershipId] = useState("all");
-  const [scopeData, setScopeData] = useState<DashboardData | null>(null);
+  const now = useRoundedNow();
+  const [branchId, setBranchId] = useState<Id<"branches"> | "all">("all");
+  const [departmentId, setDepartmentId] = useState<Id<"departments"> | "all">("all");
+  const [membershipId, setMembershipId] = useState<Id<"companyMemberships"> | "all">("all");
+  const [range, setRange] = useState<DashboardRangeArg>({ preset: "this_month" });
+  const [chartMode, setChartMode] = useState<DashboardTrendMode>("jd");
+  const [cachedData, setCachedData] = useState<{ companyId: Id<"companies">; data: DashboardData } | null>(null);
+  const [cachedFilters, setCachedFilters] = useState<{ companyId: Id<"companies">; filters: DashboardFilters } | null>(null);
 
   useEffect(() => {
-    setActiveTab("overview");
-    setDatePreset("30d");
-    setTaskType("all");
-    setStatus("all");
-    setPriority("all");
-    setFrequency("all");
     setBranchId("all");
     setDepartmentId("all");
     setMembershipId("all");
+    setRange({ preset: "this_month" });
+    setChartMode("jd");
+    setCachedData(null);
+    setCachedFilters(null);
   }, [activeCompanyId]);
 
-  const scopeDataForActiveCompany = scopeData?.company._id === activeCompanyId ? scopeData : null;
-  const canUseScopeFilters = Boolean(
-    active?.capabilities.some((capability) => capability === "analytics:view:company" || capability === "analytics:view:managed_scope"),
-  );
-  const validBranchId =
-    canUseScopeFilters && scopeDataForActiveCompany && branchId !== "all" && scopeDataForActiveCompany.filterOptions.branches.some((b) => b._id === branchId)
-      ? (branchId as Id<"branches">)
-      : undefined;
+  const filtersResult = useQuery_experimental({
+    query: api.analytics.dashboardFilters,
+    args: activeCompanyId ? { companyId: activeCompanyId } : "skip",
+  });
+  const filtersData = filtersResult.status === "success" ? filtersResult.data : null;
+
+  const validBranchId = branchId !== "all" && filtersData?.branches.some((branch) => branch._id === branchId) ? branchId : undefined;
   const validDepartmentId =
-    canUseScopeFilters && scopeDataForActiveCompany && departmentId !== "all" && scopeDataForActiveCompany.filterOptions.departments.some(
-      (d) => d._id === departmentId && (!validBranchId || d.branchId === validBranchId),
-    )
-      ? (departmentId as Id<"departments">)
+    departmentId !== "all" &&
+    filtersData?.departments.some((department) => department._id === departmentId && (!validBranchId || department.branchId === validBranchId))
+      ? departmentId
       : undefined;
   const validMembershipId =
-    canUseScopeFilters && scopeDataForActiveCompany && membershipId !== "all" && scopeDataForActiveCompany.filterOptions.employees.some(
-      (e) =>
-        e._id === membershipId &&
-        (!validBranchId || e.branchIds.includes(validBranchId)) &&
-        (!validDepartmentId || e.departmentIds.includes(validDepartmentId)),
+    membershipId !== "all" &&
+    filtersData?.users.some(
+      (user) =>
+        user._id === membershipId &&
+        (!validBranchId || user.branchIds.includes(validBranchId)) &&
+        (!validDepartmentId || user.departmentIds.includes(validDepartmentId)),
     )
-      ? (membershipId as Id<"companyMemberships">)
+      ? membershipId
       : undefined;
 
-  const queryArgs =
-    activeCompanyId && canViewActiveDashboard
-      ? {
-          companyId: activeCompanyId,
-          datePreset,
-          taskType,
-          status,
-          priority,
-          frequency,
-          branchId: validBranchId,
-          departmentId: validDepartmentId,
-          membershipId: validMembershipId,
-        }
-      : "skip";
+  const result = useQuery_experimental({
+    query: api.analytics.dashboard,
+    args:
+      activeCompanyId && filtersResult.status === "success"
+        ? {
+            companyId: activeCompanyId,
+            now,
+            range,
+            branchId: validBranchId,
+            departmentId: validDepartmentId,
+            membershipId: validMembershipId,
+          }
+        : "skip",
+  });
 
-  const result = useQuery_experimental({ query: api.analytics.dashboard, args: queryArgs });
-  const data = result.status === "success" ? (result.data as DashboardData) : null;
-
+  const liveData = result.status === "success" ? result.data : null;
   useEffect(() => {
-    if (data) setScopeData(data);
-  }, [data]);
-
+    if (liveData && activeCompanyId) setCachedData({ companyId: activeCompanyId, data: liveData });
+  }, [liveData, activeCompanyId]);
   useEffect(() => {
-    if (data?.scopeLevel === "self" && (activeTab === "organization" || activeTab === "team")) setActiveTab("overview");
-  }, [activeTab, data?.scopeLevel]);
+    if (filtersData && activeCompanyId) setCachedFilters({ companyId: activeCompanyId, filters: filtersData });
+  }, [filtersData, activeCompanyId]);
 
-  function resetFilters() {
-    setDatePreset("30d");
-    setTaskType("all");
-    setStatus("all");
-    setPriority("all");
-    setFrequency("all");
-    setBranchId("all");
-    setDepartmentId("all");
-    setMembershipId("all");
-  }
+  const queryError =
+    filtersResult.status === "error" ? filtersResult.error : result.status === "error" ? result.error : null;
 
-  if (!canViewActiveDashboard) {
+  if (active && !canViewDashboard(active.capabilities)) {
     return (
       <div className="app-page">
         <PageHeader title="Dashboard" description="Dashboard access is disabled for your account." />
       </div>
     );
   }
-
-  if (result.status === "error") {
+  if (queryError) {
     return (
       <div className="app-page">
-        <PageHeader title="Dashboard" description="Could not load analytics view." />
-        <div className="mt-4 rounded-lg border border-[var(--danger-border)] bg-[var(--danger-surface)] p-4 text-sm text-[var(--danger)]">
-          {result.error instanceof Error ? result.error.message : "An error occurred."}
-        </div>
+        <PageHeader title="Dashboard" />
+        <div className="alert-error rounded-md p-3 text-sm">{errorMessage(queryError)}</div>
       </div>
     );
   }
 
-  if (result.status === "pending" || !data) {
-    return (
-      <div className="app-page space-y-4">
-        <div className="h-7 w-48 animate-pulse rounded bg-[var(--surface-muted)]" />
-        <div className="h-20 w-full animate-pulse rounded-lg bg-[var(--surface-muted)]" />
-        <div className="h-60 w-full animate-pulse rounded-lg bg-[var(--surface-muted)]" />
-      </div>
-    );
+  const viewFilters = filtersData ?? (cachedFilters?.companyId === activeCompanyId ? cachedFilters.filters : null);
+  const viewData = liveData ?? (cachedData?.companyId === activeCompanyId ? cachedData.data : null);
+  if (!viewFilters || !viewData) return <DashboardSkeleton />;
+
+  function handleBranchChange(next: string) {
+    const nextBranch = next === "all" ? "all" : (next as Id<"branches">);
+    setBranchId(nextBranch);
+    if (nextBranch !== "all" && filtersData) {
+      if (departmentId !== "all" && !filtersData.departments.some((department) => department._id === departmentId && department.branchId === nextBranch)) {
+        setDepartmentId("all");
+      }
+      if (membershipId !== "all") {
+        const user = filtersData.users.find((entry) => entry._id === membershipId);
+        if (user && !user.branchIds.includes(nextBranch)) setMembershipId("all");
+      }
+    }
   }
 
-  const attentionBadgeCount = data.metrics.overdueTasks + data.jdCycleHealth.missedCycles;
+  function handleDepartmentChange(next: string) {
+    const nextDepartment = next === "all" ? "all" : (next as Id<"departments">);
+    setDepartmentId(nextDepartment);
+    if (nextDepartment !== "all" && membershipId !== "all" && filtersData) {
+      const user = filtersData.users.find((entry) => entry._id === membershipId);
+      if (user && !user.departmentIds.includes(nextDepartment)) setMembershipId("all");
+    }
+  }
 
   return (
-    <div className="app-page max-w-5xl">
-      {/* Calm Notion Page Title */}
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-[22px] font-semibold tracking-[-0.02em] text-[var(--ink)]">
-              {data.scopeLevel === "company" ? "Executive Dashboard" : data.scopeLevel === "managed" ? "Manager Overview" : "My Dashboard"}
-            </h1>
-            <Badge tone="neutral" className="text-[11px]">
-              {data.viewer.role}
-            </Badge>
-          </div>
-          <p className="mt-0.5 text-[13px] text-[var(--ink-muted)]">
-            Operations, team workload, recurring cycles, and risk signals across {data.company.name}.
-          </p>
-        </div>
-      </div>
-
-      {data.isTruncated && (
-        <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-300/70 bg-amber-50 px-3 py-2.5 text-[13px] text-amber-950" role="alert">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-          <p>This dashboard is incomplete because the workspace exceeds its current reporting limit. Metrics and comparisons may omit records.</p>
-        </div>
-      )}
-
-      {/* 4-Metric Overview Strip */}
-      <NotionMetricStrip data={data} />
-
-      {/* Notion View Switcher Tabs */}
-      <div className="mb-3 flex items-center gap-1 border-b border-[var(--hairline)] pb-px">
-        <button
-          type="button"
-          onClick={() => setActiveTab("overview")}
-          className={cn(
-            "flex items-center gap-1.5 border-b-2 px-3 py-1.5 text-[12.5px] transition-colors",
-            activeTab === "overview"
-              ? "border-[var(--primary)] text-[var(--primary)] font-semibold"
-              : "border-transparent text-[var(--ink-muted)] hover:text-[var(--ink)]"
-          )}
-        >
-          <BarChart3 className="h-3.5 w-3.5" />
-          Overview
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab("attention")}
-          className={cn(
-            "flex items-center gap-1.5 border-b-2 px-3 py-1.5 text-[12.5px] transition-colors",
-            activeTab === "attention"
-              ? "border-[var(--primary)] text-[var(--primary)] font-semibold"
-              : "border-transparent text-[var(--ink-muted)] hover:text-[var(--ink)]"
-          )}
-        >
-          <AlertTriangle className={cn("h-3.5 w-3.5", attentionBadgeCount > 0 && "text-[#ef4444]")} />
-          Attention
-          {attentionBadgeCount > 0 && (
-            <span className="grid h-4 min-w-4 place-items-center rounded-full bg-[#ef4444] px-1 text-[10px] font-bold text-white">
-              {attentionBadgeCount}
-            </span>
-          )}
-        </button>
-
-        {data.scopeLevel !== "self" && (
-          <>
-            <button
-              type="button"
-              onClick={() => setActiveTab("organization")}
-              className={cn(
-                "flex items-center gap-1.5 border-b-2 px-3 py-1.5 text-[12.5px] transition-colors",
-                activeTab === "organization"
-                  ? "border-[var(--primary)] text-[var(--primary)] font-semibold"
-                  : "border-transparent text-[var(--ink-muted)] hover:text-[var(--ink)]"
-              )}
-            >
-              <Building2 className="h-3.5 w-3.5" />
-              Branches & Depts
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab("team")}
-              className={cn(
-                "flex items-center gap-1.5 border-b-2 px-3 py-1.5 text-[12.5px] transition-colors",
-                activeTab === "team"
-                  ? "border-[var(--primary)] text-[var(--primary)] font-semibold"
-                  : "border-transparent text-[var(--ink-muted)] hover:text-[var(--ink)]"
-              )}
-            >
-              <Users className="h-3.5 w-3.5" />
-              Team Capacity
-            </button>
-          </>
-        )}
-
-        <button
-          type="button"
-          onClick={() => setActiveTab("breakdowns")}
-          className={cn(
-            "flex items-center gap-1.5 border-b-2 px-3 py-1.5 text-[12.5px] transition-colors",
-            activeTab === "breakdowns"
-              ? "border-[var(--primary)] text-[var(--primary)] font-semibold"
-              : "border-transparent text-[var(--ink-muted)] hover:text-[var(--ink)]"
-          )}
-        >
-          <Layers className="h-3.5 w-3.5" />
-          Breakdowns
-        </button>
-      </div>
-
-      {/* Notion Inline Filter Toolbar */}
-      <NotionInlineFilters
-        data={data}
-        datePreset={datePreset}
-        branchId={branchId}
-        departmentId={departmentId}
-        membershipId={membershipId}
-        taskType={taskType}
-        onDatePreset={setDatePreset}
-        onBranch={setBranchId}
-        onDepartment={setDepartmentId}
-        onMembership={setMembershipId}
-        onTaskType={setTaskType}
-        onReset={resetFilters}
-      />
-
-      {/* Active Tab View Content */}
-      {activeTab === "overview" && <OverviewView data={data} />}
-
-      {activeTab === "attention" && (
-        <AttentionView
-          data={data}
-          onSelectEmployee={(empId) => {
-            setMembershipId(empId);
-            setActiveTab("overview");
-          }}
-        />
-      )}
-
-      {activeTab === "organization" && (
-        <div className="space-y-6">
-          <NotionDatabaseTable
-            title="Branches Performance"
-            rows={data.comparisons.branches}
-            emptyMessage="No branches with matching task data."
-            onSelectRow={(row) => {
-              setBranchId(row.id);
-              setDepartmentId("all");
-              setMembershipId("all");
-            }}
-          />
-
-          <NotionDatabaseTable
-            title="Department Breakdown"
-            rows={data.comparisons.departments}
-            emptyMessage="No departments with matching task data."
-            onSelectRow={(row) => {
-              if (row.parentId) setBranchId(row.parentId);
-              setDepartmentId(row.id);
-              setMembershipId("all");
-            }}
-          />
-        </div>
-      )}
-
-      {activeTab === "team" && (
-        <div className="space-y-6">
-          {/* Top Performers Leaderboard */}
-          <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-4 shadow-2xs">
-            <div className="flex items-center justify-between border-b border-[var(--hairline)] pb-2.5">
-              <div className="flex items-center gap-1.5">
-                <Trophy className="h-4 w-4 text-[#f59e0b]" />
-                <span className="text-[13px] font-semibold text-[var(--ink)]">Strongest Performers</span>
-              </div>
-              <span className="text-[11px] text-[var(--ink-faint)]">Ranked by completion rate</span>
-            </div>
-
-            <div className="mt-3 grid gap-2 sm:grid-cols-2 md:grid-cols-3">
-              {data.comparisons.topPerformers.map((person, idx) => (
-                <button
-                  type="button"
-                  key={person.id}
-                  onClick={() => setMembershipId(person.id)}
-                  className="flex cursor-pointer items-center justify-between rounded border border-[var(--hairline)] bg-[var(--surface-muted)]/30 p-2 text-left transition-colors hover:bg-[var(--surface-muted)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--ink)]"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="grid h-4.5 w-4.5 place-items-center rounded bg-[var(--surface)] text-[10px] font-semibold text-[var(--ink-muted)]">
-                      {idx + 1}
-                    </span>
-                    <div className="min-w-0">
-                      <div className="truncate text-[12px] font-medium text-[var(--ink)]">{person.name}</div>
-                      <div className="text-[10.5px] text-[var(--ink-faint)]">{person.completed} tasks done</div>
-                    </div>
-                  </div>
-                  <span className="text-[12px] font-semibold text-[#10b981] tabular-nums">
-                    {formatPercent(person.completionRate)}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <NotionDatabaseTable
-            title="Team Workload Table"
-            rows={data.comparisons.employees}
-            emptyMessage="No team members in this filtered view."
-            onSelectRow={(row) => setMembershipId(row.id)}
-          />
-        </div>
-      )}
-
-      {activeTab === "breakdowns" && (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-4 shadow-2xs">
-            <h4 className="text-[12.5px] font-semibold text-[var(--ink)]">Task Status Mix</h4>
-            <div className="mt-3 space-y-2">
-              {data.breakdowns.status.map((item) => (
-                <div key={item.key} className="flex items-center justify-between text-[12px]">
-                  <div className="flex items-center gap-2">
-                    <span className={cn("h-2 w-2 rounded-full", statusDotColor(item.key))} />
-                    <span>{item.label}</span>
-                  </div>
-                  <span className="font-semibold tabular-nums text-[var(--ink)]">{formatNumber(item.value)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-4 shadow-2xs">
-            <h4 className="text-[12.5px] font-semibold text-[var(--ink)]">Priority Distribution</h4>
-            <div className="mt-3 space-y-2">
-              {data.breakdowns.priority.map((item) => (
-                <div key={item.key} className="flex items-center justify-between text-[12px]">
-                  <div className="flex items-center gap-2">
-                    <span className={cn("h-2 w-2 rounded-full", statusDotColor(item.key))} />
-                    <span>{item.label}</span>
-                  </div>
-                  <span className="font-semibold tabular-nums text-[var(--ink)]">{formatNumber(item.value)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-4 shadow-2xs">
-            <h4 className="text-[12.5px] font-semibold text-[var(--ink)]">Task Types</h4>
-            <div className="mt-3 space-y-2">
-              {data.breakdowns.type.map((item) => (
-                <div key={item.key} className="flex items-center justify-between text-[12px]">
-                  <div className="flex items-center gap-2">
-                    <span className="h-2 w-2 rounded-full bg-[#3b82f6]" />
-                    <span>{item.label}</span>
-                  </div>
-                  <span className="font-semibold tabular-nums text-[var(--ink)]">{formatNumber(item.value)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-[var(--hairline)] bg-[var(--surface)] p-4 shadow-2xs">
-            <h4 className="text-[12.5px] font-semibold text-[var(--ink)]">SOP Visibility Scope</h4>
-            <div className="mt-3 space-y-2">
-              {data.sopStats.byScope.map((item) => (
-                <div key={item.key} className="flex items-center justify-between text-[12px]">
-                  <div className="flex items-center gap-2">
-                    <span className="h-2 w-2 rounded-full bg-[#8b5cf6]" />
-                    <span>{item.label}</span>
-                  </div>
-                  <span className="font-semibold tabular-nums text-[var(--ink)]">{formatNumber(item.value)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+    <DashboardView
+      filters={viewFilters}
+      data={viewData}
+      pending={filtersResult.status !== "success" || result.status !== "success"}
+      branchId={branchId}
+      departmentId={departmentId}
+      membershipId={membershipId}
+      range={range}
+      chartMode={chartMode}
+      onBranchChange={handleBranchChange}
+      onDepartmentChange={handleDepartmentChange}
+      onMembershipChange={(value) => setMembershipId(value === "all" ? "all" : (value as Id<"companyMemberships">))}
+      onRangeChange={setRange}
+      onChartModeChange={setChartMode}
+    />
   );
 }

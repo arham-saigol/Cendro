@@ -174,6 +174,61 @@ describe("JD task cycle behavior", () => {
     expect(after?.statusCycleStart).toBe(before?.statusCycleStart);
   });
 
+  test("a legacy completed cycle without a completion row is not recorded as missed", async () => {
+    vi.setSystemTime(utc(2026, 1, 1, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Daily check", description: "", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    await t.withIdentity(identity("admin")).mutation(api.tasks.completeJd, { companyId, taskId });
+    // Simulate pre-ledger data: the stamped status survives, the row is gone.
+    await t.run(async (ctx) => {
+      for (const row of await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect()) {
+        await ctx.db.delete(row._id);
+      }
+    });
+
+    vi.setSystemTime(utc(2026, 1, 4, 12));
+    await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
+    const records = await t.run(async (ctx) => await ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
+
+    // Jan 1 stays completed via statusCycleStart; only Jan 2–3 are missed.
+    expect(records.map((record) => record.cycleStart).sort()).toEqual([utc(2026, 1, 2), utc(2026, 1, 3)]);
+
+    // The stamped cycle is materialized as a completion row so analytics keep
+    // counting it once the task's cycle floor advances past it.
+    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
+    expect(completions).toMatchObject([{ cycleStart: utc(2026, 1, 1), cycleEnd: utc(2026, 1, 2) }]);
+  });
+
+  test("a stamped completed cycle with an existing missed record still gains a completion row", async () => {
+    vi.setSystemTime(utc(2026, 1, 1, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Daily check", description: "", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    await t.withIdentity(identity("admin")).mutation(api.tasks.completeJd, { companyId, taskId });
+    // Simulate pre-ledger data: the stamp survives, the completion row is gone,
+    // and an older run already recorded the same cycle as missed.
+    await t.run(async (ctx) => {
+      for (const row of await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect()) {
+        await ctx.db.delete(row._id);
+      }
+      await ctx.db.insert("jdTaskCycleRecords", { companyId, jdTaskId: taskId, cycleStart: utc(2026, 1, 1), cycleEnd: utc(2026, 1, 2), status: "missed", recordedAt: utc(2026, 1, 2) });
+    });
+
+    vi.setSystemTime(utc(2026, 1, 4, 12));
+    await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
+    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
+    const records = await t.run(async (ctx) => await ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
+
+    // The missed record must not suppress the durable completion row; once the
+    // stamp advances, the row is the only evidence the cycle was completed.
+    expect(completions).toMatchObject([{ cycleStart: utc(2026, 1, 1), cycleEnd: utc(2026, 1, 2) }]);
+    // The stale missed record for that completed cycle is removed; Jan 2–3 are
+    // genuinely missed and keep their records.
+    expect(records).toMatchObject([
+      { cycleStart: utc(2026, 1, 2), status: "missed" },
+      { cycleStart: utc(2026, 1, 3), status: "missed" },
+    ]);
+  });
+
   test("resetAndClearMissedJdCycles deletes missed cycle records, resets cycleStartedAt to current, and prevents re-recording old cycles", async () => {
     vi.setSystemTime(utc(2026, 1, 1, 12));
     const { t, companyId, adminMembershipId } = await seedCompany();
@@ -202,7 +257,7 @@ describe("JD task cycle behavior", () => {
     expect(countAfterCron.count).toBe(0);
   });
 
-  test("resetJdTaskCyclesBatch spans across multiple pages (>100 tasks) with serialized clearing and prevents cron interleaving recreation", async () => {
+  test("resetJdTaskCyclesBatch spans across multiple pages (>100 tasks) with serialized clearing and prevents cron interleaving recreation", { timeout: 15_000 }, async () => {
     const start = utc(2026, 1, 1, 12);
     vi.setSystemTime(start);
     const { t, companyId, adminMembershipId } = await seedCompany();

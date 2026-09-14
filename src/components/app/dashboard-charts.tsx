@@ -52,9 +52,34 @@ export function DashboardTrendChart({
       : Array.from({ length: tickCount }, (_, index) => data[Math.round(index * tickStep)].label);
     return defineChart({
       marks: [
-        areaY(data, { x: "label", y: "completed", fill: "var(--ink)", fillOpacity: 0.07, curve }),
-        lineY(data, { x: "label", y: "total", stroke: "var(--ink-faint)", strokeWidth: 1.5, strokeDasharray: "3 3", curve }),
-        lineY(data, { x: "label", y: "completed", stroke: "var(--ink)", strokeWidth: 2, curve }),
+        areaY(data, { x: "label", y: "total", fill: "url(#dash-total-fill)", curve }),
+        areaY(data, { x: "label", y: "completed", fill: "url(#dash-completed-fill)", curve }),
+        lineY(data, { x: "label", y: "total", stroke: "var(--ink-secondary)", strokeWidth: 1.5, curve }),
+        lineY(data, { x: "label", y: "completed", stroke: "var(--badge-blue-fg)", strokeWidth: 2, curve }),
+      ],
+      gradients: [
+        {
+          id: "dash-total-fill",
+          x1: 0,
+          y1: 0,
+          x2: 0,
+          y2: 1,
+          stops: [
+            { offset: 0, color: "var(--ink)", opacity: 0.06 },
+            { offset: 1, color: "var(--ink)", opacity: 0 },
+          ],
+        },
+        {
+          id: "dash-completed-fill",
+          x1: 0,
+          y1: 0,
+          x2: 0,
+          y2: 1,
+          stops: [
+            { offset: 0, color: "var(--badge-blue-fg)", opacity: 0.22 },
+            { offset: 1, color: "var(--badge-blue-fg)", opacity: 0 },
+          ],
+        },
       ],
       x: {
         scale: () => scalePoint<string>().domain(data.map((row) => row.label)),
@@ -68,11 +93,7 @@ export function DashboardTrendChart({
         scale: () => scaleLinear().domain([0, maxTotal]),
         nice: true,
         grid: true,
-        axis: {
-          line: false,
-          ticks: { size: 0, padding: 8, format: (value) => (Number.isInteger(value) ? String(value) : "") },
-          tickLabels: { fontSize: 11 },
-        },
+        axis: false,
       },
       theme: {
         foreground: "var(--ink-faint)",
@@ -88,8 +109,8 @@ export function DashboardTrendChart({
           return {
             title: row.label,
             rows: [
-              { label: totalLabel, value: String(row.total) },
               { label: "Completed", value: String(row.completed) },
+              { label: totalLabel, value: String(row.total) },
             ],
           };
         },

@@ -139,6 +139,9 @@ function DateRangeControl({
   }
 
   const today = new Date();
+  const todayStart = startOfDay(today);
+  const currentMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  const canGoNext = monthStart < currentMonthStart;
   const monthLabel = monthDate.toLocaleString("en-US", { month: "long", year: "numeric" });
 
   let rangeStart: Date | null = null;
@@ -162,6 +165,7 @@ function DateRangeControl({
   }
 
   function pick(date: Date) {
+    if (startOfDay(date) > todayStart) return;
     if (!draftStart) {
       setDraftStart(date);
       setHoverDate(date);
@@ -231,6 +235,7 @@ function DateRangeControl({
                   type="button"
                   className="task-icon-btn h-7 w-7"
                   aria-label="Next month"
+                  disabled={!canGoNext}
                   onClick={() => setMonthDate(new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 1))}
                 >
                   <ChevronRight className="h-4 w-4" />
@@ -244,21 +249,24 @@ function DateRangeControl({
                   const day = startOfDay(date);
                   const inMonth = date.getMonth() === monthDate.getMonth();
                   const isToday = sameCalendarDay(today, date);
+                  const isFuture = day > todayStart;
                   const isEnd = Boolean((rangeStart && sameCalendarDay(rangeStart, day)) || (rangeEnd && sameCalendarDay(rangeEnd, day)));
                   const isBetween = Boolean(rangeStart && rangeEnd && day > rangeStart && day < rangeEnd);
                   return (
                     <button
                       key={date.toISOString()}
                       type="button"
+                      disabled={isFuture}
                       onClick={() => pick(date)}
-                      onMouseEnter={() => { if (draftStart) setHoverDate(date); }}
-                      onFocus={() => { if (draftStart) setHoverDate(date); }}
+                      onMouseEnter={() => { if (draftStart && !isFuture) setHoverDate(date); }}
+                      onFocus={() => { if (draftStart && !isFuture) setHoverDate(date); }}
                       className={cn(
                         "h-8 rounded-md text-[13px] transition-colors",
                         inMonth ? "text-[var(--ink-secondary)] hover:bg-[var(--surface-muted)]" : "text-[var(--ink-faint)]",
                         isToday && "font-semibold text-[var(--ink)]",
                         isBetween && "bg-[var(--surface-muted)]",
                         isEnd && "bg-[var(--ink)] text-[var(--canvas)] hover:bg-[var(--ink)]",
+                        isFuture && "opacity-40 hover:bg-transparent",
                       )}
                     >
                       {date.getDate()}
@@ -357,12 +365,12 @@ function ChartCard({ data, mode, onModeChange }: { data: DashboardData; mode: Da
       <div className={cn(cardTitleClass, "flex items-center justify-between gap-3")}>
         <div className="flex items-center gap-4 text-[12px] text-[var(--ink-muted)]">
           <span className="flex items-center gap-1.5">
-            <span className="w-4 border-t-2 border-dashed border-[var(--ink-muted)]" />
-            {mode === "jd" ? "Due" : "Assigned"}
+            <span className="w-4 border-t-2 border-[var(--badge-blue-fg)]" />
+            Completed
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="w-4 border-t-2 border-[var(--ink)]" />
-            Completed
+            <span className="w-4 border-t-2 border-[var(--ink-secondary)]" />
+            {mode === "jd" ? "Due" : "Assigned"}
           </span>
         </div>
         <Tabs value={mode} onValueChange={(value) => onModeChange(value as DashboardTrendMode)}>

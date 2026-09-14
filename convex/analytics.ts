@@ -32,7 +32,7 @@ const dashboardReadBudget = 24_000;
 // ~366 days earlier (the longest recurrence is annual), plus slack.
 const jdCompletionLookbackMs = 368 * 86_400_000;
 
-type QueryCompleteness = { isTruncated: boolean; remaining: number };
+type QueryCompleteness = { isTruncated: boolean; truncatedReads: number; remaining: number };
 
 // All dashboard reads share the read budget so one query stays inside Convex's
 // transaction limit; the worst-case scan allowance is reserved before yielding
@@ -45,13 +45,17 @@ async function takeBudgetedRows<T>(
 ) {
   if (completeness.remaining <= 0) {
     completeness.isTruncated = true;
+    completeness.truncatedReads++;
     return [];
   }
   const limit = Math.min(dashboardTakeLimit, completeness.remaining);
   completeness.remaining -= limit + 1;
   const result = await takeWithOverflow(take, limit);
   completeness.remaining += limit + 1 - (result.isTruncated ? limit + 1 : result.rows.length);
-  if (result.isTruncated) completeness.isTruncated = true;
+  if (result.isTruncated) {
+    completeness.isTruncated = true;
+    completeness.truncatedReads++;
+  }
   return result.rows;
 }
 
@@ -96,6 +100,7 @@ async function loadPeople(ctx: QueryCtx, membershipIds: Set<Id<"companyMembershi
     completeness.remaining -= 2;
     if (completeness.remaining <= 0) {
       completeness.isTruncated = true;
+      completeness.truncatedReads++;
       break;
     }
     const membership = await ctx.db.get(membershipId);
@@ -183,7 +188,7 @@ async function resolveDashboardScope(
   // Option lists are complete only when the budget was still alive for this
   // phase and no read truncated inside it; earlier unrelated truncation alone
   // does not disqualify them.
-  const optionsBoundary = completeness.isTruncated;
+  const optionsTruncations = completeness.truncatedReads;
   const optionsBudgetAlive = completeness.remaining > 0;
   const org = await loadOrg(ctx, companyId, completeness);
 
@@ -218,7 +223,7 @@ async function resolveDashboardScope(
     branchOptions = org.branches.filter((branch) => branchScope.has(branch._id));
     departmentOptions = org.departments.filter((department) => branchScope.has(department.branchId) || departmentScope.has(department._id));
   }
-  const optionsComplete = optionsBudgetAlive && completeness.isTruncated === optionsBoundary;
+  const optionsComplete = optionsBudgetAlive && completeness.truncatedReads === optionsTruncations;
 
   return { membership, company, dashboardScope, scopedIds, people, assignments, org, branchOptions, departmentOptions, memberBranchIds, memberDepartmentIds, scopedIdsComplete, optionsComplete };
 }
@@ -226,7 +231,7 @@ async function resolveDashboardScope(
 export const dashboardFilters = query({
   args: { companyId: v.id("companies") },
   handler: async (ctx, args) => {
-    const completeness: QueryCompleteness = { isTruncated: false, remaining: dashboardReadBudget };
+    const completeness: QueryCompleteness = { isTruncated: false, truncatedReads: 0, remaining: dashboardReadBudget };
     const scope = await resolveDashboardScope(ctx, args.companyId, completeness);
     const users = scope.dashboardScope === "self"
       ? []
@@ -271,7 +276,7 @@ export const dashboard = query({
     // reporting never extends past server time: a forged future timestamp
     // cannot push named ranges into future periods or mark work overdue early.
     const now = Math.min(args.now, Date.now());
-    const completeness: QueryCompleteness = { isTruncated: false, remaining: dashboardReadBudget };
+    const completeness: QueryCompleteness = { isTruncated: false, truncatedReads: 0, remaining: dashboardReadBudget };
     const scope = await resolveDashboardScope(ctx, args.companyId, completeness);
     const timeZone = scope.company.timeZone ?? null;
 
@@ -529,7 +534,7 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
   const { membership } = await requireMembership(ctx, args.companyId);
   const caps = await membershipCapabilities(ctx, membership);
   assertAnalyticsViewAccess(caps);
-  const completeness: QueryCompleteness = { isTruncated: false, remaining: dashboardReadBudget };
+  const completeness: QueryCompleteness = { isTruncated: false, truncatedReads: 0, remaining: dashboardReadBudget };
   const scoped = await analyticsScopedMembershipIds(
     ctx,
     args.companyId,

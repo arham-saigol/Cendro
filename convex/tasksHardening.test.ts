@@ -379,6 +379,77 @@ describe("task authorization hardening", () => {
     expect(emp2JdDetail.task.assignees).toHaveLength(1);
     expect(emp2JdDetail.task.assignees[0].membership._id).toBe(f.employee2M);
   });
+
+  test("assignees can update task status without update capabilities", async () => {
+    const f = await createAuthzFixture();
+
+    const jdTaskId = await f.asUser("adminA").mutation(api.tasks.createJd, {
+      companyId: f.companyA,
+      title: "Daily Standup",
+      recurrence: "daily",
+      assigneeMembershipIds: [f.employee1M],
+    });
+    const oneTimeTaskId = await f.asUser("adminA").mutation(api.tasks.createOneTime, {
+      companyId: f.companyA,
+      title: "File paperwork",
+      priority: "medium",
+      assigneeMembershipIds: [f.employee1M],
+    });
+
+    // Strip every task update capability from the Employee role.
+    await f.setRoleCapabilities(f.companyA, "Employee", [
+      "tasks:jd:view:self",
+      "tasks:one_time:view:self",
+    ]);
+
+    const employee = f.asUser("employeeA1");
+    await expect(employee.mutation(api.tasks.updateJdStatus, { companyId: f.companyA, taskId: jdTaskId, status: "in_progress" })).resolves.toBeNull();
+    await expect(employee.mutation(api.tasks.completeJd, { companyId: f.companyA, taskId: jdTaskId })).resolves.toBeNull();
+    await expect(employee.mutation(api.tasks.updateOneTimeStatus, { companyId: f.companyA, taskId: oneTimeTaskId, status: "in_progress" })).resolves.toBeNull();
+    await expect(employee.mutation(api.tasks.completeOneTime, { companyId: f.companyA, taskId: oneTimeTaskId })).resolves.toBeNull();
+  });
+
+  test("status updates stay closed to non-assignees without update access", async () => {
+    const f = await createAuthzFixture();
+
+    const jdTaskId = await f.asUser("adminA").mutation(api.tasks.createJd, {
+      companyId: f.companyA,
+      title: "Daily Standup",
+      recurrence: "daily",
+      assigneeMembershipIds: [f.employee1M],
+    });
+    const oneTimeTaskId = await f.asUser("adminA").mutation(api.tasks.createOneTime, {
+      companyId: f.companyA,
+      title: "File paperwork",
+      priority: "medium",
+      assigneeMembershipIds: [f.employee1M],
+    });
+    // Legacy row with no assignees: the assignee grant must not leak to it.
+    const unassignedTaskId = await f.t.run(async (ctx) =>
+      ctx.db.insert("oneTimeTasks", {
+        companyId: f.companyA,
+        reference: "TSK-900",
+        title: "Legacy unassigned",
+        priority: "low",
+        status: "due",
+        assigneeMembershipIds: [],
+        createdByMembershipId: f.adminM,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      })
+    );
+
+    // Employee 2 has update:self but is not an assignee on any of these.
+    const other = f.asUser("employeeA2");
+    await expect(other.mutation(api.tasks.updateJdStatus, { companyId: f.companyA, taskId: jdTaskId, status: "in_progress" })).rejects.toThrow("You cannot update this task.");
+    await expect(other.mutation(api.tasks.updateOneTimeStatus, { companyId: f.companyA, taskId: oneTimeTaskId, status: "completed" })).rejects.toThrow("You cannot update this task.");
+    await expect(other.mutation(api.tasks.completeOneTime, { companyId: f.companyA, taskId: oneTimeTaskId })).rejects.toThrow("You cannot update this task.");
+    await expect(other.mutation(api.tasks.updateOneTimeStatus, { companyId: f.companyA, taskId: unassignedTaskId, status: "completed" })).rejects.toThrow("You cannot update this task.");
+
+    // Update-permission holders keep working on tasks they do not own.
+    await expect(f.asUser("adminA").mutation(api.tasks.updateJdStatus, { companyId: f.companyA, taskId: jdTaskId, status: "completed" })).resolves.toBeNull();
+    await expect(f.asUser("adminA").mutation(api.tasks.updateOneTimeStatus, { companyId: f.companyA, taskId: unassignedTaskId, status: "completed" })).resolves.toBeNull();
+  });
 });
 
 

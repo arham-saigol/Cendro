@@ -489,7 +489,8 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   const status = statusText(task);
   const raw = optimistic ?? rawStatus(task);
   const locked = status === "Overdue" || raw === "overdue";
-  const canUpdate = canUpdateOverride ?? canEditTasks(active, kind);
+  const isAssignee = taskHasAssignee(task, active?.membership?._id);
+  const canUpdate = isAssignee || (canUpdateOverride ?? canEditTasks(active, kind));
   const pad = size === "md" ? "h-7 px-2.5" : "h-[22px] px-2";
 
   async function change(nextStatus: ManualStatus) {
@@ -517,7 +518,7 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
     </span>
   );
 
-  if (cellTrigger) {
+  if (cellTrigger || isAssignee) {
     return (
       <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending} pending={pending} ariaLabel="Change status" header={pill}>
         {manualStatuses.map((option) => (

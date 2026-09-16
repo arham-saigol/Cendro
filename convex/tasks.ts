@@ -1094,7 +1094,7 @@ export const catchUpMissedJdCycles = internalMutation({
       // grid's cycleStartedAt must not move from here.
       const timeZone = await companyTimeZone(ctx, task.companyId);
       const now = Date.now();
-      const { cycles } = elapsedJdCyclesSince(args.schedule.recurrence, args.schedule.cycleStartedAt, now, 200, timeZone);
+      const { cycles, nextActiveAt } = elapsedJdCyclesSince(args.schedule.recurrence, args.schedule.cycleStartedAt, now, 200, timeZone);
       for (const cycle of cycles) {
         const [done, recorded] = await Promise.all([
           currentJdCompletion(ctx, task._id, cycle.start),
@@ -1103,6 +1103,14 @@ export const catchUpMissedJdCycles = internalMutation({
         if (!done && !recorded) {
           await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.end, status: "missed", recordedAt: now });
         }
+      }
+      // The batch cap may leave elapsed old-grid cycles unprocessed; continue
+      // from the first unprocessed start so the tail of history is not lost.
+      if (cycles.length === 200) {
+        await ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, {
+          taskId: args.taskId,
+          schedule: { recurrence: args.schedule.recurrence, cycleStartedAt: nextActiveAt },
+        });
       }
       return null;
     }
@@ -1623,6 +1631,10 @@ export const deleteAttachment = mutation({
   },
 });
 
+// Claims outlive the upload URL (1h) by an hour of slack; abandoned or failed
+// uploads leave claims that the sweep below reclaims.
+const TASK_UPLOAD_CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
+
 // Reclaims a blob the caller uploaded when recording it as an attachment
 // failed (e.g. the task was deleted mid-upload). Requires the unused upload
 // claim issued to this member, so a caller can never delete another tenant's
@@ -1634,11 +1646,29 @@ export const deleteOrphanedUpload = mutation({
     const claim = await ctx.db.get(args.claimId);
     if (!claim || claim.companyId !== args.companyId || claim.membershipId !== membership._id) throw new ConvexError("Upload claim not found.");
     await ctx.db.delete(args.claimId);
+    if (claim.createdAt < Date.now() - TASK_UPLOAD_CLAIM_TTL_MS) throw new ConvexError("Upload claim expired.");
     const referenced = await ctx.db
       .query("taskAttachments")
       .withIndex("by_storageId", (q) => q.eq("storageId", args.storageId))
       .first();
     if (!referenced) await ctx.storage.delete(args.storageId);
+    return null;
+  },
+});
+
+// Abandoned claims (failed uploads, closed tabs) are deleted once the URL they
+// guard could no longer have completed an upload anyway.
+export const sweepExpiredTaskUploadClaims = internalMutation({
+  args: { cursor: v.optional(v.union(v.string(), v.null())) },
+  handler: async (ctx, args) => {
+    const cutoff = Date.now() - TASK_UPLOAD_CLAIM_TTL_MS;
+    const page = await ctx.db.query("taskUploadClaims").order("asc").paginate({ numItems: 200, cursor: args.cursor ?? null });
+    for (const claim of page.page) {
+      // Rows scan in creation order — a fresh claim means the rest are fresh.
+      if (claim.createdAt >= cutoff) return null;
+      await ctx.db.delete(claim._id);
+    }
+    if (!page.isDone) await ctx.scheduler.runAfter(0, internal.tasks.sweepExpiredTaskUploadClaims, { cursor: page.continueCursor });
     return null;
   },
 });

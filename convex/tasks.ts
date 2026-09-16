@@ -1631,8 +1631,9 @@ export const deleteAttachment = mutation({
   },
 });
 
-// Claims outlive the upload URL (1h) by an hour of slack; abandoned or failed
-// uploads leave claims that the sweep below reclaims.
+// Abandoned claims (failed uploads, closed tabs) are swept after the upload
+// URL's lifetime ends; a claim that survives stays valid for reclaiming the
+// caller's own orphan, so expiry must not strand an unreferenced blob.
 const TASK_UPLOAD_CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
 
 // Reclaims a blob the caller uploaded when recording it as an attachment
@@ -1646,7 +1647,6 @@ export const deleteOrphanedUpload = mutation({
     const claim = await ctx.db.get(args.claimId);
     if (!claim || claim.companyId !== args.companyId || claim.membershipId !== membership._id) throw new ConvexError("Upload claim not found.");
     await ctx.db.delete(args.claimId);
-    if (claim.createdAt < Date.now() - TASK_UPLOAD_CLAIM_TTL_MS) throw new ConvexError("Upload claim expired.");
     const referenced = await ctx.db
       .query("taskAttachments")
       .withIndex("by_storageId", (q) => q.eq("storageId", args.storageId))

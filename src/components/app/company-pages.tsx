@@ -695,9 +695,11 @@ function StructureTab({
     });
   }
 
-  // Deletes feel instant: the node leaves the local tree immediately and comes
-  // back if the mutation rejects.
+  // Deletes feel instant: once confirmed, the node leaves the local tree
+  // immediately and comes back if the mutation rejects. Confirm before
+  // mutating local state — a cancelled confirm resolves without deleting.
   async function deleteBranchOptimistic(branchId: Id<"branches">) {
+    if (!window.confirm("Delete this branch? Departments and assignments must be removed first.")) return;
     const previousBranches = branches;
     const previousDepartments = departments;
     setBranches(branches.filter((branch) => branch._id !== branchId));
@@ -711,6 +713,7 @@ function StructureTab({
   }
 
   async function deleteDepartmentOptimistic(departmentId: Id<"departments">) {
+    if (!window.confirm("Delete this department? Assignments must be removed first.")) return;
     const previousDepartments = departments;
     setDepartments(departments.filter((dep) => dep._id !== departmentId));
     try {
@@ -2558,13 +2561,13 @@ export default function Company() {
                 onCreateBranch={(name) => activeCompanyId && run(async () => createBranch({ companyId: activeCompanyId, name }), "Could not create branch.")}
                 onCreateDepartment={(branchId, name) => activeCompanyId && run(async () => createDepartment({ companyId: activeCompanyId, branchId, name }), "Could not create department.")}
                 onDeleteBranch={async (branchId) => {
-                  if (!activeCompanyId || !window.confirm("Delete this branch? Departments and assignments must be removed first.")) return;
+                  if (!activeCompanyId) return;
                   setError(null);
                   try { await deleteBranch({ companyId: activeCompanyId, branchId }); }
                   catch (err) { setError(err instanceof Error ? err.message : "Could not delete branch."); throw err; }
                 }}
                 onDeleteDepartment={async (departmentId) => {
-                  if (!activeCompanyId || !window.confirm("Delete this department? Assignments must be removed first.")) return;
+                  if (!activeCompanyId) return;
                   setError(null);
                   try { await deleteDepartment({ companyId: activeCompanyId, departmentId }); }
                   catch (err) { setError(err instanceof Error ? err.message : "Could not delete department."); throw err; }

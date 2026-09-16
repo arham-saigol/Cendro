@@ -3,7 +3,7 @@ import { ConvexError, v } from "convex/values";
 import { internalAction, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { currentJdCycle, defaultTimeZone, elapsedJdCyclesSince, nextJdCycleStart } from "./taskCycles";
+import { currentJdCycle, defaultTimeZone, elapsedJdCyclesSince, nextJdCycleStart, type JdRecurrence } from "./taskCycles";
 import { activeCompanyMembershipIds, assertCanAssign, assertCanDeleteTask, assertCanUpdateTask, canViewTask, getManagedMembershipIds, hasAllManagedMemberships, hasAnyManagedMembership, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scanManagedMembershipIds, scopedMembershipIds } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
@@ -229,11 +229,14 @@ async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">,
 
 /**
  * Runs full missed-cycle catch-up off the interactive path. Cheap to call: it
- * only schedules work when cycles actually elapsed since cycleStartedAt.
+ * only schedules work when cycles actually elapsed since cycleStartedAt. When
+ * the caller is about to replace the task's recurrence, pass the old schedule
+ * as `schedule` so the deferred run reconstructs the old grid — by the time it
+ * executes, the task document already carries the new recurrence.
  */
-function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number) {
+function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, schedule?: { recurrence: JdRecurrence; cycleStartedAt: number }) {
   if (task.cycleStartedAt < currentCycleStart) {
-    return ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, { taskId: task._id });
+    return ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, { taskId: task._id, schedule });
   }
 }
 
@@ -912,7 +915,7 @@ export const updateJd = mutation({
     // preservation/catch-up checks must use the old recurrence's current cycle.
     const oldCycleStart = currentJdCycle(task.recurrence, now, timeZone).start;
     await preserveJdCompletionStamp(ctx, task, oldCycleStart, timeZone);
-    await scheduleMissedJdCycleCatchUp(ctx, task, oldCycleStart);
+    await scheduleMissedJdCycleCatchUp(ctx, task, oldCycleStart, args.recurrence !== task.recurrence ? { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt } : undefined);
     const nextCycleStart = args.recurrence !== task.recurrence ? currentJdCycle(args.recurrence, now, timeZone).start : oldCycleStart;
     const nextTask = { ...task };
     nextTask.title = nonEmpty(args.title, "Task title");
@@ -1080,10 +1083,29 @@ export const listJdCycleRecords = query({
 
 /** Deferred per-task catch-up scheduled by interactive mutations. Idempotent. */
 export const catchUpMissedJdCycles = internalMutation({
-  args: { taskId: v.id("jdTasks") },
+  args: { taskId: v.id("jdTasks"), schedule: v.optional(v.object({ recurrence: recurrenceValidator, cycleStartedAt: v.number() })) },
   handler: async (ctx, args) => {
     const task = await ctx.db.get(args.taskId);
     if (!task) return null;
+    if (args.schedule) {
+      // The initiating mutation already replaced the task's recurrence and
+      // cycleStartedAt, so the old grid only exists in this snapshot. The
+      // legacy completion stamp was preserved synchronously, and the new
+      // grid's cycleStartedAt must not move from here.
+      const timeZone = await companyTimeZone(ctx, task.companyId);
+      const now = Date.now();
+      const { cycles } = elapsedJdCyclesSince(args.schedule.recurrence, args.schedule.cycleStartedAt, now, 200, timeZone);
+      for (const cycle of cycles) {
+        const [done, recorded] = await Promise.all([
+          currentJdCompletion(ctx, task._id, cycle.start),
+          currentJdCycleRecord(ctx, task._id, cycle.start),
+        ]);
+        if (!done && !recorded) {
+          await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.end, status: "missed", recordedAt: now });
+        }
+      }
+      return null;
+    }
     await recordMissedJdCycles(ctx, task);
     return null;
   },
@@ -1406,43 +1428,61 @@ export const completeOneTime = mutation({
 const DELETE_RELATED_BATCH = 500;
 const DELETE_BULK_TASK_LIMIT = 100;
 
-async function deleteJdTaskRelated(ctx: MutationCtx, taskId: Id<"jdTasks">) {
-  for (const [table, query] of [
-    ["jdTaskCompletions", () => ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).take(DELETE_RELATED_BATCH)],
-    ["jdTaskCycleRecords", () => ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).take(DELETE_RELATED_BATCH)],
-  ] as const) {
-    void table;
-    while (true) {
-      const rows = await query();
-      if (!rows.length) break;
-      for (const row of rows) await ctx.db.delete(row._id);
-    }
+/**
+ * Deletes one batch of a task's related rows per call. Returns true while any
+ * table still had rows for the task so the caller can re-schedule itself —
+ * related-row volume is unbounded, so the purge must not live in a single
+ * transaction. Idempotent: rows are keyed by taskId, so re-runs only pick up
+ * what remains.
+ */
+async function deleteTaskRelatedBatch(ctx: MutationCtx, taskType: TaskKind, taskId: string): Promise<boolean> {
+  const loaders: (() => Promise<{ _id: Id<"jdTaskCompletions" | "jdTaskCycleRecords" | "taskComments" | "taskActivityLogs" | "taskAttachments">; storageId?: Id<"_storage"> }[]>)[] = [];
+  if (taskType === "jd") {
+    const jdTaskId = taskId as Id<"jdTasks">;
+    loaders.push(
+      () => ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", jdTaskId)).take(DELETE_RELATED_BATCH),
+      () => ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", jdTaskId)).take(DELETE_RELATED_BATCH),
+    );
   }
+  loaders.push(
+    () => ctx.db.query("taskComments").withIndex("by_task", (q) => q.eq("taskType", taskType).eq("taskId", taskId)).take(DELETE_RELATED_BATCH),
+    () => ctx.db.query("taskActivityLogs").withIndex("by_task", (q) => q.eq("taskType", taskType).eq("taskId", taskId)).take(DELETE_RELATED_BATCH),
+    () => ctx.db.query("taskAttachments").withIndex("by_task", (q) => q.eq("taskType", taskType).eq("taskId", taskId)).take(DELETE_RELATED_BATCH),
+  );
+  for (const load of loaders) {
+    const rows = await load();
+    if (!rows.length) continue;
+    for (const row of rows) {
+      if (row.storageId) await ctx.storage.delete(row.storageId);
+      await ctx.db.delete(row._id);
+    }
+    return true;
+  }
+  return false;
 }
 
-async function deleteTaskScopedRows(ctx: MutationCtx, taskType: TaskKind, taskId: string) {
-  for (const table of ["taskComments", "taskActivityLogs"] as const) {
-    while (true) {
-      const rows = await ctx.db.query(table).withIndex("by_task", (q) => q.eq("taskType", taskType).eq("taskId", taskId)).take(DELETE_RELATED_BATCH);
-      if (!rows.length) break;
-      for (const row of rows) await ctx.db.delete(row._id);
-    }
-  }
-  while (true) {
-    const attachments = await ctx.db.query("taskAttachments").withIndex("by_task", (q) => q.eq("taskType", taskType).eq("taskId", taskId)).take(DELETE_RELATED_BATCH);
-    if (!attachments.length) break;
-    for (const attachment of attachments) { await ctx.storage.delete(attachment.storageId); await ctx.db.delete(attachment._id); }
-  }
-}
+/**
+ * Continues a task's related-row purge in a fresh transaction after the
+ * initiating delete commits. Same pattern as aiChat.deleteSessionMessages.
+ */
+export const purgeTaskRelatedRows = internalMutation({
+  args: { taskType: v.union(v.literal("jd"), v.literal("one_time")), taskId: v.string() },
+  handler: async (ctx, args) => {
+    const more = await deleteTaskRelatedBatch(ctx, args.taskType, args.taskId);
+    if (more) await ctx.scheduler.runAfter(0, internal.tasks.purgeTaskRelatedRows, args);
+    return null;
+  },
+});
 
 async function purgeJdTask(ctx: MutationCtx, companyId: Id<"companies">, taskId: Id<"jdTasks">) {
   const { membership, user } = await requireMembership(ctx, companyId);
   const task = await ctx.db.get(taskId);
   if (!task || task.companyId !== companyId) throw new ConvexError("Task not found.");
   await assertCanDeleteTask(ctx, companyId, membership, updateAuthTargets(task), "jd");
-  await deleteJdTaskRelated(ctx, taskId);
-  await deleteTaskScopedRows(ctx, "jd", taskId);
+  // Deleting the task doc makes its related rows unreachable (all reads go
+  // through task visibility); the scheduled purge reclaims them in batches.
   await ctx.db.delete(taskId);
+  await ctx.scheduler.runAfter(0, internal.tasks.purgeTaskRelatedRows, { taskType: "jd", taskId });
   const now = Date.now();
   await ctx.db.insert("auditEvents", { companyId, actorUserId: user._id, action: "jd_task.delete", targetType: "jdTask", targetId: taskId, createdAt: now });
 }
@@ -1452,8 +1492,8 @@ async function purgeOneTimeTask(ctx: MutationCtx, companyId: Id<"companies">, ta
   const task = await ctx.db.get(taskId);
   if (!task || task.companyId !== companyId) throw new ConvexError("Task not found.");
   await assertCanDeleteTask(ctx, companyId, membership, updateAuthTargets(task), "one_time");
-  await deleteTaskScopedRows(ctx, "one_time", taskId);
   await ctx.db.delete(taskId);
+  await ctx.scheduler.runAfter(0, internal.tasks.purgeTaskRelatedRows, { taskType: "one_time", taskId });
   const now = Date.now();
   await ctx.db.insert("auditEvents", { companyId, actorUserId: user._id, action: "one_time_task.delete", targetType: "oneTimeTask", targetId: taskId, createdAt: now });
 }

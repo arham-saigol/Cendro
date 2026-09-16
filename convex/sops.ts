@@ -27,13 +27,14 @@ async function getManagedScopeTargets(ctx: MutationCtx | QueryCtx, companyId: Id
     ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(500),
   ]);
   const branchIds = new Set<Id<"branches">>(managedBranches.map((row) => row.branchId));
-  const [assignmentLists, departmentLists] = await Promise.all([
-    Promise.all([...userIds].map((userId) => ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", userId)).take(500))),
-    Promise.all([...branchIds].map((branchId) => ctx.db.query("departments").withIndex("by_branch", (q) => q.eq("branchId", branchId)).take(500))),
-  ]);
+  // Assignment-derived branches must join branchIds before the department
+  // queries run — departments are loaded per branch, so a branch added later
+  // would contribute no departments.
+  const assignmentLists = await Promise.all([...userIds].map((userId) => ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", userId)).take(500)));
   for (const assignments of assignmentLists) {
     for (const assignment of assignments) branchIds.add(assignment.branchId);
   }
+  const departmentLists = await Promise.all([...branchIds].map((branchId) => ctx.db.query("departments").withIndex("by_branch", (q) => q.eq("branchId", branchId)).take(500)));
   const departmentIds = new Set<Id<"departments">>(managedDepartments.map((row) => row.departmentId));
   for (const departments of departmentLists) {
     for (const department of departments) if (department.companyId === companyId) departmentIds.add(department._id);
@@ -681,7 +682,16 @@ async function purgeSop(ctx: MutationCtx, companyId: Id<"companies">, sopId: Id<
 
 export const remove = mutation({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { await purgeSop(ctx, args.companyId, args.sopId); return null; } });
 
-export const removeBulk = mutation({ args: { companyId: v.id("companies"), sopIds: v.array(v.id("sops")) }, handler: async (ctx, args) => { for (const sopId of args.sopIds) await purgeSop(ctx, args.companyId, sopId); return null; } });
+const DELETE_BULK_SOP_LIMIT = 100;
+
+export const removeBulk = mutation({
+  args: { companyId: v.id("companies"), sopIds: v.array(v.id("sops")) },
+  handler: async (ctx, args) => {
+    if (args.sopIds.length > DELETE_BULK_SOP_LIMIT) throw new ConvexError(`Select at most ${DELETE_BULK_SOP_LIMIT} SOPs to delete at once.`);
+    for (const sopId of args.sopIds) await purgeSop(ctx, args.companyId, sopId);
+    return null;
+  },
+});
 
 // Content matches come from the full-text index; title/reference matches come
 // from a bounded company scan, so large workspaces stay searchable.

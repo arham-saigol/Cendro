@@ -329,39 +329,43 @@ export async function getManagedMembershipIds(
   );
   for (const row of userScopes) await addActiveMembership(ctx, ids, companyId, row.userMembershipId);
 
-  const branchScopes = await takeScopeRows(
-    (limit) => ctx.db
-      .query("managerBranchScopes")
-      .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))
-      .take(limit),
-    onTruncated,
-  );
-  for (const row of branchScopes) {
-    const assignments = await takeScopeRows(
+  const [branchScopes, departmentScopes] = await Promise.all([
+    takeScopeRows(
       (limit) => ctx.db
-        .query("userBranchAssignments")
-        .withIndex("by_branch", (q) => q.eq("branchId", row.branchId))
+        .query("managerBranchScopes")
+        .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))
         .take(limit),
       onTruncated,
-    );
-    for (const assignment of assignments) await addActiveMembership(ctx, ids, companyId, assignment.membershipId);
-  }
-
-  const departmentScopes = await takeScopeRows(
-    (limit) => ctx.db
-      .query("managerDepartmentScopes")
-      .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))
-      .take(limit),
-    onTruncated,
-  );
-  for (const row of departmentScopes) {
-    const assignments = await takeScopeRows(
+    ),
+    takeScopeRows(
       (limit) => ctx.db
-        .query("userDepartmentAssignments")
-        .withIndex("by_department", (q) => q.eq("departmentId", row.departmentId))
+        .query("managerDepartmentScopes")
+        .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))
         .take(limit),
       onTruncated,
-    );
+    ),
+  ]);
+  const [branchAssignments, departmentAssignments] = await Promise.all([
+    Promise.all(branchScopes.map((row) =>
+      takeScopeRows(
+        (limit) => ctx.db
+          .query("userBranchAssignments")
+          .withIndex("by_branch", (q) => q.eq("branchId", row.branchId))
+          .take(limit),
+        onTruncated,
+      ),
+    )),
+    Promise.all(departmentScopes.map((row) =>
+      takeScopeRows(
+        (limit) => ctx.db
+          .query("userDepartmentAssignments")
+          .withIndex("by_department", (q) => q.eq("departmentId", row.departmentId))
+          .take(limit),
+        onTruncated,
+      ),
+    )),
+  ]);
+  for (const assignments of [...branchAssignments, ...departmentAssignments]) {
     for (const assignment of assignments) await addActiveMembership(ctx, ids, companyId, assignment.membershipId);
   }
   return ids;

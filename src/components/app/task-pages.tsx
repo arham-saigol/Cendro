@@ -523,7 +523,8 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   const raw = rawStatus(task);
   const locked = status === "Overdue" || raw === "overdue";
   const isAssignee = taskHasAssignee(task, active?.membership?._id);
-  const canUpdate = isAssignee || (canUpdateOverride ?? canEditTasks(active, kind));
+  // Pending rows carry a synthetic id — a status mutation against it would reject.
+  const canUpdate = !isPendingTask(task) && (isAssignee || (canUpdateOverride ?? canEditTasks(active, kind)));
   const pad = size === "md" ? "h-7 px-2.5" : "h-[22px] px-2";
 
   async function change(nextStatus: ManualStatus) {
@@ -1446,16 +1447,16 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
   async function uploadFiles(taskId: string, files: File[]) {
     if (!activeCompanyId || files.length === 0 || !active?.capabilities.includes("tasks:attachment:add")) return;
     await Promise.all([...files].map(async (file) => {
-      const postUrl = await generateUploadUrl({ companyId: activeCompanyId });
-      const response = await fetch(postUrl, { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
+      const upload = await generateUploadUrl({ companyId: activeCompanyId });
+      const response = await fetch(upload.url, { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
       if (!response.ok) throw new Error(`Could not upload ${file.name}.`);
       const json = await response.json() as { storageId?: Id<"_storage"> };
       if (!json.storageId) throw new Error(`Could not upload ${file.name}.`);
       try {
-        await addAttachment({ companyId: activeCompanyId, taskType: taskTypeFor(kind), taskId, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size });
+        await addAttachment({ companyId: activeCompanyId, taskType: taskTypeFor(kind), taskId, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
       } catch (err) {
         // The blob is already stored; reclaim it so the failure does not leak storage.
-        void deleteOrphanedUpload({ companyId: activeCompanyId, storageId: json.storageId }).catch(() => {});
+        void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId }).catch(() => {});
         throw err;
       }
       setValues((current) => ({ ...current, files: current.files.filter((candidate) => candidate !== file) }));
@@ -1957,9 +1958,9 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
 
   const openTaskDetails = useCallback((task: TaskRow) => {
     // Seed the drawer preview so it paints before the detail query resolves.
-    seedDetailPreview(`task:${activeCompanyId}:${kind}`, task._id, task);
+    seedDetailPreview(`task:${activeCompanyId}:${kind}:${active?.membership._id}`, task._id, task);
     router.push(`${base}/${task._id}`);
-  }, [activeCompanyId, base, kind, router]);
+  }, [activeCompanyId, active?.membership._id, base, kind, router]);
 
   const saveInline = useCallback(async (task: any, patch: Partial<TaskFormValues>, label: string) => {
     if (!activeCompanyId) return false;
@@ -2261,7 +2262,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                     selected={task._id === selectedId}
                     rowCanEdit={canEditTaskRow(active, kind, task)}
                     drag={drag}
-                    pendingCell={pendingCell}
+                    pendingCell={pendingCell?.startsWith(`${task._id}:`) ? pendingCell : null}
                     assignable={assignable}
                     showAssigneeColumn={showAssigneeColumn}
                     showFrequencyColumn={showFrequencyColumn}
@@ -2638,7 +2639,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
 
   // While the detail query resolves, paint from the seeded list-row preview.
   // Editing stays disabled until the authoritative record arrives.
-  const preview = data === undefined ? getDetailPreview<TaskRow>(`task:${activeCompanyId}:${kind}`, id) : undefined;
+  const preview = data === undefined ? getDetailPreview<TaskRow>(`task:${activeCompanyId}:${kind}:${active?.membership._id}`, id) : undefined;
   if (!data && !preview) return <TaskDetailSkeleton />;
   const task = (data?.task ?? preview) as any;
 
@@ -2703,15 +2704,15 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
     await Promise.all(files.map(async (file, index) => {
       const key = pending[index].key;
       try {
-        const postUrl = await generateUploadUrl({ companyId: activeCompanyId });
-        const response = await fetch(postUrl, { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
+        const upload = await generateUploadUrl({ companyId: activeCompanyId });
+        const response = await fetch(upload.url, { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
         if (!response.ok) throw new Error(`Could not upload ${file.name}.`);
         const json = await response.json() as { storageId?: Id<"_storage"> };
         if (!json.storageId) throw new Error(`Could not upload ${file.name}.`);
         try {
-          await addAttachment({ companyId: activeCompanyId, taskType, taskId: id, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size });
+          await addAttachment({ companyId: activeCompanyId, taskType, taskId: id, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
         } catch (attachErr) {
-          void deleteOrphanedUpload({ companyId: activeCompanyId, storageId: json.storageId }).catch(() => {});
+          void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId }).catch(() => {});
           throw attachErr;
         }
       } catch (err) {

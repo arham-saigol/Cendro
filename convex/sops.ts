@@ -209,8 +209,11 @@ async function sopVisibleForView(ctx: QueryCtx, companyId: Id<"companies">, memb
 
 // Page size for the legacy scan-until-filled path; scans continue until the
 // requested count is collected or the company index is exhausted, so sparse
-// matches beyond the first page are not silently dropped.
+// matches beyond the first page are not silently dropped. A total ceiling
+// keeps the single-transaction query under Convex read limits — hitting it
+// fails loudly rather than silently returning partial results.
 const FILTERED_SOP_SCAN_PAGE = 200;
+const FILTERED_SOP_SCAN_CEILING = 1000;
 
 async function filteredSopRows(ctx: QueryCtx, args: { companyId: Id<"companies">; search?: string; view?: "all" | "my"; scope?: "all" | Doc<"sops">["scopeType"]; branchId?: Id<"branches">; userMembershipId?: Id<"companyMemberships">; limit: number }) {
   const { membership } = await requireMembership(ctx, args.companyId);
@@ -222,8 +225,10 @@ async function filteredSopRows(ctx: QueryCtx, args: { companyId: Id<"companies">
   const search = args.search?.trim().toLowerCase();
   const kept: Doc<"sops">[] = [];
   let cursor: string | null = null;
-  while (kept.length < args.limit) {
-    const page = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: FILTERED_SOP_SCAN_PAGE });
+  let scanned = 0;
+  while (kept.length < args.limit && scanned < FILTERED_SOP_SCAN_CEILING) {
+    const page = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: Math.min(FILTERED_SOP_SCAN_PAGE, FILTERED_SOP_SCAN_CEILING - scanned) });
+    scanned += page.page.length;
     const keepFlags = await Promise.all(page.page.map(async (sop) => {
       if (!(await sopVisibleForView(ctx, args.companyId, membership, sop, args.view, visibility, caps, canUseAllView, auth))) return false;
       if (!(await sopMatchesFilters(ctx, sop, args))) return false;
@@ -235,6 +240,9 @@ async function filteredSopRows(ctx: QueryCtx, args: { companyId: Id<"companies">
     }
     if (page.isDone) break;
     cursor = page.continueCursor;
+  }
+  if (scanned >= FILTERED_SOP_SCAN_CEILING && kept.length < args.limit) {
+    throw new ConvexError("Too many SOPs to scan — narrow the filters or use the paginated list endpoint.");
   }
   return await Promise.all(kept.map((sop) => withScopes(ctx, sop, membership, company?.name, caps, auth.managedTargets)));
 }
@@ -715,13 +723,17 @@ export const removeBulk = mutation({
   args: { companyId: v.id("companies"), sopIds: v.array(v.id("sops")) },
   handler: async (ctx, args) => {
     if (args.sopIds.length > DELETE_BULK_SOP_LIMIT) throw new ConvexError(`Select at most ${DELETE_BULK_SOP_LIMIT} SOPs to delete at once.`);
-    for (const sopId of args.sopIds) await purgeSop(ctx, args.companyId, sopId);
+    for (const sopId of new Set(args.sopIds)) await purgeSop(ctx, args.companyId, sopId);
     return null;
   },
 });
 
-// Content matches come from the full-text index; title/reference matches come
-// from a bounded company scan, so large workspaces stay searchable.
+// Content matches come from the full-text index. Title/reference matching is
+// substring-based, which FTS cannot express, so it pages the company index
+// until it has enough candidates for the (≤8-row) result or hits the ceiling.
+const TITLE_MATCH_TARGET = 40;
+const TITLE_SCAN_CEILING = 500;
+
 async function visibleSopSearchCandidates(ctx: any, args: { companyId: Id<"companies">; query: string }) {
   const { membership } = await requireMembership(ctx, args.companyId);
   const needle = args.query.trim();
@@ -729,14 +741,27 @@ async function visibleSopSearchCandidates(ctx: any, args: { companyId: Id<"compa
   const caps = await membershipCapabilities(ctx, membership);
   const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
   const lower = needle.toLowerCase();
+  const titleScan = async () => {
+    const matched: Doc<"sops">[] = [];
+    let cursor: string | null = null;
+    let scanned = 0;
+    while (matched.length < TITLE_MATCH_TARGET && scanned < TITLE_SCAN_CEILING) {
+      const page: { page: Doc<"sops">[]; isDone: boolean; continueCursor: string } = await ctx.db.query("sops").withIndex("by_company", (q: any) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: Math.min(100, TITLE_SCAN_CEILING - scanned) });
+      scanned += page.page.length;
+      for (const sop of page.page as Doc<"sops">[]) {
+        if (sop.reference.toLowerCase().includes(lower) || sop.title.toLowerCase().includes(lower)) matched.push(sop);
+      }
+      if (page.isDone) break;
+      cursor = page.continueCursor;
+    }
+    return matched;
+  };
   const [contentMatches, scanRows] = await Promise.all([
     ctx.db.query("sops").withSearchIndex("search_content", (q: any) => q.search("content", needle).eq("companyId", args.companyId)).take(40),
-    ctx.db.query("sops").withIndex("by_company", (q: any) => q.eq("companyId", args.companyId)).take(100),
+    titleScan(),
   ]);
   const candidates = new Map<string, Doc<"sops">>();
-  for (const sop of scanRows as Doc<"sops">[]) {
-    if (sop.reference.toLowerCase().includes(lower) || sop.title.toLowerCase().includes(lower)) candidates.set(sop._id, sop);
-  }
+  for (const sop of scanRows) candidates.set(sop._id, sop);
   for (const sop of contentMatches as Doc<"sops">[]) candidates.set(sop._id, sop);
   const all = [...candidates.values()];
   const flags = await Promise.all(all.map((sop: Doc<"sops">) => visibleSop(ctx, args.companyId, membership, sop, visibility, caps)));

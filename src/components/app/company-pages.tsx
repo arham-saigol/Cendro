@@ -779,35 +779,41 @@ function StructureTab({
 
   function handleDragEnd(event: DragEndEvent) {
     isDragging.current = false;
-    if (event.canceled) return;
-    const { source, target } = event.operation;
-    if (!source) return;
+    try {
+      if (event.canceled) return;
+      const { source, target } = event.operation;
+      if (!source) return;
 
-    // Dropped onto a branch drop zone → append only departments to that branch.
-    if (target?.data?.kind === "branchZone") {
+      // Dropped onto a branch drop zone → append only departments to that branch.
+      if (target?.data?.kind === "branchZone") {
+        if (source.data?.kind !== DEPT_TYPE) return;
+        void commitDepartmentToBranch(source.id as Id<"departments">, target.data.branchId as Id<"branches">);
+        return;
+      }
+
+      if (!isSortable(source)) return;
+
+      // Branch reorder (top-level group).
+      if (source.data?.kind === BRANCH_TYPE) {
+        if (source.initialGroup !== BRANCH_GROUP || source.initialIndex === source.index) return;
+        const previousBranches = branches;
+        const reordered = arrayMove(branches, source.initialIndex, source.index).map((b, i) => ({ ...b, order: i }));
+        setBranches(reordered);
+        void withStructureOp(() => onReorderBranches(reordered.map((b) => b._id))).catch(() => setBranches(previousBranches));
+        return;
+      }
+
+      // Department move (within or across branches).
       if (source.data?.kind !== DEPT_TYPE) return;
-      void commitDepartmentToBranch(source.id as Id<"departments">, target.data.branchId as Id<"branches">);
-      return;
+      const fromBranch = source.initialGroup as Id<"branches">;
+      const toBranch = source.group as Id<"branches">;
+      if (!fromBranch || !toBranch) return;
+      void commitDepartmentSort(source.id as Id<"departments">, fromBranch, toBranch, source.index);
+    } finally {
+      // A cancelled or no-op drop never reaches withStructureOp — replay any
+      // overview update skipped during the drag once nothing is pending.
+      if (skippedReseed.current && pendingStructureOps.current === 0) setStructureOpsDrained((tick) => tick + 1);
     }
-
-    if (!isSortable(source)) return;
-
-    // Branch reorder (top-level group).
-    if (source.data?.kind === BRANCH_TYPE) {
-      if (source.initialGroup !== BRANCH_GROUP || source.initialIndex === source.index) return;
-      const previousBranches = branches;
-      const reordered = arrayMove(branches, source.initialIndex, source.index).map((b, i) => ({ ...b, order: i }));
-      setBranches(reordered);
-      void withStructureOp(() => onReorderBranches(reordered.map((b) => b._id))).catch(() => setBranches(previousBranches));
-      return;
-    }
-
-    // Department move (within or across branches).
-    if (source.data?.kind !== DEPT_TYPE) return;
-    const fromBranch = source.initialGroup as Id<"branches">;
-    const toBranch = source.group as Id<"branches">;
-    if (!fromBranch || !toBranch) return;
-    void commitDepartmentSort(source.id as Id<"departments">, fromBranch, toBranch, source.index);
   }
 
   return (

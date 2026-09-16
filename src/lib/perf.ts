@@ -12,7 +12,14 @@
 const PREFIX = "cendro:perf";
 
 function enabled() {
-  return typeof window !== "undefined" && (process.env.NODE_ENV === "development" || window.localStorage?.getItem(PREFIX) === "1");
+  if (typeof window === "undefined") return false;
+  if (process.env.NODE_ENV === "development") return true;
+  // Restricted browsing contexts can throw on any localStorage access.
+  try {
+    return window.localStorage.getItem(PREFIX) === "1";
+  } catch {
+    return false;
+  }
 }
 
 function report(label: string, phase: string, ms: number) {

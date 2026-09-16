@@ -29,6 +29,19 @@ const jdCompletionLookbackMs = 368 * 86_400_000;
 
 type QueryCompleteness = { isTruncated: boolean; truncatedReads: number; remaining: number };
 
+// takeBudgetedRows reserves its full allowance before yielding, so a fan-out
+// of N items can reserve the whole ledger before any refund lands. Waves bound
+// the in-flight reservations so refunds return before the next wave starts.
+const BUDGET_WAVE = 8;
+
+async function mapInWaves<T, R>(items: readonly T[], fn: (item: T) => Promise<R>) {
+  const out: R[] = [];
+  for (let index = 0; index < items.length; index += BUDGET_WAVE) {
+    out.push(...await Promise.all(items.slice(index, index + BUDGET_WAVE).map(fn)));
+  }
+  return out;
+}
+
 // All dashboard reads share the read budget so one query stays inside Convex's
 // transaction limit; the worst-case scan allowance is reserved before yielding
 // so concurrent callers split the budget instead of double-spending it. Scope
@@ -124,9 +137,9 @@ async function loadAssignments(
   membershipIds: Set<Id<"companyMemberships">>,
   completeness: QueryCompleteness,
 ) {
-  // takeBudgetedRows reserves its allowance before yielding, so these run
-  // concurrently without double-spending the budget.
-  const entries = await Promise.all([...membershipIds].map(async (membershipId) => {
+  // takeBudgetedRows reserves its allowance before yielding; waves bound the
+  // in-flight reservations so refunds settle before the next wave starts.
+  const entries = await mapInWaves([...membershipIds], async (membershipId) => {
     const [membershipBranches, membershipDepartments] = await Promise.all([
       takeBudgetedRows(
         completeness,
@@ -141,7 +154,7 @@ async function loadAssignments(
       branchIds: new Set(membershipBranches.map((row) => row.branchId)),
       departmentIds: new Set(membershipDepartments.map((row) => row.departmentId)),
     }] as const;
-  }));
+  });
   return { byMembership: new Map(entries) };
 }
 
@@ -349,7 +362,7 @@ export const dashboard = query({
     // budget. A task whose reads truncated contributes no items — partial
     // ledger data would silently misreport completions — so each task tracks
     // truncation on its own phase that still shares the global ledger.
-    const jdItemGroups = await Promise.all(jdTasks.map(async (task) => {
+    const jdItemGroups = await mapInWaves(jdTasks, async (task) => {
       const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds);
       if (!assignees.length) return [];
       const taskPhase: QueryCompleteness = {
@@ -422,7 +435,7 @@ export const dashboard = query({
         }
       }
       return taskItems;
-    }));
+    });
     for (const group of jdItemGroups) items.push(...group);
     for (const task of oneTimeTasks) {
       const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds);

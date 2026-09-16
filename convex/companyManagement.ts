@@ -293,14 +293,14 @@ export const setUserActive = mutation({
       }
       await assertRoleManagerRemains(ctx, args.companyId, { activeChanges: new Map([[args.membershipId, false]]) });
       await clearUserManagementRows(ctx, args.membershipId);
+      // Targeted pending invitations are queried per membership: scanning the
+      // company's first N pending rows could miss invites aimed at this member.
       const pendingTargeted = await ctx.db
         .query("invitations")
-        .withIndex("by_companyId_and_status", (q) => q.eq("companyId", args.companyId).eq("status", "pending"))
+        .withIndex("by_companyId_and_status_and_targetMembershipId", (q) => q.eq("companyId", args.companyId).eq("status", "pending").eq("targetMembershipId", args.membershipId))
         .take(500);
       for (const invite of pendingTargeted) {
-        if (invite.targetMembershipId === args.membershipId) {
-          await ctx.db.patch(invite._id, { status: "revoked" });
-        }
+        await ctx.db.patch(invite._id, { status: "revoked" });
       }
       await ctx.db.patch(args.membershipId, { active: false, updatedAt: now });
       await ctx.db.insert("auditEvents", {
@@ -347,16 +347,17 @@ export const removeUsers = mutation({
       }
     }
     await assertRoleManagerRemains(ctx, args.companyId, { activeChanges: new Map(membershipIds.map((membershipId) => [membershipId, false])) });
-    const pendingByTarget = new Map<Id<"companyMemberships">, Doc<"invitations">[]>();
-    for (const invite of await ctx.db
-      .query("invitations")
-      .withIndex("by_companyId_and_status", (q) => q.eq("companyId", args.companyId).eq("status", "pending"))
-      .take(500)) {
-      if (!invite.targetMembershipId) continue;
-      const list = pendingByTarget.get(invite.targetMembershipId) ?? [];
-      list.push(invite);
-      pendingByTarget.set(invite.targetMembershipId, list);
-    }
+    // Targeted pending invitations are queried per membership: scanning the
+    // company's first N pending rows could miss invites aimed at a target.
+    const pendingLists = await Promise.all(
+      membershipIds.map((membershipId) =>
+        ctx.db
+          .query("invitations")
+          .withIndex("by_companyId_and_status_and_targetMembershipId", (q) => q.eq("companyId", args.companyId).eq("status", "pending").eq("targetMembershipId", membershipId))
+          .take(500),
+      ),
+    );
+    const pendingByTarget = new Map(membershipIds.map((membershipId, index) => [membershipId, pendingLists[index]]));
     const now = Date.now();
     for (const membershipId of membershipIds) {
       await clearUserManagementRows(ctx, membershipId);

@@ -902,10 +902,12 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
     api.sops.contentSearchIds,
     activeCompanyId && debouncedSearch.trim() ? { companyId: activeCompanyId, query: debouncedSearch } : "skip",
   );
-  const contentMatchIds = useMemo(
-    () => (debouncedSearch.trim() ? new Set(contentSearchResult?.ids?.map(String) ?? []) : null),
-    [contentSearchResult, debouncedSearch],
-  );
+  const contentMatchIds = useMemo(() => {
+    // Body-match IDs belong to the debounced query; while the input is ahead
+    // of the debounce they would let rows pass for a stale search term.
+    if (!debouncedSearch.trim() || search !== debouncedSearch) return null;
+    return new Set(contentSearchResult?.ids?.map(String) ?? []);
+  }, [contentSearchResult, debouncedSearch, search]);
   const preferenceResult = useQuery(api.sops.getListPreference, activeCompanyId ? { companyId: activeCompanyId } : "skip");
   const subscribedPreference = useMemo<ListPreference<SopListSort> | undefined>(() => {
     if (!preferenceResult) return undefined;
@@ -1332,7 +1334,7 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
                   const prefetchDetails = () => router.prefetch(detailsHref);
                   const openDetails = () => {
                     // Seed the drawer preview so it paints before the detail query resolves.
-                    seedDetailPreview(`sop:${activeCompanyId}`, sop._id, sop);
+                    seedDetailPreview(`sop:${activeCompanyId}:${active?.membership._id}`, sop._id, sop);
                     router.push(detailsHref);
                   };
                   return (
@@ -1587,7 +1589,7 @@ export function SopDetail({ id }: { id: string }) {
   if (serverSopResult.status === "error") return <SopDetailNotFound onBack={() => router.push("/sops")} />;
   // While the detail query resolves, paint from the seeded list-row preview.
   // The preview carries no body — the procedure section shows a placeholder.
-  const previewSop = serverSop ? undefined : getDetailPreview<SopRow>(`sop:${activeCompanyId}`, id);
+  const previewSop = serverSop ? undefined : getDetailPreview<SopRow>(`sop:${activeCompanyId}:${active?.membership._id}`, id);
   if (!serverSop && !previewSop) return <SopDetailSkeleton />;
   const baseSop = serverSop ?? previewSop;
   const sop = optimisticSop && serverSop ? { ...serverSop, ...optimisticSop } : baseSop;

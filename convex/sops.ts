@@ -207,7 +207,10 @@ async function sopVisibleForView(ctx: QueryCtx, companyId: Id<"companies">, memb
   return await visibleSopForSelf(ctx, companyId, membership, sop, undefined, auth);
 }
 
-const FILTERED_SOP_SCAN_LIMIT = 500;
+// Page size for the legacy scan-until-filled path; scans continue until the
+// requested count is collected or the company index is exhausted, so sparse
+// matches beyond the first page are not silently dropped.
+const FILTERED_SOP_SCAN_PAGE = 200;
 
 async function filteredSopRows(ctx: QueryCtx, args: { companyId: Id<"companies">; search?: string; view?: "all" | "my"; scope?: "all" | Doc<"sops">["scopeType"]; branchId?: Id<"branches">; userMembershipId?: Id<"companyMemberships">; limit: number }) {
   const { membership } = await requireMembership(ctx, args.companyId);
@@ -217,14 +220,22 @@ async function filteredSopRows(ctx: QueryCtx, args: { companyId: Id<"companies">
   const auth = sopListAuth(ctx, args.companyId, membership, caps);
   const canUseAllView = caps.has("sops:view:company") || caps.has("sops:view:managed");
   const search = args.search?.trim().toLowerCase();
-  const sops = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(FILTERED_SOP_SCAN_LIMIT);
-  const keepFlags = await Promise.all(sops.map(async (sop) => {
-    if (!(await sopVisibleForView(ctx, args.companyId, membership, sop, args.view, visibility, caps, canUseAllView, auth))) return false;
-    if (!(await sopMatchesFilters(ctx, sop, args))) return false;
-    if (search && !sop.reference.toLowerCase().includes(search) && !sop.title.toLowerCase().includes(search) && !sop.content.toLowerCase().includes(search)) return false;
-    return true;
-  }));
-  const kept = sops.filter((_, index) => keepFlags[index]).slice(0, args.limit);
+  const kept: Doc<"sops">[] = [];
+  let cursor: string | null = null;
+  while (kept.length < args.limit) {
+    const page = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: FILTERED_SOP_SCAN_PAGE });
+    const keepFlags = await Promise.all(page.page.map(async (sop) => {
+      if (!(await sopVisibleForView(ctx, args.companyId, membership, sop, args.view, visibility, caps, canUseAllView, auth))) return false;
+      if (!(await sopMatchesFilters(ctx, sop, args))) return false;
+      if (search && !sop.reference.toLowerCase().includes(search) && !sop.title.toLowerCase().includes(search) && !sop.content.toLowerCase().includes(search)) return false;
+      return true;
+    }));
+    for (let index = 0; index < page.page.length && kept.length < args.limit; index += 1) {
+      if (keepFlags[index]) kept.push(page.page[index]);
+    }
+    if (page.isDone) break;
+    cursor = page.continueCursor;
+  }
   return await Promise.all(kept.map((sop) => withScopes(ctx, sop, membership, company?.name, caps, auth.managedTargets)));
 }
 

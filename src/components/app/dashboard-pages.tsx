@@ -609,7 +609,8 @@ export function DashboardPage() {
     setRange({ preset: "this_month" });
     setChartMode("jd");
     setCachedFilters(null);
-  }, [activeCompanyId]);
+    dataCache.clear();
+  }, [activeCompanyId, dataCache]);
 
   const filtersResult = useQuery_experimental({
     query: api.analytics.dashboardFilters,

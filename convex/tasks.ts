@@ -1610,6 +1610,22 @@ export const deleteAttachment = mutation({
   },
 });
 
+// Reclaims a blob the caller uploaded when recording it as an attachment
+// failed (e.g. the task was deleted mid-upload). Only unreferenced blobs are
+// eligible, so this can never delete a file another attachment points to.
+export const deleteOrphanedUpload = mutation({
+  args: { companyId: v.id("companies"), storageId: v.id("_storage") },
+  handler: async (ctx, args) => {
+    await requireCapability(ctx, args.companyId, "tasks:attachment:add");
+    const referenced = await ctx.db
+      .query("taskAttachments")
+      .withIndex("by_storageId", (q) => q.eq("storageId", args.storageId))
+      .first();
+    if (!referenced) await ctx.storage.delete(args.storageId);
+    return null;
+  },
+});
+
 export const assignableUsers = query({
   args: {
     companyId: v.id("companies"),

@@ -115,6 +115,8 @@ describe("JD task cycle behavior", () => {
 
     vi.setSystemTime(utc(2026, 6, 29));
     await t.withIdentity(identity("admin")).mutation(api.tasks.updateJd, { companyId, taskId, title: "Weekly review", description: "", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
+    // Missed-cycle catch-up runs as a scheduled mutation off the edit path.
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
     const detail = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
     const rows = await t.withIdentity(identity("admin")).query(api.tasks.listJdRows, { companyId, frequency: "weekly", paginationOpts: { numItems: 10, cursor: null } });
     const records = await t.withIdentity(identity("admin")).query(api.tasks.listJdCycleRecords, { companyId, taskId });
@@ -318,6 +320,8 @@ describe("JD task cycle behavior", () => {
 
     vi.setSystemTime(utc(2026, 6, 29));
     await t.withIdentity(identity("admin")).mutation(api.tasks.updateJd, { companyId, taskId, title: "Weekly review", description: "", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
+    // Missed-cycle catch-up runs as a scheduled mutation off the edit path.
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
     const detail = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
     const records = await t.withIdentity(identity("admin")).query(api.tasks.listJdCycleRecords, { companyId, taskId });
 

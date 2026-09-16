@@ -15,6 +15,11 @@ export const syncCurrentUser = mutation({
     const existing = await ctx.db.query("appUsers").withIndex("by_subject", (q) => q.eq("clerkSubject", identity.tokenIdentifier)).unique();
     if (existing) {
       const names = namesForExistingUser(existing, identity, email);
+      // Skip the write (and its subscription invalidations) when the synced
+      // identity fields are identical to what is already stored.
+      if (existing.email === email && existing.firstName === names.firstName && existing.secondName === names.secondName && existing.imageUrl === imageUrl) {
+        return existing._id;
+      }
       await ctx.db.replace(existing._id, { clerkSubject: existing.clerkSubject, email, ...names, imageUrl, createdAt: existing.createdAt, updatedAt: now });
       return existing._id;
     }

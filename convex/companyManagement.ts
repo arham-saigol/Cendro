@@ -115,61 +115,66 @@ export const overview = query({
     const canReadUsers = caps.has("company:manage_users") || caps.has("company:manage_roles");
     const canReadInvitations = caps.has("company:invite_users") || caps.has("company:manage_roles");
     const canReadRoles = caps.has("company:manage_roles");
-    const branchResult = canReadStructure
-      ? await takeWithOverflow((limit) => ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
-      : { rows: [], isTruncated: false };
-    const departmentResult = canReadStructure
-      ? await takeWithOverflow((limit) => ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
-      : { rows: [], isTruncated: false };
-    const membershipResult = canReadUsers
-      ? await takeWithOverflow((limit) => ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
-      : { rows: [], isTruncated: false };
-    const invitationResult = canReadInvitations
-      ? await takeWithOverflow((limit) => ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(limit), 100)
-      : { rows: [], isTruncated: false };
+    const skipped = { rows: [], isTruncated: false };
+    const [branchResult, departmentResult, membershipResult, invitationResult, roleResult] = await Promise.all([
+      canReadStructure
+        ? takeWithOverflow((limit) => ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
+        : skipped,
+      canReadStructure
+        ? takeWithOverflow((limit) => ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
+        : skipped,
+      canReadUsers
+        ? takeWithOverflow((limit) => ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
+        : skipped,
+      canReadInvitations
+        ? takeWithOverflow((limit) => ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(limit), 100)
+        : skipped,
+      canReadStructure
+        ? takeWithOverflow((limit) => ctx.db.query("roles").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
+        : skipped,
+    ]);
     const branches = branchResult.rows.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
     const departments = departmentResult.rows.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
     let userDetailsTruncated = false;
-    const users = [];
-    for (const m of membershipResult.rows) {
-      const user = await ctx.db.get(m.userId);
-      const branchAssignmentResult = await takeWithOverflow(
-        (limit) => ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(limit),
-        overviewListLimit,
-      );
-      const departmentAssignmentResult = await takeWithOverflow(
-        (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(limit),
-        overviewListLimit,
-      );
-      const scope = canReadRoles
-        ? await managerScope(ctx, m._id, () => { userDetailsTruncated = true; })
-        : { branchIds: [], departmentIds: [], userMembershipIds: [] };
-      if (branchAssignmentResult.isTruncated || departmentAssignmentResult.isTruncated) {
-        userDetailsTruncated = true;
-      }
-      if (user) {
-        const memFirstName = memberFirstName(m, user);
-        const memSecondName = m.secondName !== undefined ? m.secondName.trim() : (user.secondName?.trim() ?? "");
-        const memFullName = memberFullName(m, user);
-        users.push({
-          membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt },
-          user: { _id: user._id, name: memFullName, firstName: memFirstName, secondName: memSecondName, email: user.email },
-          branchIds: branchAssignmentResult.rows.map((assignment) => assignment.branchId),
-          departmentIds: departmentAssignmentResult.rows.map((assignment) => assignment.departmentId),
-          scope,
-        });
-      }
-    }
+    const users = (
+      await Promise.all(
+        membershipResult.rows.map(async (m) => {
+          const [user, branchAssignmentResult, departmentAssignmentResult, scope] = await Promise.all([
+            ctx.db.get(m.userId),
+            takeWithOverflow(
+              (limit) => ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(limit),
+              overviewListLimit,
+            ),
+            takeWithOverflow(
+              (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(limit),
+              overviewListLimit,
+            ),
+            canReadRoles
+              ? managerScope(ctx, m._id, () => { userDetailsTruncated = true; })
+              : { branchIds: [], departmentIds: [], userMembershipIds: [] },
+          ]);
+          if (branchAssignmentResult.isTruncated || departmentAssignmentResult.isTruncated) {
+            userDetailsTruncated = true;
+          }
+          if (!user) return null;
+          const memFirstName = memberFirstName(m, user);
+          const memSecondName = m.secondName !== undefined ? m.secondName.trim() : (user.secondName?.trim() ?? "");
+          const memFullName = memberFullName(m, user);
+          return {
+            membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt },
+            user: { _id: user._id, name: memFullName, firstName: memFirstName, secondName: memSecondName, email: user.email },
+            branchIds: branchAssignmentResult.rows.map((assignment) => assignment.branchId),
+            departmentIds: departmentAssignmentResult.rows.map((assignment) => assignment.departmentId),
+            scope,
+          };
+        }),
+      )
+    ).filter((row) => row !== null);
     const memberCountByRole = new Map<string, number>();
     for (const m of membershipResult.rows) {
       memberCountByRole.set(m.role, (memberCountByRole.get(m.role) ?? 0) + 1);
     }
-    const roleDocs = canReadStructure
-      ? (await takeWithOverflow(
-        (limit) => ctx.db.query("roles").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
-        overviewListLimit,
-      )).rows
-      : [];
+    const roleDocs = roleResult.rows;
     roleDocs.sort((a, b) => a.name.localeCompare(b.name));
     const truncated = {
       branches: branchResult.isTruncated,
@@ -290,10 +295,10 @@ export const setUserActive = mutation({
       await clearUserManagementRows(ctx, args.membershipId);
       const pendingTargeted = await ctx.db
         .query("invitations")
-        .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
+        .withIndex("by_companyId_and_status", (q) => q.eq("companyId", args.companyId).eq("status", "pending"))
         .take(500);
       for (const invite of pendingTargeted) {
-        if (invite.status === "pending" && invite.targetMembershipId === args.membershipId) {
+        if (invite.targetMembershipId === args.membershipId) {
           await ctx.db.patch(invite._id, { status: "revoked" });
         }
       }
@@ -330,25 +335,33 @@ export const removeUsers = mutation({
   handler: async (ctx, args) => {
     const { user, capabilities: actorCaps } = await requireCapability(ctx, args.companyId, "company:manage_users");
     const membershipIds = unique(args.membershipIds);
-    for (const membershipId of membershipIds) {
-      const membership = await assertMembership(ctx, args.companyId, membershipId);
-      const targetCaps = await membershipCapabilities(ctx, membership);
+    const targetCapsList = await Promise.all(
+      membershipIds.map(async (membershipId) => {
+        const membership = await assertMembership(ctx, args.companyId, membershipId);
+        return membershipCapabilities(ctx, membership);
+      }),
+    );
+    for (const targetCaps of targetCapsList) {
       if (targetCaps.has("company:manage_roles") && !actorCaps.has("company:manage_roles")) {
         throw new ConvexError("You do not have access to remove a role administrator.");
       }
     }
     await assertRoleManagerRemains(ctx, args.companyId, { activeChanges: new Map(membershipIds.map((membershipId) => [membershipId, false])) });
+    const pendingByTarget = new Map<Id<"companyMemberships">, Doc<"invitations">[]>();
+    for (const invite of await ctx.db
+      .query("invitations")
+      .withIndex("by_companyId_and_status", (q) => q.eq("companyId", args.companyId).eq("status", "pending"))
+      .take(500)) {
+      if (!invite.targetMembershipId) continue;
+      const list = pendingByTarget.get(invite.targetMembershipId) ?? [];
+      list.push(invite);
+      pendingByTarget.set(invite.targetMembershipId, list);
+    }
     const now = Date.now();
     for (const membershipId of membershipIds) {
       await clearUserManagementRows(ctx, membershipId);
-      const pendingTargeted = await ctx.db
-        .query("invitations")
-        .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
-        .take(500);
-      for (const invite of pendingTargeted) {
-        if (invite.status === "pending" && invite.targetMembershipId === membershipId) {
-          await ctx.db.patch(invite._id, { status: "revoked" });
-        }
+      for (const invite of pendingByTarget.get(membershipId) ?? []) {
+        await ctx.db.patch(invite._id, { status: "revoked" });
       }
       await ctx.db.patch(membershipId, { active: false, updatedAt: now });
       await ctx.db.insert("auditEvents", {

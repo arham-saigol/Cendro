@@ -32,6 +32,8 @@ export type SopListFilters = {
   scope?: "all" | "company" | "branch" | "department" | "user";
   branchId?: string | null;
   userMembershipId?: string | null;
+  /** IDs whose content matched on the server, since list rows omit content. */
+  contentMatchIds?: ReadonlySet<string> | null;
 };
 
 const collator = new Intl.Collator("en", { sensitivity: "base", numeric: true });
@@ -143,7 +145,8 @@ export function filterSopListRows<TRow extends SopListFilterRow>(
       needle &&
       !row.reference?.toLowerCase().includes(needle) &&
       !row.title?.toLowerCase().includes(needle) &&
-      !row.content?.toLowerCase().includes(needle)
+      !row.content?.toLowerCase().includes(needle) &&
+      !filters.contentMatchIds?.has(row._id)
     ) return false;
     if (filters.view === "my" && !row.matchesMyView) return false;
     if (filters.scope && filters.scope !== "all" && row.scopeType !== filters.scope) return false;

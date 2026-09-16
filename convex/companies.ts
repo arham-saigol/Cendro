@@ -5,21 +5,24 @@ async function companyAccessRows(ctx: Parameters<typeof currentUser>[0], activeO
   const { user } = await currentUser(ctx);
   const memberships = await ctx.db.query("companyMemberships").withIndex("by_user", (q) => q.eq("userId", user._id)).take(100);
   if (memberships.length === 100) console.warn("companyAccessRows reached the 100 membership limit; company list may be truncated.");
-  const rows = [];
-  for (const membership of memberships) {
-    if (activeOnly && !membership.active) continue;
-    const company = await ctx.db.get(membership.companyId);
-    if (company && !company.deletedAt) {
-      const caps = membership.active ? await membershipCapabilities(ctx, membership) : new Set();
-      rows.push({
-        company: { _id: company._id, name: company.name, timeZone: company.timeZone },
-        membership: { _id: membership._id, role: membership.role, active: membership.active, firstName: membership.firstName, secondName: membership.secondName },
-        displayName: memberFullName(membership, user),
-        capabilities: Array.from(caps),
-      });
-    }
-  }
-  return rows;
+  const rows = await Promise.all(
+    memberships
+      .filter((membership) => !activeOnly || membership.active)
+      .map(async (membership) => {
+        const [company, caps] = await Promise.all([
+          ctx.db.get(membership.companyId),
+          membership.active ? membershipCapabilities(ctx, membership) : new Set<string>(),
+        ]);
+        if (!company || company.deletedAt) return null;
+        return {
+          company: { _id: company._id, name: company.name, timeZone: company.timeZone },
+          membership: { _id: membership._id, role: membership.role, active: membership.active, firstName: membership.firstName, secondName: membership.secondName },
+          displayName: memberFullName(membership, user),
+          capabilities: Array.from(caps),
+        };
+      }),
+  );
+  return rows.filter((row) => row !== null);
 }
 
 export const accessStatus = query({

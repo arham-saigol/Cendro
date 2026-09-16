@@ -16,11 +16,6 @@ type Person = {
   imageUrl: string | null;
 };
 
-type OrgAssignments = {
-  branchIds: Set<Id<"branches">>;
-  departmentIds: Set<Id<"departments">>;
-};
-
 const dashboardTakeLimit = 500;
 
 // Convex bounds a transaction to ~32k document reads; a shared budget keeps a
@@ -95,20 +90,26 @@ async function dashboardAccess(
 
 async function loadPeople(ctx: QueryCtx, membershipIds: Set<Id<"companyMemberships">>, completeness: QueryCompleteness) {
   const people = new Map<Id<"companyMemberships">, Person>();
-  for (const membershipId of membershipIds) {
-    // Each membership costs up to two point reads; keep them inside the budget.
-    if (completeness.remaining < 2) {
-      completeness.isTruncated = true;
-      completeness.truncatedReads++;
-      break;
-    }
-    completeness.remaining -= 2;
-    const membership = await ctx.db.get(membershipId);
-    if (!membership || !membership.active) continue;
-    const user = await ctx.db.get(membership.userId);
+  const ids = [...membershipIds];
+  // Each membership costs up to two point reads; keep them inside the budget.
+  const affordable = Math.floor(completeness.remaining / 2);
+  if (affordable < ids.length) {
+    completeness.isTruncated = true;
+    completeness.truncatedReads++;
+  }
+  const toLoad = ids.slice(0, Math.max(0, affordable));
+  completeness.remaining -= toLoad.length * 2;
+  const memberships = await Promise.all(toLoad.map((membershipId) => ctx.db.get(membershipId)));
+  const activeMemberships = memberships.filter((m): m is Doc<"companyMemberships"> => Boolean(m?.active));
+  const users = await Promise.all(activeMemberships.map((m) => ctx.db.get(m.userId)));
+  // Refund the allowance reserved for user reads that were never needed.
+  completeness.remaining += toLoad.length - activeMemberships.length;
+  for (let index = 0; index < activeMemberships.length; index += 1) {
+    const membership = activeMemberships[index];
+    const user = users[index];
     if (!user) continue;
-    people.set(membershipId, {
-      _id: membershipId,
+    people.set(membership._id, {
+      _id: membership._id,
       role: membership.role,
       name: fullName(membership, user),
       firstName: firstName(membership, user),
@@ -123,24 +124,25 @@ async function loadAssignments(
   membershipIds: Set<Id<"companyMemberships">>,
   completeness: QueryCompleteness,
 ) {
-  const byMembership = new Map<Id<"companyMemberships">, OrgAssignments>();
-
-  for (const membershipId of membershipIds) {
-    const membershipBranches = await takeBudgetedRows(
-      completeness,
-      (limit) => ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(limit),
-    );
-    const membershipDepartments = await takeBudgetedRows(
-      completeness,
-      (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(limit),
-    );
-    byMembership.set(membershipId, {
+  // takeBudgetedRows reserves its allowance before yielding, so these run
+  // concurrently without double-spending the budget.
+  const entries = await Promise.all([...membershipIds].map(async (membershipId) => {
+    const [membershipBranches, membershipDepartments] = await Promise.all([
+      takeBudgetedRows(
+        completeness,
+        (limit) => ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(limit),
+      ),
+      takeBudgetedRows(
+        completeness,
+        (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(limit),
+      ),
+    ]);
+    return [membershipId, {
       branchIds: new Set(membershipBranches.map((row) => row.branchId)),
       departmentIds: new Set(membershipDepartments.map((row) => row.departmentId)),
-    });
-  }
-
-  return { byMembership };
+    }] as const;
+  }));
+  return { byMembership: new Map(entries) };
 }
 
 async function loadOrg(
@@ -148,14 +150,16 @@ async function loadOrg(
   companyId: Id<"companies">,
   completeness: QueryCompleteness,
 ) {
-  const branches = await takeBudgetedRows(
-    completeness,
-    (limit) => ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
-  );
-  const departments = await takeBudgetedRows(
-    completeness,
-    (limit) => ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
-  );
+  const [branches, departments] = await Promise.all([
+    takeBudgetedRows(
+      completeness,
+      (limit) => ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
+    ),
+    takeBudgetedRows(
+      completeness,
+      (limit) => ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit),
+    ),
+  ]);
   branches.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name));
   departments.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name));
   return {
@@ -182,15 +186,26 @@ async function resolveDashboardScope(
   // only relaxes the employee check, and option-list truncation only relaxes
   // branch/department checks, so unrelated exhaustion cannot widen access.
   const scopedIdsComplete = !completeness.isTruncated;
-  const people = await loadPeople(ctx, scopedIds, completeness);
-  const assignments = await loadAssignments(ctx, scopedIds, completeness);
-
+  const optionsBudgetAlive = completeness.remaining > 0;
   // Option lists are complete only when the budget was still alive for this
   // phase and no read truncated inside it; earlier unrelated truncation alone
-  // does not disqualify them.
-  const optionsTruncations = completeness.truncatedReads;
-  const optionsBudgetAlive = completeness.remaining > 0;
-  const org = await loadOrg(ctx, companyId, completeness);
+  // does not disqualify them. The option phase shares the remaining ledger but
+  // tracks truncation separately so concurrent people/assignment exhaustion
+  // cannot disqualify option lists that loaded fine.
+  const optionPhase: QueryCompleteness = {
+    get remaining() { return completeness.remaining; },
+    set remaining(value) { completeness.remaining = value; },
+    isTruncated: false,
+    truncatedReads: 0,
+  };
+  // People, assignments, and org data are independent reads; the budget ledger
+  // is shared and each read reserves before yielding, so they run concurrently.
+  const [people, assignments, org] = await Promise.all([
+    loadPeople(ctx, scopedIds, completeness),
+    loadAssignments(ctx, scopedIds, completeness),
+    loadOrg(ctx, companyId, optionPhase),
+  ]);
+  if (optionPhase.isTruncated) completeness.isTruncated = true;
 
   const memberBranchIds = new Map<Id<"companyMemberships">, Set<Id<"branches">>>();
   const memberDepartmentIds = new Map<Id<"companyMemberships">, Set<Id<"departments">>>();
@@ -210,20 +225,22 @@ async function resolveDashboardScope(
     branchOptions = org.branches;
     departmentOptions = org.departments;
   } else if (dashboardScope === "managed") {
-    const managedBranches = await takeBudgetedRows(
-      completeness,
-      (limit) => ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(limit),
-    );
-    const managedDepartments = await takeBudgetedRows(
-      completeness,
-      (limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(limit),
-    );
+    const [managedBranches, managedDepartments] = await Promise.all([
+      takeBudgetedRows(
+        optionPhase,
+        (limit) => ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(limit),
+      ),
+      takeBudgetedRows(
+        optionPhase,
+        (limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(limit),
+      ),
+    ]);
     const branchScope = new Set(managedBranches.filter((row) => row.companyId === companyId).map((row) => row.branchId));
     const departmentScope = new Set(managedDepartments.filter((row) => row.companyId === companyId).map((row) => row.departmentId));
     branchOptions = org.branches.filter((branch) => branchScope.has(branch._id));
     departmentOptions = org.departments.filter((department) => branchScope.has(department.branchId) || departmentScope.has(department._id));
   }
-  const optionsComplete = optionsBudgetAlive && completeness.truncatedReads === optionsTruncations;
+  const optionsComplete = optionsBudgetAlive && !optionPhase.isTruncated;
 
   return { membership, company, dashboardScope, scopedIds, people, assignments, org, branchOptions, departmentOptions, memberBranchIds, memberDepartmentIds, scopedIdsComplete, optionsComplete };
 }
@@ -315,17 +332,30 @@ export const dashboard = query({
 
     const items: WorkItem[] = [];
 
-    const jdTasks = await takeBudgetedRows(
-      completeness,
-      (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
-    );
-    for (const task of jdTasks) {
+    const [jdTasks, oneTimeTasks] = await Promise.all([
+      takeBudgetedRows(
+        completeness,
+        (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
+      ),
+      takeBudgetedRows(
+        completeness,
+        (limit) => ctx.db.query("oneTimeTasks").withIndex("by_companyId_and_createdAt", (q) => q.eq("companyId", args.companyId).gte("createdAt", range.start).lte("createdAt", range.end)).take(limit),
+      ),
+    ]);
+    // Each task's ledger reads run concurrently: takeBudgetedRows reserves its
+    // allowance before yielding, so concurrent calls cannot double-spend the
+    // budget. A task whose reads truncated contributes no items — partial
+    // ledger data would silently misreport completions — so each task tracks
+    // truncation on its own phase that still shares the global ledger.
+    const jdItemGroups = await Promise.all(jdTasks.map(async (task) => {
       const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds);
-      if (!assignees.length) continue;
-      if (completeness.remaining <= 0) {
-        completeness.isTruncated = true;
-        break;
-      }
+      if (!assignees.length) return [];
+      const taskPhase: QueryCompleteness = {
+        get remaining() { return completeness.remaining; },
+        set remaining(value) { completeness.remaining = value; },
+        isTruncated: false,
+        truncatedReads: 0,
+      };
 
       const cycles = new Map<number, { dueAt: number; completed: boolean; stored: boolean }>();
       // Ledger rows (completions, missed records) keep their stored deadlines;
@@ -344,18 +374,22 @@ export const dashboard = query({
       // (the longest recurrence is annual), so this lookback covers every
       // completion that could still be due in range. Newer completions record
       // their own cycleEnd; legacy rows fall back to the current grid.
-      // Sequential so the second read sees the budget the first actually
-      // consumed rather than racing its reserved allowance.
-      const completions = await takeBudgetedRows(
-        completeness,
-        (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit),
-      );
       // Missed records store their own deadline, so they stay exact across
       // recurrence and timezone changes; match on that deadline directly.
-      const missed = await takeBudgetedRows(
-        completeness,
-        (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
-      );
+      const [completions, missed] = await Promise.all([
+        takeBudgetedRows(
+          taskPhase,
+          (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit),
+        ),
+        takeBudgetedRows(
+          taskPhase,
+          (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
+        ),
+      ]);
+      if (taskPhase.isTruncated) {
+        completeness.isTruncated = true;
+        return [];
+      }
       for (const completion of completions) {
         // Legacy rows predate cycleEnd. When the stored start no longer sits on
         // the task's grid the recurrence or timezone changed since, so the
@@ -378,18 +412,16 @@ export const dashboard = query({
       const current = currentJdCycle(task.recurrence, now, timeZone);
       put(current.start, current.end - 1, Boolean(cycles.get(current.start)?.completed), false);
 
+      const taskItems: WorkItem[] = [];
       for (const [start, cycle] of cycles) {
         if (start <= now && cycle.dueAt >= range.start && cycle.dueAt <= range.end) {
           const completed = cycle.completed || (task.status === "completed" && task.statusCycleStart === start);
-          items.push({ kind: "jd", at: cycle.dueAt, completed, overdue: !completed && cycle.dueAt < now, assigneeIds: assignees });
+          taskItems.push({ kind: "jd", at: cycle.dueAt, completed, overdue: !completed && cycle.dueAt < now, assigneeIds: assignees });
         }
       }
-    }
-
-    const oneTimeTasks = await takeBudgetedRows(
-      completeness,
-      (limit) => ctx.db.query("oneTimeTasks").withIndex("by_companyId_and_createdAt", (q) => q.eq("companyId", args.companyId).gte("createdAt", range.start).lte("createdAt", range.end)).take(limit),
-    );
+      return taskItems;
+    }));
+    for (const group of jdItemGroups) items.push(...group);
     for (const task of oneTimeTasks) {
       const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds);
       if (!assignees.length) continue;
@@ -493,16 +525,28 @@ export const dashboard = query({
     let groups: { kind: "branch" | "department"; rows: { id: string; name: string; total: number; completed: number; completionRate: number }[] } | null = null;
     if (groupKind) {
       const memberSets: ReadonlyMap<Id<"companyMemberships">, ReadonlySet<string>> = groupKind === "branch" ? scope.memberBranchIds : scope.memberDepartmentIds;
+      const candidateIds = new Set(groupCandidates.map((candidate) => candidate._id as string));
+      // Single pass over items: each item counts once per group via any of its
+      // assignees, instead of rescanning every item per group.
+      const totals = new Map<string, { total: number; completed: number }>();
+      for (const item of items) {
+        const hit = new Set<string>();
+        for (const assigneeId of item.assigneeIds) {
+          for (const groupId of memberSets.get(assigneeId) ?? []) {
+            if (candidateIds.has(groupId)) hit.add(groupId);
+          }
+        }
+        for (const groupId of hit) {
+          const row = totals.get(groupId) ?? { total: 0, completed: 0 };
+          row.total += 1;
+          if (item.completed) row.completed += 1;
+          totals.set(groupId, row);
+        }
+      }
       const rows = groupCandidates
         .map((candidate) => {
-          let total = 0;
-          let completed = 0;
-          for (const item of items) {
-            if (!item.assigneeIds.some((id) => memberSets.get(id)?.has(candidate._id))) continue;
-            total += 1;
-            if (item.completed) completed += 1;
-          }
-          return { id: candidate._id as string, name: candidate.name, total, completed, completionRate: safeRate(completed, total) };
+          const tally = totals.get(candidate._id) ?? { total: 0, completed: 0 };
+          return { id: candidate._id as string, name: candidate.name, total: tally.total, completed: tally.completed, completionRate: safeRate(tally.completed, tally.total) };
         })
         .filter((row) => row.total > 0)
         .sort((a, b) => b.completionRate - a.completionRate || b.total - a.total || a.name.localeCompare(b.name))
@@ -541,31 +585,34 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
     caps,
     () => { completeness.isTruncated = true; },
   );
-  const jd = await takeBudgetedRows(
-    completeness,
-    (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
-  );
-  const one = await takeBudgetedRows(
-    completeness,
-    (limit) => ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
-  );
+  const [jd, one, sops, recentRows] = await Promise.all([
+    takeBudgetedRows(
+      completeness,
+      (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
+    ),
+    takeBudgetedRows(
+      completeness,
+      (limit) => ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
+    ),
+    takeBudgetedRows(
+      completeness,
+      (limit) => ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
+    ),
+    caps.has("company:view_audit_log")
+      ? ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(8)
+      : Promise.resolve([]),
+  ]);
   const visibleJd = jd.filter((task) => taskHasVisibleAssignee(task, scoped));
   const visibleOne = one.filter((task) => taskHasVisibleAssignee(task, scoped));
   const overdueOne = visibleOne.filter((t) => t.status !== "completed" && (t.overdueAt || (t.dueDate && t.dueDate < Date.now()))).length;
   const completedOne = visibleOne.filter((t) => t.status === "completed").length;
-  const sops = await takeBudgetedRows(
-    completeness,
-    (limit) => ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
-  );
   const markTruncated = () => { completeness.isTruncated = true; };
   const sopVisibility = sops.length
     ? await buildSopVisibilityContext(ctx, args.companyId, membership, caps, markTruncated)
     : null;
-  let sopCount = 0;
-  for (const sop of sops) if (await visibleSop(ctx, args.companyId, membership, sop, sopVisibility, caps, markTruncated)) sopCount++;
-  const recent = caps.has("company:view_audit_log")
-    ? (await ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(8)).map((event) => ({ _id: event._id, action: event.action, targetType: event.targetType, createdAt: event.createdAt }))
-    : [];
+  const sopFlags = await Promise.all(sops.map((sop) => visibleSop(ctx, args.companyId, membership, sop, sopVisibility, caps, markTruncated)));
+  const sopCount = sopFlags.filter(Boolean).length;
+  const recent = recentRows.map((event) => ({ _id: event._id, action: event.action, targetType: event.targetType, createdAt: event.createdAt }));
   return {
     role: membership.role,
     scopeSize: scoped.size,

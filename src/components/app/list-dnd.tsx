@@ -13,7 +13,7 @@ import type { DropAnimationFunction } from "@dnd-kit/dom";
 import { SortableKeyboardPlugin } from "@dnd-kit/dom/sortable";
 import { getWindow, parseTranslate, prefersReducedMotion } from "@dnd-kit/dom/utilities";
 import { Grip } from "lucide-react";
-import { useCallback, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import {
   insertListItem, resolveListInsertion, listMovePoint, listPreviewOffsets, listReleasePoint,
   type Point, type ListInsertion, type ListRowBounds,
@@ -82,6 +82,14 @@ function previewRowOffsets(current: Session, nextIds: readonly string[]) {
   const offsets = listPreviewOffsets(current.layout.rows, nextIds);
   offsets.delete(current.sourceId);
   return offsets;
+}
+
+// Pointer moves fire far more often than the insertion point changes; returning
+// the same Map lets React skip the re-render entirely.
+function sameOffsets(a: Map<string, number>, b: Map<string, number>) {
+  if (a.size !== b.size) return false;
+  for (const [id, shift] of a) if (b.get(id) !== shift) return false;
+  return true;
 }
 
 function projectListDrag(current: Session, wrapper: HTMLDivElement, point: Point) {
@@ -184,7 +192,8 @@ export function useListDrag(options: Options) {
     const current = session.current;
     const wrapper = wrapperRef.current;
     if (!current || !wrapper) return;
-    setOffsets(projectListDrag(current, wrapper, point));
+    const next = projectListDrag(current, wrapper, point);
+    setOffsets((previous) => (sameOffsets(previous, next) ? previous : next));
   }, [wrapperRef]);
 
   useLayoutEffect(() => {
@@ -266,7 +275,8 @@ export function useListDrag(options: Options) {
     const current = session.current;
     const wrapper = wrapperRef.current;
     if (!current || current.keyboard || !wrapper) return;
-    setOffsets(projectListDrag(current, wrapper, listMovePoint(event)));
+    const next = projectListDrag(current, wrapper, listMovePoint(event));
+    setOffsets((previous) => (sameOffsets(previous, next) ? previous : next));
   }, [wrapperRef]);
 
   const onDragOver = useCallback((event: DragOverEvent) => {
@@ -279,8 +289,9 @@ export function useListDrag(options: Options) {
     const to = ids.indexOf(targetId);
     if (to < 0) return;
     current.insertion = targetId === current.sourceId ? null : { anchorId: targetId, edge: to < from ? "before" : "after" };
-    const next = current.insertion ? insertListItem(ids, current.sourceId, current.insertion) : ids;
-    setOffsets(previewRowOffsets(current, next));
+    const nextIds = current.insertion ? insertListItem(ids, current.sourceId, current.insertion) : ids;
+    const next = previewRowOffsets(current, nextIds);
+    setOffsets((previous) => (sameOffsets(previous, next) ? previous : next));
   }, []);
 
   const onDragEnd = useCallback((event: DragEndEvent) => {
@@ -308,10 +319,12 @@ export function useListDrag(options: Options) {
     return shift ? { transform: `translateY(${shift}px)` } : undefined;
   }, [offsets]);
 
-  return {
-    active, layout, overlay, register, attach, rowStyle,
-    onBeforeDragStart, onDragMove, onDragOver, onDragEnd,
-  };
+  // Stable identity between drags so memoized rows only re-render when the
+  // preview actually shifts.
+  return useMemo(
+    () => ({ active, layout, overlay, register, attach, rowStyle, onBeforeDragStart, onDragMove, onDragOver, onDragEnd }),
+    [active, layout, overlay, register, attach, rowStyle, onBeforeDragStart, onDragMove, onDragOver, onDragEnd],
+  );
 }
 
 export type ListDrag = ReturnType<typeof useListDrag>;

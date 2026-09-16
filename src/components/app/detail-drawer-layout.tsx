@@ -1,8 +1,25 @@
 "use client";
 
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { useSyncExternalStore } from "react";
 import { useDetailDrawerClose } from "./detail-drawer-motion";
 import { cn } from "@/lib/utils";
+
+const WIDE_VIEWPORT_QUERY = "(min-width: 1024px)";
+
+// The list column is only hidden below the lg breakpoint, so a detail view on a
+// narrow viewport never mounts the list's subscriptions.
+function useWideViewport() {
+  return useSyncExternalStore(
+    (onChange) => {
+      const media = window.matchMedia(WIDE_VIEWPORT_QUERY);
+      media.addEventListener("change", onChange);
+      return () => media.removeEventListener("change", onChange);
+    },
+    () => window.matchMedia(WIDE_VIEWPORT_QUERY).matches,
+    () => false,
+  );
+}
 
 export function DetailDrawerLayout({
   base,
@@ -23,12 +40,16 @@ export function DetailDrawerLayout({
   const reduceMotion = useReducedMotion();
   const { closing, close } = useDetailDrawerClose(base, isDetail, detailId ?? null);
   const hidden = reduceMotion ? { opacity: 0 } : { x: 32, opacity: 0 };
+  const wide = useWideViewport();
+  const showList = !isDetail || wide;
 
   return (
     <div className="relative h-full overflow-hidden">
-      <div className="task-list-pane">
-        <div className={cn("mx-auto w-full max-w-[1120px] px-6 py-7 md:px-10 md:py-8", isDetail && "hidden lg:block")}>{list}</div>
-      </div>
+      {showList && (
+        <div className="task-list-pane">
+          <div className={cn("mx-auto w-full max-w-[1120px] px-6 py-7 md:px-10 md:py-8", isDetail && "hidden lg:block")}>{list}</div>
+        </div>
+      )}
 
       {isDetail && <button type="button" aria-label={`Close ${label} details`} className="task-drawer-click-target hidden lg:block" onClick={() => close()} />}
 

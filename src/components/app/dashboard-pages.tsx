@@ -10,6 +10,8 @@ import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { PageHeader } from "./page-header";
 import { useCompany } from "./company-context";
+import { resolveDashboardRange } from "../../../convex/dashboardTime";
+import { localDateField } from "../../../convex/taskCycles";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { canViewDashboard } from "@/lib/permissions";
@@ -486,6 +488,7 @@ function RankingsSection({ data }: { data: DashboardData }) {
 export function DashboardView({
   filters,
   data,
+  resolvedRange,
   pending = false,
   branchId,
   departmentId,
@@ -500,6 +503,7 @@ export function DashboardView({
 }: {
   filters: DashboardFilters;
   data: DashboardData;
+  resolvedRange: DashboardData["range"];
   pending?: boolean;
   branchId: string;
   departmentId: string;
@@ -522,7 +526,7 @@ export function DashboardView({
           departmentId={departmentId}
           membershipId={membershipId}
           range={range}
-          resolvedRange={data.range}
+          resolvedRange={resolvedRange}
           today={data.today}
           onBranchChange={onBranchChange}
           onDepartmentChange={onDepartmentChange}
@@ -593,8 +597,10 @@ export function DashboardPage() {
   const [membershipId, setMembershipId] = useState<Id<"companyMemberships"> | "all">("all");
   const [range, setRange] = useState<DashboardRangeArg>({ preset: "this_month" });
   const [chartMode, setChartMode] = useState<DashboardTrendMode>("jd");
-  const [cachedData, setCachedData] = useState<{ companyId: Id<"companies">; data: DashboardData } | null>(null);
   const [cachedFilters, setCachedFilters] = useState<{ companyId: Id<"companies">; filters: DashboardFilters } | null>(null);
+  // Per-filter result cache: revisiting a combination restores instantly while
+  // the query revalidates in the background.
+  const [dataCache] = useState(() => new Map<string, DashboardData>());
 
   useEffect(() => {
     setBranchId("all");
@@ -602,7 +608,6 @@ export function DashboardPage() {
     setMembershipId("all");
     setRange({ preset: "this_month" });
     setChartMode("jd");
-    setCachedData(null);
     setCachedFilters(null);
   }, [activeCompanyId]);
 
@@ -629,25 +634,34 @@ export function DashboardPage() {
       ? membershipId
       : undefined;
 
+  // Don't wait on dashboardFilters: send the raw selections until validation
+  // lands. Valid ids produce identical args, so the common path never refetches.
+  const queryBranchId = filtersData ? validBranchId : branchId === "all" ? undefined : branchId;
+  const queryDepartmentId = filtersData ? validDepartmentId : departmentId === "all" ? undefined : departmentId;
+  const queryMembershipId = filtersData ? validMembershipId : membershipId === "all" ? undefined : membershipId;
+  const cacheKey = `${activeCompanyId ?? ""}|${queryBranchId ?? ""}|${queryDepartmentId ?? ""}|${queryMembershipId ?? ""}|${JSON.stringify(range)}`;
+
   const result = useQuery_experimental({
     query: api.analytics.dashboard,
-    args:
-      activeCompanyId && filtersResult.status === "success"
-        ? {
-            companyId: activeCompanyId,
-            now,
-            range,
-            branchId: validBranchId,
-            departmentId: validDepartmentId,
-            membershipId: validMembershipId,
-          }
-        : "skip",
+    args: activeCompanyId
+      ? {
+          companyId: activeCompanyId,
+          now,
+          range,
+          branchId: queryBranchId,
+          departmentId: queryDepartmentId,
+          membershipId: queryMembershipId,
+        }
+      : "skip",
   });
 
   const liveData = result.status === "success" ? result.data : null;
   useEffect(() => {
-    if (liveData && activeCompanyId) setCachedData({ companyId: activeCompanyId, data: liveData });
-  }, [liveData, activeCompanyId]);
+    if (liveData) {
+      dataCache.set(cacheKey, liveData);
+      if (dataCache.size > 24) dataCache.delete(dataCache.keys().next().value!);
+    }
+  }, [liveData, cacheKey, dataCache]);
   useEffect(() => {
     if (filtersData && activeCompanyId) setCachedFilters({ companyId: activeCompanyId, filters: filtersData });
   }, [filtersData, activeCompanyId]);
@@ -672,8 +686,18 @@ export function DashboardPage() {
   }
 
   const viewFilters = filtersData ?? (cachedFilters?.companyId === activeCompanyId ? cachedFilters.filters : null);
-  const viewData = liveData ?? (cachedData?.companyId === activeCompanyId ? cachedData.data : null);
+  const viewData = liveData ?? dataCache.get(cacheKey) ?? null;
   if (!viewFilters || !viewData) return <DashboardSkeleton />;
+
+  // The range label resolves locally so the trigger updates before the query
+  // returns; the server value wins once it arrives.
+  let resolvedRange = viewData.range;
+  if (!liveData) {
+    try {
+      const resolved = resolveDashboardRange(range, now, active?.company.timeZone ?? null);
+      resolvedRange = { ...viewData.range, startDate: localDateField(resolved.start, active?.company.timeZone), endDate: localDateField(resolved.end, active?.company.timeZone) };
+    } catch { /* keep the server-resolved range */ }
+  }
 
   function handleBranchChange(next: string) {
     const nextBranch = next === "all" ? "all" : (next as Id<"branches">);
@@ -702,6 +726,7 @@ export function DashboardPage() {
     <DashboardView
       filters={viewFilters}
       data={viewData}
+      resolvedRange={resolvedRange}
       pending={filtersResult.status !== "success" || result.status !== "success"}
       branchId={branchId}
       departmentId={departmentId}

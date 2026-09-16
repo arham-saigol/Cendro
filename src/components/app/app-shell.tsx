@@ -21,15 +21,19 @@ import {
   Sun,
   X,
 } from "lucide-react";
+import dynamic from "next/dynamic";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import { CompanyProvider, useCompany, type CompanyAccess } from "./company-context";
-import { AiPanel } from "./ai-panel";
 import { useTheme } from "./theme";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { canAccessCompanyManagement, canViewDashboard } from "@/lib/permissions";
 import { cn, initials } from "@/lib/utils";
+
+// The assistant panel is heavy (AI SDK, markdown rendering) and rarely opened;
+// keep it out of the shell bundle until first use.
+const AiPanel = dynamic(() => import("./ai-panel").then((m) => m.AiPanel), { ssr: false });
 
 const nav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, requiresDashboard: true },

@@ -205,7 +205,6 @@ async function resolveDashboardScope(
     loadAssignments(ctx, scopedIds, completeness),
     loadOrg(ctx, companyId, optionPhase),
   ]);
-  if (optionPhase.isTruncated) completeness.isTruncated = true;
 
   const memberBranchIds = new Map<Id<"companyMemberships">, Set<Id<"branches">>>();
   const memberDepartmentIds = new Map<Id<"companyMemberships">, Set<Id<"departments">>>();
@@ -240,6 +239,9 @@ async function resolveDashboardScope(
     branchOptions = org.branches.filter((branch) => branchScope.has(branch._id));
     departmentOptions = org.departments.filter((department) => branchScope.has(department.branchId) || departmentScope.has(department._id));
   }
+  // Propagate after every option-phase read — the managed-scope reads above
+  // can still truncate, and callers read completeness from the shared flag.
+  if (optionPhase.isTruncated) completeness.isTruncated = true;
   const optionsComplete = optionsBudgetAlive && !optionPhase.isTruncated;
 
   return { membership, company, dashboardScope, scopedIds, people, assignments, org, branchOptions, departmentOptions, memberBranchIds, memberDepartmentIds, scopedIdsComplete, optionsComplete };

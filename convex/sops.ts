@@ -328,6 +328,9 @@ export const listOrderingRows = query({
  * Server-side content search over the sops search index, so the browser list no
  * longer needs every SOP's full content to answer a body-text query.
  */
+const CONTENT_SEARCH_TARGET = 100;
+const CONTENT_SEARCH_SCAN_BUDGET = 500;
+
 export const contentSearchIds = query({
   args: { companyId: v.id("companies"), query: v.string() },
   returns: v.object({ ids: v.array(v.id("sops")), truncated: v.boolean() }),
@@ -338,14 +341,27 @@ export const contentSearchIds = query({
     const caps = await membershipCapabilities(ctx, membership);
     const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
     const auth = sopListAuth(ctx, args.companyId, membership, caps);
-    const matches = await ctx.db
-      .query("sops")
-      .withSearchIndex("search_content", (q) => q.search("content", needle).eq("companyId", args.companyId))
-      .take(101);
-    const truncated = matches.length > 100;
-    const candidates = matches.slice(0, 100);
-    const flags = await Promise.all(candidates.map((sop) => visibleSop(ctx, args.companyId, membership, sop, visibility, caps, undefined, auth)));
-    return { ids: candidates.filter((_, index) => flags[index]).map((sop) => sop._id), truncated };
+    // Keep scanning the search index until enough *visible* matches collect —
+    // a first page of inaccessible hits must not hide the viewer's real
+    // matches. The scan budget bounds the total work.
+    const visible: Doc<"sops">[] = [];
+    let cursor: string | null = null;
+    let scanned = 0;
+    let exhausted = false;
+    while (visible.length < CONTENT_SEARCH_TARGET && scanned < CONTENT_SEARCH_SCAN_BUDGET) {
+      const page = await ctx.db
+        .query("sops")
+        .withSearchIndex("search_content", (q) => q.search("content", needle).eq("companyId", args.companyId))
+        .paginate({ cursor, numItems: Math.min(100, CONTENT_SEARCH_SCAN_BUDGET - scanned) });
+      scanned += page.page.length;
+      const flags = await Promise.all(page.page.map((sop) => visibleSop(ctx, args.companyId, membership, sop, visibility, caps, undefined, auth)));
+      for (let index = 0; index < page.page.length; index += 1) {
+        if (flags[index]) visible.push(page.page[index]);
+      }
+      if (page.isDone) { exhausted = true; break; }
+      cursor = page.continueCursor;
+    }
+    return { ids: visible.slice(0, CONTENT_SEARCH_TARGET).map((sop) => sop._id), truncated: !exhausted };
   },
 });
 

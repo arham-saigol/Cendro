@@ -1439,6 +1439,9 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
           {hasMoreRenderedRows && (
             <Button size="sm" variant="ghost" onClick={() => setRenderedCount((current) => Math.min(current + SOP_PAGE_SIZE, filteredRows.length))}>Load more SOPs</Button>
           )}
+          {contentSearchResult?.truncated && debouncedSearch.trim() && (
+            <span className="text-[12px] text-[var(--ink-muted)]">More SOPs may match — try a more specific search.</span>
+          )}
         </div>
       </div>
 

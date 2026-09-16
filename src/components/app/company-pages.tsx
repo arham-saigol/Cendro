@@ -636,13 +636,21 @@ function StructureTab({
   // In-flight optimistic structure ops: an unrelated overview update must not
   // snap a just-dropped node back before its mutation commits.
   const pendingStructureOps = useRef(0);
+  // Set when an overview update arrives during a drag or pending op; the last
+  // settling op replays it so a skipped update cannot stay hidden forever.
+  const skippedReseed = useRef(false);
+  const [structureOpsDrained, setStructureOpsDrained] = useState(0);
 
   // Re-seed from real-time data when no drag or pending save is in progress.
   useEffect(() => {
-    if (isDragging.current || pendingStructureOps.current > 0) return;
+    if (isDragging.current || pendingStructureOps.current > 0) {
+      skippedReseed.current = true;
+      return;
+    }
+    skippedReseed.current = false;
     setBranches(data.branches);
     setDepartments(data.departments);
-  }, [data.branches, data.departments]);
+  }, [data.branches, data.departments, structureOpsDrained]);
 
   async function withStructureOp<T>(op: () => Promise<T>): Promise<T> {
     pendingStructureOps.current += 1;
@@ -650,6 +658,7 @@ function StructureTab({
       return await op();
     } finally {
       pendingStructureOps.current -= 1;
+      if (pendingStructureOps.current === 0 && skippedReseed.current) setStructureOpsDrained((tick) => tick + 1);
     }
   }
 

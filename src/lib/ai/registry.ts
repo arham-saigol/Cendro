@@ -141,8 +141,8 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
     permission: "member",
     risk: "read",
     execute: async (input, ctx) => {
-      const rows = await ctx.client.query(api.tasks.aiListVisible, { companyId: ctx.companyId, status: input.status, limit: input.limit });
-      return { ok: true, tasks: rows.map((row: any) => taskOut(ctx, row)), truncated: rows.length >= input.limit };
+      const { rows, truncated } = await ctx.client.query(api.tasks.aiListVisible, { companyId: ctx.companyId, status: input.status, limit: input.limit });
+      return { ok: true, tasks: rows.map((row: any) => taskOut(ctx, row)), truncated };
     },
   },
   {

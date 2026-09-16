@@ -1716,7 +1716,9 @@ async function aiOneTimeRow(ctx: Ctx, task: Doc<"oneTimeTasks">, scopedMembershi
   return { kind: "one_time" as const, id: task._id, title: task.title, description: task.description, notes: task.notes, status: state.status, dueAt: task.dueDate, priority: task.priority, quantity: task.quantity, time: task.time, assignees: await aiAssignees(ctx, visibleAssigneeIds) };
 }
 
-const AI_LIST_TASK_SCAN_LIMIT = 100;
+// Source rows scanned per kind before giving up; enough that a sparse status
+// or scoped-viewer match usually surfaces instead of silently coming back empty.
+const AI_LIST_TASK_SCAN_LIMIT = 400;
 
 export const aiListVisible = query({
   args: { companyId: v.id("companies"), status: v.union(v.literal("all"), v.literal("due"), v.literal("overdue"), v.literal("done")), limit: v.number() },
@@ -1728,27 +1730,38 @@ export const aiListVisible = query({
       displayScopedMembershipIds(ctx, args.companyId, auth, "tasks:one_time:view:any"),
     ]);
     const limit = Math.min(Math.max(Math.floor(args.limit), 1), 30);
-    const out: any[] = [];
     const matches = (status: string) => args.status === "all" || (args.status === "overdue" ? status === "Overdue" : args.status === "done" ? status === "Completed" : status !== "Completed" && status !== "Overdue");
-    const jdRows: any[] = [];
-    for (const task of await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(AI_LIST_TASK_SCAN_LIMIT)) {
-      if (!(await visible(ctx, args.companyId, membership, task, "jd", auth))) continue;
-      const row = await aiJdRow(ctx, task, scopedJd);
-      if (matches(row.status)) jdRows.push(row);
-      if (jdRows.length >= limit) break;
+    // Keep paging source rows until the requested count is filled or the scan
+    // budget runs out; `exhausted` reports whether matching rows may remain.
+    const collect = async (kind: TaskKind, table: "jdTasks" | "oneTimeTasks", scoped: Set<Id<"companyMemberships">> | undefined) => {
+      const rows: any[] = [];
+      let cursor: string | null = null;
+      let scanned = 0;
+      let exhausted = false;
+      while (rows.length < limit && scanned < AI_LIST_TASK_SCAN_LIMIT) {
+        const page = await ctx.db.query(table).withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: Math.min(100, AI_LIST_TASK_SCAN_LIMIT - scanned) });
+        scanned += page.page.length;
+        const enriched = await Promise.all(page.page.map(async (task) =>
+          (await visible(ctx, args.companyId, membership, task, kind, auth))
+            ? await (kind === "jd" ? aiJdRow(ctx, task as Doc<"jdTasks">, scoped) : aiOneTimeRow(ctx, task as Doc<"oneTimeTasks">, scoped))
+            : null,
+        ));
+        for (const row of enriched) if (row && matches(row.status)) rows.push(row);
+        if (page.isDone) { exhausted = true; break; }
+        cursor = page.continueCursor;
+      }
+      return { rows, exhausted };
+    };
+    const [jdScan, oneScan] = await Promise.all([
+      collect("jd", "jdTasks", scopedJd),
+      collect("one_time", "oneTimeTasks", scopedOneTime),
+    ]);
+    const out: any[] = [];
+    for (let i = 0; i < Math.max(jdScan.rows.length, oneScan.rows.length) && out.length < limit; i += 1) {
+      if (jdScan.rows[i]) out.push(jdScan.rows[i]);
+      if (oneScan.rows[i] && out.length < limit) out.push(oneScan.rows[i]);
     }
-    const oneRows: any[] = [];
-    for (const task of await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(AI_LIST_TASK_SCAN_LIMIT)) {
-      if (!(await visible(ctx, args.companyId, membership, task, "one_time", auth))) continue;
-      const row = await aiOneTimeRow(ctx, task, scopedOneTime);
-      if (matches(row.status)) oneRows.push(row);
-      if (oneRows.length >= limit) break;
-    }
-    for (let i = 0; i < Math.max(jdRows.length, oneRows.length) && out.length < limit; i += 1) {
-      if (jdRows[i]) out.push(jdRows[i]);
-      if (oneRows[i] && out.length < limit) out.push(oneRows[i]);
-    }
-    return out;
+    return { rows: out, truncated: !jdScan.exhausted || !oneScan.exhausted || jdScan.rows.length + oneScan.rows.length > out.length };
   },
 });
 

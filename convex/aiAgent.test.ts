@@ -56,7 +56,8 @@ describe("AI agent Convex boundaries", () => {
     await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Hidden SOP", content: "Private procedure", scopeType: "user", branchIds: [], departmentIds: [], userMembershipIds: [adminMembershipId] });
 
     const tasks = await t.withIdentity(identity("employee")).query(api.tasks.aiListVisible, { companyId, status: "all", limit: 10 });
-    expect(tasks.map((task) => task.title)).toEqual(["Visible task"]);
+    expect(tasks.rows.map((task) => task.title)).toEqual(["Visible task"]);
+    expect(tasks.truncated).toBe(false);
     const sops = await t.withIdentity(identity("employee")).query(api.sops.aiSearch, { companyId, query: "procedure" });
     expect(sops.map((sop) => sop.title)).toEqual(["Visible SOP"]);
   });

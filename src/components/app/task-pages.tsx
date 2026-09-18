@@ -1917,9 +1917,10 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
       }
       setSelectedIds(new Set());
     } catch (err) {
-      // The optimistic rollback restores the rows; restore the selection too
-      // so the failed delete can simply be retried.
-      setSelectedIds(new Set(ids));
+      // The optimistic rollback restores the rows; merge the deleted IDs back
+      // so the failed delete can be retried without discarding rows the user
+      // selected while the request was in flight.
+      setSelectedIds((current) => new Set([...current, ...ids]));
       setDeleteError(err instanceof Error ? err.message : "Could not delete the selected tasks.");
     } finally {
       setDeleting(false);

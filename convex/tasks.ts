@@ -1592,12 +1592,33 @@ export const addAttachment = mutation({
     const metadata = await ctx.db.system.get("_storage", args.storageId);
     if (!metadata) throw new ConvexError("Uploaded file not found.");
     const attachmentId = await ctx.db.insert("taskAttachments", { companyId: args.companyId, taskType: args.taskType, taskId: normalized, storageId: args.storageId, fileName: nonEmpty(args.fileName, "File name"), contentType: metadata.contentType ?? args.contentType, size: metadata.size ?? args.size, createdByMembershipId: membership._id, createdAt: Date.now() });
-    // Consume the upload claim so it cannot later "clean up" this blob.
+    // Consume the upload claim so it cannot later "clean up" this blob. A
+    // claim bound to a different blob stays for the sweep to reclaim it.
     if (args.claimId) {
       const claim = await ctx.db.get(args.claimId);
-      if (claim && claim.membershipId === membership._id) await ctx.db.delete(args.claimId);
+      if (claim && claim.companyId === args.companyId && claim.membershipId === membership._id && claim.storageId === args.storageId) await ctx.db.delete(args.claimId);
     }
     return attachmentId;
+  },
+});
+
+// Binds the blob produced by an upload POST to the claim issued with its URL.
+// Binding is what makes the claim a single-use cleanup token: orphan cleanup
+// can only ever delete this exact blob.
+export const bindUploadClaim = mutation({
+  args: { companyId: v.id("companies"), claimId: v.id("taskUploadClaims"), storageId: v.id("_storage") },
+  handler: async (ctx, args) => {
+    const { membership } = await requireCapability(ctx, args.companyId, "tasks:attachment:add");
+    const claim = await ctx.db.get(args.claimId);
+    if (!claim || claim.companyId !== args.companyId || claim.membershipId !== membership._id) throw new ConvexError("Upload claim not found.");
+    if (claim.storageId) {
+      if (claim.storageId !== args.storageId) throw new ConvexError("Upload claim is already bound.");
+      return null;
+    }
+    const metadata = await ctx.db.system.get("_storage", args.storageId);
+    if (!metadata) throw new ConvexError("Uploaded file not found.");
+    await ctx.db.patch(args.claimId, { storageId: args.storageId });
+    return null;
   },
 });
 
@@ -1636,28 +1657,30 @@ export const deleteAttachment = mutation({
 // caller's own orphan, so expiry must not strand an unreferenced blob.
 const TASK_UPLOAD_CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
 
-// Reclaims a blob the caller uploaded when recording it as an attachment
-// failed (e.g. the task was deleted mid-upload). Requires the unused upload
-// claim issued to this member, so a caller can never delete another tenant's
-// pending upload, and only unreferenced blobs are eligible.
+// Reclaims the bound blob when recording an upload as an attachment failed
+// (e.g. the task was deleted mid-upload). The claim both proves the caller
+// was issued this upload slot and names the only blob cleanup may delete,
+// so a caller can never touch another tenant's pending upload.
 export const deleteOrphanedUpload = mutation({
-  args: { companyId: v.id("companies"), claimId: v.id("taskUploadClaims"), storageId: v.id("_storage") },
+  args: { companyId: v.id("companies"), claimId: v.id("taskUploadClaims") },
   handler: async (ctx, args) => {
     const { membership } = await requireCapability(ctx, args.companyId, "tasks:attachment:add");
     const claim = await ctx.db.get(args.claimId);
     if (!claim || claim.companyId !== args.companyId || claim.membershipId !== membership._id) throw new ConvexError("Upload claim not found.");
     await ctx.db.delete(args.claimId);
+    if (!claim.storageId) return null;
     const referenced = await ctx.db
       .query("taskAttachments")
-      .withIndex("by_storageId", (q) => q.eq("storageId", args.storageId))
+      .withIndex("by_storageId", (q) => q.eq("storageId", claim.storageId!))
       .first();
-    if (!referenced) await ctx.storage.delete(args.storageId);
+    if (!referenced) await ctx.storage.delete(claim.storageId);
     return null;
   },
 });
 
-// Abandoned claims (failed uploads, closed tabs) are deleted once the URL they
-// guard could no longer have completed an upload anyway.
+// Abandoned claims (failed uploads, closed tabs) are reclaimed once the URL
+// they guard could no longer have completed an upload anyway — including the
+// bound blob when it was never attached.
 export const sweepExpiredTaskUploadClaims = internalMutation({
   args: { cursor: v.optional(v.union(v.string(), v.null())) },
   handler: async (ctx, args) => {
@@ -1666,6 +1689,13 @@ export const sweepExpiredTaskUploadClaims = internalMutation({
     for (const claim of page.page) {
       // Rows scan in creation order — a fresh claim means the rest are fresh.
       if (claim.createdAt >= cutoff) return null;
+      if (claim.storageId) {
+        const referenced = await ctx.db
+          .query("taskAttachments")
+          .withIndex("by_storageId", (q) => q.eq("storageId", claim.storageId!))
+          .first();
+        if (!referenced) await ctx.storage.delete(claim.storageId);
+      }
       await ctx.db.delete(claim._id);
     }
     if (!page.isDone) await ctx.scheduler.runAfter(0, internal.tasks.sweepExpiredTaskUploadClaims, { cursor: page.continueCursor });

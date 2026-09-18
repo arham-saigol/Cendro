@@ -62,7 +62,7 @@ export default defineSchema({
   // One row per issued upload URL. Held until addAttachment consumes it, so
   // orphan cleanup can prove the caller was issued an upload slot in this
   // company instead of deleting arbitrary unreferenced blobs cross-tenant.
-  taskUploadClaims: defineTable({ companyId: v.id("companies"), membershipId: v.id("companyMemberships"), createdAt: v.number() }).index("by_company", ["companyId"]),
+  taskUploadClaims: defineTable({ companyId: v.id("companies"), membershipId: v.id("companyMemberships"), storageId: v.optional(v.id("_storage")), createdAt: v.number() }).index("by_company", ["companyId"]),
   sops: defineTable({ companyId: v.id("companies"), reference: v.string(), title: v.string(), content: v.string(), scopeType: scope, creatorMembershipId: v.id("companyMemberships"), updatedByMembershipId: v.id("companyMemberships"), createdAt: v.number(), updatedAt: v.number() }).index("by_company", ["companyId"]).searchIndex("search_content", { searchField: "content", filterFields: ["companyId"] }),
   sopBranchScopes: defineTable({ companyId: v.id("companies"), sopId: v.id("sops"), branchId: v.id("branches") }).index("by_sop", ["sopId"]).index("by_branch", ["branchId"]).index("by_company", ["companyId"]).index("by_sopId_and_branchId", ["sopId", "branchId"]),
   sopDepartmentScopes: defineTable({ companyId: v.id("companies"), sopId: v.id("sops"), departmentId: v.id("departments") }).index("by_sop", ["sopId"]).index("by_department", ["departmentId"]).index("by_company", ["companyId"]).index("by_sopId_and_departmentId", ["sopId", "departmentId"]),

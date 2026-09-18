@@ -226,6 +226,7 @@ async function filteredSopRows(ctx: QueryCtx, args: { companyId: Id<"companies">
   const kept: Doc<"sops">[] = [];
   let cursor: string | null = null;
   let scanned = 0;
+  let exhausted = false;
   while (kept.length < args.limit && scanned < FILTERED_SOP_SCAN_CEILING) {
     const page = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: Math.min(FILTERED_SOP_SCAN_PAGE, FILTERED_SOP_SCAN_CEILING - scanned) });
     scanned += page.page.length;
@@ -238,10 +239,12 @@ async function filteredSopRows(ctx: QueryCtx, args: { companyId: Id<"companies">
     for (let index = 0; index < page.page.length && kept.length < args.limit; index += 1) {
       if (keepFlags[index]) kept.push(page.page[index]);
     }
-    if (page.isDone) break;
+    if (page.isDone) { exhausted = true; break; }
     cursor = page.continueCursor;
   }
-  if (scanned >= FILTERED_SOP_SCAN_CEILING && kept.length < args.limit) {
+  // A short result after an exhausted index is legitimate; only a scan cut off
+  // by the ceiling is an incomplete result worth failing loudly on.
+  if (!exhausted && kept.length < args.limit) {
     throw new ConvexError("Too many SOPs to scan — narrow the filters or use the paginated list endpoint.");
   }
   return await Promise.all(kept.map((sop) => withScopes(ctx, sop, membership, company?.name, caps, auth.managedTargets)));
@@ -767,8 +770,12 @@ async function visibleSopSearchCandidates(ctx: any, args: { companyId: Id<"compa
     while (matched.length < TITLE_MATCH_TARGET && scanned < TITLE_SCAN_CEILING) {
       const page: { page: Doc<"sops">[]; isDone: boolean; continueCursor: string } = await ctx.db.query("sops").withIndex("by_company", (q: any) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: Math.min(100, TITLE_SCAN_CEILING - scanned) });
       scanned += page.page.length;
-      for (const sop of page.page as Doc<"sops">[]) {
-        if (sop.reference.toLowerCase().includes(lower) || sop.title.toLowerCase().includes(lower)) matched.push(sop);
+      // Only visible matches count toward the target — a page of inaccessible
+      // title hits must not stop the scan before real matches are found.
+      const titleMatches = (page.page as Doc<"sops">[]).filter((sop) => sop.reference.toLowerCase().includes(lower) || sop.title.toLowerCase().includes(lower));
+      const visibleFlags = await Promise.all(titleMatches.map((sop) => visibleSop(ctx, args.companyId, membership, sop, visibility, caps)));
+      for (let index = 0; index < titleMatches.length; index += 1) {
+        if (visibleFlags[index]) matched.push(titleMatches[index]);
       }
       if (page.isDone) break;
       cursor = page.continueCursor;

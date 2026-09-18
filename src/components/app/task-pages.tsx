@@ -1416,6 +1416,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
   const updateJd = useMutation(api.tasks.updateJd);
   const updateOne = useMutation(api.tasks.updateOneTime);
   const generateUploadUrl = useMutation(api.tasks.generateAttachmentUploadUrl);
+  const bindUploadClaim = useMutation(api.tasks.bindUploadClaim);
   const addAttachment = useMutation(api.tasks.addAttachment);
   const deleteOrphanedUpload = useMutation(api.tasks.deleteOrphanedUpload);
   const [values, setValues] = useState<TaskFormValues>(() => task ? formFromTask(kind, task) : emptyForm(kind));
@@ -1453,10 +1454,11 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
       const json = await response.json() as { storageId?: Id<"_storage"> };
       if (!json.storageId) throw new Error(`Could not upload ${file.name}.`);
       try {
+        await bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId });
         await addAttachment({ companyId: activeCompanyId, taskType: taskTypeFor(kind), taskId, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
       } catch (err) {
         // The blob is already stored; reclaim it so the failure does not leak storage.
-        void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId }).catch(() => {});
+        void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId }).catch(() => {});
         throw err;
       }
       setValues((current) => ({ ...current, files: current.files.filter((candidate) => candidate !== file) }));
@@ -2578,6 +2580,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const updateComment = useMutation(api.tasks.updateComment);
   const deleteComment = useMutation(api.tasks.deleteComment);
   const generateUploadUrl = useMutation(api.tasks.generateAttachmentUploadUrl);
+  const bindUploadClaim = useMutation(api.tasks.bindUploadClaim);
   const addAttachment = useMutation(api.tasks.addAttachment);
   const deleteOrphanedUpload = useMutation(api.tasks.deleteOrphanedUpload);
   const deleteAttachment = useMutation(api.tasks.deleteAttachment).withOptimisticUpdate((localStore, args) => {
@@ -2710,9 +2713,10 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
         const json = await response.json() as { storageId?: Id<"_storage"> };
         if (!json.storageId) throw new Error(`Could not upload ${file.name}.`);
         try {
+          await bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId });
           await addAttachment({ companyId: activeCompanyId, taskType, taskId: id, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
         } catch (attachErr) {
-          void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId }).catch(() => {});
+          void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId }).catch(() => {});
           throw attachErr;
         }
       } catch (err) {

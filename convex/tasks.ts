@@ -1660,20 +1660,24 @@ const TASK_UPLOAD_CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
 // Reclaims the bound blob when recording an upload as an attachment failed
 // (e.g. the task was deleted mid-upload). The claim both proves the caller
 // was issued this upload slot and names the only blob cleanup may delete,
-// so a caller can never touch another tenant's pending upload.
+// so a caller can never touch another tenant's pending upload. When the
+// upload POST completed but bindUploadClaim never committed, the caller's
+// storageId is bound here so the blob is never discarded unidentified.
 export const deleteOrphanedUpload = mutation({
-  args: { companyId: v.id("companies"), claimId: v.id("taskUploadClaims") },
+  args: { companyId: v.id("companies"), claimId: v.id("taskUploadClaims"), storageId: v.optional(v.id("_storage")) },
   handler: async (ctx, args) => {
     const { membership } = await requireCapability(ctx, args.companyId, "tasks:attachment:add");
     const claim = await ctx.db.get(args.claimId);
     if (!claim || claim.companyId !== args.companyId || claim.membershipId !== membership._id) throw new ConvexError("Upload claim not found.");
+    if (claim.storageId && args.storageId && claim.storageId !== args.storageId) throw new ConvexError("Upload claim is bound to a different file.");
+    const blobId = claim.storageId ?? args.storageId;
     await ctx.db.delete(args.claimId);
-    if (!claim.storageId) return null;
-    const referenced = await ctx.db
-      .query("taskAttachments")
-      .withIndex("by_storageId", (q) => q.eq("storageId", claim.storageId!))
-      .first();
-    if (!referenced) await ctx.storage.delete(claim.storageId);
+    if (!blobId) return null;
+    const [referenced, metadata] = await Promise.all([
+      ctx.db.query("taskAttachments").withIndex("by_storageId", (q) => q.eq("storageId", blobId)).first(),
+      ctx.db.system.get("_storage", blobId),
+    ]);
+    if (!referenced && metadata) await ctx.storage.delete(blobId);
     return null;
   },
 });

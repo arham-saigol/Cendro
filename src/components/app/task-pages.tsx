@@ -1457,8 +1457,9 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
         await bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId });
         await addAttachment({ companyId: activeCompanyId, taskType: taskTypeFor(kind), taskId, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
       } catch (err) {
-        // The blob is already stored; reclaim it so the failure does not leak storage.
-        void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId }).catch(() => {});
+        // The blob is already stored; reclaim it so the failure does not leak
+        // storage — the storageId binds the claim even if binding never ran.
+        void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId }).catch(() => {});
         throw err;
       }
       setValues((current) => ({ ...current, files: current.files.filter((candidate) => candidate !== file) }));
@@ -2716,7 +2717,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
           await bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId });
           await addAttachment({ companyId: activeCompanyId, taskType, taskId: id, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
         } catch (attachErr) {
-          void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId }).catch(() => {});
+          void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId }).catch(() => {});
           throw attachErr;
         }
       } catch (err) {

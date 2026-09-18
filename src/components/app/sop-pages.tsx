@@ -370,11 +370,17 @@ function SopDialog({
   const fullSop = fullSopResult.status === "success" ? fullSopResult.data : undefined;
   const originalContent = sop?.content ?? fullSop?.content;
   const contentLoaded = mode !== "edit" || originalContent !== undefined;
+  // Change detection compares against the seeded baselines, not the live query
+  // values — a concurrent remote edit must not turn an unrelated local edit
+  // into a body or title overwrite.
+  const titleBaseline = useRef("");
+  const contentBaseline = useRef("");
   const contentSeeded = useRef(false);
   useEffect(() => { if (open) contentSeeded.current = false; }, [open]);
   useEffect(() => {
     if (mode !== "edit" || contentSeeded.current || fullSop?.content === undefined) return;
     contentSeeded.current = true;
+    contentBaseline.current = fullSop.content;
     setContent(fullSop.content);
   }, [fullSop, mode]);
 
@@ -404,14 +410,23 @@ function SopDialog({
 
   useEffect(() => {
     if (!open) return;
-    setTitle(sop?.title ?? "");
-    setContent(sop?.content ?? "");
+    titleBaseline.current = sop?.title ?? "";
+    setTitle(titleBaseline.current);
     if (mode === "create") {
+      contentBaseline.current = "";
+      setContent("");
       setScopeType(defaultCreateScope);
       setBranchId("");
       setDepartmentId("");
       setUserMembershipId("");
     } else {
+      // The body seeds only once per open — a cached fullSop already seeded it
+      // in the effect above, and a still-loading one seeds when it resolves.
+      if (!contentSeeded.current && sop?.content !== undefined) {
+        contentSeeded.current = true;
+        contentBaseline.current = sop.content;
+        setContent(sop.content);
+      }
       setScopeType(sop?.scopeType ?? "company");
       setBranchId(sop?.branchIds?.[0] ?? "");
       setDepartmentId(sop?.departmentIds?.[0] ?? "");
@@ -474,7 +489,8 @@ function SopDialog({
         });
         if (scopeType === "company" || (scopeType === "user" && userMembershipId === active?.membership._id)) onCreated?.(id as unknown as string);
       } else {
-        const titleOrContentChanged = trimmedTitle !== (sop?.title ?? "").trim() || trimmedContent !== (originalContent ?? "").trim();
+        const titleChanged = trimmedTitle !== titleBaseline.current.trim();
+        const contentChanged = trimmedContent !== contentBaseline.current.trim();
         const prevBranchId = sop?.branchIds?.[0] ?? "";
         const prevDepartmentId = sop?.departmentIds?.[0] ?? "";
         const prevUserMembershipId = sop?.userMembershipIds?.[0] ?? "";
@@ -483,11 +499,12 @@ function SopDialog({
           (scopeType === "department" && departmentId !== prevDepartmentId) ||
           (scopeType === "user" && userMembershipId !== prevUserMembershipId);
 
-        if (titleOrContentChanged || scopeChanged) {
+        if (titleChanged || contentChanged || scopeChanged) {
           await update({
             companyId: activeCompanyId,
             sopId: sop._id as Id<"sops">,
-            ...(titleOrContentChanged ? { title: trimmedTitle, content: trimmedContent } : {}),
+            ...(titleChanged ? { title: trimmedTitle } : {}),
+            ...(contentChanged ? { content: trimmedContent } : {}),
             ...(scopeChanged ? {
               scopeType,
               branchIds: scopeType === "branch" ? [branchId as Id<"branches">] : [],
@@ -610,7 +627,9 @@ function SopDialog({
                         onChange={(value) => { setContent(value); setError(null); }}
                       />
                     ) : (
-                      <div className="min-h-[176px] px-2 py-2 text-[13px] leading-6 text-[var(--ink-muted)]">Loading procedure…</div>
+                      <div className="min-h-[176px] px-2 py-2 text-[13px] leading-6 text-[var(--ink-muted)]">
+                        {fullSopResult.status === "error" ? "Could not load the SOP body. Close the dialog and try again." : "Loading procedure…"}
+                      </div>
                     )}
                   </div>
                 </div>

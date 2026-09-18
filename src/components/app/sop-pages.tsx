@@ -1156,6 +1156,9 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
       else await removeBulk({ companyId: activeCompanyId, sopIds: ids as Id<"sops">[] });
       setSelectedIds(new Set());
     } catch (err) {
+      // The optimistic rollback restores the rows; restore the selection too
+      // so the failed delete can simply be retried.
+      setSelectedIds(new Set(ids));
       setDeleteError(err instanceof Error ? err.message : "Could not delete the selected SOPs.");
     } finally {
       setDeleting(false);

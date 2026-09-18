@@ -11,6 +11,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronsRight,
+  CircleAlert,
   Clock,
   Download,
   Flag,
@@ -30,7 +31,7 @@ import {
 import { useRouter } from "next/navigation";
 import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { DragDropProvider } from "@dnd-kit/react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
@@ -43,7 +44,6 @@ import { ListSortHeader } from "./list-sort-header";
 import { ListPreferenceController, type ListPreference, type ListPreferenceControllerOptions } from "@/lib/list-preference-controller";
 import { mergeFilteredListOrder, sameListOrder } from "@/lib/list-order";
 import { insertListItem } from "@/lib/list-drag";
-import { downloadBlob, exportTaskWorkbook } from "@/lib/task-import/workbook";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -62,7 +62,13 @@ import {
   type TaskListTaskType,
 } from "@/lib/task-list-sort";
 import { ASSIGNEE_SEARCH_MAX_LENGTH } from "@/lib/assignee-search";
+import { startInteraction } from "@/lib/perf";
+import { getDetailPreview, seedDetailPreview } from "@/lib/detail-preview";
+import { prependToListFirstPage, removeFromListPages, updateInDetailQueries, updateInListPages } from "@/lib/convex-optimistic";
 import { cn, formatDate, initials } from "@/lib/utils";
+
+// The workbook stack (xlsx readers/writers) is heavy — load it on demand.
+const loadWorkbook = () => import("@/lib/task-import/workbook");
 
 type Kind = "jd" | "one";
 type Priority = "low" | "medium" | "high";
@@ -479,30 +485,58 @@ function TaskCellPopover({
   );
 }
 
+function taskStateLabel(status: ManualStatus | "overdue") {
+  return status === "due" ? "Pending" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue";
+}
+
+// Mirrors the server-side state computation so a status change can be patched
+// into loaded list/detail query results before the mutation round-trips.
+function optimisticTaskState(task: any, kind: Kind, status: ManualStatus) {
+  const state = typeof task.state === "object" && task.state ? task.state : {};
+  const now = Date.now();
+  if (kind === "jd") {
+    return { ...state, status: taskStateLabel(status), rawStatus: status, isOverdue: false, lastCompletedAt: status === "completed" ? now : (state.lastCompletedAt ?? null) };
+  }
+  const isOverdue = status !== "completed" && (Boolean(task.overdueAt) || Boolean(task.dueDate && task.dueDate < now));
+  const raw = isOverdue ? "overdue" : status;
+  return { ...state, status: taskStateLabel(raw), rawStatus: raw, isOverdue, lastCompletedAt: status === "completed" ? now : (state.lastCompletedAt ?? null) };
+}
+
 function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger = false }: { kind: Kind; task: any; size?: "sm" | "md"; canUpdateOverride?: boolean; cellTrigger?: boolean }) {
   const { activeCompanyId, active } = useCompany();
-  const updateJdStatus = useMutation(api.tasks.updateJdStatus);
-  const updateOneStatus = useMutation(api.tasks.updateOneTimeStatus);
+  // Patch the loaded list/detail queries so every view of this task — the row,
+  // the open detail pane, and status filters — reflects the change immediately.
+  const updateJdStatus = useMutation(api.tasks.updateJdStatus).withOptimisticUpdate((localStore, args) => {
+    const patch = (row: any) => ({ ...row, state: optimisticTaskState(row, "jd", args.status), ...(args.status === "completed" ? { completedAt: Date.now() } : {}) });
+    updateInListPages(localStore, api.tasks.listJdRows, args.taskId, patch);
+    updateInDetailQueries(localStore, api.tasks.getJd, args.taskId, patch);
+  });
+  const updateOneStatus = useMutation(api.tasks.updateOneTimeStatus).withOptimisticUpdate((localStore, args) => {
+    const patch = (row: any) => ({ ...row, state: optimisticTaskState(row, "one", args.status), ...(args.status === "completed" ? { completedAt: Date.now() } : {}) });
+    updateInListPages(localStore, api.tasks.listOneTimeRows, args.taskId, patch);
+    updateInDetailQueries(localStore, api.tasks.getOneTime, args.taskId, patch);
+  });
   const [pending, setPending] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [open, setOpen] = useState(false);
-  const [optimistic, setOptimistic] = useState<ManualStatus | null>(null);
   const status = statusText(task);
-  const raw = optimistic ?? rawStatus(task);
+  const raw = rawStatus(task);
   const locked = status === "Overdue" || raw === "overdue";
   const isAssignee = taskHasAssignee(task, active?.membership?._id);
-  const canUpdate = isAssignee || (canUpdateOverride ?? canEditTasks(active, kind));
+  // Pending rows carry a synthetic id — a status mutation against it would reject.
+  const canUpdate = !isPendingTask(task) && (isAssignee || (canUpdateOverride ?? canEditTasks(active, kind)));
   const pad = size === "md" ? "h-7 px-2.5" : "h-[22px] px-2";
 
   async function change(nextStatus: ManualStatus) {
     if (!activeCompanyId || locked || pending) return;
     setPending(true);
-    setOptimistic(nextStatus);
+    setFailed(false);
     try {
       if (kind === "jd") await updateJdStatus({ companyId: activeCompanyId, taskId: task._id, status: nextStatus });
       else await updateOneStatus({ companyId: activeCompanyId, taskId: task._id, status: nextStatus });
-      setOptimistic(null);
     } catch {
-      setOptimistic(null);
+      // The optimistic store reverts on failure; flag it so the retry affordance is clear.
+      setFailed(true);
     } finally {
       setPending(false);
     }
@@ -512,9 +546,10 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   if (!canUpdate) return <span className={cn("task-pill", toneClasses[statusTone(status)], pad)}><span className={cn("task-pill-dot", statusDotClass(raw))} />{status}</span>;
 
   const pill = (
-    <span className={cn("task-pill", toneClasses[statusTone(status)], pad)}>
+    <span className={cn("task-pill", toneClasses[statusTone(status)], pad, failed && "ring-1 ring-[var(--danger)]")} title={failed ? "Could not update status — try again." : undefined}>
       <span className={cn("task-pill-dot", statusDotClass(raw))} />
       {manualStatuses.find((option) => option.value === raw)?.label ?? status}
+      {failed && <CircleAlert className="h-3 w-3 text-[var(--danger)]" />}
     </span>
   );
 
@@ -719,6 +754,144 @@ function SortableTaskRow({
     </ListSortableRow>
   );
 }
+
+// Row rendering is memoized so list-level updates (search keystrokes, checkbox
+// toggles, pending-cell changes on other rows) don't re-render every row.
+const TaskTableRow = memo(function TaskTableRow({
+  task,
+  index,
+  kind,
+  scope,
+  dragDisabled,
+  checked,
+  selected,
+  rowCanEdit,
+  drag,
+  pendingCell,
+  assignable,
+  showAssigneeColumn,
+  showFrequencyColumn,
+  showPriorityColumn,
+  onOpenDetails,
+  onSaveInline,
+}: {
+  task: TaskRow;
+  index: number;
+  kind: Kind;
+  scope: string;
+  dragDisabled: boolean;
+  checked: boolean;
+  selected: boolean;
+  rowCanEdit: boolean;
+  drag: ListDrag;
+  pendingCell: string | null;
+  assignable: any[] | undefined;
+  showAssigneeColumn: boolean;
+  showFrequencyColumn: boolean;
+  showPriorityColumn: boolean;
+  onOpenDetails: (task: TaskRow) => void;
+  onSaveInline: (task: any, patch: Partial<TaskFormValues>, label: string) => Promise<boolean>;
+}) {
+  const pending = (field: string) => pendingCell === `${task._id}:${field}`;
+  const isPending = isPendingTask(task);
+  const openDetails = () => {
+    if (!isPending) onOpenDetails(task);
+  };
+  return (
+    <SortableTaskRow
+      task={task}
+      index={index}
+      scope={scope}
+      dragDisabled={dragDisabled || isPending}
+      checked={checked}
+      selected={selected}
+      rowCanEdit={rowCanEdit && !isPending}
+      drag={drag}
+      onOpenDetails={openDetails}
+    >
+      <td className="w-[92px] whitespace-nowrap font-mono text-[12px] text-[var(--ink-muted)]">{isPending ? "Saving…" : task.reference}</td>
+      <td className="col-task max-w-[250px]">
+        <div className="task-title-cell">
+          {rowCanEdit && !isPending ? (
+            <InlineTextCell value={task.title ?? ""} ariaLabel="Edit task title" required pending={pending("title")} onSave={(title) => onSaveInline(task, { title }, "title")} />
+          ) : (
+            <div className="flex min-w-0 items-center gap-2.5"><span className="min-w-0 flex-1 truncate">{task.title}</span></div>
+          )}
+          {!isPending && (
+            <button
+              type="button"
+              data-interactive="true"
+              data-tooltip="Open in side peek"
+              className="task-title-open"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => { event.stopPropagation(); openDetails(); }}
+              aria-label={`Open details for ${task.title}`}
+            >
+              <PanelRight className="h-3.5 w-3.5" />
+              <span>OPEN</span>
+            </button>
+          )}
+        </div>
+      </td>
+      {kind === "jd" ? (
+        showFrequencyColumn && (
+          <td className="whitespace-nowrap text-[var(--ink-secondary)]">
+            {rowCanEdit ? (
+              <InlineSelectCell value={task.recurrence as Frequency} options={frequencies} ariaLabel="Change frequency" pending={pending("frequency")} onSave={(recurrence) => onSaveInline(task, { recurrence }, "frequency")} />
+            ) : frequencyLabel(task.recurrence)}
+          </td>
+        )
+      ) : (
+        showPriorityColumn && (
+          <td>
+            {rowCanEdit ? (
+              <InlineSelectCell
+                value={task.priority as Priority}
+                options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))}
+                ariaLabel="Change priority"
+                pending={pending("priority")}
+                onSave={(priority) => onSaveInline(task, { priority }, "priority")}
+                renderValue={(option) => <span className={cn("priority-chip", priorityChipClasses((option?.value ?? task.priority) as Priority))}>{option?.label ?? priorityLabel(task.priority)}</span>}
+              />
+            ) : (
+              <span className={cn("priority-chip", priorityChipClasses(task.priority as Priority))}>{priorityLabel(task.priority)}</span>
+            )}
+          </td>
+        )
+      )}
+      {showAssigneeColumn && (
+        <td>
+          {rowCanEdit && assignable ? (
+            <InlineAssigneeCell assignable={assignable} assignees={task.assignees} selected={task.assigneeMembershipIds ?? []} pending={pending("assignee")} onSave={(assigneeMembershipIds) => onSaveInline(task, { assigneeMembershipIds }, "assignee")} />
+          ) : <AvatarStack assignees={task.assignees} showName />}
+        </td>
+      )}
+      <td><StatusBadge kind={kind} task={task} canUpdateOverride={rowCanEdit} cellTrigger={rowCanEdit} /></td>
+      {kind === "one" && (
+        <td className="whitespace-nowrap text-[var(--ink-secondary)]">{formatDate(task.createdAt)}</td>
+      )}
+      {kind === "one" && (
+        <td className="whitespace-nowrap">
+          {rowCanEdit ? (
+            <DatePicker value={task.dueDate ? toDateField(task.dueDate, dateHasExplicitTime(task.dueDate)) : ""} displayValue={dueLabel(task)} compact onChange={(dueDate) => { void onSaveInline(task, { dueDate }, "due"); }} />
+          ) : (
+            <span className={cn(dueTone(task) === "danger" && "font-medium text-[var(--danger)]", dueTone(task) === "warn" && "font-medium text-[var(--badge-yellow-fg)]", dueTone(task) === "muted" && "text-[var(--ink-faint)]")}>{dueLabel(task)}</span>
+          )}
+        </td>
+      )}
+      {kind === "jd" && (
+        <>
+          <td>
+            {rowCanEdit ? <InlineTextCell value={task.time ?? ""} ariaLabel="Edit time" pending={pending("time")} onSave={(time) => onSaveInline(task, { time }, "time")} /> : <span className="whitespace-nowrap">{task.time || "—"}</span>}
+          </td>
+          <td>
+            {rowCanEdit ? <InlineTextCell value={task.quantity != null ? String(task.quantity) : ""} ariaLabel="Edit quantity" inputMode="decimal" pending={pending("quantity")} onSave={(quantity) => onSaveInline(task, { quantity }, "quantity")} /> : (task.quantity != null ? task.quantity : "—")}
+          </td>
+        </>
+      )}
+    </SortableTaskRow>
+  );
+});
 
 function SelectPicker<T extends string>({ ariaLabel, value, options, onChange, placeholder = "Select" }: { ariaLabel: string; value: T; options: { value: T; label: string; helper?: string }[]; onChange: (value: T) => void; placeholder?: string }) {
   const selectedOption = options.find((option) => option.value === value);
@@ -1175,18 +1348,80 @@ function AttachmentPicker({ files, onChange }: { files: File[]; onChange: (files
   );
 }
 
-function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignableIsTruncated = false }: { kind: Kind; mode: "create" | "edit"; open: boolean; onOpenChange: (open: boolean) => void; task?: any; assignable: any[]; assignableIsTruncated?: boolean }) {
+// Applies a sparse field-mutation payload to a loaded task row. Only fields
+// actually present (not undefined) are written; state/status stay server-owned.
+// Assignee ids are re-expanded to enriched rows from the local assignable list.
+function applyTaskFieldPatch(row: any, fields: Record<string, unknown>, assignable: any[] | undefined) {
+  const next = { ...row };
+  for (const [key, value] of Object.entries(fields)) {
+    if (value !== undefined) next[key] = value;
+  }
+  if (fields.assigneeMembershipIds !== undefined) {
+    const ids = (fields.assigneeMembershipIds ?? []) as string[];
+    const existing = (row.assignees ?? []) as any[];
+    next.assignees = ids
+      .map((id) => assignable?.find((candidate) => candidate.membership?._id === id) ?? existing.find((candidate) => candidate.membership?._id === id))
+      .filter(Boolean);
+  }
+  return next;
+}
+
+function optimisticTaskFieldPatch(listQuery: any, detailQuery: any, assignable: any[] | undefined) {
+  return (localStore: any, args: any) => {
+    const { taskId, ...fields } = args;
+    const patch = (row: any) => applyTaskFieldPatch(row, fields, assignable);
+    updateInListPages(localStore, listQuery, taskId, patch);
+    updateInDetailQueries(localStore, detailQuery, taskId, patch);
+  };
+}
+
+// Synthetic list row shown while a create mutation is in flight. The id is a
+// local sentinel — never a real server id — and reference stays empty because
+// the final reference number is assigned on the server.
+function isPendingTask(task: { _id: string }) {
+  return String(task._id).startsWith("pending:");
+}
+
+function pendingTaskRow(args: { title: string; description?: string; notes?: string; time?: string; quantity?: number | null; recurrence?: string; priority?: string; dueDate?: number | null; assigneeMembershipIds?: string[] }, assignable: any[]) {
+  const now = Date.now();
+  const assigneeMembershipIds = (args.assigneeMembershipIds ?? []) as string[];
+  return {
+    _id: `pending:${crypto.randomUUID()}`,
+    reference: "",
+    title: args.title,
+    description: args.description,
+    notes: args.notes,
+    time: args.time,
+    quantity: args.quantity ?? null,
+    recurrence: args.recurrence,
+    priority: args.priority,
+    dueDate: args.dueDate ?? null,
+    createdAt: now,
+    assigneeMembershipIds,
+    assignees: assigneeMembershipIds.map((id) => assignable.find((candidate) => candidate.membership?._id === id)).filter(Boolean),
+    canUpdate: false,
+    canDelete: false,
+    state: { status: "Pending", rawStatus: "due", isOverdue: false, dueAt: args.dueDate ?? null, lastCompletedAt: null },
+  };
+}
+
+function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignableIsTruncated = false, onUploadError }: { kind: Kind; mode: "create" | "edit"; open: boolean; onOpenChange: (open: boolean) => void; task?: any; assignable: any[]; assignableIsTruncated?: boolean; onUploadError?: (message: string) => void }) {
   const { activeCompanyId, active } = useCompany();
-  const createJd = useMutation(api.tasks.createJd);
-  const createOne = useMutation(api.tasks.createOneTime);
+  const createJd = useMutation(api.tasks.createJd).withOptimisticUpdate((localStore, args) => {
+    prependToListFirstPage(localStore, api.tasks.listJdRows, pendingTaskRow(args, assignable));
+  });
+  const createOne = useMutation(api.tasks.createOneTime).withOptimisticUpdate((localStore, args) => {
+    prependToListFirstPage(localStore, api.tasks.listOneTimeRows, pendingTaskRow(args, assignable));
+  });
   const updateJd = useMutation(api.tasks.updateJd);
   const updateOne = useMutation(api.tasks.updateOneTime);
   const generateUploadUrl = useMutation(api.tasks.generateAttachmentUploadUrl);
+  const bindUploadClaim = useMutation(api.tasks.bindUploadClaim);
   const addAttachment = useMutation(api.tasks.addAttachment);
+  const deleteOrphanedUpload = useMutation(api.tasks.deleteOrphanedUpload);
   const [values, setValues] = useState<TaskFormValues>(() => task ? formFromTask(kind, task) : emptyForm(kind));
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [persistedTaskId, setPersistedTaskId] = useState<string | null>(null);
 
   const taskAssignees = task?.assignees;
   const dialogAssignable = useMemo(() => {
@@ -1205,7 +1440,6 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
     if (!nextOpen) {
       setError(null);
       setSaving(false);
-      setPersistedTaskId(null);
       setValues(task ? formFromTask(kind, task) : emptyForm(kind));
     }
   }
@@ -1213,15 +1447,23 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
 
   async function uploadFiles(taskId: string, files: File[]) {
     if (!activeCompanyId || files.length === 0 || !active?.capabilities.includes("tasks:attachment:add")) return;
-    for (const file of [...files]) {
-      const postUrl = await generateUploadUrl({ companyId: activeCompanyId });
-      const response = await fetch(postUrl, { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
+    await Promise.all([...files].map(async (file) => {
+      const upload = await generateUploadUrl({ companyId: activeCompanyId });
+      const response = await fetch(upload.url, { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
       if (!response.ok) throw new Error(`Could not upload ${file.name}.`);
       const json = await response.json() as { storageId?: Id<"_storage"> };
       if (!json.storageId) throw new Error(`Could not upload ${file.name}.`);
-      await addAttachment({ companyId: activeCompanyId, taskType: taskTypeFor(kind), taskId, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size });
+      try {
+        await bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId });
+        await addAttachment({ companyId: activeCompanyId, taskType: taskTypeFor(kind), taskId, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
+      } catch (err) {
+        // The blob is already stored; reclaim it so the failure does not leak
+        // storage — the storageId binds the claim even if binding never ran.
+        void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId }).catch(() => {});
+        throw err;
+      }
       setValues((current) => ({ ...current, files: current.files.filter((candidate) => candidate !== file) }));
-    }
+    }));
   }
 
   async function submit() {
@@ -1232,22 +1474,24 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
     setSaving(true);
     setError(null);
     try {
-      let taskId = persistedTaskId ?? (task?._id as string | undefined);
+      let taskId = task?._id as string | undefined;
       const common = { companyId: activeCompanyId, title: values.title.trim(), description: values.description, notes: values.notes, time: values.time, quantity: quantityFromInput(values.quantity), assigneeMembershipIds: values.assigneeMembershipIds as Id<"companyMemberships">[] };
-      if (!persistedTaskId) {
-        if (kind === "jd") {
-          if (mode === "create") taskId = await createJd({ ...common, recurrence: values.recurrence });
-          else await updateJd({ ...common, taskId: task._id, recurrence: values.recurrence });
-        } else {
-          const payload = { ...common, dueDate: fromDateInput(values.dueDate), priority: values.priority };
-          if (mode === "create") taskId = await createOne(payload);
-          else await updateOne({ ...payload, taskId: task._id });
-        }
-        if (mode === "create" && taskId) setPersistedTaskId(taskId);
+      if (kind === "jd") {
+        if (mode === "create") taskId = await createJd({ ...common, recurrence: values.recurrence });
+        else await updateJd({ ...common, taskId: task._id, recurrence: values.recurrence });
+      } else {
+        const payload = { ...common, dueDate: fromDateInput(values.dueDate), priority: values.priority };
+        if (mode === "create") taskId = await createOne(payload);
+        else await updateOne({ ...payload, taskId: task._id });
       }
-      if (taskId) await uploadFiles(taskId, values.files);
+      // The saved task is already visible (optimistic row); attachment uploads
+      // continue in the background and surface failures through the list error.
+      const files = values.files;
       reset(false);
       setValues(emptyForm(kind));
+      if (taskId && files.length) {
+        void uploadFiles(taskId, files).catch((err) => onUploadError?.(err instanceof Error ? err.message : "Could not upload attachments."));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save task.");
     } finally {
@@ -1325,7 +1569,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
 
             <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--hairline)] px-6 py-4">
               <Button type="button" variant="secondary" onClick={() => reset(false)}>Cancel</Button>
-              <Button type="submit" size="lg" variant="primary" disabled={saving || !values.title.trim() || (mode === "create" && values.assigneeMembershipIds.length === 0)}>{saving ? "Saving..." : persistedTaskId ? "Retry upload" : mode === "create" ? "Create task" : "Save changes"}</Button>
+              <Button type="submit" size="lg" variant="primary" disabled={saving || !values.title.trim() || (mode === "create" && values.assigneeMembershipIds.length === 0)}>{saving ? "Saving..." : mode === "create" ? "Create task" : "Save changes"}</Button>
             </div>
           </form>
         </Dialog.Content>
@@ -1400,12 +1644,20 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
       orderFormat: preferenceResult.orderFormat,
     };
   }, [preferenceResult]);
-  const updateJd = useMutation(api.tasks.updateJd);
-  const updateOneTime = useMutation(api.tasks.updateOneTime);
-  const deleteJd = useMutation(api.tasks.deleteJd);
-  const deleteJdBulk = useMutation(api.tasks.deleteJdBulk);
-  const deleteOneTime = useMutation(api.tasks.deleteOneTime);
-  const deleteOneTimeBulk = useMutation(api.tasks.deleteOneTimeBulk);
+  const updateJdFields = useMutation(api.tasks.updateJdFields).withOptimisticUpdate(optimisticTaskFieldPatch(api.tasks.listJdRows, api.tasks.getJd, assignable));
+  const updateOneTimeFields = useMutation(api.tasks.updateOneTimeFields).withOptimisticUpdate(optimisticTaskFieldPatch(api.tasks.listOneTimeRows, api.tasks.getOneTime, assignable));
+  const deleteJd = useMutation(api.tasks.deleteJd).withOptimisticUpdate((localStore, args) => {
+    removeFromListPages(localStore, api.tasks.listJdRows, new Set([args.taskId]));
+  });
+  const deleteJdBulk = useMutation(api.tasks.deleteJdBulk).withOptimisticUpdate((localStore, args) => {
+    removeFromListPages(localStore, api.tasks.listJdRows, new Set(args.taskIds));
+  });
+  const deleteOneTime = useMutation(api.tasks.deleteOneTime).withOptimisticUpdate((localStore, args) => {
+    removeFromListPages(localStore, api.tasks.listOneTimeRows, new Set([args.taskId]));
+  });
+  const deleteOneTimeBulk = useMutation(api.tasks.deleteOneTimeBulk).withOptimisticUpdate((localStore, args) => {
+    removeFromListPages(localStore, api.tasks.listOneTimeRows, new Set(args.taskIds));
+  });
   const setListSort = useMutation(api.tasks.setListSort);
   const saveListOrder = useMutation(api.tasks.saveListOrder);
   const [preferenceController] = useState(() => new ListPreferenceController<TaskListSort>(async (command) => {
@@ -1490,17 +1742,19 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     })
   ), [assigneeFilter, currentMembershipId, effectiveTaskView, frequency, kind, orderedTasks, priorityFilter, search, statusFilter]);
   const displayedTasks = filteredTasks;
-  const renderedTasks = displayedTasks.slice(0, renderedCount);
-  const visibleIds = renderedTasks.map((task) => task._id);
+  const renderedTasks = useMemo(() => displayedTasks.slice(0, renderedCount), [displayedTasks, renderedCount]);
+  const visibleIds = useMemo(() => renderedTasks.filter((task) => !isPendingTask(task)).map((task) => task._id), [renderedTasks]);
   const selectedVisibleCount = visibleIds.reduce((count, id) => count + (selectedIds.has(id) ? 1 : 0), 0);
-  const allVisibleSelected = renderedTasks.length > 0 && selectedVisibleCount === renderedTasks.length;
+  const allVisibleSelected = visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
   const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
   const selectionCount = selectedIds.size;
   const canDeleteSelection = selectionCount > 0 && !deleting && Array.from(selectedIds).every((id) => canDeleteTaskRow(active, kind, allTasks.find((task) => task._id === id)));
   const selectedTaskId = selectionCount === 1 ? Array.from(selectedIds)[0] : null;
   const selectedTask = selectedTaskId ? allTasks.find((task) => task._id === selectedTaskId) ?? null : null;
   const canEditSelectedTask = Boolean(selectedTask && canEditTaskRow(active, kind, selectedTask));
-  const hasMoreRenderedTasks = dataReady && renderedTasks.length < displayedTasks.length;
+  // The rendered window grows independently of page exhaustion so streamed-in
+  // pages become visible as they arrive.
+  const hasMoreRenderedTasks = renderedTasks.length < displayedTasks.length;
   const dragDisabled = !customOrderingEnabled || preferenceState.sorting;
   const taskDragWrapperRef = useRef<HTMLDivElement>(null);
   const taskDragBodyRef = useRef<HTMLTableSectionElement>(null);
@@ -1663,6 +1917,10 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
       }
       setSelectedIds(new Set());
     } catch (err) {
+      // The optimistic rollback restores the rows; merge the deleted IDs back
+      // so the failed delete can be retried without discarding rows the user
+      // selected while the request was in flight.
+      setSelectedIds((current) => new Set([...current, ...ids]));
       setDeleteError(err instanceof Error ? err.message : "Could not delete the selected tasks.");
     } finally {
       setDeleting(false);
@@ -1687,6 +1945,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
         assigneeEmails: t.assignees?.map((a: any) => a.user.email).join("; ") ?? "",
         status: t.state?.status ?? "Pending",
       }));
+      const { exportTaskWorkbook, downloadBlob } = await loadWorkbook();
       const workbook = await exportTaskWorkbook(
         kind === "jd" ? "jd" : "one_time",
         activeCompanyId,
@@ -1704,23 +1963,37 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     }
   }
 
-  async function saveInline(task: any, patch: Partial<TaskFormValues>, label: string) {
+  const openTaskDetails = useCallback((task: TaskRow) => {
+    // Seed the drawer preview so it paints before the detail query resolves.
+    seedDetailPreview(`task:${activeCompanyId}:${kind}:${active?.membership._id}`, task._id, task);
+    router.push(`${base}/${task._id}`);
+  }, [activeCompanyId, active?.membership._id, base, kind, router]);
+
+  const saveInline = useCallback(async (task: any, patch: Partial<TaskFormValues>, label: string) => {
     if (!activeCompanyId) return false;
     const key = `${task._id}:${label}`;
     setPendingCell(key);
     setInlineError(null);
+    const timer = startInteraction(`task.${label}`);
+    timer.paint();
     try {
-      const common = {
-        companyId: activeCompanyId,
-        title: (patch.title ?? task.title ?? "").trim(),
-        description: patch.description ?? task.description,
-        notes: patch.notes ?? task.notes,
-        time: patch.time ?? task.time,
-        quantity: patch.quantity !== undefined ? quantityFromInput(patch.quantity) : task.quantity,
-        assigneeMembershipIds: (patch.assigneeMembershipIds ?? task.assigneeMembershipIds) as Id<"companyMemberships">[],
-      };
-      if (kind === "jd") await updateJd({ ...common, taskId: task._id as Id<"jdTasks">, recurrence: (patch.recurrence ?? task.recurrence) as Frequency });
-      else await updateOneTime({ ...common, taskId: task._id as Id<"oneTimeTasks">, dueDate: patch.dueDate !== undefined ? fromDateInput(patch.dueDate) : task.dueDate, priority: (patch.priority ?? task.priority) as Priority });
+      // Send only the edited field so one cell save does not rewrite the row.
+      const fields: Record<string, unknown> = {};
+      if (patch.title !== undefined) fields.title = patch.title.trim();
+      if (patch.description !== undefined) fields.description = patch.description;
+      if (patch.notes !== undefined) fields.notes = patch.notes;
+      if (patch.time !== undefined) fields.time = patch.time;
+      if (patch.quantity !== undefined) fields.quantity = quantityFromInput(patch.quantity) ?? null;
+      if (patch.assigneeMembershipIds !== undefined) fields.assigneeMembershipIds = patch.assigneeMembershipIds;
+      if (kind === "jd") {
+        if (patch.recurrence !== undefined) fields.recurrence = patch.recurrence;
+        await updateJdFields({ companyId: activeCompanyId, taskId: task._id as Id<"jdTasks">, ...fields } as any);
+      } else {
+        if (patch.dueDate !== undefined) fields.dueDate = patch.dueDate.trim() ? (fromDateInput(patch.dueDate) ?? null) : null;
+        if (patch.priority !== undefined) fields.priority = patch.priority;
+        await updateOneTimeFields({ companyId: activeCompanyId, taskId: task._id as Id<"oneTimeTasks">, ...fields } as any);
+      }
+      timer.ack();
       return true;
     } catch (err) {
       setInlineError(err instanceof Error ? err.message : "Could not update the task.");
@@ -1728,7 +2001,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     } finally {
       setPendingCell((current) => current === key ? null : current);
     }
-  }
+  }, [activeCompanyId, kind, updateJdFields, updateOneTimeFields]);
 
   function changeFrequencyFilter(value: FrequencyFilter) {
     setFrequency(value);
@@ -1764,7 +2037,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
         description={description}
       />
 
-      <TaskDialog kind={kind} mode="create" open={createOpen} onOpenChange={setCreateOpen} assignable={assignable ?? []} assignableIsTruncated={assignableResult?.isTruncated ?? false} />
+      <TaskDialog kind={kind} mode="create" open={createOpen} onOpenChange={setCreateOpen} assignable={assignable ?? []} assignableIsTruncated={assignableResult?.isTruncated ?? false} onUploadError={setInlineError} />
       {editingTask && (
         <TaskDialog
           key={editingTask._id}
@@ -1775,6 +2048,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
           task={editingTask}
           assignable={assignable ?? []}
           assignableIsTruncated={assignableResult?.isTruncated ?? false}
+          onUploadError={setInlineError}
         />
       )}
 
@@ -1948,7 +2222,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
             )}
           </thead>
           <tbody ref={taskDragBodyRef}>
-            {!dataReady ? (
+            {tasks === undefined || !subscribedPreference ? (
               Array.from({ length: 6 }).map((_, index) => (
                 <tr key={`skel-${index}`}>
                   <td colSpan={kind === "jd" ? jdColumns : oneColumns} className="pl-4">
@@ -1962,6 +2236,9 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
             ) : renderedTasks.length === 0 ? (
               <tr>
                 <td colSpan={kind === "jd" ? jdColumns : oneColumns} className="!h-auto py-2">
+                  {!dataReady ? (
+                    <div className="py-4 text-center text-[13px] text-[var(--ink-muted)]">Loading tasks…</div>
+                  ) : (
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
                     <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{!hasActiveFilters && allTasks.length === 0 ? "No tasks yet" : "No matching tasks"}</div>
@@ -1975,109 +2252,32 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                       <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); setStatusFilter("all"); setFrequency("all"); setPriorityFilter("all"); setPersonalFrequencyView("all"); setPersonalPriorityView("all"); setAssigneeFilter("all"); }}>Clear filters</Button>
                     )}
                   </div>
+                  )}
                 </td>
               </tr>
             ) : (
               <>
-                {renderedTasks.map((task, index) => {
-                  const isChecked = selectedIds.has(task._id);
-                  const rowCanEdit = canEditTaskRow(active, kind, task);
-                  const pending = (field: string) => pendingCell === `${task._id}:${field}`;
-                  const openDetails = () => router.push(`${base}/${task._id}`);
-                  return (
-                    <SortableTaskRow
-                      key={task._id}
-                      task={task}
-                      index={index}
-                      scope={preferenceScope}
-                      dragDisabled={dragDisabled}
-                      checked={isChecked}
-                      selected={task._id === selectedId}
-                      rowCanEdit={rowCanEdit}
-                      drag={drag}
-                      onOpenDetails={openDetails}
-                    >
-                      <td className="w-[92px] whitespace-nowrap font-mono text-[12px] text-[var(--ink-muted)]">{task.reference}</td>
-                      <td className="col-task max-w-[250px]">
-                        <div className="task-title-cell">
-                          {rowCanEdit ? (
-                            <InlineTextCell value={task.title ?? ""} ariaLabel="Edit task title" required pending={pending("title")} onSave={(title) => saveInline(task, { title }, "title")} />
-                          ) : (
-                            <div className="flex min-w-0 items-center gap-2.5"><span className="min-w-0 flex-1 truncate">{task.title}</span></div>
-                          )}
-                          <button
-                            type="button"
-                            data-interactive="true"
-                            data-tooltip="Open in side peek"
-                            className="task-title-open"
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onClick={(event) => { event.stopPropagation(); openDetails(); }}
-                            aria-label={`Open details for ${task.title}`}
-                          >
-                            <PanelRight className="h-3.5 w-3.5" />
-                            <span>OPEN</span>
-                          </button>
-                        </div>
-                      </td>
-                      {kind === "jd" ? (
-                        showFrequencyColumn && (
-                          <td className="whitespace-nowrap text-[var(--ink-secondary)]">
-                            {rowCanEdit ? (
-                              <InlineSelectCell value={task.recurrence as Frequency} options={frequencies} ariaLabel="Change frequency" pending={pending("frequency")} onSave={(recurrence) => saveInline(task, { recurrence }, "frequency")} />
-                            ) : frequencyLabel(task.recurrence)}
-                          </td>
-                        )
-                      ) : (
-                        showPriorityColumn && (
-                          <td>
-                            {rowCanEdit ? (
-                              <InlineSelectCell
-                                value={task.priority as Priority}
-                                options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))}
-                                ariaLabel="Change priority"
-                                pending={pending("priority")}
-                                onSave={(priority) => saveInline(task, { priority }, "priority")}
-                                renderValue={(option) => <span className={cn("priority-chip", priorityChipClasses((option?.value ?? task.priority) as Priority))}>{option?.label ?? priorityLabel(task.priority)}</span>}
-                              />
-                            ) : (
-                              <span className={cn("priority-chip", priorityChipClasses(task.priority as Priority))}>{priorityLabel(task.priority)}</span>
-                            )}
-                          </td>
-                        )
-                      )}
-                      {showAssigneeColumn && (
-                        <td>
-                          {rowCanEdit && assignable ? (
-                            <InlineAssigneeCell assignable={assignable} assignees={task.assignees} selected={task.assigneeMembershipIds ?? []} pending={pending("assignee")} onSave={(assigneeMembershipIds) => saveInline(task, { assigneeMembershipIds }, "assignee")} />
-                          ) : <AvatarStack assignees={task.assignees} showName />}
-                        </td>
-                      )}
-                      <td><StatusBadge kind={kind} task={task} canUpdateOverride={rowCanEdit} cellTrigger={rowCanEdit} /></td>
-                      {kind === "one" && (
-                        <td className="whitespace-nowrap text-[var(--ink-secondary)]">{formatDate(task.createdAt)}</td>
-                      )}
-                      {kind === "one" && (
-                        <td className="whitespace-nowrap">
-                          {rowCanEdit ? (
-                            <DatePicker value={task.dueDate ? toDateField(task.dueDate, dateHasExplicitTime(task.dueDate)) : ""} displayValue={dueLabel(task)} compact onChange={(dueDate) => { void saveInline(task, { dueDate }, "due"); }} />
-                          ) : (
-                            <span className={cn(dueTone(task) === "danger" && "font-medium text-[var(--danger)]", dueTone(task) === "warn" && "font-medium text-[var(--badge-yellow-fg)]", dueTone(task) === "muted" && "text-[var(--ink-faint)]")}>{dueLabel(task)}</span>
-                          )}
-                        </td>
-                      )}
-                      {kind === "jd" && (
-                        <>
-                          <td>
-                            {rowCanEdit ? <InlineTextCell value={task.time ?? ""} ariaLabel="Edit time" pending={pending("time")} onSave={(time) => saveInline(task, { time }, "time")} /> : <span className="whitespace-nowrap">{task.time || "—"}</span>}
-                          </td>
-                          <td>
-                            {rowCanEdit ? <InlineTextCell value={task.quantity != null ? String(task.quantity) : ""} ariaLabel="Edit quantity" inputMode="decimal" pending={pending("quantity")} onSave={(quantity) => saveInline(task, { quantity }, "quantity")} /> : (task.quantity != null ? task.quantity : "—")}
-                          </td>
-                        </>
-                      )}
-                    </SortableTaskRow>
-                  );
-                })}
+                {renderedTasks.map((task, index) => (
+                  <TaskTableRow
+                    key={task._id}
+                    task={task}
+                    index={index}
+                    kind={kind}
+                    scope={preferenceScope}
+                    dragDisabled={dragDisabled}
+                    checked={selectedIds.has(task._id)}
+                    selected={task._id === selectedId}
+                    rowCanEdit={canEditTaskRow(active, kind, task)}
+                    drag={drag}
+                    pendingCell={pendingCell?.startsWith(`${task._id}:`) ? pendingCell : null}
+                    assignable={assignable}
+                    showAssigneeColumn={showAssigneeColumn}
+                    showFrequencyColumn={showFrequencyColumn}
+                    showPriorityColumn={showPriorityColumn}
+                    onOpenDetails={openTaskDetails}
+                    onSaveInline={saveInline}
+                  />
+                ))}
                 {canCreate && (
                   <tr className="task-add-row">
                     <td colSpan={kind === "jd" ? jdColumns : oneColumns}>
@@ -2105,20 +2305,23 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
             </div>
             {renderedTasks.map((task) => {
               const isChecked = selectedIds.has(task._id);
+              const isPending = isPendingTask(task);
               return (
                 <ListDragRailRow
                   key={`rail-${task._id}`}
                   id={task._id}
                   label={`Reorder ${task.reference}: ${task.title}`}
-                  disabled={dragDisabled}
+                  disabled={dragDisabled || isPending}
+                  disabledReason={isPending ? "Task is still saving" : undefined}
                   checked={isChecked}
                   drag={drag}
                 >
                   <Checkbox
                     className="task-list-rail-control"
                     checked={isChecked}
+                    disabled={isPending}
                     onCheckedChange={() => toggleOne(task._id)}
-                    aria-label={isChecked ? `Unselect ${task.title}` : `Select ${task.title}`}
+                    aria-label={isPending ? `${task.title} is still saving` : isChecked ? `Unselect ${task.title}` : `Select ${task.title}`}
                   />
                 </ListDragRailRow>
               );
@@ -2315,10 +2518,17 @@ function InlinePropertyText({ value, placeholder = "—", ariaLabel, onSave, inp
   );
 }
 
-function AttachmentList({ attachments, canDelete, onDelete }: { attachments: any[]; canDelete: boolean | ((attachment: any) => boolean); onDelete: (id: Id<"taskAttachments">) => void }) {
-  if (attachments.length === 0) return <div className="text-[13px] text-[var(--ink-faint)]">No attachments.</div>;
+function AttachmentList({ attachments, pendingUploads = [], canDelete, onDelete }: { attachments: any[]; pendingUploads?: { key: string; name: string; size: number }[]; canDelete: boolean | ((attachment: any) => boolean); onDelete: (id: Id<"taskAttachments">) => void }) {
+  if (attachments.length === 0 && pendingUploads.length === 0) return <div className="text-[13px] text-[var(--ink-faint)]">No attachments.</div>;
   return (
     <div className="grid gap-1.5">
+      {pendingUploads.map((item) => (
+        <div key={item.key} className="task-attachment-item" aria-label={`Uploading ${item.name}`}>
+          <Paperclip className="h-4 w-4 shrink-0 animate-pulse text-[var(--ink-faint)]" />
+          <span className="min-w-0 flex-1 truncate text-[var(--ink-faint)]">{item.name}</span>
+          <span className="shrink-0 text-[12px] text-[var(--ink-faint)]">Uploading…</span>
+        </div>
+      ))}
       {attachments.map((attachment) => {
         const showDelete = typeof canDelete === "function" ? canDelete(attachment) : canDelete;
         return (
@@ -2375,15 +2585,19 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   const updateComment = useMutation(api.tasks.updateComment);
   const deleteComment = useMutation(api.tasks.deleteComment);
   const generateUploadUrl = useMutation(api.tasks.generateAttachmentUploadUrl);
+  const bindUploadClaim = useMutation(api.tasks.bindUploadClaim);
   const addAttachment = useMutation(api.tasks.addAttachment);
-  const deleteAttachment = useMutation(api.tasks.deleteAttachment);
-  const updateJdText = useMutation(api.tasks.updateJdText);
-  const updateOneTimeText = useMutation(api.tasks.updateOneTimeText);
-  const updateJdFields = useMutation(api.tasks.updateJdFields);
-  const updateOneTimeFields = useMutation(api.tasks.updateOneTimeFields);
+  const deleteOrphanedUpload = useMutation(api.tasks.deleteOrphanedUpload);
+  const deleteAttachment = useMutation(api.tasks.deleteAttachment).withOptimisticUpdate((localStore, args) => {
+    removeFromListPages(localStore, api.tasks.listAttachments, new Set([String(args.attachmentId)]));
+  });
+  const updateJdText = useMutation(api.tasks.updateJdText).withOptimisticUpdate(optimisticTaskFieldPatch(api.tasks.listJdRows, api.tasks.getJd, assignable));
+  const updateOneTimeText = useMutation(api.tasks.updateOneTimeText).withOptimisticUpdate(optimisticTaskFieldPatch(api.tasks.listOneTimeRows, api.tasks.getOneTime, assignable));
+  const updateJdFields = useMutation(api.tasks.updateJdFields).withOptimisticUpdate(optimisticTaskFieldPatch(api.tasks.listJdRows, api.tasks.getJd, assignable));
+  const updateOneTimeFields = useMutation(api.tasks.updateOneTimeFields).withOptimisticUpdate(optimisticTaskFieldPatch(api.tasks.listOneTimeRows, api.tasks.getOneTime, assignable));
   const [editOpen, setEditOpen] = useState(false);
   const [body, setBody] = useState("");
-  const [uploading, setUploading] = useState(false);
+  const [pendingUploads, setPendingUploads] = useState<{ key: string; name: string; size: number }[]>([]);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [textError, setTextError] = useState<string | null>(null);
   const [pendingTaskField, setPendingTaskField] = useState<string | null>(null);
@@ -2431,8 +2645,11 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
     previousEditingCommentIdRef.current = editingCommentId;
   }, [editingCommentBody, editingCommentId]);
 
-  if (!data) return <TaskDetailSkeleton />;
-  const task = data.task;
+  // While the detail query resolves, paint from the seeded list-row preview.
+  // Editing stays disabled until the authoritative record arrives.
+  const preview = data === undefined ? getDetailPreview<TaskRow>(`task:${activeCompanyId}:${kind}:${active?.membership._id}`, id) : undefined;
+  if (!data && !preview) return <TaskDetailSkeleton />;
+  const task = (data?.task ?? preview) as any;
 
   async function saveTaskText(patch: { title?: string; description?: string; notes?: string }) {
     if (!activeCompanyId) return false;
@@ -2487,22 +2704,32 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
     }
   }
 
-  async function upload(file: File) {
-    if (!activeCompanyId) return;
-    setUploading(true);
+  async function uploadFiles(files: File[]) {
+    if (!activeCompanyId || files.length === 0) return;
     setUploadError(null);
-    try {
-      const postUrl = await generateUploadUrl({ companyId: activeCompanyId });
-      const response = await fetch(postUrl, { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
-      if (!response.ok) throw new Error("Upload failed.");
-      const json = await response.json() as { storageId?: Id<"_storage"> };
-      if (!json.storageId) throw new Error("Upload failed.");
-      await addAttachment({ companyId: activeCompanyId, taskType, taskId: id, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size });
-    } catch (err) {
-      setUploadError(err instanceof Error ? err.message : "Upload failed.");
-    } finally {
-      setUploading(false);
-    }
+    const pending = files.map((file, index) => ({ key: `${Date.now()}-${index}-${file.name}`, name: file.name, size: file.size }));
+    setPendingUploads((current) => [...current, ...pending]);
+    await Promise.all(files.map(async (file, index) => {
+      const key = pending[index].key;
+      try {
+        const upload = await generateUploadUrl({ companyId: activeCompanyId });
+        const response = await fetch(upload.url, { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
+        if (!response.ok) throw new Error(`Could not upload ${file.name}.`);
+        const json = await response.json() as { storageId?: Id<"_storage"> };
+        if (!json.storageId) throw new Error(`Could not upload ${file.name}.`);
+        try {
+          await bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId });
+          await addAttachment({ companyId: activeCompanyId, taskType, taskId: id, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
+        } catch (attachErr) {
+          void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId }).catch(() => {});
+          throw attachErr;
+        }
+      } catch (err) {
+        setUploadError(err instanceof Error ? err.message : "Upload failed.");
+      } finally {
+        setPendingUploads((current) => current.filter((item) => item.key !== key));
+      }
+    }));
   }
 
   async function submitComment() {
@@ -2568,7 +2795,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   return (
     <div>
       <PeekBar kind={kind} canEdit={canEdit} onEdit={() => setEditOpen(true)} />
-      <TaskDialog kind={kind} mode="edit" open={editOpen} onOpenChange={setEditOpen} task={task} assignable={assignable ?? []} assignableIsTruncated={assignableResult?.isTruncated ?? false} />
+      <TaskDialog kind={kind} mode="edit" open={editOpen} onOpenChange={setEditOpen} task={task} assignable={assignable ?? []} assignableIsTruncated={assignableResult?.isTruncated ?? false} onUploadError={setUploadError} />
 
       {textError && <p className="alert-error mt-4 rounded-md p-2 text-[13px]" role="alert">{textError}</p>}
 
@@ -2652,6 +2879,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
         </div>
         <AttachmentList
           attachments={attachments ?? []}
+          pendingUploads={pendingUploads}
           canDelete={(attachment) =>
             canDeleteAnyAttachment ||
             (canDeleteOwnAttachment && attachment.createdByMembershipId === active?.membership._id)
@@ -2666,8 +2894,8 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
         {canAddAttachments && (
           <div className="task-attachment-add-row">
             <label className="task-attachment-add inline-flex cursor-pointer items-center gap-1.5">
-              <input className="sr-only" type="file" disabled={uploading} onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); event.currentTarget.value = ""; }} />
-              <Plus className="h-3.5 w-3.5" />{uploading ? "Uploading..." : "Attach file"}
+              <input className="sr-only" type="file" multiple onChange={(event) => { const files = Array.from(event.target.files ?? []); if (files.length) void uploadFiles(files); event.currentTarget.value = ""; }} />
+              <Plus className="h-3.5 w-3.5" />Attach files
             </label>
           </div>
         )}

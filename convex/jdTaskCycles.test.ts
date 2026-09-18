@@ -115,6 +115,8 @@ describe("JD task cycle behavior", () => {
 
     vi.setSystemTime(utc(2026, 6, 29));
     await t.withIdentity(identity("admin")).mutation(api.tasks.updateJd, { companyId, taskId, title: "Weekly review", description: "", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
+    // Missed-cycle catch-up runs as a scheduled mutation off the edit path.
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
     const detail = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
     const rows = await t.withIdentity(identity("admin")).query(api.tasks.listJdRows, { companyId, frequency: "weekly", paginationOpts: { numItems: 10, cursor: null } });
     const records = await t.withIdentity(identity("admin")).query(api.tasks.listJdCycleRecords, { companyId, taskId });
@@ -123,6 +125,27 @@ describe("JD task cycle behavior", () => {
     expect(detail.task.state.isOverdue).toBe(false);
     expect(rows.page.find((row) => row._id === taskId)?.state.rawStatus).toBe("due");
     expect(records).toMatchObject([{ cycleStart: utc(2026, 6, 22), cycleEnd: utc(2026, 6, 29), status: "missed" }]);
+  });
+
+  test("changing recurrence still records the old schedule's elapsed cycles", async () => {
+    vi.setSystemTime(utc(2026, 6, 1, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Weekly review", description: "", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
+
+    vi.setSystemTime(utc(2026, 6, 29, 12));
+    await t.withIdentity(identity("admin")).mutation(api.tasks.updateJd, { companyId, taskId, title: "Weekly review", description: "", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    // Deferred catch-up reconstructs the old weekly grid from the snapshot
+    // passed by updateJd — by now the task document already says "daily".
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const records = await t.withIdentity(identity("admin")).query(api.tasks.listJdCycleRecords, { companyId, taskId });
+    const detail = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
+    expect(detail.task.recurrence).toBe("daily");
+    expect(records).toHaveLength(4);
+    expect(records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ cycleStart: utc(2026, 6, 1), cycleEnd: utc(2026, 6, 8), status: "missed" }),
+      expect.objectContaining({ cycleStart: utc(2026, 6, 22), cycleEnd: utc(2026, 6, 29), status: "missed" }),
+    ]));
   });
 
   test("reads legacy missed-cycle records that carry a schedule generation", async () => {
@@ -318,6 +341,8 @@ describe("JD task cycle behavior", () => {
 
     vi.setSystemTime(utc(2026, 6, 29));
     await t.withIdentity(identity("admin")).mutation(api.tasks.updateJd, { companyId, taskId, title: "Weekly review", description: "", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
+    // Missed-cycle catch-up runs as a scheduled mutation off the edit path.
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
     const detail = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
     const records = await t.withIdentity(identity("admin")).query(api.tasks.listJdCycleRecords, { companyId, taskId });
 

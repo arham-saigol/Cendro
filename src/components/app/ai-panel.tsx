@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import type { FileUIPart } from "ai";
@@ -52,7 +52,7 @@ type AssistantBlock =
 
 type ActivityPanelPreference = { open: boolean; manual: boolean };
 
-type ChatSession = { _id: Id<"aiChatSessions">; title?: string; createdAt: number; updatedAt: number };
+type ChatSession = { _id: Id<"aiChatSessions">; title: string | undefined; createdAt: number; updatedAt: number };
 type PendingAttachment = { id: string; file: File; previewUrl?: string; part?: FileUIPart; status: "loading" | "ready" | "error" };
 
 const AI_SESSION_RESTORE_TTL_MS = 5 * 60 * 60 * 1000;
@@ -504,7 +504,7 @@ function ActivityRow({ item }: { item: ActivityItem }) {
   );
 }
 
-function ActivityMarkdown({ text }: { text: string }) {
+const ActivityMarkdown = memo(function ActivityMarkdown({ text }: { text: string }) {
   return (
     <div className="[overflow-wrap:anywhere] [&_a]:font-medium [&_a]:text-[var(--ink-secondary)] [&_a]:underline [&_a]:underline-offset-2 [&_code]:rounded [&_code]:bg-[var(--surface-muted)] [&_code]:px-1 [&_code]:py-0.5 [&_li]:my-0.5 [&_ol]:my-1.5 [&_ol]:list-decimal [&_ol]:pl-4 [&_p]:my-1.5 [&>p:first-child]:mt-0 [&>p:last-child]:mb-0 [&_pre]:my-1.5 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-[var(--surface-muted)] [&_pre]:p-2 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_strong]:font-medium [&_ul]:my-1.5 [&_ul]:list-disc [&_ul]:pl-4">
       <ReactMarkdown
@@ -517,9 +517,9 @@ function ActivityMarkdown({ text }: { text: string }) {
       </ReactMarkdown>
     </div>
   );
-}
+});
 
-function AssistantMarkdown({ text }: { text: string }) {
+const AssistantMarkdown = memo(function AssistantMarkdown({ text }: { text: string }) {
   return (
     <div className="py-1 text-sm leading-6 text-[var(--ink-secondary)] [overflow-wrap:anywhere] [&_a]:font-medium [&_a]:text-[var(--primary)] [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:border-l-2 [&_blockquote]:border-[var(--hairline-strong)] [&_blockquote]:pl-3 [&_blockquote]:text-[var(--ink-muted)] [&_code]:rounded [&_code]:bg-[var(--surface-muted)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-[0.92em] [&_h1]:mb-2 [&_h1]:mt-3 [&_h1]:text-lg [&_h1]:font-semibold [&_h2]:mb-2 [&_h2]:mt-3 [&_h2]:text-base [&_h2]:font-semibold [&_h3]:mb-1.5 [&_h3]:mt-2.5 [&_h3]:font-semibold [&_hr]:my-3 [&_hr]:border-[var(--hairline)] [&_li]:my-1 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-2 [&>p:first-child]:mt-0 [&>p:last-child]:mb-0 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-[var(--surface-muted)] [&_pre]:p-3 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_strong]:font-semibold [&_table]:my-2 [&_table]:w-full [&_table]:border-collapse [&_td]:border [&_td]:border-[var(--hairline)] [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-[var(--hairline)] [&_th]:bg-[var(--surface-muted)] [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5">
       <ReactMarkdown
@@ -532,7 +532,35 @@ function AssistantMarkdown({ text }: { text: string }) {
       </ReactMarkdown>
     </div>
   );
-}
+});
+
+const AssistantMessageView = memo(function AssistantMessageView({
+  message,
+  isLive,
+  activityPanelPreferences,
+  onToggleActivityPanel,
+}: {
+  message: any;
+  isLive: boolean;
+  activityPanelPreferences: Record<string, ActivityPanelPreference>;
+  onToggleActivityPanel: (segment: ActivitySegment) => void;
+}) {
+  const blocks = useMemo(() => buildAssistantBlocks(message, isLive), [message, isLive]);
+  const assistantText = blocks.flatMap((block) => block.kind === "text" ? [block.text.trim()] : []).filter(Boolean).join("\n\n");
+  if (isLive && blocks.length === 0) return <PendingThinkingIndicator />;
+  return (
+    <div className="group relative -mb-8 mr-7 px-1 pb-8 pt-1">
+      {blocks.map((block) => {
+        if (block.kind !== "activity") return <AssistantMarkdown key={block.id} text={block.text.trim()} />;
+        const preference = activityPanelPreferences[block.segment.id];
+        const open = preference?.manual ? preference.open : block.segment.isLive && block.segment.entries.length > 0;
+        return <ActivityPanel key={block.segment.id} segment={block.segment} open={open} onToggle={() => onToggleActivityPanel(block.segment)} />;
+      })}
+      {!isLive && blocks.length > 0 && !assistantText && <IncompleteAssistantNotice />}
+      {assistantText && <CopyMessageButton text={assistantText} align="left" />}
+    </div>
+  );
+});
 
 function AssistantOrbMark() {
   return (
@@ -549,7 +577,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
   const [input, setInput] = useState("");
   const [selectedAttachments, setSelectedAttachments] = useState<PendingAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
-  const [sessionId, setSessionId] = useState<Id<"aiChatSessions"> | null>(null);
+  const [resolvedSession, setResolvedSession] = useState<{ companyId: Id<"companies">; sessionId: Id<"aiChatSessions"> } | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [sessionActionsOpen, setSessionActionsOpen] = useState<Id<"aiChatSessions"> | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState<Id<"aiChatSessions"> | null>(null);
@@ -571,9 +599,30 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
 
   const getOrCreate = useMutation(api.aiChat.getOrCreateSession);
   const createSession = useMutation(api.aiChat.createSession);
-  const setSessionTitle = useMutation(api.aiChat.setSessionTitle);
-  const deleteChatSession = useMutation(api.aiChat.deleteSession);
+  const setSessionTitle = useMutation(api.aiChat.setSessionTitle).withOptimisticUpdate((localStore, args) => {
+    const title = args.title.trim();
+    for (const entry of localStore.getAllQueries(api.aiChat.listSessions)) {
+      const value = entry.value as ChatSession[] | undefined;
+      if (value) localStore.setQuery(api.aiChat.listSessions, entry.args, value.map((session) => session._id === args.sessionId ? { ...session, title } : session));
+    }
+    for (const entry of localStore.getAllQueries(api.aiChat.getSession)) {
+      const value = entry.value as ChatSession | undefined;
+      if (value?._id === args.sessionId) localStore.setQuery(api.aiChat.getSession, entry.args, { ...value, title });
+    }
+  });
+  const deleteChatSession = useMutation(api.aiChat.deleteSession).withOptimisticUpdate((localStore, args) => {
+    for (const entry of localStore.getAllQueries(api.aiChat.listSessions)) {
+      const value = entry.value as ChatSession[] | undefined;
+      if (value) localStore.setQuery(api.aiChat.listSessions, entry.args, value.filter((session) => session._id !== args.sessionId));
+    }
+  });
   const sessions = useQuery(api.aiChat.listSessions, { companyId });
+  // Reuse a stored session as soon as the (already subscribed) session list
+  // confirms it exists — no mutation round trip before history loads.
+  const storedSessionId = resolvedSession?.companyId === companyId ? null : readStoredAiSession(companyId);
+  const sessionId = resolvedSession?.companyId === companyId
+    ? resolvedSession.sessionId
+    : storedSessionId && sessions?.some((session) => session._id === storedSessionId) ? storedSessionId : null;
   const persisted = useQuery(api.aiChat.listMessages, sessionId ? { companyId, sessionId } : "skip");
   const currentSessionDetails = useQuery(api.aiChat.getSession, sessionId ? { companyId, sessionId } : "skip");
   const currentSession = currentSessionDetails ?? sessions?.find((session) => session._id === sessionId) ?? null;
@@ -635,7 +684,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     const stored = readStoredAiSession(companyId);
     getOrCreate({ companyId, sessionId: stored ?? undefined }).then((id) => {
       if (cancelled) return;
-      setSessionId(id);
+      setResolvedSession({ companyId, sessionId: id });
       rememberStoredAiSession(companyId, id);
     });
     return () => {
@@ -643,10 +692,19 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     };
   }, [companyId, getOrCreate]);
 
-  const transport = useMemo(() => new DefaultChatTransport({ api: "/api/ai/chat", body: { companyId, sessionId } }), [companyId, sessionId]);
+  // Only the latest message goes over the wire; the server rebuilds history
+  // from Convex, so earlier attachment data URLs are not re-uploaded per send.
+  const transport = useMemo(() => new DefaultChatTransport({
+    api: "/api/ai/chat",
+    body: { companyId, sessionId },
+    prepareSendMessagesRequest: ({ messages: chatMessages, body }) => ({
+      body: { ...(body ?? {}), messages: chatMessages.slice(-1) },
+    }),
+  }), [companyId, sessionId]);
   const { messages, setMessages, sendMessage, status } = useChat({
     id: sessionId ? `${companyId}:${sessionId}` : `pending:${companyId}`,
     transport,
+    experimental_throttle: 50,
   });
   const isSending = status !== "ready" && !String(status).includes("error");
   const attachmentPending = selectedAttachments.some((attachment) => attachment.status === "loading");
@@ -682,7 +740,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     const node = chatScrollRef.current;
     if (!node || !shouldStickToBottom.current) return;
     node.scrollTop = node.scrollHeight;
-  });
+  }, [messages]);
 
   function updateShouldStickToBottom() {
     const node = chatScrollRef.current;
@@ -710,20 +768,15 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
     return formatMessageTime(message.createdAt) ?? formatMessageTime(localMessageTimes[String(message.id ?? "")]);
   }
 
-  function activityPanelOpen(segment: ActivitySegment) {
-    const preference = activityPanelPreferences[segment.id];
-    return preference?.manual ? preference.open : segment.isLive && segment.entries.length > 0;
-  }
-
-  function toggleActivityPanel(segment: ActivitySegment) {
+  const toggleActivityPanel = useCallback((segment: ActivitySegment) => {
     setActivityPanelPreferences((current) => {
       const open = current[segment.id]?.manual ? current[segment.id].open : segment.isLive;
       return { ...current, [segment.id]: { open: !open, manual: true } };
     });
-  }
+  }, []);
 
   function rememberSession(id: Id<"aiChatSessions">) {
-    setSessionId(id);
+    setResolvedSession({ companyId, sessionId: id });
     setMessages([]);
     hydratedSession.current = null;
     localMessageSession.current = null;
@@ -961,21 +1014,14 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
 
         {messages.map((message: any) => {
           if (message.role === "assistant") {
-            const isLiveAssistant = isSending && lastMessage?.id === message.id;
-            const blocks = buildAssistantBlocks(message, isLiveAssistant);
-            const assistantText = blocks.flatMap((block) => block.kind === "text" ? [block.text.trim()] : []).filter(Boolean).join("\n\n");
-            const visibleAssistantText = assistantText;
-            if (isLiveAssistant && blocks.length === 0) return <PendingThinkingIndicator key={message.id} />;
             return (
-              <div key={message.id} className="group relative -mb-8 mr-7 px-1 pb-8 pt-1">
-                {blocks.map((block) => block.kind === "activity" ? (
-                  <ActivityPanel key={block.segment.id} segment={block.segment} open={activityPanelOpen(block.segment)} onToggle={() => toggleActivityPanel(block.segment)} />
-                ) : (
-                  <AssistantMarkdown key={block.id} text={block.text.trim()} />
-                ))}
-                {!isLiveAssistant && blocks.length > 0 && !assistantText && <IncompleteAssistantNotice />}
-                {visibleAssistantText && <CopyMessageButton text={visibleAssistantText} align="left" />}
-              </div>
+              <AssistantMessageView
+                key={message.id}
+                message={message}
+                isLive={isSending && lastMessage?.id === message.id}
+                activityPanelPreferences={activityPanelPreferences}
+                onToggleActivityPanel={toggleActivityPanel}
+              />
             );
           }
 

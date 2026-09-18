@@ -622,8 +622,8 @@ function StructureTab({
   canManageDepartments: boolean;
   onCreateBranch: (name: string) => void;
   onCreateDepartment: (branchId: Id<"branches">, name: string) => void;
-  onDeleteBranch: (id: Id<"branches">) => void;
-  onDeleteDepartment: (id: Id<"departments">) => void;
+  onDeleteBranch: (id: Id<"branches">) => Promise<void>;
+  onDeleteDepartment: (id: Id<"departments">) => Promise<void>;
   onReorderBranches: (orderedBranchIds: Id<"branches">[]) => Promise<void>;
   onMoveDepartment: (departmentId: Id<"departments">, toBranchId: Id<"branches">, orderedDepartmentIds: Id<"departments">[]) => Promise<void>;
 }) {
@@ -633,13 +633,34 @@ function StructureTab({
   const [newBranchName, setNewBranchName] = useState("");
   const [newDeptByBranch, setNewDeptByBranch] = useState<Record<string, string>>({});
   const isDragging = useRef(false);
+  // In-flight optimistic structure ops: an unrelated overview update must not
+  // snap a just-dropped node back before its mutation commits.
+  const pendingStructureOps = useRef(0);
+  // Set when an overview update arrives during a drag or pending op; the last
+  // settling op replays it so a skipped update cannot stay hidden forever.
+  const skippedReseed = useRef(false);
+  const [structureOpsDrained, setStructureOpsDrained] = useState(0);
 
-  // Re-seed from real-time data when no drag is in progress.
+  // Re-seed from real-time data when no drag or pending save is in progress.
   useEffect(() => {
-    if (isDragging.current) return;
+    if (isDragging.current || pendingStructureOps.current > 0) {
+      skippedReseed.current = true;
+      return;
+    }
+    skippedReseed.current = false;
     setBranches(data.branches);
     setDepartments(data.departments);
-  }, [data.branches, data.departments]);
+  }, [data.branches, data.departments, structureOpsDrained]);
+
+  async function withStructureOp<T>(op: () => Promise<T>): Promise<T> {
+    pendingStructureOps.current += 1;
+    try {
+      return await op();
+    } finally {
+      pendingStructureOps.current -= 1;
+      if (pendingStructureOps.current === 0 && skippedReseed.current) setStructureOpsDrained((tick) => tick + 1);
+    }
+  }
 
   const departmentsByBranch = useMemo(() => {
     const map = new Map<Id<"branches">, DepartmentRow[]>();
@@ -652,10 +673,18 @@ function StructureTab({
     return map;
   }, [branches, departments]);
 
-  const memberCountForBranch = (branchId: Id<"branches">) =>
-    data.users.filter((u) => u.branchIds.includes(branchId)).length;
-  const memberCountForDepartment = (departmentId: Id<"departments">) =>
-    data.users.filter((u) => u.departmentIds.includes(departmentId)).length;
+  // Single pass over users; per-row lookups become map reads.
+  const memberCounts = useMemo(() => {
+    const byBranch = new Map<string, number>();
+    const byDepartment = new Map<string, number>();
+    for (const user of data.users) {
+      for (const id of user.branchIds) byBranch.set(id, (byBranch.get(id) ?? 0) + 1);
+      for (const id of user.departmentIds) byDepartment.set(id, (byDepartment.get(id) ?? 0) + 1);
+    }
+    return { byBranch, byDepartment };
+  }, [data.users]);
+  const memberCountForBranch = (branchId: Id<"branches">) => memberCounts.byBranch.get(branchId) ?? 0;
+  const memberCountForDepartment = (departmentId: Id<"departments">) => memberCounts.byDepartment.get(departmentId) ?? 0;
 
   function toggleCollapse(branchId: Id<"branches">) {
     setCollapsed((prev) => {
@@ -675,6 +704,34 @@ function StructureTab({
     });
   }
 
+  // Deletes feel instant: once confirmed, the node leaves the local tree
+  // immediately and comes back if the mutation rejects. Confirm before
+  // mutating local state — a cancelled confirm resolves without deleting.
+  async function deleteBranchOptimistic(branchId: Id<"branches">) {
+    if (!window.confirm("Delete this branch? Departments and assignments must be removed first.")) return;
+    const previousBranches = branches;
+    const previousDepartments = departments;
+    setBranches(branches.filter((branch) => branch._id !== branchId));
+    setDepartments(departments.filter((dep) => dep.branchId !== branchId));
+    try {
+      await withStructureOp(() => onDeleteBranch(branchId));
+    } catch {
+      setBranches(previousBranches);
+      setDepartments(previousDepartments);
+    }
+  }
+
+  async function deleteDepartmentOptimistic(departmentId: Id<"departments">) {
+    if (!window.confirm("Delete this department? Assignments must be removed first.")) return;
+    const previousDepartments = departments;
+    setDepartments(departments.filter((dep) => dep._id !== departmentId));
+    try {
+      await withStructureOp(() => onDeleteDepartment(departmentId));
+    } catch {
+      setDepartments(previousDepartments);
+    }
+  }
+
   const newDeptName = (branchId: Id<"branches">) => newDeptByBranch[branchId] ?? "";
   const setNewDeptName = (branchId: Id<"branches">, value: string) =>
     setNewDeptByBranch((prev) => ({ ...prev, [branchId]: value }));
@@ -690,7 +747,7 @@ function StructureTab({
     const others = without.filter((d) => d.branchId !== toBranchId);
     setDepartments([...others, ...reindexed]);
     try {
-      await onMoveDepartment(deptId, toBranchId, reindexed.map((d) => d._id));
+      await withStructureOp(() => onMoveDepartment(deptId, toBranchId, reindexed.map((d) => d._id)));
       expand(toBranchId);
     } catch {
       setDepartments(previousDepartments);
@@ -713,7 +770,7 @@ function StructureTab({
     const others = without.filter((d) => d.branchId !== toBranch);
     setDepartments([...others, ...reindexed]);
     try {
-      await onMoveDepartment(deptId, toBranch, reindexed.map((d) => d._id));
+      await withStructureOp(() => onMoveDepartment(deptId, toBranch, reindexed.map((d) => d._id)));
       if (fromBranch !== toBranch) expand(toBranch);
     } catch {
       setDepartments(previousDepartments);
@@ -722,35 +779,41 @@ function StructureTab({
 
   function handleDragEnd(event: DragEndEvent) {
     isDragging.current = false;
-    if (event.canceled) return;
-    const { source, target } = event.operation;
-    if (!source) return;
+    try {
+      if (event.canceled) return;
+      const { source, target } = event.operation;
+      if (!source) return;
 
-    // Dropped onto a branch drop zone → append only departments to that branch.
-    if (target?.data?.kind === "branchZone") {
+      // Dropped onto a branch drop zone → append only departments to that branch.
+      if (target?.data?.kind === "branchZone") {
+        if (source.data?.kind !== DEPT_TYPE) return;
+        void commitDepartmentToBranch(source.id as Id<"departments">, target.data.branchId as Id<"branches">);
+        return;
+      }
+
+      if (!isSortable(source)) return;
+
+      // Branch reorder (top-level group).
+      if (source.data?.kind === BRANCH_TYPE) {
+        if (source.initialGroup !== BRANCH_GROUP || source.initialIndex === source.index) return;
+        const previousBranches = branches;
+        const reordered = arrayMove(branches, source.initialIndex, source.index).map((b, i) => ({ ...b, order: i }));
+        setBranches(reordered);
+        void withStructureOp(() => onReorderBranches(reordered.map((b) => b._id))).catch(() => setBranches(previousBranches));
+        return;
+      }
+
+      // Department move (within or across branches).
       if (source.data?.kind !== DEPT_TYPE) return;
-      void commitDepartmentToBranch(source.id as Id<"departments">, target.data.branchId as Id<"branches">);
-      return;
+      const fromBranch = source.initialGroup as Id<"branches">;
+      const toBranch = source.group as Id<"branches">;
+      if (!fromBranch || !toBranch) return;
+      void commitDepartmentSort(source.id as Id<"departments">, fromBranch, toBranch, source.index);
+    } finally {
+      // A cancelled or no-op drop never reaches withStructureOp — replay any
+      // overview update skipped during the drag once nothing is pending.
+      if (skippedReseed.current && pendingStructureOps.current === 0) setStructureOpsDrained((tick) => tick + 1);
     }
-
-    if (!isSortable(source)) return;
-
-    // Branch reorder (top-level group).
-    if (source.data?.kind === BRANCH_TYPE) {
-      if (source.initialGroup !== BRANCH_GROUP || source.initialIndex === source.index) return;
-      const previousBranches = branches;
-      const reordered = arrayMove(branches, source.initialIndex, source.index).map((b, i) => ({ ...b, order: i }));
-      setBranches(reordered);
-      void onReorderBranches(reordered.map((b) => b._id)).catch(() => setBranches(previousBranches));
-      return;
-    }
-
-    // Department move (within or across branches).
-    if (source.data?.kind !== DEPT_TYPE) return;
-    const fromBranch = source.initialGroup as Id<"branches">;
-    const toBranch = source.group as Id<"branches">;
-    if (!fromBranch || !toBranch) return;
-    void commitDepartmentSort(source.id as Id<"departments">, fromBranch, toBranch, source.index);
   }
 
   return (
@@ -804,7 +867,7 @@ function StructureTab({
                   isCollapsed={isCollapsed}
                   canDrag={canManageBranches}
                   onToggleCollapse={() => toggleCollapse(branch._id)}
-                  onDelete={() => onDeleteBranch(branch._id)}
+                  onDelete={() => void deleteBranchOptimistic(branch._id)}
                 >
                   {!isCollapsed && (
                     <div className="structure-departments">
@@ -816,7 +879,7 @@ function StructureTab({
                           branchId={branch._id}
                           memberCount={memberCountForDepartment(dep._id)}
                           canDrag={canManageDepartments}
-                          onDelete={() => onDeleteDepartment(dep._id)}
+                          onDelete={() => void deleteDepartmentOptimistic(dep._id)}
                         />
                       ))}
 
@@ -2360,7 +2423,7 @@ export default function Company() {
   }
 
   async function saveCompanyName() {
-    if (!activeCompanyId || !nameDirty) return;
+    if (!activeCompanyId || !nameDirty || savingName) return;
     setSavingName(true);
     try {
       await updateCompanyName({ companyId: activeCompanyId, name: companyName.trim() });
@@ -2372,7 +2435,7 @@ export default function Company() {
   }
 
   async function saveCompanyTimeZone(timeZone: string) {
-    if (!activeCompanyId || timeZone === currentCompany?.timeZone) return;
+    if (!activeCompanyId || timeZone === currentCompany?.timeZone || savingTimeZone) return;
     setSavingTimeZone(true);
     try {
       await updateCompanyTimeZone({ companyId: activeCompanyId, timeZone });
@@ -2512,12 +2575,18 @@ export default function Company() {
                 canManageDepartments={canManageDepartments}
                 onCreateBranch={(name) => activeCompanyId && run(async () => createBranch({ companyId: activeCompanyId, name }), "Could not create branch.")}
                 onCreateDepartment={(branchId, name) => activeCompanyId && run(async () => createDepartment({ companyId: activeCompanyId, branchId, name }), "Could not create department.")}
-                onDeleteBranch={(branchId) =>
-                  activeCompanyId && window.confirm("Delete this branch? Departments and assignments must be removed first.") && run(async () => deleteBranch({ companyId: activeCompanyId, branchId }), "Could not delete branch.")
-                }
-                onDeleteDepartment={(departmentId) =>
-                  activeCompanyId && window.confirm("Delete this department? Assignments must be removed first.") && run(async () => deleteDepartment({ companyId: activeCompanyId, departmentId }), "Could not delete department.")
-                }
+                onDeleteBranch={async (branchId) => {
+                  if (!activeCompanyId) return;
+                  setError(null);
+                  try { await deleteBranch({ companyId: activeCompanyId, branchId }); }
+                  catch (err) { setError(err instanceof Error ? err.message : "Could not delete branch."); throw err; }
+                }}
+                onDeleteDepartment={async (departmentId) => {
+                  if (!activeCompanyId) return;
+                  setError(null);
+                  try { await deleteDepartment({ companyId: activeCompanyId, departmentId }); }
+                  catch (err) { setError(err instanceof Error ? err.message : "Could not delete department."); throw err; }
+                }}
                 onReorderBranches={async (orderedBranchIds) => {
                   if (!activeCompanyId) return;
                   setError(null);

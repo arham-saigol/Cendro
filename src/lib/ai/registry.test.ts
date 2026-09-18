@@ -99,15 +99,18 @@ describe("AI tool registry task notes", () => {
     const getDetailDef = cendroAiToolDefinitions.find((t) => t.name === "get_task_detail")!;
 
     const ctx = mockContext();
-    (ctx.client.query as any).mockResolvedValueOnce([
-      {
-        kind: "one_time",
-        id: "task-10",
-        title: "Task with notes",
-        notes: "Remember safety goggles",
-        status: "due",
-      },
-    ]);
+    (ctx.client.query as any).mockResolvedValueOnce({
+      rows: [
+        {
+          kind: "one_time",
+          id: "task-10",
+          title: "Task with notes",
+          notes: "Remember safety goggles",
+          status: "due",
+        },
+      ],
+      truncated: false,
+    });
 
     const listRes = await listDef.execute({ status: "all", limit: 10 }, ctx);
     expect(listRes).toMatchObject({

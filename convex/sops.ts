@@ -21,18 +21,21 @@ async function assertTargets(ctx: any, companyId: Id<"companies">, args: { branc
 async function getManagedScopeTargets(ctx: MutationCtx | QueryCtx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, caps?: Set<Capability>) {
   const capabilities = caps ?? (await membershipCapabilities(ctx, membership));
   if (capabilities.has("sops:manage:company")) return null;
-  const branchIds = new Set<Id<"branches">>();
-  const managedBranches = await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(500);
-  for (const row of managedBranches) branchIds.add(row.branchId);
-  const userIds = await getManagedMembershipIds(ctx, companyId, membership._id);
-  for (const userId of userIds) {
-    const assignments = await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", userId)).take(500);
+  const [managedBranches, userIds, managedDepartments] = await Promise.all([
+    ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(500),
+    getManagedMembershipIds(ctx, companyId, membership._id),
+    ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(500),
+  ]);
+  const branchIds = new Set<Id<"branches">>(managedBranches.map((row) => row.branchId));
+  // Assignment-derived branches must join branchIds before the department
+  // queries run — departments are loaded per branch, so a branch added later
+  // would contribute no departments.
+  const assignmentLists = await Promise.all([...userIds].map((userId) => ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", userId)).take(500)));
+  for (const assignments of assignmentLists) {
     for (const assignment of assignments) branchIds.add(assignment.branchId);
   }
-  const departmentIds = new Set<Id<"departments">>();
-  const managedDepartments = await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(500);
-  for (const row of managedDepartments) departmentIds.add(row.departmentId);
   const departmentLists = await Promise.all([...branchIds].map((branchId) => ctx.db.query("departments").withIndex("by_branch", (q) => q.eq("branchId", branchId)).take(500)));
+  const departmentIds = new Set<Id<"departments">>(managedDepartments.map((row) => row.departmentId));
   for (const departments of departmentLists) {
     for (const department of departments) if (department.companyId === companyId) departmentIds.add(department._id);
   }
@@ -139,9 +142,14 @@ async function insertScopeRows(ctx: MutationCtx, companyId: Id<"companies">, sop
   for (const userMembershipId of args.userMembershipIds) await ctx.db.insert("sopUserScopes", { companyId, sopId, userMembershipId });
 }
 async function withScopes(ctx: QueryCtx, sop: Doc<"sops">, membership: Doc<"companyMemberships">, companyName?: string, precomputedCaps?: Set<Capability>, managedTargets?: () => Promise<SopManagedTargets>) {
-  const branchIds = (await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500)).map((row) => row.branchId);
-  const departmentIds = (await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500)).map((row) => row.departmentId);
-  const userMembershipIds = (await ctx.db.query("sopUserScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500)).map((row) => row.userMembershipId);
+  const [branchScopeRows, departmentScopeRows, userScopeRows] = await Promise.all([
+    ctx.db.query("sopBranchScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500),
+    ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500),
+    ctx.db.query("sopUserScopes").withIndex("by_sop", (q) => q.eq("sopId", sop._id)).take(500),
+  ]);
+  const branchIds = branchScopeRows.map((row) => row.branchId);
+  const departmentIds = departmentScopeRows.map((row) => row.departmentId);
+  const userMembershipIds = userScopeRows.map((row) => row.userMembershipId);
   let scopeTargetName = companyName ?? "Company";
   let scopeTargetUser: { firstName: string; name: string; imageUrl: string | null } | null = null;
   if (sop.scopeType === "branch") {
@@ -161,8 +169,10 @@ async function withScopes(ctx: QueryCtx, sop: Doc<"sops">, membership: Doc<"comp
     }
   }
   const caps = precomputedCaps ?? (await membershipCapabilities(ctx, membership));
-  const canUpdate = await canManageSopTargets(ctx, sop.companyId, membership, sop.scopeType, { branchIds, departmentIds, userMembershipIds }, caps, managedTargets);
-  const canDelete = await canDeleteSopTargets(ctx, sop.companyId, membership, sop.scopeType, { branchIds, departmentIds, userMembershipIds }, caps, managedTargets);
+  const [canUpdate, canDelete] = await Promise.all([
+    canManageSopTargets(ctx, sop.companyId, membership, sop.scopeType, { branchIds, departmentIds, userMembershipIds }, caps, managedTargets),
+    canDeleteSopTargets(ctx, sop.companyId, membership, sop.scopeType, { branchIds, departmentIds, userMembershipIds }, caps, managedTargets),
+  ]);
   return { ...sop, branchIds, departmentIds, userMembershipIds, scopeTargetName, scopeTargetUser, canUpdate, canDelete };
 }
 
@@ -197,6 +207,14 @@ async function sopVisibleForView(ctx: QueryCtx, companyId: Id<"companies">, memb
   return await visibleSopForSelf(ctx, companyId, membership, sop, undefined, auth);
 }
 
+// Page size for the legacy scan-until-filled path; scans continue until the
+// requested count is collected or the company index is exhausted, so sparse
+// matches beyond the first page are not silently dropped. A total ceiling
+// keeps the single-transaction query under Convex read limits — hitting it
+// fails loudly rather than silently returning partial results.
+const FILTERED_SOP_SCAN_PAGE = 200;
+const FILTERED_SOP_SCAN_CEILING = 1000;
+
 async function filteredSopRows(ctx: QueryCtx, args: { companyId: Id<"companies">; search?: string; view?: "all" | "my"; scope?: "all" | Doc<"sops">["scopeType"]; branchId?: Id<"branches">; userMembershipId?: Id<"companyMemberships">; limit: number }) {
   const { membership } = await requireMembership(ctx, args.companyId);
   const company = await ctx.db.get(args.companyId);
@@ -204,16 +222,32 @@ async function filteredSopRows(ctx: QueryCtx, args: { companyId: Id<"companies">
   const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
   const auth = sopListAuth(ctx, args.companyId, membership, caps);
   const canUseAllView = caps.has("sops:view:company") || caps.has("sops:view:managed");
-  const out = [];
   const search = args.search?.trim().toLowerCase();
-  for await (const sop of ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc")) {
-    if (out.length >= args.limit) break;
-    if (!(await sopVisibleForView(ctx, args.companyId, membership, sop, args.view, visibility, caps, canUseAllView, auth))) continue;
-    if (!(await sopMatchesFilters(ctx, sop, args))) continue;
-    if (search && !sop.reference.toLowerCase().includes(search) && !sop.title.toLowerCase().includes(search) && !sop.content.toLowerCase().includes(search)) continue;
-    out.push(await withScopes(ctx, sop, membership, company?.name, caps, auth.managedTargets));
+  const kept: Doc<"sops">[] = [];
+  let cursor: string | null = null;
+  let scanned = 0;
+  let exhausted = false;
+  while (kept.length < args.limit && scanned < FILTERED_SOP_SCAN_CEILING) {
+    const page = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: Math.min(FILTERED_SOP_SCAN_PAGE, FILTERED_SOP_SCAN_CEILING - scanned) });
+    scanned += page.page.length;
+    const keepFlags = await Promise.all(page.page.map(async (sop) => {
+      if (!(await sopVisibleForView(ctx, args.companyId, membership, sop, args.view, visibility, caps, canUseAllView, auth))) return false;
+      if (!(await sopMatchesFilters(ctx, sop, args))) return false;
+      if (search && !sop.reference.toLowerCase().includes(search) && !sop.title.toLowerCase().includes(search) && !sop.content.toLowerCase().includes(search)) return false;
+      return true;
+    }));
+    for (let index = 0; index < page.page.length && kept.length < args.limit; index += 1) {
+      if (keepFlags[index]) kept.push(page.page[index]);
+    }
+    if (page.isDone) { exhausted = true; break; }
+    cursor = page.continueCursor;
   }
-  return out;
+  // A short result after an exhausted index is legitimate; only a scan cut off
+  // by the ceiling is an incomplete result worth failing loudly on.
+  if (!exhausted && kept.length < args.limit) {
+    throw new ConvexError("Too many SOPs to scan — narrow the filters or use the paginated list endpoint.");
+  }
+  return await Promise.all(kept.map((sop) => withScopes(ctx, sop, membership, company?.name, caps, auth.managedTargets)));
 }
 
 export const list = query({
@@ -227,14 +261,15 @@ export const list = query({
     const auth = sopListAuth(ctx, args.companyId, membership, caps);
     // Visibility/search filtering happens after database pagination, so pages may contain fewer items than requested; continuation tokens still advance correctly.
     const page = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
-    const out = [];
     const search = args.search?.trim().toLowerCase();
-    for (const sop of page.page) {
-      if (!(await sopVisibleForView(ctx, args.companyId, membership, sop, args.view, visibility, caps, canUseAllView, auth))) continue;
-      if (!(await sopMatchesFilters(ctx, sop, args))) continue;
-      if (search && !sop.reference.toLowerCase().includes(search) && !sop.title.toLowerCase().includes(search) && !sop.content.toLowerCase().includes(search)) continue;
-      out.push(await withScopes(ctx, sop, membership, company?.name, caps, auth.managedTargets));
-    }
+    const keepFlags = await Promise.all(page.page.map(async (sop) => {
+      if (!(await sopVisibleForView(ctx, args.companyId, membership, sop, args.view, visibility, caps, canUseAllView, auth))) return false;
+      if (!(await sopMatchesFilters(ctx, sop, args))) return false;
+      if (search && !sop.reference.toLowerCase().includes(search) && !sop.title.toLowerCase().includes(search) && !sop.content.toLowerCase().includes(search)) return false;
+      return true;
+    }));
+    const kept = page.page.filter((_, index) => keepFlags[index]);
+    const out = await Promise.all(kept.map((sop) => withScopes(ctx, sop, membership, company?.name, caps, auth.managedTargets)));
     return { ...page, page: out };
   },
 });
@@ -244,10 +279,13 @@ export const listRows = query({
   handler: async (ctx, args) => await filteredSopRows(ctx, { ...args, limit: 200 }),
 });
 
+// Full content is deliberately excluded from list rows: the list only needs it
+// for search, which the server-side search_content index now handles.
+const { content: _sopContentField, ...sopOrderingSopFields } = schema.tables.sops.validator.fields;
 const sopOrderingRowValidator = v.object({
   _id: v.id("sops"),
   _creationTime: v.number(),
-  ...schema.tables.sops.validator.fields,
+  ...sopOrderingSopFields,
   branchIds: v.array(v.id("branches")),
   departmentIds: v.array(v.id("departments")),
   userMembershipIds: v.array(v.id("companyMemberships")),
@@ -274,32 +312,93 @@ export const listOrderingRows = query({
     const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
     const auth = sopListAuth(ctx, args.companyId, membership, caps);
     const page = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
-    const departmentBranches = new Map<Id<"departments">, Id<"branches"> | null>();
-    const authorizedRows = [];
-    for (const sop of page.page) {
-      if (!(await visibleSop(ctx, args.companyId, membership, sop, visibility, caps, undefined, auth))) continue;
-      const row = await withScopes(ctx, sop, membership, company?.name, caps, auth.managedTargets);
+    const visibleFlags = await Promise.all(page.page.map((sop) => visibleSop(ctx, args.companyId, membership, sop, visibility, caps, undefined, auth)));
+    const visibleSops = page.page.filter((_, index) => visibleFlags[index]);
+    const [rows, myViewFlags] = await Promise.all([
+      Promise.all(visibleSops.map((sop) => withScopes(ctx, sop, membership, company?.name, caps, auth.managedTargets))),
+      Promise.all(visibleSops.map((sop) => visibleSopForSelf(ctx, args.companyId, membership, sop, undefined, auth))),
+    ]);
+    const departmentIds = new Set<Id<"departments">>();
+    for (let index = 0; index < visibleSops.length; index += 1) {
+      if (visibleSops[index].scopeType === "department") for (const departmentId of rows[index].departmentIds) departmentIds.add(departmentId);
+    }
+    const departmentDocs = (await Promise.all([...departmentIds].map((departmentId) => ctx.db.get(departmentId)))).filter(Boolean) as Doc<"departments">[];
+    const departmentBranches = new Map(departmentDocs.map((department) => [department._id, department.companyId === args.companyId ? department.branchId : null]));
+    const authorizedRows = visibleSops.map((sop, index) => {
+      const { content: _content, ...row } = rows[index];
       const filterBranchIds: Id<"branches">[] = [];
       if (sop.scopeType === "branch") {
         filterBranchIds.push(...row.branchIds);
       } else if (sop.scopeType === "department") {
         for (const departmentId of row.departmentIds) {
-          if (!departmentBranches.has(departmentId)) {
-            const department = await ctx.db.get(departmentId);
-            departmentBranches.set(departmentId, department?.companyId === args.companyId ? department.branchId : null);
-          }
           const branchId = departmentBranches.get(departmentId) ?? null;
           if (branchId) filterBranchIds.push(branchId);
         }
       }
-      authorizedRows.push({
+      return {
         ...row,
         // The self capability is checked here because visibleSopForSelf alone does not enforce it.
-        matchesMyView: caps.has("sops:view:self") && (await visibleSopForSelf(ctx, args.companyId, membership, sop, undefined, auth)),
+        matchesMyView: caps.has("sops:view:self") && myViewFlags[index],
         filterBranchIds,
-      });
-    }
+      };
+    });
     return { ...page, page: authorizedRows };
+  },
+});
+
+/**
+ * Server-side content search over the sops search index, so the browser list no
+ * longer needs every SOP's full content to answer a body-text query.
+ */
+const CONTENT_SEARCH_TARGET = 100;
+const CONTENT_SEARCH_SCAN_BUDGET = 500;
+
+// Full-text hits arrive ranked by the index before any visibility filtering,
+// so keep paging until enough *visible* matches collect or the scan budget
+// ends — a first page of inaccessible hits must not hide real matches.
+async function visibleContentMatches(
+  ctx: MutationCtx | QueryCtx,
+  companyId: Id<"companies">,
+  needle: string,
+  membership: Doc<"companyMemberships">,
+  caps: Set<Capability>,
+  visibility: SopVisibilityContext | null,
+  target: number,
+  budget: number,
+  auth?: SopListRowAuth,
+) {
+  const visible: Doc<"sops">[] = [];
+  let cursor: string | null = null;
+  let scanned = 0;
+  let exhausted = false;
+  while (visible.length < target && scanned < budget) {
+    const page = await ctx.db
+      .query("sops")
+      .withSearchIndex("search_content", (q) => q.search("content", needle).eq("companyId", companyId))
+      .paginate({ cursor, numItems: Math.min(100, budget - scanned) });
+    scanned += page.page.length;
+    const flags = await Promise.all(page.page.map((sop) => visibleSop(ctx, companyId, membership, sop, visibility, caps, undefined, auth)));
+    for (let index = 0; index < page.page.length; index += 1) {
+      if (flags[index]) visible.push(page.page[index]);
+    }
+    if (page.isDone) { exhausted = true; break; }
+    cursor = page.continueCursor;
+  }
+  return { sops: visible.slice(0, target), exhausted };
+}
+
+export const contentSearchIds = query({
+  args: { companyId: v.id("companies"), query: v.string() },
+  returns: v.object({ ids: v.array(v.id("sops")), truncated: v.boolean() }),
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const needle = args.query.trim();
+    if (!needle) return { ids: [], truncated: false };
+    const caps = await membershipCapabilities(ctx, membership);
+    const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
+    const auth = sopListAuth(ctx, args.companyId, membership, caps);
+    const { sops, exhausted } = await visibleContentMatches(ctx, args.companyId, needle, membership, caps, visibility, CONTENT_SEARCH_TARGET, CONTENT_SEARCH_SCAN_BUDGET, auth);
+    return { ids: sops.map((sop) => sop._id), truncated: !exhausted };
   },
 });
 
@@ -490,22 +589,20 @@ export const filterOptions = query({
       for (const departmentId of managed?.departmentIds ?? []) departmentIds.add(departmentId);
     }
 
-    const branches = [];
-    for (const branchId of branchIds) {
-      const branch = await ctx.db.get(branchId);
-      if (branch?.companyId === args.companyId) branches.push({ _id: branch._id, name: branch.name });
-    }
+    const [branchDocs, departmentDocs, membershipDocs] = await Promise.all([
+      Promise.all([...branchIds].map((branchId) => ctx.db.get(branchId))),
+      Promise.all([...departmentIds].map((departmentId) => ctx.db.get(departmentId))),
+      Promise.all([...userIds].map((membershipId) => ctx.db.get(membershipId))),
+    ]);
+    const branches = branchDocs.filter((branch) => branch?.companyId === args.companyId).map((branch) => ({ _id: branch!._id, name: branch!.name }));
     const branchNames = new Map(branches.map((branch) => [branch._id, branch.name]));
-    const departments = [];
-    for (const departmentId of departmentIds) {
-      const department = await ctx.db.get(departmentId);
-      if (department?.companyId === args.companyId) departments.push({ _id: department._id, name: department.name, branchId: department.branchId, branchName: branchNames.get(department.branchId) ?? "Unknown branch" });
-    }
+    const departments = departmentDocs.filter((department) => department?.companyId === args.companyId).map((department) => ({ _id: department!._id, name: department!.name, branchId: department!.branchId, branchName: branchNames.get(department!.branchId) ?? "Unknown branch" }));
+    const activeMemberships = membershipDocs.filter((m): m is Doc<"companyMemberships"> => Boolean(m && m.companyId === args.companyId && m.active));
+    const userDocs = await Promise.all(activeMemberships.map((m) => ctx.db.get(m.userId)));
     const users = [];
-    for (const membershipId of userIds) {
-      const userMembership = await ctx.db.get(membershipId);
-      if (!userMembership || userMembership.companyId !== args.companyId || !userMembership.active) continue;
-      const user = await ctx.db.get(userMembership.userId);
+    for (let index = 0; index < activeMemberships.length; index += 1) {
+      const userMembership = activeMemberships[index];
+      const user = userDocs[index];
       if (user) users.push({ membership: { _id: userMembership._id, role: userMembership.role }, user: { name: memberFullName(userMembership, user), firstName: memberFirstName(userMembership, user), imageUrl: user.imageUrl ?? null } });
     }
     branches.sort((a, b) => a.name.localeCompare(b.name));
@@ -535,9 +632,11 @@ export const create = mutation({
 });
 
 async function currentSopTargets(ctx: MutationCtx | QueryCtx, sopId: Id<"sops">) {
-  const branchScopes = await ctx.db.query("sopBranchScopes").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(500);
-  const departmentScopes = await ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(500);
-  const userScopes = await ctx.db.query("sopUserScopes").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(500);
+  const [branchScopes, departmentScopes, userScopes] = await Promise.all([
+    ctx.db.query("sopBranchScopes").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(500),
+    ctx.db.query("sopDepartmentScopes").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(500),
+    ctx.db.query("sopUserScopes").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(500),
+  ]);
   return {
     branchIds: branchScopes.map((r) => r.branchId),
     departmentIds: departmentScopes.map((r) => r.departmentId),
@@ -577,6 +676,9 @@ export const update = mutation({
 
     if (args.title !== undefined) patch.title = nonEmpty(args.title, "Title");
     if (args.content !== undefined) patch.content = args.content.trim();
+    // Embedding only depends on title + content, so scope-only edits and no-op
+    // saves should not pay for a re-index pass.
+    const indexedFieldsChanged = (patch.title !== undefined && patch.title !== sop.title) || (patch.content !== undefined && patch.content !== sop.content);
 
     if (args.scopeType !== undefined) {
       await requireCapability(ctx, args.companyId, sopManageCapability(args.scopeType));
@@ -590,7 +692,7 @@ export const update = mutation({
     }
 
     await ctx.db.patch(args.sopId, patch);
-    await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: args.sopId });
+    if (indexedFieldsChanged) await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: args.sopId });
     return null;
   },
 });
@@ -613,7 +715,6 @@ export const updateScope = mutation({
     await deleteScopeRows(ctx, args.sopId);
     await ctx.db.patch(args.sopId, { scopeType: args.scopeType, updatedByMembershipId: membership._id, updatedAt: Date.now() });
     await insertScopeRows(ctx, args.companyId, args.sopId, scopeArgs);
-    await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: args.sopId });
     return null;
   },
 });
@@ -634,25 +735,73 @@ async function purgeSop(ctx: MutationCtx, companyId: Id<"companies">, sopId: Id<
 
 export const remove = mutation({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args) => { await purgeSop(ctx, args.companyId, args.sopId); return null; } });
 
-export const removeBulk = mutation({ args: { companyId: v.id("companies"), sopIds: v.array(v.id("sops")) }, handler: async (ctx, args) => { for (const sopId of args.sopIds) await purgeSop(ctx, args.companyId, sopId); return null; } });
+const DELETE_BULK_SOP_LIMIT = 100;
 
-async function textSearch(ctx: any, args: { companyId: Id<"companies">; query: string }) {
+export const removeBulk = mutation({
+  args: { companyId: v.id("companies"), sopIds: v.array(v.id("sops")) },
+  handler: async (ctx, args) => {
+    if (args.sopIds.length > DELETE_BULK_SOP_LIMIT) throw new ConvexError(`Select at most ${DELETE_BULK_SOP_LIMIT} SOPs to delete at once.`);
+    for (const sopId of new Set(args.sopIds)) await purgeSop(ctx, args.companyId, sopId);
+    return null;
+  },
+});
+
+// Content matches come from the full-text index. Title/reference matching is
+// substring-based, which FTS cannot express, so it pages the company index
+// until it has enough candidates for the (≤8-row) result or hits the ceiling.
+const TITLE_MATCH_TARGET = 40;
+const TITLE_SCAN_CEILING = 500;
+// The search result keeps at most 8 rows, but inaccessible hits must not
+// starve the content window, so the FTS scan collects more than 8.
+const SEARCH_CONTENT_TARGET = 24;
+const SEARCH_CONTENT_SCAN_BUDGET = 200;
+
+async function visibleSopSearchCandidates(ctx: any, args: { companyId: Id<"companies">; query: string }) {
   const { membership } = await requireMembership(ctx, args.companyId);
-  const rows = await ctx.db.query("sops").withIndex("by_company", (q: any) => q.eq("companyId", args.companyId)).take(100);
-  const needle = args.query.trim().toLowerCase();
-  if (!needle) return [];
+  const needle = args.query.trim();
+  if (!needle) return { membership, sops: [] as Doc<"sops">[] };
   const caps = await membershipCapabilities(ctx, membership);
   const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
-  const out = [];
-  for (const sop of rows) {
-    if (await visibleSop(ctx, args.companyId, membership, sop, visibility, caps) && (sop.reference.toLowerCase().includes(needle) || sop.title.toLowerCase().includes(needle) || sop.content.toLowerCase().includes(needle))) out.push({ id: sop._id, title: sop.title, excerpt: sop.content.slice(0, 500), scopeType: sop.scopeType });
-  }
-  return out.slice(0, 8);
+  const lower = needle.toLowerCase();
+  const titleScan = async () => {
+    const matched: Doc<"sops">[] = [];
+    let cursor: string | null = null;
+    let scanned = 0;
+    while (matched.length < TITLE_MATCH_TARGET && scanned < TITLE_SCAN_CEILING) {
+      const page: { page: Doc<"sops">[]; isDone: boolean; continueCursor: string } = await ctx.db.query("sops").withIndex("by_company", (q: any) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: Math.min(100, TITLE_SCAN_CEILING - scanned) });
+      scanned += page.page.length;
+      // Only visible matches count toward the target — a page of inaccessible
+      // title hits must not stop the scan before real matches are found.
+      const titleMatches = (page.page as Doc<"sops">[]).filter((sop) => sop.reference.toLowerCase().includes(lower) || sop.title.toLowerCase().includes(lower));
+      const visibleFlags = await Promise.all(titleMatches.map((sop) => visibleSop(ctx, args.companyId, membership, sop, visibility, caps)));
+      for (let index = 0; index < titleMatches.length; index += 1) {
+        if (visibleFlags[index]) matched.push(titleMatches[index]);
+      }
+      if (page.isDone) break;
+      cursor = page.continueCursor;
+    }
+    return matched;
+  };
+  const [contentResult, scanRows] = await Promise.all([
+    visibleContentMatches(ctx, args.companyId, needle, membership, caps, visibility, SEARCH_CONTENT_TARGET, SEARCH_CONTENT_SCAN_BUDGET),
+    titleScan(),
+  ]);
+  const candidates = new Map<string, Doc<"sops">>();
+  for (const sop of scanRows) candidates.set(sop._id, sop);
+  for (const sop of contentResult.sops) candidates.set(sop._id, sop);
+  const all = [...candidates.values()];
+  const flags = await Promise.all(all.map((sop: Doc<"sops">) => visibleSop(ctx, args.companyId, membership, sop, visibility, caps)));
+  return { membership, sops: all.filter((_: Doc<"sops">, index: number) => flags[index]) };
+}
+
+async function textSearch(ctx: any, args: { companyId: Id<"companies">; query: string }) {
+  const { sops } = await visibleSopSearchCandidates(ctx, args);
+  return sops.slice(0, 8).map((sop) => ({ id: sop._id, title: sop.title, excerpt: sop.content.slice(0, 500), scopeType: sop.scopeType }));
 }
 
 export const searchAccessible = query({ args: { companyId: v.id("companies"), query: v.string() }, handler: textSearch });
 
-export const visibleSearchRows = internalQuery({ args: { companyId: v.id("companies"), embeddingIds: v.array(v.id("sopEmbeddings")) }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const caps = await membershipCapabilities(ctx, membership); const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps); const out = []; for (const embeddingId of args.embeddingIds) { const embedding = await ctx.db.get(embeddingId); if (!embedding || embedding.companyId !== args.companyId) continue; const sop = await ctx.db.get(embedding.sopId); if (!sop || !(await visibleSop(ctx, args.companyId, membership, sop, visibility, caps))) continue; out.push({ id: sop._id, title: sop.title, excerpt: embedding.chunk.slice(0, 500), scopeType: sop.scopeType }); } return out; } });
+export const visibleSearchRows = internalQuery({ args: { companyId: v.id("companies"), embeddingIds: v.array(v.id("sopEmbeddings")) }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const caps = await membershipCapabilities(ctx, membership); const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps); const embeddings = (await Promise.all(args.embeddingIds.map((embeddingId) => ctx.db.get(embeddingId)))).filter((embedding) => embedding && embedding.companyId === args.companyId); const sops = (await Promise.all(embeddings.map((embedding) => ctx.db.get(embedding!.sopId)))).filter(Boolean) as Doc<"sops">[]; const flags = await Promise.all(sops.map((sop) => visibleSop(ctx, args.companyId, membership, sop, visibility, caps))); const out = []; for (let index = 0; index < sops.length; index += 1) { if (!flags[index]) continue; const sop = sops[index]; const embedding = embeddings.find((e) => e!.sopId === sop._id); out.push({ id: sop._id, title: sop.title, excerpt: (embedding?.chunk ?? sop.content).slice(0, 500), scopeType: sop.scopeType }); } return out; } });
 
 export const authorizeSearch = internalQuery({ args: { companyId: v.id("companies") }, handler: async (ctx, args) => { await requireMembership(ctx, args.companyId); return null; } });
 
@@ -689,19 +838,8 @@ async function embed(apiKey: string, input: string) {
 export const aiSearch = query({
   args: { companyId: v.id("companies"), query: v.string() },
   handler: async (ctx, args) => {
-    const { membership } = await requireMembership(ctx, args.companyId);
-    const needle = args.query.trim().toLowerCase();
-    if (!needle) return [];
-    const rows = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(100);
-    const caps = await membershipCapabilities(ctx, membership);
-    const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
-    const out = [];
-    for (const sop of rows) {
-      if (!(await visibleSop(ctx, args.companyId, membership, sop, visibility, caps))) continue;
-      if (sop.reference.toLowerCase().includes(needle) || sop.title.toLowerCase().includes(needle) || sop.content.toLowerCase().includes(needle)) out.push({ id: sop._id, title: sop.title, excerpt: sop.content.slice(0, 700), scopeType: sop.scopeType });
-      if (out.length >= 8) break;
-    }
-    return out;
+    const { sops } = await visibleSopSearchCandidates(ctx, args);
+    return sops.slice(0, 8).map((sop) => ({ id: sop._id, title: sop.title, excerpt: sop.content.slice(0, 700), scopeType: sop.scopeType }));
   },
 });
 

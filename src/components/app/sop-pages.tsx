@@ -53,6 +53,8 @@ import {
 } from "@/lib/sop-list-sort";
 import { sopTargetName } from "@/lib/sop-target-name";
 import { SopRichTextEditor, SopRichTextViewer } from "./sop-rich-text";
+import { getDetailPreview, seedDetailPreview } from "@/lib/detail-preview";
+import { removeFromListPages } from "@/lib/convex-optimistic";
 import { cn, formatDate, initials } from "@/lib/utils";
 
 type ScopeType = "company" | "branch" | "department" | "user";
@@ -170,7 +172,8 @@ const sopListPreferenceMessages: ListPreferenceControllerOptions = {
 type SopRow = SopListOrderingRow & {
   reference: string;
   title: string;
-  content: string;
+  // List rows no longer carry content; content search goes through sops.contentSearchIds.
+  content?: string;
   scopeType: ScopeType;
   branchIds: string[];
   departmentIds: string[];
@@ -355,6 +358,32 @@ function SopDialog({
   const scopeOptions = useQuery(api.sops.scopeOptions, open && activeCompanyId && canLoadSopScopeOptions(active) ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const scopeTargetValid = scopeType === "company" || (scopeType === "branch" ? Boolean(branchId) : scopeType === "department" ? Boolean(departmentId) : Boolean(userMembershipId));
 
+  // List rows and detail previews omit the body, so an edit dialog opened from
+  // one must load the full SOP — otherwise a title-only save would erase the
+  // stored content. Saving stays blocked until the body is known.
+  const fullSopResult = useQuery_experimental({
+    query: api.sops.get,
+    args: open && mode === "edit" && sop?._id && sop?.content === undefined && activeCompanyId
+      ? { companyId: activeCompanyId, sopId: sop._id as Id<"sops"> }
+      : "skip",
+  });
+  const fullSop = fullSopResult.status === "success" ? fullSopResult.data : undefined;
+  const originalContent = sop?.content ?? fullSop?.content;
+  const contentLoaded = mode !== "edit" || originalContent !== undefined;
+  // Change detection compares against the seeded baselines, not the live query
+  // values — a concurrent remote edit must not turn an unrelated local edit
+  // into a body or title overwrite.
+  const titleBaseline = useRef("");
+  const contentBaseline = useRef("");
+  const contentSeeded = useRef(false);
+  useEffect(() => { if (open) contentSeeded.current = false; }, [open]);
+  useEffect(() => {
+    if (mode !== "edit" || contentSeeded.current || fullSop?.content === undefined) return;
+    contentSeeded.current = true;
+    contentBaseline.current = fullSop.content;
+    setContent(fullSop.content);
+  }, [fullSop, mode]);
+
   const branchPickerOptions = useMemo(() => {
     const list = scopeOptions?.branches.map((branch) => ({ value: branch._id as string, label: branch.name })) ?? [];
     if (mode === "edit" && sop?.scopeType === "branch" && sop?.branchIds?.[0] && !list.some((o) => o.value === sop.branchIds[0])) {
@@ -381,14 +410,23 @@ function SopDialog({
 
   useEffect(() => {
     if (!open) return;
-    setTitle(sop?.title ?? "");
-    setContent(sop?.content ?? "");
+    titleBaseline.current = sop?.title ?? "";
+    setTitle(titleBaseline.current);
     if (mode === "create") {
+      contentBaseline.current = "";
+      setContent("");
       setScopeType(defaultCreateScope);
       setBranchId("");
       setDepartmentId("");
       setUserMembershipId("");
     } else {
+      // The body seeds only once per open — a cached fullSop already seeded it
+      // in the effect above, and a still-loading one seeds when it resolves.
+      if (!contentSeeded.current && sop?.content !== undefined) {
+        contentSeeded.current = true;
+        contentBaseline.current = sop.content;
+        setContent(sop.content);
+      }
       setScopeType(sop?.scopeType ?? "company");
       setBranchId(sop?.branchIds?.[0] ?? "");
       setDepartmentId(sop?.departmentIds?.[0] ?? "");
@@ -429,7 +467,7 @@ function SopDialog({
   useEffect(() => autoSize(titleRef), [title, open]);
 
   async function submit() {
-    if (!activeCompanyId || saving) return;
+    if (!activeCompanyId || saving || !contentLoaded) return;
     const trimmedTitle = title.trim();
     const trimmedContent = content.trim();
     if (!trimmedTitle) { setError("Title is required."); return; }
@@ -451,7 +489,8 @@ function SopDialog({
         });
         if (scopeType === "company" || (scopeType === "user" && userMembershipId === active?.membership._id)) onCreated?.(id as unknown as string);
       } else {
-        const titleOrContentChanged = trimmedTitle !== (sop?.title ?? "").trim() || trimmedContent !== (sop?.content ?? "").trim();
+        const titleChanged = trimmedTitle !== titleBaseline.current.trim();
+        const contentChanged = trimmedContent !== contentBaseline.current.trim();
         const prevBranchId = sop?.branchIds?.[0] ?? "";
         const prevDepartmentId = sop?.departmentIds?.[0] ?? "";
         const prevUserMembershipId = sop?.userMembershipIds?.[0] ?? "";
@@ -460,11 +499,12 @@ function SopDialog({
           (scopeType === "department" && departmentId !== prevDepartmentId) ||
           (scopeType === "user" && userMembershipId !== prevUserMembershipId);
 
-        if (titleOrContentChanged || scopeChanged) {
+        if (titleChanged || contentChanged || scopeChanged) {
           await update({
             companyId: activeCompanyId,
             sopId: sop._id as Id<"sops">,
-            ...(titleOrContentChanged ? { title: trimmedTitle, content: trimmedContent } : {}),
+            ...(titleChanged ? { title: trimmedTitle } : {}),
+            ...(contentChanged ? { content: trimmedContent } : {}),
             ...(scopeChanged ? {
               scopeType,
               branchIds: scopeType === "branch" ? [branchId as Id<"branches">] : [],
@@ -578,13 +618,19 @@ function SopDialog({
                 <div className="grid grid-cols-[120px_1fr] items-start gap-3 py-2">
                   <span className="pt-2 text-[13px] text-[var(--ink-muted)]">Body</span>
                   <div className="min-w-0">
-                    <SopRichTextEditor
-                      value={content}
-                      placeholder="Write the procedure steps..."
-                      ariaLabel="SOP body"
-                      className="min-h-[176px] px-2 py-2 text-[13px] leading-6"
-                      onChange={(value) => { setContent(value); setError(null); }}
-                    />
+                    {contentLoaded ? (
+                      <SopRichTextEditor
+                        value={content}
+                        placeholder="Write the procedure steps..."
+                        ariaLabel="SOP body"
+                        className="min-h-[176px] px-2 py-2 text-[13px] leading-6"
+                        onChange={(value) => { setContent(value); setError(null); }}
+                      />
+                    ) : (
+                      <div className="min-h-[176px] px-2 py-2 text-[13px] leading-6 text-[var(--ink-muted)]">
+                        {fullSopResult.status === "error" ? "Could not load the SOP body. Close the dialog and try again." : "Loading procedure…"}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -594,7 +640,7 @@ function SopDialog({
 
             <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--hairline)] px-6 py-4">
               <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>Cancel</Button>
-              <Button type="submit" size="lg" variant="primary" disabled={saving || !title.trim() || !scopeTargetValid}>{saving ? "Saving..." : mode === "create" ? "Create SOP" : "Save changes"}</Button>
+              <Button type="submit" size="lg" variant="primary" disabled={saving || !contentLoaded || !title.trim() || !scopeTargetValid}>{saving ? "Saving..." : mode === "create" ? "Create SOP" : "Save changes"}</Button>
             </div>
           </form>
         </Dialog.Content>
@@ -895,6 +941,16 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
     () => (sopPageStatus === "LoadingFirstPage" ? [] : sopPageResults),
     [sopPageResults, sopPageStatus],
   );
+  const contentSearchResult = useQuery(
+    api.sops.contentSearchIds,
+    activeCompanyId && debouncedSearch.trim() ? { companyId: activeCompanyId, query: debouncedSearch } : "skip",
+  );
+  const contentMatchIds = useMemo(() => {
+    // Body-match IDs belong to the debounced query; while the input is ahead
+    // of the debounce they would let rows pass for a stale search term.
+    if (!debouncedSearch.trim() || search !== debouncedSearch) return null;
+    return new Set(contentSearchResult?.ids?.map(String) ?? []);
+  }, [contentSearchResult, debouncedSearch, search]);
   const preferenceResult = useQuery(api.sops.getListPreference, activeCompanyId ? { companyId: activeCompanyId } : "skip");
   const subscribedPreference = useMemo<ListPreference<SopListSort> | undefined>(() => {
     if (!preferenceResult) return undefined;
@@ -908,8 +964,12 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
   }, [preferenceResult]);
   const filterOptions = useQuery(api.sops.filterOptions, activeCompanyId && canUseAllSops ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const update = useMutation(api.sops.update);
-  const remove = useMutation(api.sops.remove);
-  const removeBulk = useMutation(api.sops.removeBulk);
+  const remove = useMutation(api.sops.remove).withOptimisticUpdate((localStore, args) => {
+    removeFromListPages(localStore, api.sops.listOrderingRows, new Set([args.sopId]));
+  });
+  const removeBulk = useMutation(api.sops.removeBulk).withOptimisticUpdate((localStore, args) => {
+    removeFromListPages(localStore, api.sops.listOrderingRows, new Set(args.sopIds));
+  });
   const setListSort = useMutation(api.sops.setListSort);
   const saveListOrder = useMutation(api.sops.saveListOrder);
   const [preferenceController] = useState(() => new ListPreferenceController<SopListSort>(async (command) => {
@@ -957,13 +1017,16 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
   }, [activePreference?.customOrder, activeSort, rows, sortOptions]);
   const filteredRows = useMemo(
     () => filterSopListRows(orderedRows, {
-      search: debouncedSearch,
+      // Title/reference match instantly on each keystroke; body matches arrive
+      // via the debounced server content search.
+      search,
       view: effectiveSopView,
       scope: scopeFilter,
       branchId: branchFilter === "all" ? null : branchFilter,
       userMembershipId: personFilter === "all" ? null : personFilter,
+      contentMatchIds,
     }),
-    [branchFilter, debouncedSearch, effectiveSopView, orderedRows, personFilter, scopeFilter],
+    [branchFilter, contentMatchIds, effectiveSopView, orderedRows, personFilter, scopeFilter, search],
   );
   const renderedRows = filteredRows.slice(0, renderedCount);
   const renderedIds = renderedRows.map((sop) => sop._id);
@@ -977,7 +1040,9 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
   const selectedSopId = selectionCount === 1 ? Array.from(selectedIds)[0] : null;
   const selectedSop = selectedSopId ? rows.find((sop) => sop._id === selectedSopId) ?? null : null;
   const canEditSelectedSop = Boolean(selectedSop && (selectedSop.canUpdate ?? canManageSop(active, selectedSop.scopeType as ScopeType)));
-  const hasMoreRenderedRows = dataReady && renderedRows.length < filteredRows.length;
+  // The rendered window grows independently of page exhaustion so streamed-in
+  // pages become visible as they arrive.
+  const hasMoreRenderedRows = renderedRows.length < filteredRows.length;
   const dragDisabled = !customOrderingEnabled || preferenceState.sorting;
   const dragDisabledReason = customOrderingEnabled ? undefined
     : !dataReady ? "Loading all SOPs…"
@@ -1134,6 +1199,10 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
       else await removeBulk({ companyId: activeCompanyId, sopIds: ids as Id<"sops">[] });
       setSelectedIds(new Set());
     } catch (err) {
+      // The optimistic rollback restores the rows; merge the deleted IDs back
+      // so the failed delete can be retried without discarding rows the user
+      // selected while the request was in flight.
+      setSelectedIds((current) => new Set([...current, ...ids]));
       setDeleteError(err instanceof Error ? err.message : "Could not delete the selected SOPs.");
     } finally {
       setDeleting(false);
@@ -1147,7 +1216,7 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
     setPendingCell(key);
     setInlineError(null);
     try {
-      await update({ companyId: activeCompanyId, sopId: sop._id as Id<"sops">, title, content: sop.content });
+      await update({ companyId: activeCompanyId, sopId: sop._id as Id<"sops">, title });
       return true;
     } catch (err) {
       setOptimisticRows((current) => { const next = { ...current }; delete next[sop._id]; return next; });
@@ -1269,7 +1338,7 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
             </tr>
           </thead>
           <tbody ref={dragBodyRef}>
-            {!dataReady ? (
+            {sopPageStatus === "LoadingFirstPage" || !subscribedPreference ? (
               Array.from({ length: 6 }).map((_, index) => (
                 <tr key={`skel-${index}`}>
                   <td colSpan={5} className="pl-4">
@@ -1283,6 +1352,9 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
             ) : renderedRows.length === 0 ? (
               <tr>
                 <td colSpan={5} className="!h-auto py-2">
+                  {!dataReady ? (
+                    <div className="py-4 text-center text-[13px] text-[var(--ink-muted)]">Loading SOPs…</div>
+                  ) : (
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
                     <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{hasActiveFilters ? "No matching SOPs" : "No SOPs yet"}</div>
@@ -1294,6 +1366,7 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
                       <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); setScopeFilter("all"); setBranchFilter("all"); setPersonFilter("all"); }}>Clear filters</Button>
                     )}
                   </div>
+                  )}
                 </td>
               </tr>
             ) : (
@@ -1306,7 +1379,11 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
                   const pending = (field: string) => pendingCell === `${sop._id}:${field}`;
                   const detailsHref = `/sops/${sop._id}`;
                   const prefetchDetails = () => router.prefetch(detailsHref);
-                  const openDetails = () => router.push(detailsHref);
+                  const openDetails = () => {
+                    // Seed the drawer preview so it paints before the detail query resolves.
+                    seedDetailPreview(`sop:${activeCompanyId}:${active?.membership._id}`, sop._id, sop);
+                    router.push(detailsHref);
+                  };
                   return (
                     <SortableSopRow
                       key={sop._id}
@@ -1410,6 +1487,9 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
           {!dataReady && <span className="text-[12px] text-[var(--ink-muted)]">Loading all SOPs…</span>}
           {hasMoreRenderedRows && (
             <Button size="sm" variant="ghost" onClick={() => setRenderedCount((current) => Math.min(current + SOP_PAGE_SIZE, filteredRows.length))}>Load more SOPs</Button>
+          )}
+          {contentSearchResult?.truncated && debouncedSearch.trim() && (
+            <span className="text-[12px] text-[var(--ink-muted)]">More SOPs may match — try a more specific search.</span>
           )}
         </div>
       </div>
@@ -1554,11 +1634,15 @@ export function SopDetail({ id }: { id: string }) {
   }, [optimisticSop, serverSop]);
 
   if (serverSopResult.status === "error") return <SopDetailNotFound onBack={() => router.push("/sops")} />;
-  if (!serverSop) return <SopDetailSkeleton />;
-  const sop = optimisticSop ? { ...serverSop, ...optimisticSop } : serverSop;
+  // While the detail query resolves, paint from the seeded list-row preview.
+  // The preview carries no body — the procedure section shows a placeholder.
+  const previewSop = serverSop ? undefined : getDetailPreview<SopRow>(`sop:${activeCompanyId}:${active?.membership._id}`, id);
+  if (!serverSop && !previewSop) return <SopDetailSkeleton />;
+  const baseSop = serverSop ?? previewSop;
+  const sop = optimisticSop && serverSop ? { ...serverSop, ...optimisticSop } : baseSop;
   const sopScope = sop.scopeType as ScopeType;
   const editableScope = editableScopeTypes.includes(sopScope as EditableScopeType) ? sopScope as EditableScopeType : null;
-  const canEdit = Boolean(serverSop.canUpdate ?? canManageSop(active, sopScope));
+  const canEdit = Boolean(serverSop ? (serverSop.canUpdate ?? canManageSop(active, sopScope)) : false);
   const targetName = sopTargetName(sop, active?.company.name);
 
   async function saveText(patch: { title?: string; body?: string }) {
@@ -1666,7 +1750,15 @@ export function SopDetail({ id }: { id: string }) {
 
       <section className="task-section">
         <h2 className="task-section-title">Procedure</h2>
-        <EditableSopField value={sop.content ?? ""} placeholder={canEdit ? "Write the procedure steps..." : "No content."} ariaLabel="Edit SOP body" canEdit={canEdit} variant="body" onSave={(body) => saveText({ body })} />
+        {serverSop ? (
+          <EditableSopField value={sop.content ?? ""} placeholder={canEdit ? "Write the procedure steps..." : "No content."} ariaLabel="Edit SOP body" canEdit={canEdit} variant="body" onSave={(body) => saveText({ body })} />
+        ) : (
+          <div className="space-y-2">
+            <div className="h-3.5 w-4/5 animate-pulse rounded bg-[var(--surface-muted)]" />
+            <div className="h-3.5 w-3/5 animate-pulse rounded bg-[var(--surface-muted)]" />
+            <div className="h-3.5 w-2/3 animate-pulse rounded bg-[var(--surface-muted)]" />
+          </div>
+        )}
       </section>
     </div>
   );

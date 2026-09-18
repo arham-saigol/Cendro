@@ -84,8 +84,10 @@ export async function POST(req: Request) {
         ? persisted.some((message) => message.clientMessageId === clientMessageId)
         : latestPersisted?.role === "user" && latestPersisted.content === content;
       if (content.trim() && !alreadyPersisted) {
-        await client.mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "user", content, clientMessageId });
-        persisted = await client.query(api.aiChat.listMessages, { companyId, sessionId });
+        // One round trip: appendMessage returns the id and the doc shape is
+        // fixed, so the history is updated locally instead of refetched.
+        const appendedId = await client.mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "user", content, clientMessageId });
+        persisted = [...persisted, { _id: appendedId, _creationTime: Date.now(), sessionId, role: "user" as const, content, clientMessageId, createdAt: Date.now() }];
       }
     }
 

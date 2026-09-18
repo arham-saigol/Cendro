@@ -29,10 +29,9 @@ export function useDetailDrawerClose(base: string, isOpen: boolean, selectedDeta
   const close = useCallback((target = base) => {
     clearTimer();
     setClosing(true);
-    timerRef.current = window.setTimeout(() => {
-      timerRef.current = null;
-      router.push(target);
-    }, DETAIL_DRAWER_CLOSE_MS);
+    // Navigate immediately — the layout keeps the drawer mounted through
+    // AnimatePresence, so the exit animation still plays on the way out.
+    router.push(target);
   }, [base, clearTimer, router]);
 
   useEffect(() => {

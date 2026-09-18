@@ -62,8 +62,7 @@ async function pendingInvitations(ctx: MutationCtx, companyId: Id<"companies">) 
   const rows: Doc<"invitations">[] = [];
   for await (const invitation of ctx.db
     .query("invitations")
-    .withIndex("by_company", (q) => q.eq("companyId", companyId))
-    .filter((q) => q.eq(q.field("status"), "pending"))) {
+    .withIndex("by_companyId_and_status", (q) => q.eq("companyId", companyId).eq("status", "pending"))) {
     rows.push(invitation);
   }
   return rows;
@@ -73,8 +72,7 @@ async function membershipsWithRole(ctx: MutationCtx, companyId: Id<"companies">,
   const rows: Doc<"companyMemberships">[] = [];
   for await (const membership of ctx.db
     .query("companyMemberships")
-    .withIndex("by_company", (q) => q.eq("companyId", companyId))
-    .filter((q) => q.eq(q.field("role"), roleName))) {
+    .withIndex("by_companyId_and_role", (q) => q.eq("companyId", companyId).eq("role", roleName))) {
     rows.push(membership);
   }
   return rows;
@@ -236,16 +234,15 @@ export const remove = mutation({
 
     const member = await ctx.db
       .query("companyMemberships")
-      .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
-      .filter((q) => q.eq(q.field("role"), role.name))
+      .withIndex("by_companyId_and_role", (q) => q.eq("companyId", args.companyId).eq("role", role.name))
       .first();
     if (member) {
       throw new ConvexError("Reassign members to another role before deleting this one.");
     }
     const invitation = await ctx.db
       .query("invitations")
-      .withIndex("by_company", (q) => q.eq("companyId", args.companyId))
-      .filter((q) => q.and(q.eq(q.field("status"), "pending"), q.eq(q.field("role"), role.name)))
+      .withIndex("by_companyId_and_status", (q) => q.eq("companyId", args.companyId).eq("status", "pending"))
+      .filter((q) => q.eq(q.field("role"), role.name))
       .first();
     if (invitation) {
       throw new ConvexError("Revoke pending invitations using this role before deleting it.");

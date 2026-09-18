@@ -435,7 +435,8 @@ describe("SOP authorization hardening", () => {
     expect(employeeById.get(companySop)).toMatchObject({ matchesMyView: true, filterBranchIds: [] });
     expect(employeeById.get(branch1Sop)).toMatchObject({ matchesMyView: true, filterBranchIds: [f.branchA1] });
     expect(employeeById.get(dept1Sop)).toMatchObject({ matchesMyView: true, filterBranchIds: [f.branchA1] });
-    expect(employeeById.get(companySop)?.content).toBe("Body");
+    // List rows intentionally omit full content; the detail query owns it.
+    expect(employeeById.get(companySop)).not.toHaveProperty("content");
   });
 
   test("Ordering rows paginate over more than 200 SOPs", async () => {

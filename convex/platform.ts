@@ -30,11 +30,12 @@ export const adminDashboard = query({
 
     const limit = Math.min(Math.max(Math.floor(args.companyLimit), 1), MAX_ADMIN_COMPANIES);
     const page = await ctx.db.query("companies").order("desc").take(limit + 1);
-    const companies = [];
-    for (const company of page.slice(0, limit)) {
-      const memberCount = (await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", company._id)).take(500)).length;
-      companies.push({ company, memberCount });
-    }
+    const companies = await Promise.all(
+      page.slice(0, limit).map(async (company) => ({
+        company,
+        memberCount: (await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", company._id)).take(500)).length,
+      })),
+    );
     return { access, companies, hasMore: page.length > limit && limit < MAX_ADMIN_COMPANIES };
   },
 });
@@ -44,11 +45,12 @@ export const listCompanies = query({
   handler: async (ctx, args) => {
     await requirePlatformAdmin(ctx);
     const page = await ctx.db.query("companies").order("desc").paginate(args.paginationOpts);
-    const rows = [];
-    for (const company of page.page) {
-      const memberCount = (await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", company._id)).take(500)).length;
-      rows.push({ company, memberCount });
-    }
+    const rows = await Promise.all(
+      page.page.map(async (company) => ({
+        company,
+        memberCount: (await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", company._id)).take(500)).length,
+      })),
+    );
     return { ...page, page: rows };
   },
 });

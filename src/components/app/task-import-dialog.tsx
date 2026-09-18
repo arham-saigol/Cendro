@@ -12,19 +12,17 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useConvex, useMutation, usePaginatedQuery, useQuery } from "convex/react";
-import { useEffect, useRef, useState } from "react";
+import { useConvex, useMutation, useQuery } from "convex/react";
+import { useRef, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import {
-  downloadBlob,
-  exportTaskWorkbook,
-  parseWorkbook,
-} from "@/lib/task-import/workbook";
 import type { TaskImportDraft, TaskImportKind } from "@/lib/task-import/schema";
+
+// The workbook stack (xlsx readers/writers) is heavy — load it on demand.
+const loadWorkbook = () => import("@/lib/task-import/workbook");
 
 type PageKind = "jd" | "one";
 type ReviewRow = {
@@ -80,7 +78,6 @@ export function TaskImportExportMenu({
   const [rows, setRows] = useState<ReviewRow[]>([]);
   const [importKey, setImportKey] = useState(() => crypto.randomUUID());
 
-  const [exportRequested, setExportRequested] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
 
   const assignableResult = useQuery(
@@ -89,49 +86,43 @@ export function TaskImportExportMenu({
   ) as { users: any[]; isTruncated: boolean } | undefined;
   const assignable = assignableResult?.users;
 
-  const pages = usePaginatedQuery(
-    api.tasks.exportRows,
-    activeCompanyId && exportRequested ? { companyId: activeCompanyId, kind: taskKind(kind) } : "skip",
-    { initialNumItems: 200 }
-  );
+  const isBusy = importBusy || exportBusy;
 
-  const exportLoading = exportRequested && (pages.status === "LoadingFirstPage" || pages.status === "LoadingMore");
-  const isBusy = importBusy || exportBusy || exportLoading;
-
-  useEffect(() => {
-    if (exportRequested && pages.status === "CanLoadMore" && !exportBusy) {
-      pages.loadMore(200);
+  // A one-time export does not need live page subscriptions: walk the export
+  // cursor directly and let each page drop after it is consumed.
+  async function handleExport() {
+    if (!activeCompanyId || !active || exportBusy) return;
+    setExportBusy(true);
+    try {
+      const rows: any[] = [];
+      let cursor: string | null = null;
+      let isDone = false;
+      while (!isDone) {
+        const page: { page: any[]; continueCursor: string; isDone: boolean } = await convex.query(api.tasks.exportRows, {
+          companyId: activeCompanyId,
+          kind: taskKind(kind),
+          paginationOpts: { numItems: 200, cursor },
+        });
+        rows.push(...page.page);
+        cursor = page.continueCursor;
+        isDone = page.isDone;
+      }
+      const { exportTaskWorkbook, downloadBlob } = await loadWorkbook();
+      const workbook = await exportTaskWorkbook(taskKind(kind), activeCompanyId, active.company.name, rows);
+      downloadBlob(await workbook.toBlob(), `${kind === "jd" ? "jd-tasks" : "one-time-tasks"}.xlsx`);
+      onNotification?.({
+        type: "success",
+        message: `Successfully exported ${rows.length} task${rows.length === 1 ? "" : "s"}.`,
+      });
+    } catch (err) {
+      onNotification?.({
+        type: "error",
+        message: err instanceof Error ? err.message : "Could not export tasks.",
+      });
+    } finally {
+      setExportBusy(false);
     }
-  }, [exportBusy, exportRequested, pages]);
-
-  useEffect(() => {
-    if (exportRequested && pages.status === "Exhausted" && !exportBusy && activeCompanyId && active) {
-      setExportBusy(true);
-      void (async () => {
-        try {
-          const workbook = await exportTaskWorkbook(
-            taskKind(kind),
-            activeCompanyId,
-            active.company.name,
-            pages.results
-          );
-          downloadBlob(await workbook.toBlob(), `${kind === "jd" ? "jd-tasks" : "one-time-tasks"}.xlsx`);
-          onNotification?.({
-            type: "success",
-            message: `Successfully exported ${pages.results.length} task${pages.results.length === 1 ? "" : "s"}.`,
-          });
-        } catch (err) {
-          onNotification?.({
-            type: "error",
-            message: err instanceof Error ? err.message : "Could not export tasks.",
-          });
-        } finally {
-          setExportBusy(false);
-          setExportRequested(false);
-        }
-      })();
-    }
-  }, [active, activeCompanyId, exportBusy, exportRequested, kind, onNotification, pages.results, pages.status]);
+  }
 
   async function handleFile(file: File) {
     if (!activeCompanyId) return;
@@ -140,6 +131,7 @@ export function TaskImportExportMenu({
     const currentImportKey = crypto.randomUUID();
     setImportKey(currentImportKey);
     try {
+      const { parseWorkbook } = await loadWorkbook();
       const parsed = await parseWorkbook(file, activeCompanyId, taskKind(kind));
       if (parsed.rows.length === 0) {
         throw new Error("No task rows found in this workbook.");
@@ -301,8 +293,6 @@ export function TaskImportExportMenu({
             <span>
               {exportBusy
                 ? "Exporting..."
-                : exportLoading
-                ? "Loading..."
                 : importBusy
                 ? "Importing..."
                 : "Import / Export"}
@@ -326,7 +316,7 @@ export function TaskImportExportMenu({
               <DropdownMenu.Item
                 className="task-menu-item"
                 disabled={isBusy}
-                onSelect={() => setExportRequested(true)}
+                onSelect={() => void handleExport()}
               >
                 <Download className="h-4 w-4" />
                 <span>Export tasks</span>

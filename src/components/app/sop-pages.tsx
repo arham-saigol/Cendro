@@ -358,6 +358,26 @@ function SopDialog({
   const scopeOptions = useQuery(api.sops.scopeOptions, open && activeCompanyId && canLoadSopScopeOptions(active) ? { companyId: activeCompanyId } : "skip") as SopScopeOptions | undefined;
   const scopeTargetValid = scopeType === "company" || (scopeType === "branch" ? Boolean(branchId) : scopeType === "department" ? Boolean(departmentId) : Boolean(userMembershipId));
 
+  // List rows and detail previews omit the body, so an edit dialog opened from
+  // one must load the full SOP — otherwise a title-only save would erase the
+  // stored content. Saving stays blocked until the body is known.
+  const fullSopResult = useQuery_experimental({
+    query: api.sops.get,
+    args: open && mode === "edit" && sop?._id && sop?.content === undefined && activeCompanyId
+      ? { companyId: activeCompanyId, sopId: sop._id as Id<"sops"> }
+      : "skip",
+  });
+  const fullSop = fullSopResult.status === "success" ? fullSopResult.data : undefined;
+  const originalContent = sop?.content ?? fullSop?.content;
+  const contentLoaded = mode !== "edit" || originalContent !== undefined;
+  const contentSeeded = useRef(false);
+  useEffect(() => { if (open) contentSeeded.current = false; }, [open]);
+  useEffect(() => {
+    if (mode !== "edit" || contentSeeded.current || fullSop?.content === undefined) return;
+    contentSeeded.current = true;
+    setContent(fullSop.content);
+  }, [fullSop, mode]);
+
   const branchPickerOptions = useMemo(() => {
     const list = scopeOptions?.branches.map((branch) => ({ value: branch._id as string, label: branch.name })) ?? [];
     if (mode === "edit" && sop?.scopeType === "branch" && sop?.branchIds?.[0] && !list.some((o) => o.value === sop.branchIds[0])) {
@@ -432,7 +452,7 @@ function SopDialog({
   useEffect(() => autoSize(titleRef), [title, open]);
 
   async function submit() {
-    if (!activeCompanyId || saving) return;
+    if (!activeCompanyId || saving || !contentLoaded) return;
     const trimmedTitle = title.trim();
     const trimmedContent = content.trim();
     if (!trimmedTitle) { setError("Title is required."); return; }
@@ -454,7 +474,7 @@ function SopDialog({
         });
         if (scopeType === "company" || (scopeType === "user" && userMembershipId === active?.membership._id)) onCreated?.(id as unknown as string);
       } else {
-        const titleOrContentChanged = trimmedTitle !== (sop?.title ?? "").trim() || trimmedContent !== (sop?.content ?? "").trim();
+        const titleOrContentChanged = trimmedTitle !== (sop?.title ?? "").trim() || trimmedContent !== (originalContent ?? "").trim();
         const prevBranchId = sop?.branchIds?.[0] ?? "";
         const prevDepartmentId = sop?.departmentIds?.[0] ?? "";
         const prevUserMembershipId = sop?.userMembershipIds?.[0] ?? "";
@@ -581,13 +601,17 @@ function SopDialog({
                 <div className="grid grid-cols-[120px_1fr] items-start gap-3 py-2">
                   <span className="pt-2 text-[13px] text-[var(--ink-muted)]">Body</span>
                   <div className="min-w-0">
-                    <SopRichTextEditor
-                      value={content}
-                      placeholder="Write the procedure steps..."
-                      ariaLabel="SOP body"
-                      className="min-h-[176px] px-2 py-2 text-[13px] leading-6"
-                      onChange={(value) => { setContent(value); setError(null); }}
-                    />
+                    {contentLoaded ? (
+                      <SopRichTextEditor
+                        value={content}
+                        placeholder="Write the procedure steps..."
+                        ariaLabel="SOP body"
+                        className="min-h-[176px] px-2 py-2 text-[13px] leading-6"
+                        onChange={(value) => { setContent(value); setError(null); }}
+                      />
+                    ) : (
+                      <div className="min-h-[176px] px-2 py-2 text-[13px] leading-6 text-[var(--ink-muted)]">Loading procedure…</div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -597,7 +621,7 @@ function SopDialog({
 
             <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--hairline)] px-6 py-4">
               <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>Cancel</Button>
-              <Button type="submit" size="lg" variant="primary" disabled={saving || !title.trim() || !scopeTargetValid}>{saving ? "Saving..." : mode === "create" ? "Create SOP" : "Save changes"}</Button>
+              <Button type="submit" size="lg" variant="primary" disabled={saving || !contentLoaded || !title.trim() || !scopeTargetValid}>{saving ? "Saving..." : mode === "create" ? "Create SOP" : "Save changes"}</Button>
             </div>
           </form>
         </Dialog.Content>

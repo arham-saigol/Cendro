@@ -119,6 +119,81 @@ describe("task authorization hardening", () => {
     ).rejects.toThrow("This file is already attached.");
   });
 
+  test("Upload claims bind a single blob and gate orphan cleanup", async () => {
+    const f = await createAuthzFixture();
+
+    const { claimId } = await f.asUser("adminA").mutation(api.tasks.generateAttachmentUploadUrl, { companyId: f.companyA });
+    const storageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["orphan"], { type: "text/plain" })));
+
+    // A claim is only usable by the member it was issued to, in its company.
+    await expect(
+      f.asUser("adminB").mutation(api.tasks.bindUploadClaim, { companyId: f.companyB, claimId, storageId })
+    ).rejects.toThrow("Upload claim not found.");
+    await expect(
+      f.asUser("adminB").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyB, claimId, storageId })
+    ).rejects.toThrow("Upload claim not found.");
+
+    // The owner binds the uploaded blob; rebinding to another blob is refused.
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId, storageId })
+    ).resolves.toBeNull();
+    const otherStorageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["other"], { type: "text/plain" })));
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId, storageId: otherStorageId })
+    ).rejects.toThrow("Upload claim is already bound.");
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId, storageId: otherStorageId })
+    ).rejects.toThrow("Upload claim is bound to a different file.");
+
+    // Cleanup deletes the bound unreferenced blob and consumes the claim.
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId, storageId })
+    ).resolves.toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", storageId))).toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.get(claimId))).toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", otherStorageId))).not.toBeNull();
+  });
+
+  test("Orphan cleanup binds an unbound claim so a skipped bind cannot leak the blob", async () => {
+    const f = await createAuthzFixture();
+
+    // Simulate an upload POST that completed while bindUploadClaim never ran.
+    const claimId = await f.t.run(async (ctx) =>
+      ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, createdAt: Date.now() })
+    );
+    const storageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["late-bind"], { type: "text/plain" })));
+
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId, storageId })
+    ).resolves.toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", storageId))).toBeNull();
+
+    // A blob already recorded as an attachment is never reclaimed.
+    const jdTaskId = await f.asUser("adminA").mutation(api.tasks.createJd, {
+      companyId: f.companyA,
+      title: "Attach target",
+      recurrence: "daily",
+      assigneeMembershipIds: [f.adminM],
+    });
+    const attachedStorageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["attached"], { type: "text/plain" })));
+    await f.asUser("adminA").mutation(api.tasks.addAttachment, {
+      companyId: f.companyA,
+      taskType: "jd",
+      taskId: jdTaskId,
+      storageId: attachedStorageId,
+      fileName: "attached.txt",
+      contentType: "text/plain",
+      size: 8,
+    });
+    const attachedClaimId = await f.t.run(async (ctx) =>
+      ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, storageId: attachedStorageId, createdAt: Date.now() })
+    );
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId: attachedClaimId, storageId: attachedStorageId })
+    ).resolves.toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", attachedStorageId))).not.toBeNull();
+  });
+
   test("Attachment deletion distinguishes own attachment from moderation", async () => {
     const f = await createAuthzFixture();
 

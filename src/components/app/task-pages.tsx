@@ -2196,7 +2196,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
           onDragOver={drag.onDragOver}
           onDragEnd={drag.onDragEnd}
         >
-        <div className="task-table-wrap">
+        <div className="task-table-wrap task-list-table-wrap">
         <table className="task-table">
           <thead>
             {kind === "jd" ? (

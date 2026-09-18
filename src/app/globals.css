@@ -217,7 +217,11 @@ button:disabled { cursor: not-allowed; }
 
 /* ---------- Task pages (Notion-like) ---------- */
 
-.task-list-pane { height: 100%; overflow-y: auto; }
+.task-list-pane {
+  height: 100%;
+  overflow-y: auto;
+  container-type: inline-size;
+}
 
 /* Detail drawer that slides in from the right edge */
 .task-drawer-click-target {
@@ -299,6 +303,18 @@ button:disabled { cursor: not-allowed; }
 
 /* Task list selection and drag controls live in a rail outside the table so the table
    stays a pure data grid; rows are fixed-height so rail rows stay aligned. */
+.task-list-table-wrap { overflow-x: clip; }
+@container (max-width: 1120px) {
+  /* A constrained list pane needs an intentional route to its remaining columns.
+     Keep the native track hidden so the desktop list never grows a stray bottom line. */
+  .task-list-table-wrap {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .task-list-table-wrap::-webkit-scrollbar { display: none; }
+}
 .task-list-drag-handle {
   display: inline-grid;
   width: 24px;

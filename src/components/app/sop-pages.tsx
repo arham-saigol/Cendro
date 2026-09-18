@@ -1326,7 +1326,7 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
           onDragOver={drag.onDragOver}
           onDragEnd={drag.onDragEnd}
         >
-        <div className="task-table-wrap task-list-table-wrap overflow-x-auto">
+        <div className="task-table-wrap">
         <table className="task-table">
           <thead>
             <tr>

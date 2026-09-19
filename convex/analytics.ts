@@ -364,19 +364,22 @@ export const dashboard = query({
       .map((task) => ({ task, assignees: visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds) }))
       .filter((entry) => entry.assignees.length > 0);
 
-    // Small visible sets keep the per-task fan-out: reads stay proportional to
-    // what the viewer can see. Once the set outgrows a single wave, two
-    // company-range scans grouped by task replace 2N queries — fewer round
-    // trips and no more reads for a viewer who can see most tasks anyway.
+    // Two company-range scans grouped by task replace 2N per-task queries, but
+    // only when the visible set covers every loaded task — scan rows then all
+    // belong to ledgers we build anyway. A partially scoped viewer keeps the
+    // per-task path: unrelated tasks' rows would burn the scan budget, and a
+    // truncated scan would erase visible results the per-task reads could have
+    // served. The company task list itself is already bounded by
+    // dashboardTakeLimit, so full coverage of it is the only safe bulk signal.
     type TaskLedger = { completions: Doc<"jdTaskCompletions">[]; missed: Doc<"jdTaskCycleRecords">[]; truncated: boolean };
     const ledgersByTask = new Map<Id<"jdTasks">, TaskLedger>();
-    if (visibleJdTasks.length <= BUDGET_WAVE) {
+    if (visibleJdTasks.length < jdTasks.length || visibleJdTasks.length <= BUDGET_WAVE) {
       // Every takeBudgetedRows call reserves its allowance before yielding, so
-      // this bounded Promise.all cannot double-spend the shared budget. A task
-      // whose reads truncated contributes no items — partial ledger data would
-      // silently misreport completions — so it tracks truncation on its own
-      // phase that still shares the global ledger.
-      await Promise.all(visibleJdTasks.map(async ({ task }) => {
+      // the wave cannot double-spend the shared budget. A task whose reads
+      // truncated contributes no items — partial ledger data would silently
+      // misreport completions — so it tracks truncation on its own phase that
+      // still shares the global ledger.
+      await mapInWaves(visibleJdTasks, async ({ task }) => {
         const taskPhase: QueryCompleteness = {
           get remaining() { return completeness.remaining; },
           set remaining(value) { completeness.remaining = value; },
@@ -394,7 +397,7 @@ export const dashboard = query({
           ),
         ]);
         ledgersByTask.set(task._id, { completions, missed, truncated: taskPhase.isTruncated });
-      }));
+      });
     } else {
       // One +1 row over each cap proves whether the range was cut short; caps
       // halve the remaining ledger so the concurrent scans cannot overspend it.

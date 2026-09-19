@@ -140,9 +140,9 @@ async function insertScopeRows(ctx: MutationCtx, companyId: Id<"companies">, sop
 }
 async function withScopes(ctx: QueryCtx, sop: Doc<"sops">, membership: Doc<"companyMemberships">, companyName?: string, precomputedCaps?: Set<Capability>, auth?: SopListAuth) {
   const [branchScopeRows, departmentScopeRows, userScopeRows] = await Promise.all([
-    sopScopeRowsFor(ctx, auth, sop._id, "sopBranchScopes", (rows) => rows.branchScopes),
-    sopScopeRowsFor(ctx, auth, sop._id, "sopDepartmentScopes", (rows) => rows.departmentScopes),
-    sopScopeRowsFor(ctx, auth, sop._id, "sopUserScopes", (rows) => rows.userScopes),
+    sopScopeRowsFor(ctx, sop._id, "sopBranchScopes"),
+    sopScopeRowsFor(ctx, sop._id, "sopDepartmentScopes"),
+    sopScopeRowsFor(ctx, sop._id, "sopUserScopes"),
   ]);
   const branchIds = branchScopeRows.map((row) => row.branchId);
   const departmentIds = departmentScopeRows.map((row) => row.departmentId);
@@ -180,10 +180,10 @@ async function sopMatchesFilters(ctx: QueryCtx, sop: Doc<"sops">, args: { scope?
   if (args.scope && args.scope !== "all" && sop.scopeType !== args.scope) return false;
   if (args.branchId) {
     if (sop.scopeType === "branch") {
-      const rows = await sopScopeRowsFor(ctx, auth, sop._id, "sopBranchScopes", (rows) => rows.branchScopes);
+      const rows = await sopScopeRowsFor(ctx, sop._id, "sopBranchScopes");
       if (!rows.some((row) => row.branchId === args.branchId)) return false;
     } else if (sop.scopeType === "department") {
-      const rows = await sopScopeRowsFor(ctx, auth, sop._id, "sopDepartmentScopes", (rows) => rows.departmentScopes);
+      const rows = await sopScopeRowsFor(ctx, sop._id, "sopDepartmentScopes");
       let matchesBranch = false;
       for (const row of rows) {
         const department = auth?.departmentById ? await auth.departmentById(row.departmentId) : await ctx.db.get(row.departmentId);
@@ -195,7 +195,7 @@ async function sopMatchesFilters(ctx: QueryCtx, sop: Doc<"sops">, args: { scope?
     }
   }
   if (args.userMembershipId) {
-    const rows = await sopScopeRowsFor(ctx, auth, sop._id, "sopUserScopes", (rows) => rows.userScopes);
+    const rows = await sopScopeRowsFor(ctx, sop._id, "sopUserScopes");
     if (!rows.some((row) => row.userMembershipId === args.userMembershipId)) return false;
   }
   return true;

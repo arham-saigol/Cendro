@@ -495,11 +495,11 @@ function optimisticTaskState(task: any, kind: Kind, status: ManualStatus) {
   const state = typeof task.state === "object" && task.state ? task.state : {};
   const now = Date.now();
   if (kind === "jd") {
-    return { ...state, status: taskStateLabel(status), rawStatus: status, isOverdue: false, lastCompletedAt: status === "completed" ? now : (state.lastCompletedAt ?? null) };
+    return { ...state, status: taskStateLabel(status), rawStatus: status, isOverdue: false };
   }
   const isOverdue = status !== "completed" && (Boolean(task.overdueAt) || Boolean(task.dueDate && task.dueDate < now));
   const raw = isOverdue ? "overdue" : status;
-  return { ...state, status: taskStateLabel(raw), rawStatus: raw, isOverdue, lastCompletedAt: status === "completed" ? now : (state.lastCompletedAt ?? null) };
+  return { ...state, status: taskStateLabel(raw), rawStatus: raw, isOverdue };
 }
 
 function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger = false }: { kind: Kind; task: any; size?: "sm" | "md"; canUpdateOverride?: boolean; cellTrigger?: boolean }) {
@@ -1401,7 +1401,7 @@ function pendingTaskRow(args: { title: string; description?: string; notes?: str
     assignees: assigneeMembershipIds.map((id) => assignable.find((candidate) => candidate.membership?._id === id)).filter(Boolean),
     canUpdate: false,
     canDelete: false,
-    state: { status: "Pending", rawStatus: "due", isOverdue: false, dueAt: args.dueDate ?? null, lastCompletedAt: null },
+    state: { status: "Pending", rawStatus: "due", isOverdue: false, dueAt: args.dueDate ?? null },
   };
 }
 

@@ -186,7 +186,7 @@ describe("JD task cycle behavior", () => {
     await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
     await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
     const after = await t.run(async (ctx) => await ctx.db.get(taskId));
-    const records = await t.run(async (ctx) => await ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).take(250));
+    const records = await t.run(async (ctx) => await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).take(250));
 
     expect(records).toHaveLength(202);
     expect(records).toEqual(expect.arrayContaining([
@@ -204,21 +204,21 @@ describe("JD task cycle behavior", () => {
     await t.withIdentity(identity("admin")).mutation(api.tasks.completeJd, { companyId, taskId });
     // Simulate pre-ledger data: the stamped status survives, the row is gone.
     await t.run(async (ctx) => {
-      for (const row of await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect()) {
+      for (const row of await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect()) {
         await ctx.db.delete(row._id);
       }
     });
 
     vi.setSystemTime(utc(2026, 1, 4, 12));
     await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
-    const records = await t.run(async (ctx) => await ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
+    const records = await t.run(async (ctx) => await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect());
 
     // Jan 1 stays completed via statusCycleStart; only Jan 2–3 are missed.
     expect(records.map((record) => record.cycleStart).sort()).toEqual([utc(2026, 1, 2), utc(2026, 1, 3)]);
 
     // The stamped cycle is materialized as a completion row so analytics keep
     // counting it once the task's cycle floor advances past it.
-    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
+    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect());
     expect(completions).toMatchObject([{ cycleStart: utc(2026, 1, 1), cycleEnd: utc(2026, 1, 2) }]);
   });
 
@@ -230,7 +230,7 @@ describe("JD task cycle behavior", () => {
     // Simulate pre-ledger data: the stamp survives, the completion row is gone,
     // and an older run already recorded the same cycle as missed.
     await t.run(async (ctx) => {
-      for (const row of await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect()) {
+      for (const row of await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect()) {
         await ctx.db.delete(row._id);
       }
       await ctx.db.insert("jdTaskCycleRecords", { companyId, jdTaskId: taskId, cycleStart: utc(2026, 1, 1), cycleEnd: utc(2026, 1, 2), status: "missed", recordedAt: utc(2026, 1, 2) });
@@ -238,8 +238,8 @@ describe("JD task cycle behavior", () => {
 
     vi.setSystemTime(utc(2026, 1, 4, 12));
     await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
-    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
-    const records = await t.run(async (ctx) => await ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
+    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect());
+    const records = await t.run(async (ctx) => await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect());
 
     // The missed record must not suppress the durable completion row; once the
     // stamp advances, the row is the only evidence the cycle was completed.

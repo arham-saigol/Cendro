@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
-import { analyticsScopedMembershipIds, assertAnalyticsViewAccess, buildSopVisibilityContext, membershipCapabilities, requireMembership, taskHasVisibleAssignee, visibleAssigneeMembershipIds, visibleSop } from "./permissions";
+import { analyticsScopedMembershipIds, assertAnalyticsViewAccess, buildSopVisibilityContext, membershipCapabilities, requireMembership, sopListScopeAuth, taskHasVisibleAssignee, visibleAssigneeMembershipIds, visibleSop } from "./permissions";
 import { currentJdCycle, elapsedJdCyclesDueBetween, localDateField, nextJdCycleStart } from "./taskCycles";
 import { bucketIndexFor, buildDashboardBuckets, dashboardRangeValidator, resolveDashboardRange } from "./dashboardTime";
 import type { Doc, Id } from "./_generated/dataModel";
@@ -143,11 +143,11 @@ async function loadAssignments(
     const [membershipBranches, membershipDepartments] = await Promise.all([
       takeBudgetedRows(
         completeness,
-        (limit) => ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(limit),
+        (limit) => ctx.db.query("userBranchAssignments").withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", membershipId)).take(limit),
       ),
       takeBudgetedRows(
         completeness,
-        (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(limit),
+        (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", membershipId)).take(limit),
       ),
     ]);
     return [membershipId, {
@@ -240,11 +240,11 @@ async function resolveDashboardScope(
     const [managedBranches, managedDepartments] = await Promise.all([
       takeBudgetedRows(
         optionPhase,
-        (limit) => ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(limit),
+        (limit) => ctx.db.query("managerBranchScopes").withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", membership._id)).take(limit),
       ),
       takeBudgetedRows(
         optionPhase,
-        (limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(limit),
+        (limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", membership._id)).take(limit),
       ),
     ]);
     const branchScope = new Set(managedBranches.filter((row) => row.companyId === companyId).map((row) => row.branchId));
@@ -357,20 +357,83 @@ export const dashboard = query({
         (limit) => ctx.db.query("oneTimeTasks").withIndex("by_companyId_and_createdAt", (q) => q.eq("companyId", args.companyId).gte("createdAt", range.start).lte("createdAt", range.end)).take(limit),
       ),
     ]);
-    // Each task's ledger reads run concurrently: takeBudgetedRows reserves its
-    // allowance before yielding, so concurrent calls cannot double-spend the
-    // budget. A task whose reads truncated contributes no items — partial
-    // ledger data would silently misreport completions — so each task tracks
-    // truncation on its own phase that still shares the global ledger.
-    const jdItemGroups = await mapInWaves(jdTasks, async (task) => {
-      const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds);
-      if (!assignees.length) return [];
-      const taskPhase: QueryCompleteness = {
-        get remaining() { return completeness.remaining; },
-        set remaining(value) { completeness.remaining = value; },
-        isTruncated: false,
-        truncatedReads: 0,
+    // Visibility is a JS-only check, so resolve it before touching the ledger
+    // tables. The ledger fan-out below then only reads rows for tasks the
+    // viewer can actually see.
+    const visibleJdTasks = jdTasks
+      .map((task) => ({ task, assignees: visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds) }))
+      .filter((entry) => entry.assignees.length > 0);
+
+    // Small visible sets keep the per-task fan-out: reads stay proportional to
+    // what the viewer can see. Once the set outgrows a single wave, two
+    // company-range scans grouped by task replace 2N queries — fewer round
+    // trips and no more reads for a viewer who can see most tasks anyway.
+    type TaskLedger = { completions: Doc<"jdTaskCompletions">[]; missed: Doc<"jdTaskCycleRecords">[]; truncated: boolean };
+    const ledgersByTask = new Map<Id<"jdTasks">, TaskLedger>();
+    if (visibleJdTasks.length <= BUDGET_WAVE) {
+      // Every takeBudgetedRows call reserves its allowance before yielding, so
+      // this bounded Promise.all cannot double-spend the shared budget. A task
+      // whose reads truncated contributes no items — partial ledger data would
+      // silently misreport completions — so it tracks truncation on its own
+      // phase that still shares the global ledger.
+      await Promise.all(visibleJdTasks.map(async ({ task }) => {
+        const taskPhase: QueryCompleteness = {
+          get remaining() { return completeness.remaining; },
+          set remaining(value) { completeness.remaining = value; },
+          isTruncated: false,
+          truncatedReads: 0,
+        };
+        const [completions, missed] = await Promise.all([
+          takeBudgetedRows(
+            taskPhase,
+            (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit),
+          ),
+          takeBudgetedRows(
+            taskPhase,
+            (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
+          ),
+        ]);
+        ledgersByTask.set(task._id, { completions, missed, truncated: taskPhase.isTruncated });
+      }));
+    } else {
+      // One +1 row over each cap proves whether the range was cut short; caps
+      // halve the remaining ledger so the concurrent scans cannot overspend it.
+      const scanCap = Math.max(0, Math.floor((completeness.remaining - 2) / 2));
+      const scan = async <T>(take: (limit: number) => Promise<T[]>) => {
+        if (scanCap === 0) {
+          completeness.isTruncated = true;
+          completeness.truncatedReads++;
+          return { rows: [] as T[], truncated: true };
+        }
+        const rows = await take(scanCap + 1);
+        completeness.remaining -= rows.length;
+        const truncated = rows.length > scanCap;
+        if (truncated) {
+          completeness.isTruncated = true;
+          completeness.truncatedReads++;
+        }
+        return { rows: rows.slice(0, scanCap), truncated };
       };
+      const [completionScan, missedScan] = await Promise.all([
+        scan((limit) => ctx.db.query("jdTaskCompletions").withIndex("by_companyId_and_cycleStart", (q) => q.eq("companyId", args.companyId).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit)),
+        scan((limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_companyId_and_cycleEnd", (q) => q.eq("companyId", args.companyId).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).order("desc").take(limit)),
+      ]);
+      const truncated = completionScan.truncated || missedScan.truncated;
+      // A truncated scan cannot be attributed to individual tasks, so no task's
+      // ledger is trusted — same "only complete data counts" contract as the
+      // per-task path.
+      for (const { task } of visibleJdTasks) ledgersByTask.set(task._id, { completions: [], missed: [], truncated });
+      for (const row of completionScan.rows) ledgersByTask.get(row.jdTaskId)?.completions.push(row);
+      for (const row of missedScan.rows) ledgersByTask.get(row.jdTaskId)?.missed.push(row);
+    }
+
+    const jdItemGroups = visibleJdTasks.map(({ task, assignees }) => {
+      const ledger = ledgersByTask.get(task._id)!;
+      if (ledger.truncated) {
+        completeness.isTruncated = true;
+        return [];
+      }
+      const { completions, missed } = ledger;
 
       const cycles = new Map<number, { dueAt: number; completed: boolean; stored: boolean }>();
       // Ledger rows (completions, missed records) keep their stored deadlines;
@@ -391,20 +454,6 @@ export const dashboard = query({
       // their own cycleEnd; legacy rows fall back to the current grid.
       // Missed records store their own deadline, so they stay exact across
       // recurrence and timezone changes; match on that deadline directly.
-      const [completions, missed] = await Promise.all([
-        takeBudgetedRows(
-          taskPhase,
-          (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit),
-        ),
-        takeBudgetedRows(
-          taskPhase,
-          (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
-        ),
-      ]);
-      if (taskPhase.isTruncated) {
-        completeness.isTruncated = true;
-        return [];
-      }
       for (const completion of completions) {
         // Legacy rows predate cycleEnd. When the stored start no longer sits on
         // the task's grid the recurrence or timezone changed since, so the
@@ -625,7 +674,8 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
   const sopVisibility = sops.length
     ? await buildSopVisibilityContext(ctx, args.companyId, membership, caps, markTruncated)
     : null;
-  const sopFlags = await Promise.all(sops.map((sop) => visibleSop(ctx, args.companyId, membership, sop, sopVisibility, caps, markTruncated)));
+  const scopeAuth = sopListScopeAuth(ctx, args.companyId, membership._id);
+  const sopFlags = await Promise.all(sops.map((sop) => visibleSop(ctx, args.companyId, membership, sop, sopVisibility, caps, markTruncated, scopeAuth)));
   const sopCount = sopFlags.filter(Boolean).length;
   const recent = recentRows.map((event) => ({ _id: event._id, action: event.action, targetType: event.targetType, createdAt: event.createdAt }));
   return {

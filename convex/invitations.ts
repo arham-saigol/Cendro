@@ -75,14 +75,14 @@ export const accept = mutation({
     for (const departmentId of [...departmentIds, ...managedDepartmentIds]) { const department = await ctx.db.get(departmentId); if (!department || department.companyId !== invitation.companyId) throw new ConvexError("Invitation contains an invalid department."); }
     for (const userMembershipId of managedUserMembershipIds) { const scopedMembership = await ctx.db.get(userMembershipId); if (!scopedMembership || scopedMembership.companyId !== invitation.companyId || !scopedMembership.active) throw new ConvexError("Invitation contains an invalid managed user."); }
 
-    for (const row of await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
-    for (const row of await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+    for (const row of await ctx.db.query("userBranchAssignments").withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+    for (const row of await ctx.db.query("userDepartmentAssignments").withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
     for (const branchId of branchIds) await ctx.db.insert("userBranchAssignments", { companyId: invitation.companyId, membershipId, branchId });
     for (const departmentId of departmentIds) await ctx.db.insert("userDepartmentAssignments", { companyId: invitation.companyId, membershipId, departmentId });
 
-    for (const row of await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
-    for (const row of await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
-    for (const row of await ctx.db.query("managerUserScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+    for (const row of await ctx.db.query("managerBranchScopes").withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+    for (const row of await ctx.db.query("managerDepartmentScopes").withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
+    for (const row of await ctx.db.query("managerUserScopes").withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", membershipId)).take(500)) await ctx.db.delete(row._id);
     for (const branchId of managedBranchIds) await ctx.db.insert("managerBranchScopes", { companyId: invitation.companyId, managerMembershipId: membershipId, branchId, updatedAt: now });
     for (const departmentId of managedDepartmentIds) await ctx.db.insert("managerDepartmentScopes", { companyId: invitation.companyId, managerMembershipId: membershipId, departmentId, updatedAt: now });
     for (const userMembershipId of managedUserMembershipIds) if (userMembershipId !== membershipId) await ctx.db.insert("managerUserScopes", { companyId: invitation.companyId, managerMembershipId: membershipId, userMembershipId, updatedAt: now });

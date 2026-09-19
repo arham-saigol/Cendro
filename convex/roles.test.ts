@@ -458,7 +458,7 @@ describe("company roles", () => {
         .collect();
       const overrides = await ctx.db
         .query("permissionOverrides")
-        .withIndex("by_membership", (q) => q.eq("membershipId", legacyMembershipId))
+        .withIndex("by_membershipId_and_capability", (q) => q.eq("membershipId", legacyMembershipId))
         .collect();
       return {
         roleNames: roles.map((role) => role.name).sort(),

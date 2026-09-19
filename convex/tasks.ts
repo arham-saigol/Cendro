@@ -243,15 +243,14 @@ function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, cu
 async function jdState(ctx: Ctx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string) {
   const c = currentJdCycle(task.recurrence, now, timeZone ?? await companyTimeZone(ctx, task.companyId));
   const currentDone = await currentJdCompletion(ctx, task._id, c.start);
-  const last = (await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_completedAt", (q) => q.eq("jdTaskId", task._id)).order("desc").take(1))[0];
   const status: ManualStatus = currentDone || (task.statusCycleStart === c.start && task.status === "completed") ? "completed" : task.statusCycleStart === c.start ? task.status : "due";
-  return { status: statusLabel(status), rawStatus: status, isOverdue: false, currentCycleStart: c.start, currentCycleEnd: c.end, dueAt: c.end, lastCompletedAt: last?.completedAt ?? null };
+  return { status: statusLabel(status), rawStatus: status, isOverdue: false, currentCycleStart: c.start, currentCycleEnd: c.end, dueAt: c.end };
 }
 
 function oneState(task: Doc<"oneTimeTasks">) {
   const isOverdue = Boolean(task.overdueAt) || Boolean(task.dueDate && task.status !== "completed" && task.dueDate < Date.now());
   const status: ManualStatus | "overdue" = isOverdue ? "overdue" : task.status;
-  return { status: statusLabel(status), rawStatus: status, isOverdue, dueAt: task.dueDate ?? null, lastCompletedAt: task.completedAt ?? null };
+  return { status: statusLabel(status), rawStatus: status, isOverdue, dueAt: task.dueDate ?? null };
 }
 
 async function getVisibleTask(ctx: Ctx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, taskType: TaskKind, taskId: string) {
@@ -1077,7 +1076,7 @@ export const listJdCycleRecords = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const task = await ctx.db.get(args.taskId);
     if (!task || task.companyId !== args.companyId || !(await visible(ctx, args.companyId, membership, task, "jd"))) throw new ConvexError("Task not found.");
-    return await ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", args.taskId)).order("desc").take(100);
+    return await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", args.taskId)).order("desc").take(100);
   },
 });
 
@@ -1148,7 +1147,7 @@ export const clearMissedJdCyclesBatch = internalMutation({
     const page = args.companyId
       ? await ctx.db
           .query("jdTaskCycleRecords")
-          .withIndex("by_company", (q) => q.eq("companyId", args.companyId!))
+          .withIndex("by_companyId_and_cycleEnd", (q) => q.eq("companyId", args.companyId!))
           .paginate({ numItems: 250, cursor: args.cursor ?? null })
       : await ctx.db
           .query("jdTaskCycleRecords")
@@ -1233,7 +1232,7 @@ export const countMissedJdCycles = internalQuery({
     const records = args.companyId
       ? await ctx.db
           .query("jdTaskCycleRecords")
-          .withIndex("by_company", (q) => q.eq("companyId", args.companyId!))
+          .withIndex("by_companyId_and_cycleEnd", (q) => q.eq("companyId", args.companyId!))
           .take(max + 1)
       : await ctx.db.query("jdTaskCycleRecords").take(max + 1);
     const hasMore = records.length > max;
@@ -1448,8 +1447,8 @@ async function deleteTaskRelatedBatch(ctx: MutationCtx, taskType: TaskKind, task
   if (taskType === "jd") {
     const jdTaskId = taskId as Id<"jdTasks">;
     loaders.push(
-      () => ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", jdTaskId)).take(DELETE_RELATED_BATCH),
-      () => ctx.db.query("jdTaskCycleRecords").withIndex("by_task", (q) => q.eq("jdTaskId", jdTaskId)).take(DELETE_RELATED_BATCH),
+      () => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", jdTaskId)).take(DELETE_RELATED_BATCH),
+      () => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", jdTaskId)).take(DELETE_RELATED_BATCH),
     );
   }
   loaders.push(

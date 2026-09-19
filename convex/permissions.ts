@@ -323,7 +323,7 @@ export async function getManagedMembershipIds(
   const userScopes = await takeScopeRows(
     (limit) => ctx.db
       .query("managerUserScopes")
-      .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))
+      .withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", managerMembershipId))
       .take(limit),
     onTruncated,
   );
@@ -333,14 +333,14 @@ export async function getManagedMembershipIds(
     takeScopeRows(
       (limit) => ctx.db
         .query("managerBranchScopes")
-        .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))
+        .withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", managerMembershipId))
         .take(limit),
       onTruncated,
     ),
     takeScopeRows(
       (limit) => ctx.db
         .query("managerDepartmentScopes")
-        .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))
+        .withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", managerMembershipId))
         .take(limit),
       onTruncated,
     ),
@@ -398,13 +398,13 @@ export async function scanManagedMembershipIds(
 
   for await (const row of ctx.db
     .query("managerUserScopes")
-    .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))) {
+    .withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", managerMembershipId))) {
     if (!nextScopeRow() || !addMembership(row.userMembershipId, row.companyId === companyId)) return result(true);
   }
 
   for await (const scope of ctx.db
     .query("managerBranchScopes")
-    .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))) {
+    .withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", managerMembershipId))) {
     if (!nextScopeRow()) return result(true);
     if (scope.companyId !== companyId) continue;
     for await (const assignment of ctx.db
@@ -416,7 +416,7 @@ export async function scanManagedMembershipIds(
 
   for await (const scope of ctx.db
     .query("managerDepartmentScopes")
-    .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))) {
+    .withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", managerMembershipId))) {
     if (!nextScopeRow()) return result(true);
     if (scope.companyId !== companyId) continue;
     for await (const assignment of ctx.db
@@ -552,7 +552,7 @@ export async function isManagedMembership(
   // inspect every assignment rather than reuse the bounded scope cache.
   for await (const assignment of ctx.db
     .query("userBranchAssignments")
-    .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))) {
+    .withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", membershipId))) {
     if (assignment.companyId !== companyId) continue;
     const scope = await ctx.db
       .query("managerBranchScopes")
@@ -567,7 +567,7 @@ export async function isManagedMembership(
   }
   for await (const assignment of ctx.db
     .query("userDepartmentAssignments")
-    .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))) {
+    .withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", membershipId))) {
     if (assignment.companyId !== companyId) continue;
     const scope = await ctx.db
       .query("managerDepartmentScopes")
@@ -677,7 +677,7 @@ export async function membershipBranchIds(
     takeScopeRows(
       (limit) => ctx.db
         .query("userBranchAssignments")
-        .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))
+        .withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", membershipId))
         .take(limit),
       onTruncated,
     ),
@@ -696,7 +696,7 @@ export async function membershipDepartmentIds(
     takeScopeRows(
       (limit) => ctx.db
         .query("userDepartmentAssignments")
-        .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))
+        .withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", membershipId))
         .take(limit),
       onTruncated,
     ),
@@ -708,7 +708,106 @@ export async function membershipDepartmentIds(
 export type SopListRowAuth = {
   selfBranchIds?: () => Promise<Set<Id<"branches">>>;
   selfDepartmentIds?: () => Promise<Set<Id<"departments">>>;
+  /**
+   * Scope rows for one SOP, served from a single company-range scan per scope
+   * table. List paths supply it so per-SOP checks hit an in-memory map instead
+   * of repeating by_sop index reads for every row.
+   */
+  sopScopes?: (sopId: Id<"sops">) => Promise<SopScopeRows>;
+  /** Department lookup backed by the same preload. */
+  departmentById?: (departmentId: Id<"departments">) => Promise<Doc<"departments"> | null>;
 };
+
+export type SopScopeRows = {
+  branchScopes: { branchId: Id<"branches"> }[];
+  departmentScopes: { departmentId: Id<"departments"> }[];
+  userScopes: { userMembershipId: Id<"companyMemberships"> }[];
+};
+
+// Scope rows are links between a SOP and an org unit, so a company-range scan
+// stays small in practice. If it ever exceeds the cap, fail loudly rather than
+// hide scopes behind a silently partial map.
+const SOP_SCOPE_INDEX_LIMIT = 5_000;
+
+async function sopScopeIndex(ctx: Ctx, companyId: Id<"companies">) {
+  const scan = async <T>(take: (limit: number) => Promise<T[]>) => {
+    const rows = await take(SOP_SCOPE_INDEX_LIMIT + 1);
+    if (rows.length > SOP_SCOPE_INDEX_LIMIT) {
+      throw new ConvexError("Too many SOP scope rows to list.");
+    }
+    return rows;
+  };
+  const [branchRows, departmentRows, userRows, departments] = await Promise.all([
+    scan((limit) => ctx.db.query("sopBranchScopes").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit)),
+    scan((limit) => ctx.db.query("sopDepartmentScopes").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit)),
+    scan((limit) => ctx.db.query("sopUserScopes").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit)),
+    scan((limit) => ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", companyId)).take(limit)),
+  ]);
+  const scopesBySop = new Map<Id<"sops">, SopScopeRows>();
+  const entry = (sopId: Id<"sops">) => {
+    let row = scopesBySop.get(sopId);
+    if (!row) scopesBySop.set(sopId, (row = { branchScopes: [], departmentScopes: [], userScopes: [] }));
+    return row;
+  };
+  for (const row of branchRows) entry(row.sopId).branchScopes.push({ branchId: row.branchId });
+  for (const row of departmentRows) entry(row.sopId).departmentScopes.push({ departmentId: row.departmentId });
+  for (const row of userRows) entry(row.sopId).userScopes.push({ userMembershipId: row.userMembershipId });
+  return { scopesBySop, departmentById: new Map(departments.map((department) => [department._id, department])) };
+}
+
+const EMPTY_SOP_SCOPE_ROWS: SopScopeRows = { branchScopes: [], departmentScopes: [], userScopes: [] };
+
+/**
+ * Lazily builds the company scope index once per query invocation; every
+ * concurrent per-SOP lookup shares the same scan. The viewer's own branch and
+ * department assignments are memoized too when a membership is supplied.
+ */
+export function sopListScopeAuth(ctx: Ctx, companyId: Id<"companies">, membershipId?: Id<"companyMemberships">): SopListRowAuth {
+  let index: Promise<Awaited<ReturnType<typeof sopScopeIndex>>> | undefined;
+  let selfBranchIds: Promise<Set<Id<"branches">>> | undefined;
+  let selfDepartmentIds: Promise<Set<Id<"departments">>> | undefined;
+  const load = () => (index ??= sopScopeIndex(ctx, companyId));
+  return {
+    sopScopes: async (sopId) => (await load()).scopesBySop.get(sopId) ?? EMPTY_SOP_SCOPE_ROWS,
+    departmentById: async (departmentId) => (await load()).departmentById.get(departmentId) ?? null,
+    ...(membershipId
+      ? {
+          selfBranchIds: () => (selfBranchIds ??= membershipBranchIds(ctx, new Set([membershipId]))),
+          selfDepartmentIds: () => (selfDepartmentIds ??= membershipDepartmentIds(ctx, new Set([membershipId]))),
+        }
+      : {}),
+  };
+}
+
+type SopScopeTable = "sopBranchScopes" | "sopDepartmentScopes" | "sopUserScopes";
+type SopScopeRow = Doc<"sopBranchScopes"> | Doc<"sopDepartmentScopes"> | Doc<"sopUserScopes">;
+
+function takeSopScopeRows(ctx: Ctx, table: SopScopeTable, sopId: Id<"sops">, limit: number): Promise<SopScopeRow[]> {
+  switch (table) {
+    case "sopBranchScopes":
+      return ctx.db.query("sopBranchScopes").withIndex("by_sopId_and_branchId", (q) => q.eq("sopId", sopId)).take(limit);
+    case "sopDepartmentScopes":
+      return ctx.db.query("sopDepartmentScopes").withIndex("by_sopId_and_departmentId", (q) => q.eq("sopId", sopId)).take(limit);
+    case "sopUserScopes":
+      return ctx.db.query("sopUserScopes").withIndex("by_sopId_and_userMembershipId", (q) => q.eq("sopId", sopId)).take(limit);
+  }
+}
+
+/**
+ * Reads a SOP's scope rows from the preloaded company index when present,
+ * falling back to a per-SOP indexed scan (bounded like any other scope read).
+ */
+export async function sopScopeRowsFor<Row>(
+  ctx: Ctx,
+  auth: SopListRowAuth | undefined,
+  sopId: Id<"sops">,
+  table: SopScopeTable,
+  pick: (rows: SopScopeRows) => Row[],
+  onTruncated?: TruncationObserver,
+): Promise<Row[]> {
+  if (auth?.sopScopes) return pick(await auth.sopScopes(sopId));
+  return (await takeScopeRows((limit) => takeSopScopeRows(ctx, table, sopId, limit), onTruncated)) as Row[];
+}
 
 export async function visibleSopForSelf(
   ctx: Ctx,
@@ -721,34 +820,16 @@ export async function visibleSopForSelf(
   if (sop.companyId !== companyId) return false;
   if (sop.scopeType === "company") return true;
   if (sop.scopeType === "user") {
-    const rows = await takeScopeRows(
-      (limit) => ctx.db
-        .query("sopUserScopes")
-        .withIndex("by_sop", (q) => q.eq("sopId", sop._id))
-        .take(limit),
-      onTruncated,
-    );
+    const rows = await sopScopeRowsFor(ctx, auth, sop._id, "sopUserScopes", (rows) => rows.userScopes, onTruncated);
     return rows.some((row) => row.userMembershipId === m._id);
   }
   if (sop.scopeType === "branch") {
     const branchIds = auth?.selfBranchIds ? await auth.selfBranchIds() : await membershipBranchIds(ctx, new Set([m._id]), onTruncated);
-    const sopBranches = await takeScopeRows(
-      (limit) => ctx.db
-        .query("sopBranchScopes")
-        .withIndex("by_sop", (q) => q.eq("sopId", sop._id))
-        .take(limit),
-      onTruncated,
-    );
+    const sopBranches = await sopScopeRowsFor(ctx, auth, sop._id, "sopBranchScopes", (rows) => rows.branchScopes, onTruncated);
     return sopBranches.some((row) => branchIds.has(row.branchId));
   }
   const departmentIds = auth?.selfDepartmentIds ? await auth.selfDepartmentIds() : await membershipDepartmentIds(ctx, new Set([m._id]), onTruncated);
-  const sopDepartments = await takeScopeRows(
-    (limit) => ctx.db
-      .query("sopDepartmentScopes")
-      .withIndex("by_sop", (q) => q.eq("sopId", sop._id))
-      .take(limit),
-    onTruncated,
-  );
+  const sopDepartments = await sopScopeRowsFor(ctx, auth, sop._id, "sopDepartmentScopes", (rows) => rows.departmentScopes, onTruncated);
   return sopDepartments.some((row) => departmentIds.has(row.departmentId));
 }
 
@@ -784,14 +865,14 @@ export async function buildSopVisibilityContext(
     takeScopeRows(
       (limit) => ctx.db
         .query("managerBranchScopes")
-        .withIndex("by_manager", (q) => q.eq("managerMembershipId", m._id))
+        .withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", m._id))
         .take(limit),
       onTruncated,
     ),
     takeScopeRows(
       (limit) => ctx.db
         .query("managerDepartmentScopes")
-        .withIndex("by_manager", (q) => q.eq("managerMembershipId", m._id))
+        .withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", m._id))
         .take(limit),
       onTruncated,
     ),
@@ -823,36 +904,18 @@ export async function visibleSop(
     const v = visibility ?? (await buildSopVisibilityContext(ctx, companyId, m, caps, onTruncated));
     if (v) {
       if (sop.scopeType === "user") {
-        const rows = await takeScopeRows(
-          (limit) => ctx.db
-            .query("sopUserScopes")
-            .withIndex("by_sop", (q) => q.eq("sopId", sop._id))
-            .take(limit),
-          onTruncated,
-        );
+        const rows = await sopScopeRowsFor(ctx, auth, sop._id, "sopUserScopes", (rows) => rows.userScopes, onTruncated);
         if (rows.some((row) => v.scopedMembershipIds.has(row.userMembershipId))) return true;
       } else if (sop.scopeType === "branch") {
-        const sopBranches = await takeScopeRows(
-          (limit) => ctx.db
-            .query("sopBranchScopes")
-            .withIndex("by_sop", (q) => q.eq("sopId", sop._id))
-            .take(limit),
-          onTruncated,
-        );
+        const sopBranches = await sopScopeRowsFor(ctx, auth, sop._id, "sopBranchScopes", (rows) => rows.branchScopes, onTruncated);
         if (sopBranches.some((row) => v.membershipBranchIds.has(row.branchId) || v.managerBranchScopes.has(row.branchId)))
           return true;
       } else if (sop.scopeType === "department") {
-        const sopDepartments = await takeScopeRows(
-          (limit) => ctx.db
-            .query("sopDepartmentScopes")
-            .withIndex("by_sop", (q) => q.eq("sopId", sop._id))
-            .take(limit),
-          onTruncated,
-        );
+        const sopDepartments = await sopScopeRowsFor(ctx, auth, sop._id, "sopDepartmentScopes", (rows) => rows.departmentScopes, onTruncated);
         for (const row of sopDepartments) {
           if (v.membershipDepartmentIds.has(row.departmentId) || v.managerDepartmentScopes.has(row.departmentId))
             return true;
-          const department = await ctx.db.get(row.departmentId);
+          const department = auth?.departmentById ? await auth.departmentById(row.departmentId) : await ctx.db.get(row.departmentId);
           if (department?.companyId === companyId && v.managerBranchScopes.has(department.branchId)) return true;
         }
       }

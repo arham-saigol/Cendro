@@ -92,7 +92,7 @@ describe("task import backend", () => {
     expect(updated.task.title).toBe("New");
     expect(updated.task.assigneeMembershipIds).toEqual([adminMembershipId]);
     expect(updated.task.status).toBe("completed");
-    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task", (q) => q.eq("jdTaskId", taskId)).collect());
+    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect());
     expect(completions).toHaveLength(1);
     const logs = await t.run(async (ctx) => await ctx.db.query("taskActivityLogs").withIndex("by_task", (q) => q.eq("taskType", "jd").eq("taskId", taskId)).collect());
     expect(logs.some((l) => l.event === "status_changed" && l.fromStatus === "due" && l.toStatus === "completed")).toBe(true);

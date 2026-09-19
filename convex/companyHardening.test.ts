@@ -133,7 +133,7 @@ describe("company management & invitation hardening", () => {
     const branchAssignments = await f.t.run(async (ctx) => {
       return await ctx.db
         .query("userBranchAssignments")
-        .withIndex("by_membership", (q) => q.eq("membershipId", f.employee1M))
+        .withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", f.employee1M))
         .collect();
     });
     expect(branchAssignments.length).toBe(0);
@@ -283,7 +283,7 @@ describe("company management & invitation hardening", () => {
     const countBefore = await f.t.run(async (ctx) => {
       const rows = await ctx.db
         .query("managerUserScopes")
-        .withIndex("by_manager", (q) => q.eq("managerMembershipId", f.managerM))
+        .withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", f.managerM))
         .collect();
       return rows.length;
     });
@@ -298,7 +298,7 @@ describe("company management & invitation hardening", () => {
     const countAfter = await f.t.run(async (ctx) => {
       const rows = await ctx.db
         .query("managerUserScopes")
-        .withIndex("by_manager", (q) => q.eq("managerMembershipId", f.managerM))
+        .withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", f.managerM))
         .collect();
       return rows.length;
     });

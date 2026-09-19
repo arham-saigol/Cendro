@@ -62,7 +62,7 @@ async function pendingInvitations(ctx: MutationCtx, companyId: Id<"companies">) 
   const rows: Doc<"invitations">[] = [];
   for await (const invitation of ctx.db
     .query("invitations")
-    .withIndex("by_companyId_and_status", (q) => q.eq("companyId", companyId).eq("status", "pending"))) {
+    .withIndex("by_companyId_and_status_and_targetMembershipId", (q) => q.eq("companyId", companyId).eq("status", "pending"))) {
     rows.push(invitation);
   }
   return rows;
@@ -90,7 +90,7 @@ async function deleteLegacyOverrideRows(ctx: MutationCtx, companyId: Id<"compani
     while (true) {
       const rows = await ctx.db
         .query("permissionOverrides")
-        .withIndex("by_membership", (q) => q.eq("membershipId", membership._id))
+        .withIndex("by_membershipId_and_capability", (q) => q.eq("membershipId", membership._id))
         .take(LIST_LIMIT);
       if (!rows.length) break;
       for (const row of rows) await ctx.db.delete(row._id);
@@ -241,7 +241,7 @@ export const remove = mutation({
     }
     const invitation = await ctx.db
       .query("invitations")
-      .withIndex("by_companyId_and_status", (q) => q.eq("companyId", args.companyId).eq("status", "pending"))
+      .withIndex("by_companyId_and_status_and_targetMembershipId", (q) => q.eq("companyId", args.companyId).eq("status", "pending"))
       .filter((q) => q.eq(q.field("role"), role.name))
       .first();
     if (invitation) {

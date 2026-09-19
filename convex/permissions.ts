@@ -323,7 +323,7 @@ export async function getManagedMembershipIds(
   const userScopes = await takeScopeRows(
     (limit) => ctx.db
       .query("managerUserScopes")
-      .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))
+      .withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", managerMembershipId))
       .take(limit),
     onTruncated,
   );
@@ -333,14 +333,14 @@ export async function getManagedMembershipIds(
     takeScopeRows(
       (limit) => ctx.db
         .query("managerBranchScopes")
-        .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))
+        .withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", managerMembershipId))
         .take(limit),
       onTruncated,
     ),
     takeScopeRows(
       (limit) => ctx.db
         .query("managerDepartmentScopes")
-        .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))
+        .withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", managerMembershipId))
         .take(limit),
       onTruncated,
     ),
@@ -398,13 +398,13 @@ export async function scanManagedMembershipIds(
 
   for await (const row of ctx.db
     .query("managerUserScopes")
-    .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))) {
+    .withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", managerMembershipId))) {
     if (!nextScopeRow() || !addMembership(row.userMembershipId, row.companyId === companyId)) return result(true);
   }
 
   for await (const scope of ctx.db
     .query("managerBranchScopes")
-    .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))) {
+    .withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", managerMembershipId))) {
     if (!nextScopeRow()) return result(true);
     if (scope.companyId !== companyId) continue;
     for await (const assignment of ctx.db
@@ -416,7 +416,7 @@ export async function scanManagedMembershipIds(
 
   for await (const scope of ctx.db
     .query("managerDepartmentScopes")
-    .withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId))) {
+    .withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", managerMembershipId))) {
     if (!nextScopeRow()) return result(true);
     if (scope.companyId !== companyId) continue;
     for await (const assignment of ctx.db
@@ -552,7 +552,7 @@ export async function isManagedMembership(
   // inspect every assignment rather than reuse the bounded scope cache.
   for await (const assignment of ctx.db
     .query("userBranchAssignments")
-    .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))) {
+    .withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", membershipId))) {
     if (assignment.companyId !== companyId) continue;
     const scope = await ctx.db
       .query("managerBranchScopes")
@@ -567,7 +567,7 @@ export async function isManagedMembership(
   }
   for await (const assignment of ctx.db
     .query("userDepartmentAssignments")
-    .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))) {
+    .withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", membershipId))) {
     if (assignment.companyId !== companyId) continue;
     const scope = await ctx.db
       .query("managerDepartmentScopes")
@@ -677,7 +677,7 @@ export async function membershipBranchIds(
     takeScopeRows(
       (limit) => ctx.db
         .query("userBranchAssignments")
-        .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))
+        .withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", membershipId))
         .take(limit),
       onTruncated,
     ),
@@ -696,7 +696,7 @@ export async function membershipDepartmentIds(
     takeScopeRows(
       (limit) => ctx.db
         .query("userDepartmentAssignments")
-        .withIndex("by_membership", (q) => q.eq("membershipId", membershipId))
+        .withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", membershipId))
         .take(limit),
       onTruncated,
     ),
@@ -706,9 +706,58 @@ export async function membershipDepartmentIds(
 }
 
 export type SopListRowAuth = {
+  /** The viewer's own branch assignments, memoized once per list operation. */
   selfBranchIds?: () => Promise<Set<Id<"branches">>>;
+  /** The viewer's own department assignments, memoized once per list operation. */
   selfDepartmentIds?: () => Promise<Set<Id<"departments">>>;
+  /** Department lookup memoized per id — one get per distinct department. */
+  departmentById?: (departmentId: Id<"departments">) => Promise<Doc<"departments"> | null>;
 };
+
+/**
+ * Per-list memoized lookups shared by every SOP row check. Without them,
+ * visibility and filter checks re-read the viewer's own assignments once per
+ * SOP row on the page.
+ */
+export function sopListScopeAuth(ctx: Ctx, companyId: Id<"companies">, membershipId?: Id<"companyMemberships">): SopListRowAuth {
+  let selfBranchIds: Promise<Set<Id<"branches">>> | undefined;
+  let selfDepartmentIds: Promise<Set<Id<"departments">>> | undefined;
+  const departments = new Map<Id<"departments">, Promise<Doc<"departments"> | null>>();
+  return {
+    departmentById: (departmentId) => {
+      let cached = departments.get(departmentId);
+      if (!cached) departments.set(departmentId, (cached = ctx.db.get(departmentId)));
+      return cached;
+    },
+    ...(membershipId
+      ? {
+          selfBranchIds: () => (selfBranchIds ??= membershipBranchIds(ctx, new Set([membershipId]))),
+          selfDepartmentIds: () => (selfDepartmentIds ??= membershipDepartmentIds(ctx, new Set([membershipId]))),
+        }
+      : {}),
+  };
+}
+
+type SopScopeTable = "sopBranchScopes" | "sopDepartmentScopes" | "sopUserScopes";
+type SopScopeRow = Doc<"sopBranchScopes"> | Doc<"sopDepartmentScopes"> | Doc<"sopUserScopes">;
+
+function takeSopScopeRows(ctx: Ctx, table: SopScopeTable, sopId: Id<"sops">, limit: number): Promise<SopScopeRow[]> {
+  switch (table) {
+    case "sopBranchScopes":
+      return ctx.db.query("sopBranchScopes").withIndex("by_sopId_and_branchId", (q) => q.eq("sopId", sopId)).take(limit);
+    case "sopDepartmentScopes":
+      return ctx.db.query("sopDepartmentScopes").withIndex("by_sopId_and_departmentId", (q) => q.eq("sopId", sopId)).take(limit);
+    case "sopUserScopes":
+      return ctx.db.query("sopUserScopes").withIndex("by_sopId_and_userMembershipId", (q) => q.eq("sopId", sopId)).take(limit);
+  }
+}
+
+export function sopScopeRowsFor(ctx: Ctx, sopId: Id<"sops">, table: "sopBranchScopes", onTruncated?: TruncationObserver): Promise<Doc<"sopBranchScopes">[]>;
+export function sopScopeRowsFor(ctx: Ctx, sopId: Id<"sops">, table: "sopDepartmentScopes", onTruncated?: TruncationObserver): Promise<Doc<"sopDepartmentScopes">[]>;
+export function sopScopeRowsFor(ctx: Ctx, sopId: Id<"sops">, table: "sopUserScopes", onTruncated?: TruncationObserver): Promise<Doc<"sopUserScopes">[]>;
+export async function sopScopeRowsFor(ctx: Ctx, sopId: Id<"sops">, table: SopScopeTable, onTruncated?: TruncationObserver) {
+  return await takeScopeRows((limit) => takeSopScopeRows(ctx, table, sopId, limit), onTruncated);
+}
 
 export async function visibleSopForSelf(
   ctx: Ctx,
@@ -721,34 +770,16 @@ export async function visibleSopForSelf(
   if (sop.companyId !== companyId) return false;
   if (sop.scopeType === "company") return true;
   if (sop.scopeType === "user") {
-    const rows = await takeScopeRows(
-      (limit) => ctx.db
-        .query("sopUserScopes")
-        .withIndex("by_sop", (q) => q.eq("sopId", sop._id))
-        .take(limit),
-      onTruncated,
-    );
+    const rows = await sopScopeRowsFor(ctx, sop._id, "sopUserScopes", onTruncated);
     return rows.some((row) => row.userMembershipId === m._id);
   }
   if (sop.scopeType === "branch") {
     const branchIds = auth?.selfBranchIds ? await auth.selfBranchIds() : await membershipBranchIds(ctx, new Set([m._id]), onTruncated);
-    const sopBranches = await takeScopeRows(
-      (limit) => ctx.db
-        .query("sopBranchScopes")
-        .withIndex("by_sop", (q) => q.eq("sopId", sop._id))
-        .take(limit),
-      onTruncated,
-    );
+    const sopBranches = await sopScopeRowsFor(ctx, sop._id, "sopBranchScopes", onTruncated);
     return sopBranches.some((row) => branchIds.has(row.branchId));
   }
   const departmentIds = auth?.selfDepartmentIds ? await auth.selfDepartmentIds() : await membershipDepartmentIds(ctx, new Set([m._id]), onTruncated);
-  const sopDepartments = await takeScopeRows(
-    (limit) => ctx.db
-      .query("sopDepartmentScopes")
-      .withIndex("by_sop", (q) => q.eq("sopId", sop._id))
-      .take(limit),
-    onTruncated,
-  );
+  const sopDepartments = await sopScopeRowsFor(ctx, sop._id, "sopDepartmentScopes", onTruncated);
   return sopDepartments.some((row) => departmentIds.has(row.departmentId));
 }
 
@@ -784,14 +815,14 @@ export async function buildSopVisibilityContext(
     takeScopeRows(
       (limit) => ctx.db
         .query("managerBranchScopes")
-        .withIndex("by_manager", (q) => q.eq("managerMembershipId", m._id))
+        .withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", m._id))
         .take(limit),
       onTruncated,
     ),
     takeScopeRows(
       (limit) => ctx.db
         .query("managerDepartmentScopes")
-        .withIndex("by_manager", (q) => q.eq("managerMembershipId", m._id))
+        .withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", m._id))
         .take(limit),
       onTruncated,
     ),
@@ -823,36 +854,18 @@ export async function visibleSop(
     const v = visibility ?? (await buildSopVisibilityContext(ctx, companyId, m, caps, onTruncated));
     if (v) {
       if (sop.scopeType === "user") {
-        const rows = await takeScopeRows(
-          (limit) => ctx.db
-            .query("sopUserScopes")
-            .withIndex("by_sop", (q) => q.eq("sopId", sop._id))
-            .take(limit),
-          onTruncated,
-        );
+        const rows = await sopScopeRowsFor(ctx, sop._id, "sopUserScopes", onTruncated);
         if (rows.some((row) => v.scopedMembershipIds.has(row.userMembershipId))) return true;
       } else if (sop.scopeType === "branch") {
-        const sopBranches = await takeScopeRows(
-          (limit) => ctx.db
-            .query("sopBranchScopes")
-            .withIndex("by_sop", (q) => q.eq("sopId", sop._id))
-            .take(limit),
-          onTruncated,
-        );
+        const sopBranches = await sopScopeRowsFor(ctx, sop._id, "sopBranchScopes", onTruncated);
         if (sopBranches.some((row) => v.membershipBranchIds.has(row.branchId) || v.managerBranchScopes.has(row.branchId)))
           return true;
       } else if (sop.scopeType === "department") {
-        const sopDepartments = await takeScopeRows(
-          (limit) => ctx.db
-            .query("sopDepartmentScopes")
-            .withIndex("by_sop", (q) => q.eq("sopId", sop._id))
-            .take(limit),
-          onTruncated,
-        );
+        const sopDepartments = await sopScopeRowsFor(ctx, sop._id, "sopDepartmentScopes", onTruncated);
         for (const row of sopDepartments) {
           if (v.membershipDepartmentIds.has(row.departmentId) || v.managerDepartmentScopes.has(row.departmentId))
             return true;
-          const department = await ctx.db.get(row.departmentId);
+          const department = auth?.departmentById ? await auth.departmentById(row.departmentId) : await ctx.db.get(row.departmentId);
           if (department?.companyId === companyId && v.managerBranchScopes.has(department.branchId)) return true;
         }
       }

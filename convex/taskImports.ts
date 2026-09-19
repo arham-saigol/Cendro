@@ -423,7 +423,7 @@ export const commitTaskImportBatch = mutation({
     if (new Set(rowKeys).size !== rowKeys.length) fail("Import batch contains duplicate source rows.");
     const references = includedRows.map((row) => validateReference(row.draft.reference, args.kind));
     if (new Set(references).size !== references.length) fail("Import batch contains duplicate task references.");
-    const priorReceipts = await ctx.db.query("taskImportBatches").withIndex("by_companyId_and_importKey", (q) => q.eq("companyId", args.companyId).eq("importKey", args.importKey)).take(MAX_IMPORT_BATCHES + 1);
+    const priorReceipts = await ctx.db.query("taskImportBatches").withIndex("by_companyId_and_importKey_and_batchKey", (q) => q.eq("companyId", args.companyId).eq("importKey", args.importKey)).take(MAX_IMPORT_BATCHES + 1);
     if (priorReceipts.length > MAX_IMPORT_BATCHES || priorReceipts.some((receipt) => receipt.actorMembershipId !== membership._id || receipt.kind !== args.kind || receipt.source !== args.source)) fail("Import key is not available.");
     const priorReferences = new Set(priorReceipts.flatMap((receipt) => receipt.result.taskReferences));
     const { emails, membershipIds } = extractAssigneeTargets(

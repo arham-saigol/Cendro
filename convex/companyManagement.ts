@@ -58,9 +58,9 @@ async function managerScope(
   onTruncated?: () => void,
 ) {
   const [branches, departments, users] = await Promise.all([
-    takeWithOverflow((limit) => ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
-    takeWithOverflow((limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
-    takeWithOverflow((limit) => ctx.db.query("managerUserScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
+    takeWithOverflow((limit) => ctx.db.query("managerBranchScopes").withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
+    takeWithOverflow((limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
+    takeWithOverflow((limit) => ctx.db.query("managerUserScopes").withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
   ]);
   if (branches.isTruncated || departments.isTruncated || users.isTruncated) onTruncated?.();
   return {
@@ -72,27 +72,27 @@ async function managerScope(
 
 async function clearUserManagementRows(ctx: any, membershipId: Id<"companyMemberships">) {
   while (true) {
-    const rows = await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500);
+    const rows = await ctx.db.query("userBranchAssignments").withIndex("by_membershipId_and_branchId", (q: any) => q.eq("membershipId", membershipId)).take(500);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
   while (true) {
-    const rows = await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q: any) => q.eq("membershipId", membershipId)).take(500);
+    const rows = await ctx.db.query("userDepartmentAssignments").withIndex("by_membershipId_and_departmentId", (q: any) => q.eq("membershipId", membershipId)).take(500);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
   while (true) {
-    const rows = await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500);
+    const rows = await ctx.db.query("managerBranchScopes").withIndex("by_managerMembershipId_and_branchId", (q: any) => q.eq("managerMembershipId", membershipId)).take(500);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
   while (true) {
-    const rows = await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500);
+    const rows = await ctx.db.query("managerDepartmentScopes").withIndex("by_managerMembershipId_and_departmentId", (q: any) => q.eq("managerMembershipId", membershipId)).take(500);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
   while (true) {
-    const rows = await ctx.db.query("managerUserScopes").withIndex("by_manager", (q: any) => q.eq("managerMembershipId", membershipId)).take(500);
+    const rows = await ctx.db.query("managerUserScopes").withIndex("by_managerMembershipId_and_userMembershipId", (q: any) => q.eq("managerMembershipId", membershipId)).take(500);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
@@ -142,11 +142,11 @@ export const overview = query({
           const [user, branchAssignmentResult, departmentAssignmentResult, scope] = await Promise.all([
             ctx.db.get(m.userId),
             takeWithOverflow(
-              (limit) => ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(limit),
+              (limit) => ctx.db.query("userBranchAssignments").withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", m._id)).take(limit),
               overviewListLimit,
             ),
             takeWithOverflow(
-              (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", m._id)).take(limit),
+              (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", m._id)).take(limit),
               overviewListLimit,
             ),
             canReadRoles
@@ -429,8 +429,8 @@ export const setAssignments = mutation({
     const departmentIds = unique(args.departmentIds);
     for (const branchId of branchIds) await assertBranch(ctx, args.companyId, branchId);
     for (const departmentId of departmentIds) await assertDepartment(ctx, args.companyId, departmentId);
-    for (const r of await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", args.membershipId)).take(500)) await ctx.db.delete(r._id);
-    for (const r of await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", args.membershipId)).take(500)) await ctx.db.delete(r._id);
+    for (const r of await ctx.db.query("userBranchAssignments").withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", args.membershipId)).take(500)) await ctx.db.delete(r._id);
+    for (const r of await ctx.db.query("userDepartmentAssignments").withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", args.membershipId)).take(500)) await ctx.db.delete(r._id);
     for (const branchId of branchIds) await ctx.db.insert("userBranchAssignments", { companyId: args.companyId, membershipId: args.membershipId, branchId });
     for (const departmentId of departmentIds) await ctx.db.insert("userDepartmentAssignments", { companyId: args.companyId, membershipId: args.membershipId, departmentId });
   },
@@ -447,9 +447,9 @@ export const setManagerScope = mutation({
     for (const branchId of branchIds) await assertBranch(ctx, args.companyId, branchId);
     for (const departmentId of departmentIds) await assertDepartment(ctx, args.companyId, departmentId);
     for (const membershipId of userMembershipIds) await assertMembership(ctx, args.companyId, membershipId);
-    for (const r of await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", args.managerMembershipId)).take(500)) await ctx.db.delete(r._id);
-    for (const r of await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", args.managerMembershipId)).take(500)) await ctx.db.delete(r._id);
-    for (const r of await ctx.db.query("managerUserScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", args.managerMembershipId)).take(500)) await ctx.db.delete(r._id);
+    for (const r of await ctx.db.query("managerBranchScopes").withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", args.managerMembershipId)).take(500)) await ctx.db.delete(r._id);
+    for (const r of await ctx.db.query("managerDepartmentScopes").withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", args.managerMembershipId)).take(500)) await ctx.db.delete(r._id);
+    for (const r of await ctx.db.query("managerUserScopes").withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", args.managerMembershipId)).take(500)) await ctx.db.delete(r._id);
     const updatedAt = Date.now();
     for (const branchId of branchIds) await ctx.db.insert("managerBranchScopes", { companyId: args.companyId, managerMembershipId: args.managerMembershipId, branchId, updatedAt });
     for (const departmentId of departmentIds) await ctx.db.insert("managerDepartmentScopes", { companyId: args.companyId, managerMembershipId: args.managerMembershipId, departmentId, updatedAt });

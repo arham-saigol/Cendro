@@ -531,11 +531,11 @@ describe("production permission and validation fixes", () => {
     const result = await t.run(async (ctx) => {
       const user = await ctx.db.query("appUsers").withIndex("by_email", (q) => q.eq("email", "new@example.com")).unique();
       const membership = user ? await ctx.db.query("companyMemberships").withIndex("by_company_user", (q) => q.eq("companyId", companyId).eq("userId", user._id)).unique() : null;
-      const branchAssignments = membership ? await ctx.db.query("userBranchAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membership._id)).take(10) : [];
-      const departmentAssignments = membership ? await ctx.db.query("userDepartmentAssignments").withIndex("by_membership", (q) => q.eq("membershipId", membership._id)).take(10) : [];
-      const managedBranches = membership ? await ctx.db.query("managerBranchScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(10) : [];
-      const managedDepartments = membership ? await ctx.db.query("managerDepartmentScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(10) : [];
-      const managedUsers = membership ? await ctx.db.query("managerUserScopes").withIndex("by_manager", (q) => q.eq("managerMembershipId", membership._id)).take(10) : [];
+      const branchAssignments = membership ? await ctx.db.query("userBranchAssignments").withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", membership._id)).take(10) : [];
+      const departmentAssignments = membership ? await ctx.db.query("userDepartmentAssignments").withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", membership._id)).take(10) : [];
+      const managedBranches = membership ? await ctx.db.query("managerBranchScopes").withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", membership._id)).take(10) : [];
+      const managedDepartments = membership ? await ctx.db.query("managerDepartmentScopes").withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", membership._id)).take(10) : [];
+      const managedUsers = membership ? await ctx.db.query("managerUserScopes").withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", membership._id)).take(10) : [];
       return { membership, branchAssignments, departmentAssignments, managedBranches, managedDepartments, managedUsers };
     });
     expect(result.membership?.role).toBe("Employee");

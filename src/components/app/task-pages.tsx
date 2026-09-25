@@ -419,6 +419,7 @@ function TaskCellPopover({
   header,
   children,
   panelClassName,
+  preferredWidth,
   showHeader = true,
   hideTriggerOnOpen = true,
 }: {
@@ -430,6 +431,7 @@ function TaskCellPopover({
   header: React.ReactNode;
   children: React.ReactNode;
   panelClassName?: string;
+  preferredWidth?: number;
   showHeader?: boolean;
   hideTriggerOnOpen?: boolean;
 }) {
@@ -439,7 +441,9 @@ function TaskCellPopover({
   function measure() {
     const bounds = triggerRef.current?.getBoundingClientRect();
     if (!bounds) return;
-    const width = Math.min(Math.max(bounds.width + 28, 220), window.innerWidth - 16);
+    // A popover with preferredWidth renders wider than its trigger; the left
+    // clamp must use that same width so right-edge cells can't overflow.
+    const width = Math.min(Math.max(bounds.width + 28, preferredWidth ?? 220), window.innerWidth - 16);
     const left = Math.min(Math.max(8, bounds.left - 14), Math.max(8, window.innerWidth - width - 8));
     setRect({ top: bounds.top, bottom: bounds.bottom, left, width });
   }
@@ -1201,7 +1205,7 @@ function DatePicker({ value, onChange, displayValue, compact = false }: { value:
     </div>
   );
 
-  if (compact) return <TaskCellPopover open={open} onOpenChange={setOpen} ariaLabel="Change Due Date" header={header} panelClassName="task-cell-popover-date">{calendar}</TaskCellPopover>;
+  if (compact) return <TaskCellPopover open={open} onOpenChange={setOpen} ariaLabel="Change Due Date" header={header} panelClassName="task-cell-popover-date" preferredWidth={250}>{calendar}</TaskCellPopover>;
 
   return (
     <DropdownMenu.Root open={open} onOpenChange={setOpen}>

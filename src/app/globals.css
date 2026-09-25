@@ -519,7 +519,6 @@ button:disabled { cursor: not-allowed; }
 .task-cell-popover-item:hover,
 .task-cell-popover-item:focus-visible { background: var(--surface-muted); color: var(--ink); }
 .task-cell-popover-scroll .task-cell-popover-body { max-height: 288px; overflow: auto; }
-.task-cell-popover-date { width: min(250px, calc(100vw - 16px)) !important; }
 .task-cell-popover-date .task-cell-popover-body { padding: 0; }
 
 .task-cell-control {

@@ -11,6 +11,16 @@ type BeforeInstallPromptEvent = Event & {
 
 const INSTALL_DISMISS_KEY = "cendro.install-dismissed";
 
+// Storage can be unavailable (private browsing); the install UI must never
+// take down the workspace over a persisted dismissal.
+function installDismissed(): boolean {
+  try {
+    return localStorage.getItem(INSTALL_DISMISS_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 function isIosSafari() {
   const ua = navigator.userAgent;
   const isIos = /iphone|ipad|ipod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
@@ -42,7 +52,7 @@ export function PwaAgent() {
   }, []);
 
   useEffect(() => {
-    if (localStorage.getItem(INSTALL_DISMISS_KEY) === "1") return;
+    if (installDismissed()) return;
     const onBeforeInstall = (event: Event) => {
       event.preventDefault();
       setInstallEvent(event as BeforeInstallPromptEvent);
@@ -96,7 +106,11 @@ export function PwaAgent() {
   }, []);
 
   function dismissInstall() {
-    localStorage.setItem(INSTALL_DISMISS_KEY, "1");
+    try {
+      localStorage.setItem(INSTALL_DISMISS_KEY, "1");
+    } catch {
+      // Dismissal still applies for this mount.
+    }
     setInstallEvent(null);
     setInstallHint(null);
   }

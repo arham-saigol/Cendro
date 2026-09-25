@@ -519,7 +519,7 @@ button:disabled { cursor: not-allowed; }
 .task-cell-popover-item:hover,
 .task-cell-popover-item:focus-visible { background: var(--surface-muted); color: var(--ink); }
 .task-cell-popover-scroll .task-cell-popover-body { max-height: 288px; overflow: auto; }
-.task-cell-popover-date { width: 250px !important; }
+.task-cell-popover-date { width: min(250px, calc(100vw - 16px)) !important; }
 .task-cell-popover-date .task-cell-popover-body { padding: 0; }
 
 .task-cell-control {
@@ -1723,6 +1723,7 @@ button:disabled { cursor: not-allowed; }
   .structure-chevron { width: 26px; height: 26px; }
   .task-title-open { opacity: 1; pointer-events: auto; }
   .task-checkbox-rail .opacity-0 { opacity: 1; }
+  .comment-action-menu { opacity: 1; pointer-events: auto; }
   .comment-action-btn { min-width: 30px; min-height: 30px; }
   .task-rail-arrow { width: 32px; height: 32px; }
 

@@ -24,10 +24,16 @@ const STATIC_PATHS = new Set(PRECACHE_URLS);
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
+    // The offline page is the one asset the fetch handler cannot do without:
+    // fail the install (and retry next time) rather than control pages without
+    // a fallback. Other precached assets are nice-to-have only.
     caches
       .open(STATIC_CACHE)
-      .then((cache) => cache.addAll(PRECACHE_URLS))
-      .catch(() => undefined),
+      .then((cache) =>
+        cache
+          .add(OFFLINE_URL)
+          .then(() => cache.addAll(PRECACHE_URLS.filter((url) => url !== OFFLINE_URL)).catch(() => undefined)),
+      ),
   );
 });
 

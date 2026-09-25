@@ -903,7 +903,8 @@ function SortableSopRow({
         onOpenDetails();
       }}
       onKeyDown={(event) => {
-        if (tapOpens && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onOpenDetails(); }
+        if (!tapOpens || (event.target as HTMLElement).closest("[data-interactive='true']")) return;
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpenDetails(); }
       }}
     >
       {children}

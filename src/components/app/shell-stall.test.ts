@@ -257,6 +257,24 @@ describe("useShellStall", () => {
     expect(warnSpy.mock.calls[0][0]).toContain("[cendro] app shell retry requested");
   });
 
+  test("a waiting-status transition keeps the stall clock running", async () => {
+    await render();
+    await advance(SHELL_STALL_WARN_MS);
+    expect(result!.stalled).toBe(true);
+
+    // loading -> convexUnauthenticated: still waiting, so the elapsed time
+    // carries over and the error card shows immediately instead of after
+    // another full warn threshold.
+    status = "convexUnauthenticated";
+    await render();
+    expect(result!.stalled).toBe(true);
+    expect(result!.elapsedMs).toBeGreaterThanOrEqual(SHELL_STALL_WARN_MS);
+
+    // Auto-retry still measures from the original start of the wait.
+    await advance(SHELL_AUTO_RETRY_MS - SHELL_STALL_WARN_MS);
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+  });
+
   test("recovering resets the timer and clears the retry counter", async () => {
     await render();
     await advance(SHELL_AUTO_RETRY_MS);

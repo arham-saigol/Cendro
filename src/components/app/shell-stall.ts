@@ -87,7 +87,9 @@ export function useShellStall(accessStatus: string, stage: ShellLoadingStage | n
       }
     }, 1000);
     return () => clearInterval(interval);
-  }, [waiting, accessStatus]);
+    // One continuous wait is one episode: switching between waiting statuses
+    // (e.g. loading -> convexUnauthenticated) must not restart the clock.
+  }, [waiting]);
 
   // Read per render so the count persists across auto-reload remounts.
   return { stalled: waiting && elapsedMs >= SHELL_STALL_WARN_MS, elapsedMs, reloads: readShellRetries(shellRetryStorage()), retry };

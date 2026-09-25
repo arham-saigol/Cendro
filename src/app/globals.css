@@ -1728,6 +1728,9 @@ button:disabled { cursor: not-allowed; }
   .task-checkbox-rail .opacity-0 { opacity: 1; }
   .comment-action-menu { opacity: 1; pointer-events: auto; }
   .comment-action-btn { min-width: 30px; min-height: 30px; }
+  /* The always-on menu floats over the row's top-right; keep the author/timestamp
+     line clear of it on touch. */
+  .comment-row:has(> .comment-action-menu) .comment-header { padding-right: 68px; }
   .task-rail-arrow { width: 32px; height: 32px; }
 
   /* iOS Safari zooms the page when a focused input is below 16px. */

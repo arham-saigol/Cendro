@@ -95,7 +95,13 @@ export function PwaAgent() {
       .catch(() => undefined);
 
     const onControllerChange = () => {
-      if (reloadingForUpdate.current) window.location.reload();
+      if (reloadingForUpdate.current) {
+        window.location.reload();
+      } else {
+        // Another tab applied the update: the worker we offered is already
+        // active, so Reload would post SKIP_WAITING to nothing. Drop the card.
+        setWaitingWorker(null);
+      }
     };
     navigator.serviceWorker.addEventListener("controllerchange", onControllerChange);
 

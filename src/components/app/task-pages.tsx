@@ -2959,8 +2959,8 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
                   <div className="min-w-0 flex-1">
                     {isComment ? (
                       <div className="rounded-lg border border-[var(--hairline)] bg-[var(--canvas-soft)] px-3 py-2 shadow-[0_1px_0_color-mix(in_srgb,var(--ink)_4%,transparent)]">
-                        <div className="flex items-baseline gap-2">
-                          <span className="text-[13px] font-medium text-[var(--ink)]">{name}</span>
+                        <div className="comment-header flex items-baseline gap-2">
+                          <span className="min-w-0 truncate text-[13px] font-medium text-[var(--ink)]">{name}</span>
                           {activityRow.createdAt && <span className="text-[12px] text-[var(--ink-faint)]">{relativeTime(activityRow.createdAt)}</span>}
                         </div>
                         {isEditing ? (

@@ -1,11 +1,15 @@
 // Cendro service worker.
 //
-// Caching policy: only static, immutable assets are cached (content-hashed
-// /_next/static chunks, icons, the manifest, and the offline page). Navigations
-// are network-first with an offline fallback — authenticated HTML and all
+// Caching policy: only static assets are cached (content-hashed /_next/static
+// chunks, icons, the manifest, and the offline page). Navigations are
+// network-first with an offline fallback — authenticated HTML and all
 // task/company data are never cached, so nothing sensitive or stale is served.
 
-const CACHE_VERSION = "v1";
+// Replaced with the deploy's commit SHA when /sw.js is served (see route.ts):
+// every deployment ships different worker bytes, which is what triggers the
+// browser's updatefound event — and a fresh static cache that drops the
+// previous deploy's icons/manifest.
+const CACHE_VERSION = "__CENDRO_BUILD__";
 const STATIC_CACHE = `cendro-static-${CACHE_VERSION}`;
 const OFFLINE_URL = "/offline.html";
 
@@ -41,7 +45,11 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== STATIC_CACHE).map((key) => caches.delete(key))))
+      .then((keys) =>
+        // Only rotate our own versioned caches — other features may use Cache
+        // Storage on this origin.
+        Promise.all(keys.filter((key) => key.startsWith("cendro-static-") && key !== STATIC_CACHE).map((key) => caches.delete(key))),
+      )
       .then(() => self.clients.claim()),
   );
 });
@@ -76,7 +84,9 @@ self.addEventListener("fetch", (event) => {
         fetch(request).then((response) => {
           if (response.ok && response.type === "basic") {
             const clone = response.clone();
-            caches.open(STATIC_CACHE).then((cache) => cache.put(request, clone));
+            // Keep the worker alive until the write lands; a failed write must
+            // not fail the response.
+            event.waitUntil(caches.open(STATIC_CACHE).then((cache) => cache.put(request, clone)).catch(() => undefined));
           }
           return response;
         }),

@@ -744,7 +744,7 @@ describe("production permission and validation fixes", () => {
           companyId,
           reference: `OT-${String(i).padStart(4, "0")}`,
           title: i === 245 ? "Rare Needle Task" : `Generic Task ${i}`,
-          priority: i === 245 ? "high" : "low",
+          priority: i === 245 ? "high" : i === 244 ? "critical" : "low",
           status: "due",
           assigneeMembershipIds: [adminMembershipId],
           createdByMembershipId: adminMembershipId,
@@ -780,12 +780,21 @@ describe("production permission and validation fixes", () => {
     expect(highPriority.page).toHaveLength(1);
     expect(highPriority.page[0].title).toBe("Rare Needle Task");
 
+    const criticalPriority = await admin.query(api.tasks.listOneTimeRows, {
+      companyId,
+      priority: "critical",
+      paginationOpts: { numItems: 200, cursor: null },
+    });
+    expect(criticalPriority.page).toHaveLength(1);
+    expect(criticalPriority.page[0].title).toBe("Generic Task 244");
+
     // Test personalFilterOptions returns assigned options
     const personalOpts = await admin.query(api.tasks.personalFilterOptions, {
       companyId,
       kind: "one_time",
     });
     expect(personalOpts.values).toContain("high");
+    expect(personalOpts.values).toContain("critical");
     expect(personalOpts.values).toContain("low");
   });
 

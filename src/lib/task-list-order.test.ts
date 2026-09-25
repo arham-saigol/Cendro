@@ -35,10 +35,12 @@ describe("task list ordering", () => {
     const oneTimeRows = [
       row("medium", { priority: "medium", createdAt: 4 }),
       row("high-old", { priority: "high", createdAt: 1 }),
+      row("critical", { priority: "critical", createdAt: 6 }),
       row("low", { priority: "low", createdAt: 5 }),
       row("high-new", { priority: "high", createdAt: 9 }),
     ];
     expect(sortTaskListRows(oneTimeRows, "one_time", { mode: "default" }).map((task) => task._id)).toEqual([
+      "critical",
       "high-new",
       "high-old",
       "medium",

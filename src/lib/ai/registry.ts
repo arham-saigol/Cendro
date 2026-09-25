@@ -39,7 +39,7 @@ export type CendroAiToolDefinition<Input extends z.ZodType = z.ZodType> = {
 class AiToolDenied extends Error {}
 class AiToolNotFound extends Error {}
 
-const priority = z.enum(["low", "medium", "high"]);
+const priority = z.enum(["low", "medium", "high", "critical"]);
 const recurrence = z.enum(["daily", "every_other_day", "weekly", "semimonthly", "monthly", "quarterly", "semiannually", "annually"]);
 const taskRef = z.string().regex(/^task_\d+$/);
 const memberRef = z.string().regex(/^member_\d+$/);

@@ -28,7 +28,7 @@ describe("AI tool registry task notes", () => {
       title: "Clean kitchen",
       description: "Detailed description",
       notes: "Do not use bleach",
-      priority: "high",
+      priority: "critical",
     });
     expect(parsed.notes).toBe("Do not use bleach");
 
@@ -39,7 +39,7 @@ describe("AI tool registry task notes", () => {
       notes: "Do not use bleach",
       status: "due",
       dueAt: null,
-      priority: "high",
+      priority: "critical",
       assignees: [],
     });
 

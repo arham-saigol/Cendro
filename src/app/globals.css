@@ -40,6 +40,8 @@
   --badge-yellow-fg: #79550d;
   --badge-neutral-bg: #dde0e2;
   --badge-neutral-fg: #4a4d50;
+  --priority-critical-bg: #f2bcb4;
+  --priority-critical-fg: #8a1f13;
   --priority-high-bg: #fbe1de;
   --priority-high-fg: #a33a32;
   --priority-medium-bg: #fdf1cd;
@@ -99,6 +101,8 @@
   --badge-yellow-fg: #efd08a;
   --badge-neutral-bg: #2a2c2f;
   --badge-neutral-fg: #a8a59f;
+  --priority-critical-bg: #4d231d;
+  --priority-critical-fg: #ff9d92;
   --priority-high-bg: #3b2321;
   --priority-high-fg: #f4aaa4;
   --priority-medium-bg: #39311e;

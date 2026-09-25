@@ -21,6 +21,8 @@ describe("task workbook pure helpers", () => {
     expect(normalizeFrequency("qtr")).toBe("quarterly");
     expect(normalizeFrequency("bi-yearly")).toBe("semiannually");
     expect(normalizePriority("MED")).toBe("medium");
+    expect(normalizePriority("Critical")).toBe("critical");
+    expect(normalizePriority("CRIT")).toBe("critical");
     expect(normalizePriority("urgent")).toBeNull();
     expect(normalizeStatus("Pending")).toBe("due");
     expect(normalizeStatus("In Progress")).toBe("in_progress");
@@ -78,12 +80,16 @@ describe("task workbook pure helpers", () => {
   });
 
   test("exports and parses a Cendro workbook without task IDs", async () => {
-    const workbook = await exportTaskWorkbook("one_time", "company-1", "Acme", [{ reference: "TSK-001", title: "=literal text", description: "Body", notes: "Important note", dueDate: Date.UTC(2026, 1, 1, 23, 59, 59), priority: "high", time: "30m", quantity: 2, assigneeEmails: "a@example.com", status: "Pending" }]);
+    const workbook = await exportTaskWorkbook("one_time", "company-1", "Acme", [
+      { reference: "TSK-001", title: "=literal text", description: "Body", notes: "Important note", dueDate: Date.UTC(2026, 1, 1, 23, 59, 59), priority: "high", time: "30m", quantity: 2, assigneeEmails: "a@example.com", status: "Pending" },
+      { reference: "TSK-002", title: "Critical task", priority: "critical", status: "Pending" },
+    ]);
     const sheets = await readXlsxFile(await workbook.toBlob());
     const parsed = parseCendroWorkbookSheets(sheets, "company-1", "one_time");
-    expect(parsed.rows).toHaveLength(1);
+    expect(parsed.rows).toHaveLength(2);
     expect(parsed.rows[0]).toMatchObject({ reference: "TSK-001", title: "=literal text", description: "Body", notes: "Important note", priority: "high", quantity: 2, assigneeEmails: ["a@example.com"], status: "due" });
     expect(parsed.rows[0].dueDate).toBeTypeOf("number");
+    expect(parsed.rows[1]).toMatchObject({ reference: "TSK-002", title: "Critical task", priority: "critical", status: "due" });
   });
 
   test("exports and parses a JD task workbook preserving notes", async () => {

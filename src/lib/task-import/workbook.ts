@@ -34,6 +34,7 @@ export const priorityLabels: Record<Priority, string> = {
   low: "Low",
   medium: "Medium",
   high: "High",
+  critical: "Critical",
 };
 
 export const statusLabels: Record<TaskImportStatus, string> = {
@@ -162,7 +163,7 @@ export function normalizeFrequency(value: unknown): Frequency | null {
 
 export function normalizePriority(value: unknown): Priority | null {
   const normalized = normalizeEnumToken(value);
-  const aliases: Record<string, Priority> = { low: "low", l: "low", medium: "medium", med: "medium", m: "medium", high: "high", h: "high" };
+  const aliases: Record<string, Priority> = { low: "low", l: "low", medium: "medium", med: "medium", m: "medium", high: "high", h: "high", critical: "critical", crit: "critical", c: "critical" };
   return aliases[normalized] ?? null;
 }
 

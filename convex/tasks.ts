@@ -31,7 +31,7 @@ type TaskVisibilityAuth = {
 };
 
 const recurrenceValidator = v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("quarterly"), v.literal("semiannually"), v.literal("annually"));
-const priorityValidator = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
+const priorityValidator = v.union(v.literal("low"), v.literal("medium"), v.literal("high"), v.literal("critical"));
 const statusValidator = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
 const jdFrequencyFilterValidator = v.union(v.literal("all"), v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("quarterly"), v.literal("semiannually"), v.literal("annually"));
 const TASK_LIST_ORDER_LIMIT = 2_000;

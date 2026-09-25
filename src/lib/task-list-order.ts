@@ -45,6 +45,7 @@ const priorityRanks = new Map<string, number>([
   ["low", 0],
   ["medium", 1],
   ["high", 2],
+  ["critical", 3],
 ]);
 
 const customOrderKeyPattern = /^(?:0|-[1-9]\d*|[1-9]\d*)\/[1-9]\d*$/;

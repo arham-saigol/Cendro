@@ -51,7 +51,7 @@ const recurrenceOptions = [
   "semiannually",
   "annually",
 ] as const;
-const priorityOptions = ["low", "medium", "high"] as const;
+const priorityOptions = ["low", "medium", "high", "critical"] as const;
 
 function taskKind(kind: PageKind): TaskImportKind {
   return kind === "jd" ? "jd" : "one_time";

@@ -4,7 +4,7 @@ import { taskListOrderEntryValidator, taskListPreferenceValidator } from "./task
 import { sopListPreferenceValidator } from "./sopListPreferences";
 
 const role = v.string();
-const priority = v.union(v.literal("low"), v.literal("medium"), v.literal("high"));
+const priority = v.union(v.literal("low"), v.literal("medium"), v.literal("high"), v.literal("critical"));
 const rec = v.union(v.literal("daily"), v.literal("every_other_day"), v.literal("weekly"), v.literal("semimonthly"), v.literal("monthly"), v.literal("quarterly"), v.literal("semiannually"), v.literal("annually"));
 const taskStatus = v.union(v.literal("due"), v.literal("in_progress"), v.literal("completed"));
 const scope = v.union(v.literal("company"), v.literal("branch"), v.literal("department"), v.literal("user"));

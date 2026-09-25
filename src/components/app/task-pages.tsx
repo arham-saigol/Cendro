@@ -72,7 +72,7 @@ import { cn, formatDate, initials } from "@/lib/utils";
 const loadWorkbook = () => import("@/lib/task-import/workbook");
 
 type Kind = "jd" | "one";
-type Priority = "low" | "medium" | "high";
+type Priority = "low" | "medium" | "high" | "critical";
 type Frequency = "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "quarterly" | "semiannually" | "annually";
 type ManualStatus = "due" | "in_progress" | "completed";
 type StatusFilter = "all" | ManualStatus | "overdue";
@@ -142,7 +142,7 @@ const frequencies: { value: Frequency; label: string }[] = [
   { value: "semiannually", label: "Bi-yearly" },
   { value: "annually", label: "Yearly" },
 ];
-const priorities: Priority[] = ["low", "medium", "high"];
+const priorities: Priority[] = ["low", "medium", "high", "critical"];
 const TASK_PAGE_SIZE = 200;
 const TASK_LIST_ORDER_LIMIT = 2_000;
 const manualStatuses: { value: ManualStatus; label: string }[] = [
@@ -317,8 +317,14 @@ function humanSize(bytes?: number) {
   while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
   return `${i <= 1 ? Math.round(value) : value.toFixed(1)} ${units[i]}`;
 }
+const priorityChipTones: Record<Priority, string> = {
+  critical: "bg-[var(--priority-critical-bg)] text-[var(--priority-critical-fg)]",
+  high: "bg-[var(--priority-high-bg)] text-[var(--priority-high-fg)]",
+  medium: "bg-[var(--priority-medium-bg)] text-[var(--priority-medium-fg)]",
+  low: "bg-[var(--priority-low-bg)] text-[var(--priority-low-fg)]",
+};
 function priorityChipClasses(priority: Priority) {
-  return priority === "high" ? "bg-[var(--priority-high-bg)] text-[var(--priority-high-fg)]" : priority === "medium" ? "bg-[var(--priority-medium-bg)] text-[var(--priority-medium-fg)]" : "bg-[var(--priority-low-bg)] text-[var(--priority-low-fg)]";
+  return priorityChipTones[priority];
 }
 function dueLabel(task: any) {
   const ms = task.dueDate;

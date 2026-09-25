@@ -136,13 +136,14 @@ describe("task import backend", () => {
     const taskId = await admin.mutation(api.tasks.createOneTime, { companyId, title: "Filed", dueDate: Date.now() + 86_400_000, priority: "medium", assigneeMembershipIds: [adminMembershipId] });
     await admin.mutation(api.tasks.completeOneTime, { companyId, taskId });
     const task = await admin.query(api.tasks.getOneTime, { companyId, taskId });
-    const oneTimeDraft = { ...draft(), rowKey: "One-Time Tasks:2", sourceSheet: "One-Time Tasks", kind: "one_time" as const, reference: task.task.reference, title: "Filed", recurrence: null, dueDate: Date.now() - 86_400_000, priority: "high" as const, status: "completed" as const, presentFields: ["reference", "dueDate", "priority", "status"] as ("reference" | "dueDate" | "priority" | "status")[], rawAssigneeText: "", assigneeEmails: [] };
+    const oneTimeDraft = { ...draft(), rowKey: "One-Time Tasks:2", sourceSheet: "One-Time Tasks", kind: "one_time" as const, reference: task.task.reference, title: "Filed", recurrence: null, dueDate: Date.now() - 86_400_000, priority: "critical" as const, status: "completed" as const, presentFields: ["reference", "dueDate", "priority", "status"] as ("reference" | "dueDate" | "priority" | "status")[], rawAssigneeText: "", assigneeEmails: [] };
     await admin.mutation(api.taskImports.commitTaskImportBatch, {
       companyId, kind: "one_time", importKey: "import-completed", batchKey: "batch-1", source: "cendro",
       rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: oneTimeDraft }],
     });
     const updated = await admin.query(api.tasks.getOneTime, { companyId, taskId });
     expect(updated.task.status).toBe("completed");
+    expect(updated.task.priority).toBe("critical");
     expect(updated.task.overdueAt).toBeUndefined();
     expect(updated.task.state.rawStatus).toBe("completed");
   });

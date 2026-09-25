@@ -29,6 +29,8 @@ import { useTheme } from "./theme";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { canAccessCompanyManagement, canViewDashboard } from "@/lib/permissions";
+import { shellStageLabel, type ShellConnection, type ShellLoadingStage } from "@/lib/shell-access";
+import { useShellStall } from "./shell-stall";
 import { cn, initials } from "@/lib/utils";
 
 // The assistant panel is heavy (AI SDK, markdown rendering) and rarely opened;
@@ -320,11 +322,80 @@ function AssistantOrb({ onClick }: { onClick: () => void }) {
   );
 }
 
+function stallCopy(accessStatus: string, stage: ShellLoadingStage | null): { title: string; body: string } {
+  if (accessStatus === "convexUnauthenticated") {
+    return { title: "Couldn't verify your sign-in", body: "The server rejected the session token or never confirmed it. A firewall, VPN, or browser extension may be interfering with the secure connection." };
+  }
+  if (accessStatus === "profileMissing") {
+    return { title: "Your profile is still syncing", body: "Your account record hasn't been created yet. If this keeps happening, your account may be missing an email address — ask an administrator to check." };
+  }
+  if (stage === "session") {
+    return { title: "Sign-in is taking a while", body: "The sign-in service hasn't finished loading. A network filter or browser extension may be blocking it." };
+  }
+  if (stage === "convex-auth") {
+    return { title: "Securing your session", body: "You're signed in, but the secure connection hasn't been confirmed. A firewall or VPN may be blocking the connection to Cendro's servers." };
+  }
+  if (stage === "data") {
+    return { title: "Loading your workspace", body: "You're connected and signed in, but the workspace data hasn't arrived yet. The connection may have been interrupted." };
+  }
+  return { title: "Still loading", body: "This is taking longer than usual." };
+}
+
+function StallCard({
+  accessStatus,
+  stage,
+  elapsedMs,
+  reloads,
+  connection,
+  email,
+  onRetry,
+}: {
+  accessStatus: string;
+  stage: ShellLoadingStage | null;
+  elapsedMs: number;
+  reloads: number;
+  connection: ShellConnection | null;
+  email: string | null;
+  onRetry: () => void;
+}) {
+  const { title, body } = stallCopy(accessStatus, stage);
+  const elapsedSeconds = Math.round(elapsedMs / 1000);
+  const socket = connection
+    ? connection.isWebSocketConnected
+      ? "websocket connected"
+      : connection.hasEverConnected
+        ? `reconnecting (attempt ${connection.connectionRetries})`
+        : "websocket not connected"
+    : "websocket state unknown";
+  return (
+    <ShellCard>
+      {accessStatus !== "loading" || stage !== "session" ? (
+        <div className="mb-4">
+          <AccountCompanyMenu />
+        </div>
+      ) : null}
+      <h1 className="text-xl font-semibold">{title}</h1>
+      <p className="mt-2 text-sm text-[var(--ink-muted)]">{body}</p>
+      <p className="mt-3 text-xs text-[var(--ink-faint)]">
+        {stage ? `Waiting on ${shellStageLabel(stage)} · ` : ""}
+        {elapsedSeconds}s · {socket}
+        {reloads > 0 ? ` · retried ${reloads}x` : ""}
+        {typeof navigator !== "undefined" && navigator.onLine === false ? " · offline" : ""}
+      </p>
+      {email && <p className="mt-1 text-xs text-[var(--ink-faint)]">Signed in as {email}</p>}
+      <div className="mt-5 flex gap-2">
+        <Button variant="primary" onClick={onRetry}>Try again</Button>
+      </div>
+    </ShellCard>
+  );
+}
+
 function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; isPlatformAdmin: boolean }) {
   const path = usePathname();
   const router = useRouter();
-  const { accessStatus, email, activeCompanyId, active } = useCompany();
+  const { accessStatus, email, activeCompanyId, active, loadingStage, connection } = useCompany();
   const [aiOpen, setAiOpen] = useState(false);
+  const { stalled, elapsedMs, reloads, retry } = useShellStall(accessStatus, loadingStage, connection);
 
   useEffect(() => {
     if (accessStatus === "signedOut") router.replace(`/sign-in?redirect_url=${encodeURIComponent(path)}`);
@@ -335,6 +406,19 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
   const visibleNav = useMemo(() => nav.filter((item) => (!item.requiresCompanyManagement || canOpenCompanyManagement) && (!item.requiresDashboard || canViewActiveDashboard)), [canOpenCompanyManagement, canViewActiveDashboard]);
 
   if (accessStatus === "loading") {
+    if (stalled) {
+      return (
+        <StallCard
+          accessStatus={accessStatus}
+          stage={loadingStage}
+          elapsedMs={elapsedMs}
+          reloads={reloads}
+          connection={connection}
+          email={email}
+          onRetry={retry}
+        />
+      );
+    }
     return (
       <div className="min-h-dvh bg-[var(--chrome)] p-8">
         <div className="mx-auto max-w-5xl space-y-3">
@@ -349,6 +433,19 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
   if (accessStatus === "signedOut") return null;
 
   if (accessStatus === "convexUnauthenticated" || accessStatus === "profileMissing") {
+    if (stalled) {
+      return (
+        <StallCard
+          accessStatus={accessStatus}
+          stage={loadingStage}
+          elapsedMs={elapsedMs}
+          reloads={reloads}
+          connection={connection}
+          email={email}
+          onRetry={retry}
+        />
+      );
+    }
     return (
       <ShellCard>
         <div className="mb-4">

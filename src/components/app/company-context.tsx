@@ -2,9 +2,10 @@
 
 import { useAuth } from "@clerk/nextjs";
 import { createContext, useContext, useMemo, useState } from "react";
-import { useConvexAuth, useQuery } from "convex/react";
+import { useConvexAuth, useConvexConnectionState, useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
+import { loadingStage, type ShellConnection, type ShellLoadingStage } from "@/lib/shell-access";
 
 export type CompanyAccess = {
   company: { _id: Id<"companies">; name: string; timeZone?: string };
@@ -24,6 +25,10 @@ type AccessResult =
 
 type Ctx = {
   accessStatus: AccessStatus;
+  /** Which boot stage is still pending while accessStatus === "loading"; null otherwise. */
+  loadingStage: ShellLoadingStage | null;
+  /** Convex WebSocket diagnostics for stall reporting; null before client subscription. */
+  connection: ShellConnection | null;
   email: string | null;
   companies: CompanyAccess[];
   activeCompanyId: Id<"companies"> | null;
@@ -36,8 +41,24 @@ const Context = createContext<Ctx | null>(null);
 export function CompanyProvider({ children }: { children: React.ReactNode }) {
   const { isLoaded, isSignedIn } = useAuth();
   const { isLoading: convexAuthLoading, isAuthenticated } = useConvexAuth();
+  const connectionState = useConvexConnectionState();
   const queryResult = useQuery(api.companies.accessStatus, isLoaded && isSignedIn && isAuthenticated ? {} : "skip") as AccessResult | undefined;
   const accessStatus: AccessStatus = !isLoaded || (isSignedIn && convexAuthLoading) ? "loading" : !isSignedIn ? "signedOut" : !isAuthenticated ? "convexUnauthenticated" : queryResult?.status ?? "loading";
+  const stage = loadingStage({
+    clerkLoaded: isLoaded,
+    clerkSignedIn: isSignedIn === true,
+    convexAuthLoading,
+    convexAuthenticated: isAuthenticated,
+    accessPending: queryResult === undefined,
+  });
+  const connection: ShellConnection = useMemo(
+    () => ({
+      isWebSocketConnected: connectionState.isWebSocketConnected,
+      hasEverConnected: connectionState.hasEverConnected,
+      connectionRetries: connectionState.connectionRetries,
+    }),
+    [connectionState],
+  );
   const companies = useMemo(() => (queryResult?.status === "ready" ? queryResult.companies : []), [queryResult]);
   const email = queryResult && "email" in queryResult ? queryResult.email : null;
   const [selectedCompanyId, setSelectedCompanyId] = useState<Id<"companies"> | null>(() => {
@@ -53,7 +74,10 @@ export function CompanyProvider({ children }: { children: React.ReactNode }) {
     setSelectedCompanyId(id);
   };
 
-  const value = useMemo(() => ({ accessStatus, email, companies, activeCompanyId, setActiveCompanyId, active }), [accessStatus, email, companies, activeCompanyId, active]);
+  const value = useMemo(
+    () => ({ accessStatus, loadingStage: stage, connection, email, companies, activeCompanyId, setActiveCompanyId, active }),
+    [accessStatus, stage, connection, email, companies, activeCompanyId, active],
+  );
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }
 

@@ -5,6 +5,7 @@ import { ConvexProviderWithClerk } from "convex/react-clerk";
 import { ConvexReactClient, useConvexAuth, useMutation } from "convex/react";
 import { useEffect } from "react";
 import { api } from "../../../convex/_generated/api";
+import { PwaAgent } from "./pwa-agent";
 
 const url = process.env.NEXT_PUBLIC_CONVEX_URL;
 const convex = url ? new ConvexReactClient(url) : null;
@@ -27,6 +28,7 @@ export function ConvexClientProvider({ children }: { children: React.ReactNode }
   return (
     <ConvexProviderWithClerk client={convex} useAuth={useAuth}>
       <UserSync />
+      <PwaAgent />
       {children}
     </ConvexProviderWithClerk>
   );

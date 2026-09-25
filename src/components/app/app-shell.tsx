@@ -309,7 +309,7 @@ function AssistantOrb({ onClick }: { onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      className="fixed bottom-5 right-5 z-30 grid h-11 w-11 place-items-center rounded-full border border-[var(--assistant-orb-border)] bg-[var(--assistant-orb-bg)] text-zinc-950 shadow-[var(--assistant-orb-shadow)] transition hover:-translate-y-0.5 hover:bg-[var(--assistant-orb-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] active:translate-y-0 md:bottom-6 md:right-6"
+      className="fixed bottom-[calc(1.25rem+env(safe-area-inset-bottom))] right-[calc(1.25rem+env(safe-area-inset-right))] z-30 grid h-11 w-11 place-items-center rounded-full border border-[var(--assistant-orb-border)] bg-[var(--assistant-orb-bg)] text-zinc-950 shadow-[var(--assistant-orb-shadow)] transition hover:-translate-y-0.5 hover:bg-[var(--assistant-orb-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] active:translate-y-0 md:bottom-[calc(1.5rem+env(safe-area-inset-bottom))] md:right-[calc(1.5rem+env(safe-area-inset-right))]"
       aria-label="Open AI assistant"
     >
       <svg aria-hidden="true" role="graphics-symbol" viewBox="0 0 20 20" className="h-[31px] w-[31px]" xmlns="http://www.w3.org/2000/svg">
@@ -398,7 +398,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
   }
 
   return (
-    <div className={cn("flex h-dvh overflow-hidden bg-[var(--chrome)] py-2 pl-1.5 text-[var(--ink)]", aiOpen ? "pr-1.5" : "pr-2.5")}>
+    <div className={cn("flex h-dvh overflow-hidden bg-[var(--chrome)] pb-[max(0.5rem,env(safe-area-inset-bottom))] pl-[max(0.375rem,env(safe-area-inset-left))] pt-[max(0.5rem,env(safe-area-inset-top))] text-[var(--ink)]", aiOpen ? "pr-[max(0.375rem,env(safe-area-inset-right))]" : "pr-[max(0.625rem,env(safe-area-inset-right))]")}>
       <aside className="hidden w-[246px] shrink-0 flex-col bg-[var(--chrome-translucent)] px-2 pb-2 pt-1 backdrop-blur-sm md:flex">
         <AccountCompanyMenu searchItems={visibleNav} />
         <nav className="mt-4 space-y-0.5">
@@ -430,7 +430,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <header className="shrink-0 bg-[var(--chrome-translucent)] px-2 pb-2 pt-1 backdrop-blur-sm md:hidden">
           <AccountCompanyMenu searchItems={visibleNav} />
-          <nav className="mt-2 flex gap-1 overflow-x-auto pb-1">
+          <nav className="scrollbar-hidden mt-2 flex gap-1 overflow-x-auto pb-1">
             {visibleNav.map((item) => {
               const Icon = item.icon;
               const activeRow = path === item.href || path.startsWith(`${item.href}/`);

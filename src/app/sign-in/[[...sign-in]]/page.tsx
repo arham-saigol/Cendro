@@ -10,7 +10,7 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ r
   const redirectUrl = safeRedirectUrl((await searchParams).redirect_url);
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[var(--canvas-soft)]">
+    <main className="flex min-h-screen items-center justify-center bg-[var(--canvas-soft)] px-4 py-6">
       <SignIn fallbackRedirectUrl={redirectUrl} forceRedirectUrl={redirectUrl} signUpFallbackRedirectUrl={redirectUrl} signUpForceRedirectUrl={redirectUrl} />
     </main>
   );

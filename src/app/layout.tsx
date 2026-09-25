@@ -1,10 +1,29 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
 import { ConvexClientProvider } from "@/components/app/providers";
 import { ThemeProvider } from "@/components/app/theme";
 
-export const metadata: Metadata = { title: "Cendro", description: "Notion-like operations workspace for tasks, SOPs, employees, and companies." };
+export const metadata: Metadata = {
+  title: "Cendro",
+  description: "Notion-like operations workspace for tasks, SOPs, employees, and companies.",
+  applicationName: "Cendro",
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "Cendro" },
+  formatDetection: { telephone: false },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  // Keeps fixed dialogs and the detail drawer inside the visible area when the
+  // mobile keyboard opens.
+  interactiveWidget: "resizes-content",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#eef0f1" },
+    { media: "(prefers-color-scheme: dark)", color: "#26282b" },
+  ],
+};
 
 const themeScript = `
 (() => {

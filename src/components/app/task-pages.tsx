@@ -44,6 +44,7 @@ import { ListSortHeader } from "./list-sort-header";
 import { ListPreferenceController, type ListPreference, type ListPreferenceControllerOptions } from "@/lib/list-preference-controller";
 import { mergeFilteredListOrder, sameListOrder } from "@/lib/list-order";
 import { insertListItem } from "@/lib/list-drag";
+import { useIsCoarsePointer } from "@/lib/use-is-coarse-pointer";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -438,7 +439,9 @@ function TaskCellPopover({
   function measure() {
     const bounds = triggerRef.current?.getBoundingClientRect();
     if (!bounds) return;
-    setRect({ top: bounds.top, bottom: bounds.bottom, left: bounds.left - 14, width: Math.max(bounds.width + 28, 220) });
+    const width = Math.min(Math.max(bounds.width + 28, 220), window.innerWidth - 16);
+    const left = Math.min(Math.max(8, bounds.left - 14), Math.max(8, window.innerWidth - width - 8));
+    setRect({ top: bounds.top, bottom: bounds.bottom, left, width });
   }
 
   useEffect(() => {
@@ -725,6 +728,10 @@ function SortableTaskRow({
   onOpenDetails: () => void;
   children: ReactNode;
 }) {
+  // On touch there's no hover to reveal the OPEN chip, so any non-interactive
+  // part of an editable row also opens the drawer; cell editors keep their taps.
+  const coarse = useIsCoarsePointer();
+  const tapOpens = !rowCanEdit || coarse;
   return (
     <ListSortableRow
       id={task._id}
@@ -733,17 +740,17 @@ function SortableTaskRow({
       disabled={dragDisabled}
       drag={drag}
       data-row="task"
-      data-clickable={!rowCanEdit ? "true" : undefined}
+      data-clickable={tapOpens ? "true" : undefined}
       data-selected={selected ? "true" : undefined}
       data-checked={checked ? "true" : undefined}
-      tabIndex={!rowCanEdit ? 0 : undefined}
+      tabIndex={tapOpens ? 0 : undefined}
       onClick={(event) => {
-        if (rowCanEdit) return;
+        if (!tapOpens) return;
         if ((event.target as HTMLElement).closest("[data-interactive='true']")) return;
         onOpenDetails();
       }}
       onKeyDown={(event) => {
-        if (rowCanEdit || (event.target as HTMLElement).closest("[data-interactive='true']")) return;
+        if (!tapOpens || (event.target as HTMLElement).closest("[data-interactive='true']")) return;
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           onOpenDetails();
@@ -2189,7 +2196,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
           </div>
         )}
 
-        <div ref={taskDragWrapperRef} className="relative -ml-14 w-[calc(100%+3.5rem)] pl-14">
+        <div ref={taskDragWrapperRef} className="list-rail-gutter relative">
         <DragDropProvider
           onBeforeDragStart={drag.onBeforeDragStart}
           onDragMove={drag.onDragMove}

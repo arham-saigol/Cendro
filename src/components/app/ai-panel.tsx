@@ -916,7 +916,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
   }
 
   return (
-    <aside className="fixed bottom-2 right-2 top-2 z-40 flex w-[min(420px,calc(100vw-16px))] flex-col overflow-hidden rounded-xl bg-[var(--chrome-translucent)] text-[var(--ink)] shadow-[var(--shadow-popover)] backdrop-blur-sm md:static md:z-auto md:w-[392px] md:shrink-0 md:rounded-lg md:shadow-none">
+    <aside className="fixed bottom-[max(0.5rem,env(safe-area-inset-bottom))] right-[max(0.5rem,env(safe-area-inset-right))] top-[max(0.5rem,env(safe-area-inset-top))] z-40 flex w-[min(420px,calc(100vw-16px))] flex-col overflow-hidden rounded-xl bg-[var(--chrome-translucent)] text-[var(--ink)] shadow-[var(--shadow-popover)] backdrop-blur-sm md:static md:z-auto md:w-[392px] md:shrink-0 md:rounded-lg md:shadow-none">
       <header className="relative flex h-11 shrink-0 items-center justify-between px-2.5">
         <div ref={sessionMenuRef} className="flex min-w-0 items-center gap-1.5">
           <button type="button" onClick={toggleSessionMenu} className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-1 text-sm font-medium hover:bg-[var(--surface-hover)]" aria-label="Switch AI session" aria-expanded={menuOpen}>

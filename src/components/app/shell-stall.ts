@@ -7,6 +7,7 @@ import {
   clearShellRetries,
   isShellWaiting,
   readShellRetries,
+  shellRetriesPersistable,
   shellRetryStorage,
   shellStallSummary,
   shouldAutoRetry,
@@ -24,12 +25,13 @@ function browserOnline(): boolean {
  * Escalates a pending boot state: after SHELL_STALL_WARN_MS the caller swaps the
  * skeleton for a recoverable error card; after SHELL_AUTO_RETRY_MS the page
  * reloads itself once per episode (the retry counter survives reloads and is
- * capped in sessionStorage so a hard outage can't spin forever).
+ * capped in sessionStorage so a hard outage can't spin forever — if storage
+ * can't persist the counter, automatic reloads are disabled entirely and only
+ * the manual Try again remains).
  */
 export function useShellStall(accessStatus: string, stage: ShellLoadingStage | null, connection: ShellConnection | null) {
   const waiting = isShellWaiting(accessStatus);
   const [elapsedMs, setElapsedMs] = useState(0);
-  const [reloads, setReloads] = useState(0);
   const elapsedRef = useRef(0);
 
   const diagnostics = useCallback(
@@ -44,21 +46,28 @@ export function useShellStall(accessStatus: string, stage: ShellLoadingStage | n
       }),
     [accessStatus, stage, connection],
   );
+  // The stall interval outlives renders, so it reads diagnostics through a ref
+  // kept fresh after each commit; stage can advance while status stays "loading".
+  const diagnosticsRef = useRef(diagnostics);
+  useEffect(() => {
+    diagnosticsRef.current = diagnostics;
+  }, [diagnostics]);
 
   const retry = useCallback(() => {
     bumpShellRetries(shellRetryStorage());
-    console.warn("[cendro] app shell retry requested", diagnostics(elapsedRef.current));
+    console.warn("[cendro] app shell retry requested", diagnosticsRef.current(elapsedRef.current));
     window.location.reload();
-  }, [diagnostics]);
+  }, []);
 
   useEffect(() => {
     if (!waiting) {
       elapsedRef.current = 0;
       setElapsedMs(0);
       clearShellRetries(shellRetryStorage());
-      setReloads(0);
       return;
     }
+    const storage = shellRetryStorage();
+    const persistable = shellRetriesPersistable(storage);
     const startedAt = Date.now();
     let warned = false;
     let autoRetried = false;
@@ -68,21 +77,18 @@ export function useShellStall(accessStatus: string, stage: ShellLoadingStage | n
       setElapsedMs(elapsed);
       if (elapsed >= SHELL_STALL_WARN_MS && !warned) {
         warned = true;
-        console.warn("[cendro] app shell still waiting", diagnostics(elapsed));
+        console.warn("[cendro] app shell still waiting", diagnosticsRef.current(elapsed));
       }
-      const retries = readShellRetries(shellRetryStorage());
-      if (!autoRetried && shouldAutoRetry(elapsed, retries)) {
+      if (!autoRetried && persistable && shouldAutoRetry(elapsed, readShellRetries(storage))) {
         autoRetried = true;
-        setReloads(retries + 1);
-        bumpShellRetries(shellRetryStorage());
-        console.warn("[cendro] app shell auto-retrying after stall", diagnostics(elapsed));
+        bumpShellRetries(storage);
+        console.warn("[cendro] app shell auto-retrying after stall", diagnosticsRef.current(elapsed));
         window.location.reload();
       }
     }, 1000);
     return () => clearInterval(interval);
-    // diagnostics intentionally excluded: it reads per-tick elapsed state
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [waiting, accessStatus]);
 
-  return { stalled: waiting && elapsedMs >= SHELL_STALL_WARN_MS, elapsedMs, reloads, retry };
+  // Read per render so the count persists across auto-reload remounts.
+  return { stalled: waiting && elapsedMs >= SHELL_STALL_WARN_MS, elapsedMs, reloads: readShellRetries(shellRetryStorage()), retry };
 }

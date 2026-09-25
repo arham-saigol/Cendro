@@ -198,18 +198,50 @@ describe("useShellStall", () => {
     await advance(SHELL_AUTO_RETRY_MS * 2);
     expect(reloadSpy).toHaveBeenCalledTimes(1);
 
-    // Simulates the page after reload #1: storage survives, timer restarts.
+    // Simulates the page after reload #1: storage survives, timer restarts,
+    // and the card shows the persisted retry count.
     await remount();
+    expect(result!.reloads).toBe(1);
     await advance(SHELL_AUTO_RETRY_MS);
     expect(reloadSpy).toHaveBeenCalledTimes(2);
     expect(readShellRetries(sessionStorage)).toBe(2);
 
     // Simulates the page after reload #2: cap reached, card stays — no spin.
     await remount();
+    expect(result!.reloads).toBe(2);
     await advance(SHELL_AUTO_RETRY_MS * 3);
     expect(reloadSpy).toHaveBeenCalledTimes(2);
     expect(readShellRetries(sessionStorage)).toBe(2);
     expect(result!.stalled).toBe(true);
+  });
+
+  test("disabled storage stops automatic reloads but keeps manual retry", async () => {
+    Object.defineProperty(globalThis, "sessionStorage", {
+      value: {
+        getItem: () => {
+          throw new Error("denied");
+        },
+        setItem: () => {
+          throw new Error("denied");
+        },
+        removeItem: () => {
+          throw new Error("denied");
+        },
+      },
+      configurable: true,
+    });
+    await render();
+
+    // Storage can't persist the counter, so auto-retry would loop forever — it stays off.
+    await advance(SHELL_AUTO_RETRY_MS * 3);
+    expect(reloadSpy).not.toHaveBeenCalled();
+    expect(result!.stalled).toBe(true);
+
+    // The manual escape hatch still works.
+    act(() => {
+      result!.retry();
+    });
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
   });
 
   test("manual retry reloads immediately and counts toward the cap", async () => {

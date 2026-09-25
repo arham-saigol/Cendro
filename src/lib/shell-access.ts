@@ -93,6 +93,23 @@ export function clearShellRetries(storage: StorageLike | null | undefined): void
   }
 }
 
+/**
+ * Whether the retry counter can actually persist (and therefore cap auto-reloads
+ * across page reloads). Without it each reload restarts at zero and a stall
+ * would reload-loop forever, so the hook disables automatic retries in that
+ * case; manual retry stays available.
+ */
+export function shellRetriesPersistable(storage: StorageLike | null | undefined): boolean {
+  if (!storage) return false;
+  try {
+    const current = storage.getItem(RETRY_STORAGE_KEY) ?? "0";
+    storage.setItem(RETRY_STORAGE_KEY, current);
+    return storage.getItem(RETRY_STORAGE_KEY) === current;
+  } catch {
+    return false;
+  }
+}
+
 export type ShellStallSummary = {
   status: string;
   stage: ShellLoadingStage | null;

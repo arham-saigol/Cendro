@@ -5,6 +5,7 @@ import { ConvexProviderWithClerk } from "convex/react-clerk";
 import { ConvexReactClient, useConvexAuth, useMutation } from "convex/react";
 import { useEffect, useMemo } from "react";
 import { api } from "../../../convex/_generated/api";
+import { PwaAgent } from "./pwa-agent";
 import { boundGetToken } from "@/lib/clerk-token";
 
 const url = process.env.NEXT_PUBLIC_CONVEX_URL;
@@ -60,6 +61,7 @@ export function ConvexClientProvider({ children }: { children: React.ReactNode }
   return (
     <ConvexProviderWithClerk client={convex} useAuth={useBoundedClerkAuth}>
       <UserSync />
+      <PwaAgent />
       {children}
     </ConvexProviderWithClerk>
   );

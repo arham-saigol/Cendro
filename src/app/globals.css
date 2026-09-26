@@ -523,7 +523,6 @@ button:disabled { cursor: not-allowed; }
 .task-cell-popover-item:hover,
 .task-cell-popover-item:focus-visible { background: var(--surface-muted); color: var(--ink); }
 .task-cell-popover-scroll .task-cell-popover-body { max-height: 288px; overflow: auto; }
-.task-cell-popover-date { width: 250px !important; }
 .task-cell-popover-date .task-cell-popover-body { padding: 0; }
 
 .task-cell-control {
@@ -1700,4 +1699,62 @@ button:disabled { cursor: not-allowed; }
   .company-settings-row,
   .company-stat-row { grid-template-columns: 1fr; gap: 8px; }
   .company-settings-control { justify-content: flex-start; }
+}
+
+/* ---------- Touch and small screens ---------- */
+
+/* List rails (drag handle + row checkbox) sit in a gutter outside the table so
+   the table stays a pure grid; narrow phones reclaim most of the gutter. */
+.list-rail-gutter {
+  --rail-gutter: 3.5rem;
+  margin-left: calc(-1 * var(--rail-gutter));
+  padding-left: var(--rail-gutter);
+  width: calc(100% + var(--rail-gutter));
+}
+.list-rail-gutter--narrow { --rail-gutter: 2.75rem; }
+
+/* Pointer-based sortable drags need the browser to stop claiming the gesture
+   for scrolling. */
+.task-list-drag-handle,
+.structure-grip { touch-action: none; }
+
+@media (hover: none), (pointer: coarse) {
+  /* Hover-only controls become permanent, tap-sized affordances on touch. */
+  .structure-grip,
+  .structure-row .task-icon-btn { opacity: 1; }
+  .structure-grip { width: 26px; height: 26px; }
+  .structure-chevron { width: 26px; height: 26px; }
+  .task-title-open { opacity: 1; pointer-events: auto; }
+  .task-checkbox-rail .opacity-0 { opacity: 1; }
+  .comment-action-menu { opacity: 1; pointer-events: auto; }
+  .comment-action-btn { min-width: 30px; min-height: 30px; }
+  /* The always-on menu floats over the row's top-right; keep the author/timestamp
+     line clear of it on touch. */
+  .comment-row:has(> .comment-action-menu) .comment-header { padding-right: 68px; }
+  .task-rail-arrow { width: 32px; height: 32px; }
+
+  /* iOS Safari zooms the page when a focused input is below 16px. */
+  input,
+  textarea { font-size: 16px; }
+}
+
+@media (max-width: 639px) {
+  .list-rail-gutter,
+  .list-rail-gutter--narrow { --rail-gutter: 1.75rem; }
+  .task-checkbox-rail { width: 1.75rem; padding-right: 0.25rem; }
+  .company-table-wrap .task-checkbox-rail > * { justify-content: center; }
+  /* Drag handle stacks over the checkbox inside the narrower rail. */
+  .task-list-rail-row {
+    width: 1.75rem;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    padding-right: 0.25rem;
+  }
+  .task-list-rail-row .task-list-drag-handle {
+    width: 24px;
+    height: 16px;
+    flex-basis: 16px;
+  }
 }

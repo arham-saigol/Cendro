@@ -23,6 +23,33 @@ describe("AI message persistence helpers", () => {
     expect(toUiMessage({ _id: "assistant_1", role: "assistant", content: serialized }).parts[0].text).toBe(parsed.text);
   });
 
+  test("escaped characters can only over-trim, never exceed the cap", () => {
+    // Escapes expand in the JSON string, so removing N raw chars shrinks the
+    // output by at least N — a single-pass trim always lands under the cap.
+    const newlineHeavy = "a" + "\n".repeat(35_000) + "x".repeat(40_000);
+    const serialized = serializeAssistantMessage({ role: "assistant", parts: [{ type: "text", text: newlineHeavy }] }, 64_000);
+
+    expect(serialized.length).toBeLessThanOrEqual(64_000);
+    const text = JSON.parse(serialized).text;
+    expect(text).toBe("a" + "\n".repeat(text.length - 1));
+  });
+
+  test("budget eviction drops reasoning and tool parts before the final answer part", () => {
+    const message = {
+      role: "assistant",
+      parts: [
+        { type: "reasoning", text: "r".repeat(20_000) },
+        { type: "tool-list_tasks", toolCallId: "call_1", state: "output-available", input: {}, output: { rows: "o".repeat(10_000) } },
+        { type: "text", text: "a".repeat(30_000), state: "done" },
+      ],
+    };
+    const serialized = serializeAssistantMessage(message, 64_000);
+
+    expect(serialized.length).toBeLessThanOrEqual(64_000);
+    const ui = toUiMessage({ _id: "assistant_1", role: "assistant", content: serialized });
+    expect(ui.parts.some((part: any) => part.type === "text" && part.text === "a".repeat(30_000))).toBe(true);
+  });
+
   test("intermediate assistant output is not treated as the final answer", () => {
     const message = {
       role: "assistant",

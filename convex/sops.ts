@@ -824,11 +824,10 @@ export const semanticSearchAccessible = action({
     if (!query) return [];
     await ctx.runQuery(internal.sops.authorizeSearch, { companyId: args.companyId });
     const apiKey = process.env.VOYAGE_API_KEY;
-    if (!apiKey) return await ctx.runQuery(internal.sops.searchFallback, args);
-    // Embedding calls cost money; when the caller is over budget, degrade to
-    // text search rather than fail.
+    // Embedding calls cost money and the text fallback still scans; the
+    // budget applies either way — when over it, degrade rather than fail.
     const budget = await ctx.runMutation(api.aiChat.consumeRateLimit, { kind: "ai-search" });
-    if (!budget.ok) return await ctx.runQuery(internal.sops.searchFallback, args);
+    if (!budget.ok || !apiKey) return await ctx.runQuery(internal.sops.searchFallback, args);
     const vector = await embed(apiKey, query);
     if (!vector) return await ctx.runQuery(internal.sops.searchFallback, args);
     // Over-fetch before the visibility filter so invisible hits cannot starve

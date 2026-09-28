@@ -122,8 +122,11 @@ export function serializeAssistantMessage(message: any, maxChars = 64_000) {
   if (!parts.some((part) => part.type === "text") && text) parts.push({ type: "text", text, state: "done" });
 
   // Stored content must fit the persistence byte cap as valid JSON — slicing
-  // the serialized string would corrupt parse on read. Drop trailing display
-  // parts first (toUiMessage falls back to `text`), then trim `text` itself.
+  // the serialized string would corrupt parse on read. Evict non-text parts
+  // first so the final answer survives in `parts`; drop oldest text parts
+  // next (toUiMessage falls back to `text`), then trim `text` itself. Each
+  // removed character shrinks the output by at least one, so a single trim
+  // always lands under the cap — escapes can only over-trim, never exceed.
   const envelope = (finalText: string) => JSON.stringify({
     kind: STORED_ASSISTANT_MESSAGE_KIND,
     version: STORED_ASSISTANT_MESSAGE_VERSION,
@@ -132,7 +135,9 @@ export function serializeAssistantMessage(message: any, maxChars = 64_000) {
   } satisfies StoredAssistantMessage);
   let serialized = envelope(text);
   while (serialized.length > maxChars && parts.length) {
-    parts.pop();
+    let dropAt = -1;
+    for (let i = parts.length - 1; i >= 0; i -= 1) if (parts[i].type !== "text") { dropAt = i; break; }
+    parts.splice(dropAt === -1 ? 0 : dropAt, 1);
     serialized = envelope(text);
   }
   if (serialized.length > maxChars) {

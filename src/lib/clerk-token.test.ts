@@ -29,6 +29,11 @@ describe("boundGetToken", () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 
+  test("returns null when getToken throws before returning a promise", async () => {
+    const bounded = boundGetToken(() => { throw new Error("session unavailable"); }, 50);
+    await expect(bounded({ template: "convex" })).resolves.toBeNull();
+  });
+
   test("returns null when getToken rejects, matching the uncaught wrapper behavior", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const bounded = boundGetToken(() => Promise.reject(new Error("fetch failed")), 50);

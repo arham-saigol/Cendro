@@ -5,8 +5,8 @@
  * a stalled internal retry) the returned promise never settles. Convex's auth
  * manager awaits it before anything else, so a hung getToken freezes the whole
  * boot chain on the skeleton screen forever. Racing it against a deadline lets
- * Convex fall back to its own bounded retry and then to a recoverable
- * signed-in-but-unverified state.
+ * Convex finish the attempt; the auth provider then retries failed handshakes
+ * so a transient outage does not permanently strand the tab.
  */
 
 export type GetTokenOptions = { template?: string; skipCache?: boolean };
@@ -19,7 +19,7 @@ const TIMED_OUT = Symbol("clerk-get-token-timeout");
 export function boundGetToken(getToken: GetToken, timeoutMs = CLERK_GET_TOKEN_TIMEOUT_MS): GetToken {
   return async (options) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const attempt = getToken(options).then(
+    const attempt = Promise.resolve().then(() => getToken(options)).then(
       (token) => token,
       () => null,
     );

@@ -231,6 +231,22 @@ describe("useShellStall", () => {
     expect(reloadSpy).toHaveBeenCalledTimes(1);
   });
 
+  test("recovery after an automatic reload reports the previous stall episode", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null));
+    try {
+      await render();
+      await advance(SHELL_AUTO_RETRY_MS);
+      await remount();
+      await advance(5_000);
+      status = "ready";
+      await render();
+      expect(fetchSpy.mock.calls.some(([, options]) => JSON.parse(options?.body as string).event === "recovered")).toBe(true);
+      expect(readShellRetries(sessionStorage)).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   test("recovering resets the timer and clears the retry counter", async () => {
     await render();
     await advance(SHELL_AUTO_RETRY_MS);

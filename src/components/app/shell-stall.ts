@@ -66,14 +66,16 @@ export function useShellStall(accessStatus: string, stage: ShellLoadingStage | n
 
   useEffect(() => {
     if (!waiting) {
-      if (elapsedRef.current >= SHELL_STALL_WARN_MS) {
+      const storage = shellRetryStorage();
+      // A reload resets the local clock but not this episode's retry budget.
+      if (elapsedRef.current >= SHELL_STALL_WARN_MS || readShellRetries(storage) > 0) {
         const snapshot = diagnosticsRef.current(elapsedRef.current);
         if (snapshot.status === "ready" || snapshot.status === "noCompanies") reportAuthDiagnostic("recovered", snapshot);
       }
       clearBootEpisode();
       elapsedRef.current = 0;
       setElapsedMs(0);
-      clearShellRetries(shellRetryStorage());
+      clearShellRetries(storage);
       return;
     }
     bootEpisode();

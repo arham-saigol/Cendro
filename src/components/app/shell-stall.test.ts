@@ -4,15 +4,15 @@ import { createRoot, type Root } from "react-dom/client";
 import { useShellStall } from "./shell-stall";
 import { ConvexClerkAuthProvider } from "./convex-clerk-auth";
 
-const clerkState = vi.hoisted(() => ({ signedIn: true, sessionId: "session-a", token: null as string | null, calls: [] as unknown[] }));
-const syncState = vi.hoisted(() => ({ calls: 0, failUntil: 0 }));
+const clerkState = vi.hoisted(() => ({ signedIn: true, sessionId: "session-a", orgId: null as string | null, token: null as string | null, calls: [] as unknown[] }));
+const syncState = vi.hoisted(() => ({ calls: 0, failUntil: 0, missingEmail: false }));
 vi.mock("./pwa-agent", () => ({ PwaAgent: () => null }));
 vi.mock("@clerk/nextjs", () => {
   const getToken = async (options: unknown) => {
     clerkState.calls.push(options);
     return clerkState.token;
   };
-  return { useAuth: () => ({ isLoaded: true, isSignedIn: clerkState.signedIn, sessionId: clerkState.sessionId, orgId: null, orgRole: null, sessionClaims: null, getToken }) };
+  return { useAuth: () => ({ isLoaded: true, isSignedIn: clerkState.signedIn, sessionId: clerkState.sessionId, orgId: clerkState.orgId, orgRole: null, sessionClaims: null, getToken }) };
 });
 vi.mock("convex/react", async () => {
   const React = await import("react");
@@ -36,6 +36,10 @@ vi.mock("convex/react", async () => {
   }
   const sync = async () => {
     syncState.calls++;
+    if (syncState.missingEmail) {
+      const { ConvexError } = await import("convex/values");
+      throw new ConvexError("Authenticated email is required.");
+    }
     if (syncState.calls <= syncState.failUntil) throw new Error("temporary failure");
   };
   return {
@@ -369,6 +373,93 @@ test("a failed token handshake reauthenticates when Clerk recovers, and a sessio
   }
 });
 
+test("a later auth failure starts a fresh backoff after successful recovery", async () => {
+  vi.useFakeTimers();
+  clerkState.signedIn = true;
+  clerkState.sessionId = "same-session";
+  clerkState.orgId = null;
+  clerkState.token = null;
+  clerkState.calls = [];
+  const root = createRoot(createMockElement());
+  try {
+    await act(async () => {
+      root.render(React.createElement(ConvexClerkAuthProvider, { client: {} as any }));
+    });
+    await act(async () => { vi.advanceTimersByTime(5_000); });
+    clerkState.token = "valid-token";
+    await act(async () => { vi.advanceTimersByTime(10_000); });
+
+    // An org change reauthenticates with the same session, and this separate
+    // failure must use the initial delay, not the earlier episode's backoff.
+    clerkState.token = null;
+    clerkState.orgId = "org-2";
+    await act(async () => {
+      root.render(React.createElement(ConvexClerkAuthProvider, { client: {} as any }));
+    });
+    const callsBeforeRetry = clerkState.calls.length;
+    await act(async () => { vi.advanceTimersByTime(5_000); });
+    expect(clerkState.calls).toHaveLength(callsBeforeRetry + 1);
+  } finally {
+    await act(async () => { root.unmount(); });
+    clerkState.orgId = null;
+    vi.useRealTimers();
+  }
+});
+
+test("retry backoff resets when the signed-in Clerk session changes", async () => {
+  vi.useFakeTimers();
+  clerkState.signedIn = true;
+  clerkState.sessionId = "unavailable-session";
+  clerkState.token = null;
+  clerkState.calls = [];
+  const root = createRoot(createMockElement());
+  try {
+    await act(async () => {
+      root.render(React.createElement(ConvexClerkAuthProvider, { client: {} as any }));
+    });
+    for (const delay of [5_000, 10_000, 20_000, 40_000, 60_000]) {
+      await act(async () => { vi.advanceTimersByTime(delay); });
+    }
+    clerkState.sessionId = "new-session";
+    await act(async () => {
+      root.render(React.createElement(ConvexClerkAuthProvider, { client: {} as any }));
+    });
+    const callsAfterSwitch = clerkState.calls.length;
+    await act(async () => { vi.advanceTimersByTime(5_000); });
+    expect(clerkState.calls).toHaveLength(callsAfterSwitch + 1);
+  } finally {
+    await act(async () => { root.unmount(); });
+    vi.useRealTimers();
+  }
+});
+
+test("profile sync does not retry a missing-email claim until the session changes", async () => {
+  vi.useFakeTimers();
+  vi.stubEnv("NEXT_PUBLIC_CONVEX_URL", "https://example.convex.cloud");
+  const { ConvexClientProvider } = await import("./providers");
+  clerkState.signedIn = true;
+  clerkState.sessionId = "without-email";
+  clerkState.token = "valid-token";
+  syncState.calls = 0;
+  syncState.missingEmail = true;
+  const root = createRoot(createMockElement());
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await act(async () => { root.render(React.createElement(ConvexClientProvider, null)); });
+    await act(async () => { vi.advanceTimersByTime(120_000); });
+    expect(syncState.calls).toBe(1);
+    clerkState.sessionId = "another-session";
+    await act(async () => { root.render(React.createElement(ConvexClientProvider, null)); });
+    expect(syncState.calls).toBe(2);
+  } finally {
+    await act(async () => { root.unmount(); });
+    error.mockRestore();
+    syncState.missingEmail = false;
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  }
+});
+
 test("profile sync eventually succeeds after more than four transient failures without reloading", async () => {
   vi.useFakeTimers();
   vi.stubEnv("NEXT_PUBLIC_CONVEX_URL", "https://example.convex.cloud");
@@ -377,6 +468,7 @@ test("profile sync eventually succeeds after more than four transient failures w
   clerkState.token = "valid-token";
   syncState.calls = 0;
   syncState.failUntil = 4;
+  syncState.missingEmail = false;
   const root = createRoot(createMockElement());
   const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   try {

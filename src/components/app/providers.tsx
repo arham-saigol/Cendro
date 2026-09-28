@@ -2,6 +2,7 @@
 
 import { useAuth } from "@clerk/nextjs";
 import { ConvexReactClient, useConvexAuth, useMutation } from "convex/react";
+import { ConvexError } from "convex/values";
 import { useEffect } from "react";
 import { api } from "../../../convex/_generated/api";
 import { PwaAgent } from "./pwa-agent";
@@ -11,7 +12,7 @@ const url = process.env.NEXT_PUBLIC_CONVEX_URL;
 const convex = url ? new ConvexReactClient(url) : null;
 
 function UserSync() {
-  const { isSignedIn, sessionId } = useAuth();
+  const { isSignedIn } = useAuth();
   const { isAuthenticated } = useConvexAuth();
   const sync = useMutation(api.users.syncCurrentUser);
 
@@ -25,6 +26,10 @@ function UserSync() {
           return;
         } catch (err) {
           if (cancelled) return;
+          if (err instanceof ConvexError && err.data === "Authenticated email is required.") {
+            console.error("[cendro] user sync requires an email claim; ask an administrator to check this account.");
+            return;
+          }
           if (attempt === 0 || attempt % 10 === 0) console.warn("[cendro] user sync failed; retrying", err);
           // A transient failure must not permanently strand an already signed-in
           // user on the profile screen after a fixed number of attempts.
@@ -36,7 +41,7 @@ function UserSync() {
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, isSignedIn, sessionId, sync]);
+  }, [isAuthenticated, isSignedIn, sync]);
 
   return null;
 }

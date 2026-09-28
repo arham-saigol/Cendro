@@ -137,7 +137,7 @@ export async function POST(req: Request) {
       onError: () => "Cendro AI could not complete that request.",
       onFinish: async ({ responseMessage, isAborted, finishReason }) => {
         if (isAborted || finishReason === "error" || !finalTextOfAssistantMessage(responseMessage).trim()) return;
-        const content = serializeAssistantMessage(responseMessage).slice(0, MAX_PERSISTED_CONTENT_CHARS);
+        const content = serializeAssistantMessage(responseMessage, MAX_PERSISTED_CONTENT_CHARS);
         const secret = env.data.AI_CHAT_PERSISTENCE_SECRET;
         // Persist through one retry — a dropped reply vanishes from history and
         // silently removes it from the context of every later turn.

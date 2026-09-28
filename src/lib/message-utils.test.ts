@@ -11,6 +11,18 @@ describe("AI message persistence helpers", () => {
     expect(toUiMessage({ _id: "assistant_1", role: "assistant", content: serialized }).parts[0].text).toBe(longText);
   });
 
+  test("oversized responses are truncated inside the JSON envelope, never mid-string", () => {
+    const hugeText = "x".repeat(100_000);
+    const serialized = serializeAssistantMessage({ role: "assistant", parts: [{ type: "text", text: hugeText }] }, 64_000);
+
+    expect(serialized.length).toBeLessThanOrEqual(64_000);
+    const parsed = JSON.parse(serialized);
+    expect(parsed.text.length).toBeGreaterThan(0);
+    expect(hugeText.startsWith(parsed.text)).toBe(true);
+    expect(textFromStoredContent(serialized)).toBe(parsed.text);
+    expect(toUiMessage({ _id: "assistant_1", role: "assistant", content: serialized }).parts[0].text).toBe(parsed.text);
+  });
+
   test("intermediate assistant output is not treated as the final answer", () => {
     const message = {
       role: "assistant",

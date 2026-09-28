@@ -154,11 +154,11 @@ describe("task authorization hardening", () => {
     expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", otherStorageId))).not.toBeNull();
   });
 
-  test("Orphan cleanup releases an unbound claim without touching the blob", async () => {
+  test("Orphan cleanup deletes an unreferenced supplied blob but never a referenced one", async () => {
     const f = await createAuthzFixture();
 
-    // An unbound claim proves nothing about the supplied storageId, so the
-    // caller's blob is left for the expiry sweep — never deleted on their say-so.
+    // An unbound claim plus a blob nothing tracks can only be this flow's own
+    // abandoned upload — deleting it keeps the failed-bind path from leaking.
     const claimId = await f.t.run(async (ctx) =>
       ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, createdAt: Date.now() })
     );
@@ -168,7 +168,7 @@ describe("task authorization hardening", () => {
       f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId, storageId })
     ).resolves.toBeNull();
     expect(await f.t.run(async (ctx) => ctx.db.get(claimId))).toBeNull();
-    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", storageId))).not.toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", storageId))).toBeNull();
 
     // A blob already recorded as an attachment is never reclaimed.
     const jdTaskId = await f.asUser("adminA").mutation(api.tasks.createJd, {

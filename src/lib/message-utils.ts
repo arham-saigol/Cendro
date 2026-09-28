@@ -106,7 +106,7 @@ export function finalTextOfAssistantMessage(message: any) {
   return parts.slice(lastToolIndex + 1).map(partText).join("");
 }
 
-export function serializeAssistantMessage(message: any) {
+export function serializeAssistantMessage(message: any, maxChars = 64_000) {
   const text = finalTextOfAssistantMessage(message).trim();
   const sourceParts = Array.isArray(message?.parts) ? message.parts : [];
   const lastToolIndex = sourceParts.reduce((last: number, part: any, index: number) => toolNameOfPart(part) ? index : last, -1);
@@ -121,12 +121,24 @@ export function serializeAssistantMessage(message: any) {
 
   if (!parts.some((part) => part.type === "text") && text) parts.push({ type: "text", text, state: "done" });
 
-  return JSON.stringify({
+  // Stored content must fit the persistence byte cap as valid JSON — slicing
+  // the serialized string would corrupt parse on read. Drop trailing display
+  // parts first (toUiMessage falls back to `text`), then trim `text` itself.
+  const envelope = (finalText: string) => JSON.stringify({
     kind: STORED_ASSISTANT_MESSAGE_KIND,
     version: STORED_ASSISTANT_MESSAGE_VERSION,
-    text,
+    text: finalText,
     parts,
   } satisfies StoredAssistantMessage);
+  let serialized = envelope(text);
+  while (serialized.length > maxChars && parts.length) {
+    parts.pop();
+    serialized = envelope(text);
+  }
+  if (serialized.length > maxChars) {
+    serialized = envelope(text.slice(0, Math.max(0, text.length - (serialized.length - maxChars))));
+  }
+  return serialized;
 }
 
 export function toUiMessage(row: { _id: string; role: "user" | "assistant" | "tool"; content: string; createdAt?: number }) {

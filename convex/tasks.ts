@@ -1660,10 +1660,10 @@ const TASK_UPLOAD_CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
 
 // Reclaims the bound blob when recording an upload as an attachment failed
 // (e.g. the task was deleted mid-upload). The claim both proves the caller
-// was issued this upload slot and names the only blob cleanup may delete,
-// so a caller can never touch another tenant's pending upload. When the
-// upload POST completed but bindUploadClaim never committed, the caller's
-// storageId is bound here so the blob is never discarded unidentified.
+// was issued this upload slot and scopes which blob cleanup may delete, so
+// a caller can never touch another tenant's pending upload. When the upload
+// POST completed but bindUploadClaim never committed, the supplied blob is
+// deleted only while no claim or attachment references it.
 export const deleteOrphanedUpload = mutation({
   args: { companyId: v.id("companies"), claimId: v.id("taskUploadClaims"), storageId: v.optional(v.id("_storage")) },
   handler: async (ctx, args) => {
@@ -1671,16 +1671,19 @@ export const deleteOrphanedUpload = mutation({
     const claim = await ctx.db.get(args.claimId);
     if (!claim || claim.companyId !== args.companyId || claim.membershipId !== membership._id) throw new ConvexError("Upload claim not found.");
     if (claim.storageId && args.storageId && claim.storageId !== args.storageId) throw new ConvexError("Upload claim is bound to a different file.");
-    // Only the claim-bound blob is safe to delete — an unbound claim proves
-    // nothing about args.storageId, so let the expiry sweep reclaim it.
-    const blobId = claim.storageId;
+    // A blob is only safe to delete when nothing references it: the claim's
+    // own bound blob once this claim is gone, or a supplied blob no claim or
+    // attachment tracks (the leftover of a failed bind). Anything referenced
+    // elsewhere belongs to another upload — leave it to its owner.
+    const blobId = claim.storageId ?? args.storageId ?? null;
     await ctx.db.delete(args.claimId);
     if (!blobId) return null;
-    const [referenced, metadata] = await Promise.all([
+    const [attachmentRef, claimRef, metadata] = await Promise.all([
       ctx.db.query("taskAttachments").withIndex("by_storageId", (q) => q.eq("storageId", blobId)).first(),
+      ctx.db.query("taskUploadClaims").withIndex("by_storageId", (q) => q.eq("storageId", blobId)).first(),
       ctx.db.system.get("_storage", blobId),
     ]);
-    if (!referenced && metadata) await ctx.storage.delete(blobId);
+    if (!attachmentRef && !claimRef && metadata) await ctx.storage.delete(blobId);
     return null;
   },
 });
@@ -1892,7 +1895,9 @@ export const aiListVisible = query({
         ? aiJdRow(item.task as Doc<"jdTasks">, item.state, scopedJd, assignees)
         : aiOneTimeRow(item.task as Doc<"oneTimeTasks">, item.state, scopedOneTime, assignees),
     );
-    return { rows, truncated: jdScan.truncated || oneScan.truncated };
+    // Each scan also truncates at `limit`, so matches dropped by the merge
+    // only show up when the combined count exceeds the returned window.
+    return { rows, truncated: jdScan.truncated || oneScan.truncated || jdScan.matched.length + oneScan.matched.length > rows.length };
   },
 });
 

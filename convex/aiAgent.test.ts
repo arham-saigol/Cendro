@@ -87,6 +87,44 @@ describe("AI agent Convex boundaries", () => {
     expect(result.truncated).toBe(true);
   });
 
+  test("aiListVisible reports truncation when mixed kinds jointly exceed the limit", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let i = 0; i < 20; i += 1) {
+        await ctx.db.insert("jdTasks", {
+          companyId,
+          reference: `JD-${String(i + 1).padStart(3, "0")}`,
+          title: `Bulk JD ${i}`,
+          recurrence: "weekly",
+          cycleStartedAt: now,
+          status: "due",
+          assigneeMembershipIds: [adminMembershipId],
+          createdByMembershipId: adminMembershipId,
+          createdAt: now + i,
+          updatedAt: now + i,
+        });
+        await ctx.db.insert("oneTimeTasks", {
+          companyId,
+          reference: `OT-${String(i + 1).padStart(3, "0")}`,
+          title: `Bulk one-time ${i}`,
+          priority: "medium",
+          status: "due",
+          assigneeMembershipIds: [adminMembershipId],
+          createdByMembershipId: adminMembershipId,
+          createdAt: now + i,
+          updatedAt: now + i,
+        });
+      }
+    });
+
+    // 20 JD + 20 one-time, limit 30: 10 rows are dropped by the merge and
+    // callers must hear about it even though each per-kind scan fits.
+    const result = await t.withIdentity(identity("admin")).query(api.tasks.aiListVisible, { companyId, status: "all", limit: 30 });
+    expect(result.rows).toHaveLength(30);
+    expect(result.truncated).toBe(true);
+  });
+
   test("cross-company AI sessions and unauthorized writes fail", async () => {
     const { t, companyId, otherCompanyId, employeeMembershipId } = await seed();
     const sessionId = await t.withIdentity(identity("admin")).mutation(api.aiChat.createSession, { companyId });

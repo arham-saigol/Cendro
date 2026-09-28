@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 import { currentJdCycle, defaultTimeZone } from "./taskCycles";
@@ -9,6 +9,10 @@ import { MAX_REFERENCE_NUMBER, nextReference, syncReferenceCounter } from "./ref
 import { defaultRoleCapabilities } from "../src/lib/permissions";
 
 const modules = import.meta.glob("./**/*.ts");
+
+function utc(year: number, month: number, day: number, hour = 0) {
+  return Date.UTC(year, month - 1, day, hour);
+}
 
 function identity(key: string, email = `${key}@example.com`) {
   return { tokenIdentifier: `clerk|${key}`, subject: key, issuer: "https://clerk.test", email, name: key };
@@ -96,6 +100,44 @@ describe("task import backend", () => {
     expect(completions).toHaveLength(1);
     const logs = await t.run(async (ctx) => await ctx.db.query("taskActivityLogs").withIndex("by_task", (q) => q.eq("taskType", "jd").eq("taskId", taskId)).collect());
     expect(logs.some((l) => l.event === "status_changed" && l.fromStatus === "due" && l.toStatus === "completed")).toBe(true);
+  });
+
+  test("importing a recurrence change still records the old grid's missed cycles", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(utc(2026, 6, 4, 12)); // Thursday
+      const { t, companyId, adminMembershipId } = await seed();
+      await t.run(async (ctx) => await ctx.db.patch(companyId, { timeZone: "UTC" }));
+      const admin = t.withIdentity(identity("admin"));
+      const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Daily close", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+      const task = await admin.query(api.tasks.getJd, { companyId, taskId });
+
+      // Friday: the import switches the task to weekly. Thursday's daily
+      // cycle elapsed un-completed and must land in missed-cycle history —
+      // the new weekly grid's start precedes it and cannot see it.
+      vi.setSystemTime(utc(2026, 6, 5, 12));
+      await admin.mutation(api.taskImports.commitTaskImportBatch, {
+        companyId,
+        kind: "jd",
+        importKey: "import-recurrence",
+        batchKey: "batch-1",
+        source: "cendro",
+        rows: [{
+          include: true,
+          expectedUpdatedAt: task.task.updatedAt,
+          selectedAssigneeMembershipIds: null,
+          draft: draft({ reference: task.task.reference, recurrence: "weekly", rawAssigneeText: "", assigneeEmails: [], presentFields: ["reference", "recurrence"] }),
+        }],
+      });
+      await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+      const records = await t.run(async (ctx) => await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect());
+      expect(records).toEqual([expect.objectContaining({ cycleStart: utc(2026, 6, 4), cycleEnd: utc(2026, 6, 5), status: "missed" })]);
+      const updated = await admin.query(api.tasks.getJd, { companyId, taskId });
+      expect(updated.task.recurrence).toBe("weekly");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("requires the preview version and rejects duplicate update references", async () => {

@@ -188,12 +188,19 @@ export async function assertRoleManagerRemains(
 ) {
   const capCache = new Map<string, Promise<Set<Capability>>>();
   // Only members whose role can grant company:manage_roles need reading —
-  // scoped by the role index instead of scanning every membership.
-  const managingRoleNames = new Set<string>();
+  // scoped by the role index instead of scanning every membership. Names
+  // without a role document fall back to built-in defaults (companies not
+  // yet seeded still have working Admins), and pending capability edits
+  // replace a name's caps wherever it appears.
+  const docCaps = new Map<string, string[]>();
   for await (const role of ctx.db.query("roles").withIndex("by_company", (q) => q.eq("companyId", companyId))) {
-    const pendingCaps = change.capabilityChanges?.get(role.name);
-    const caps = pendingCaps ? pendingCaps.filter(isKnownCapability) : role.capabilities;
-    if (caps.includes("company:manage_roles")) managingRoleNames.add(role.name);
+    docCaps.set(role.name, role.capabilities);
+  }
+  const roleNames = new Set<string>([...docCaps.keys(), ...defaultRoleNames, ...(change.capabilityChanges?.keys() ?? [])]);
+  const managingRoleNames = new Set<string>();
+  for (const name of roleNames) {
+    const caps = change.capabilityChanges?.get(name) ?? docCaps.get(name) ?? legacyRoleCapabilities(name);
+    if (caps.includes("company:manage_roles")) managingRoleNames.add(name);
   }
   const candidates = new Map<Id<"companyMemberships">, Doc<"companyMemberships">>();
   for (const roleName of managingRoleNames) {

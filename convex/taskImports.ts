@@ -444,10 +444,13 @@ export const commitTaskImportBatch = mutation({
           const recurrence = hasField(item.draft, "recurrence") && item.draft.recurrence ? item.draft.recurrence : task.recurrence;
           const currentCycle = currentJdCycle(recurrence, now, company.timeZone);
           const nextCycleStart = recurrence !== task.recurrence ? currentCycle.start : undefined;
+          // The stamp and catch-up live on the old recurrence's grid — the
+          // new grid's start can precede elapsed old cycles and lose them.
+          const oldCycleStart = currentJdCycle(task.recurrence, now, company.timeZone).start;
           // Deferred like the interactive paths: inline catch-up can blow the
           // commit's transaction limits when a backlog of cycles elapsed.
-          await preserveJdCompletionStamp(ctx, task, currentCycle.start, company.timeZone ?? defaultTimeZone);
-          await scheduleMissedJdCycleCatchUp(ctx, task, currentCycle.start, recurrence !== task.recurrence ? { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt } : undefined);
+          await preserveJdCompletionStamp(ctx, task, oldCycleStart, company.timeZone ?? defaultTimeZone);
+          await scheduleMissedJdCycleCatchUp(ctx, task, oldCycleStart, recurrence !== task.recurrence ? { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt } : undefined);
           const rolled = await ctx.db.get(task._id);
           if (!rolled) fail("One or more import rows became unavailable. Re-preview and try again.");
           const activeCycleStart = nextCycleStart ?? currentCycle.start;

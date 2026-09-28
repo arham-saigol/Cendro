@@ -139,6 +139,27 @@ describe("backend permissions hardening", () => {
     ).rejects.toThrow("You do not have access to delete this task.");
   });
 
+  test("legacy companies without role documents still enforce role-admin retention", async () => {
+    const f = await createAuthzFixture();
+    // Simulate a company whose role records were never seeded: memberships
+    // fall back to built-in defaults via legacyRoleCapabilities.
+    await f.t.run(async (ctx) => {
+      for (const role of await ctx.db.query("roles").withIndex("by_company", (q) => q.eq("companyId", f.companyA)).collect()) {
+        await ctx.db.delete(role._id);
+      }
+    });
+
+    // Deactivating a non-admin member leaves the legacy Admin managing roles.
+    await expect(
+      f.t.run(async (ctx) => await assertRoleManagerRemains(ctx, f.companyA, { activeChanges: new Map([[f.managerM, false]]) }))
+    ).resolves.toBeNull();
+
+    // Deactivating the sole legacy Admin is still refused.
+    await expect(
+      f.t.run(async (ctx) => await assertRoleManagerRemains(ctx, f.companyA, { activeChanges: new Map([[f.adminM, false]]) }))
+    ).rejects.toThrow("At least one active member must be able to manage roles.");
+  });
+
   test("targeted managed checks scan every branch assignment", async () => {
     const f = await createAuthzFixture();
     const targetMembershipId = await f.t.run(async (ctx) => {

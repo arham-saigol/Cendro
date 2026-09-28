@@ -1,6 +1,6 @@
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
-import { internal } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import { action, internalAction, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { Capability } from "../src/lib/permissions";
@@ -813,6 +813,10 @@ export const semanticSearchAccessible = action({
     await ctx.runQuery(internal.sops.authorizeSearch, { companyId: args.companyId });
     const apiKey = process.env.VOYAGE_API_KEY;
     if (!apiKey) return await ctx.runQuery(internal.sops.searchFallback, args);
+    // Embedding calls cost money; when the caller is over budget, degrade to
+    // text search rather than fail.
+    const budget = await ctx.runMutation(api.aiChat.consumeRateLimit, { kind: "ai-search" });
+    if (!budget.ok) return await ctx.runQuery(internal.sops.searchFallback, args);
     const vector = await embed(apiKey, query);
     if (!vector) return await ctx.runQuery(internal.sops.searchFallback, args);
     const results = await ctx.vectorSearch("sopEmbeddings", "by_embedding", { vector, limit: 16, filter: (q) => q.eq("companyId", args.companyId) });

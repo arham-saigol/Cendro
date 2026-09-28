@@ -14,8 +14,8 @@ export const sendInvitation = internalAction({
   handler: async (ctx, args) => {
     const apiKey = process.env.RESEND_API_KEY;
     const from = process.env.RESEND_FROM;
-    const appUrl = process.env.APP_URL || "http://localhost:3000";
-    if (!apiKey || !from) throw new ConvexError("Invitation email is not configured.");
+    const appUrl = process.env.APP_URL;
+    if (!apiKey || !from || !appUrl) throw new ConvexError("Invitation email is not configured.");
     const url = `${appUrl}/invite/${encodeURIComponent(args.token)}`;
     const result = await new Resend(apiKey).emails.send({
       from,

@@ -14,7 +14,10 @@ function safeTitle(value: string) {
 const aiRateLimitConfigs = {
   "ai-chat": { limit: 20, windowMs: 60_000 },
   "ai-title": { limit: 10, windowMs: 60_000 },
+  "ai-search": { limit: 30, windowMs: 60_000 },
 } as const;
+
+const PERSISTENCE_REQUEST_WINDOW_MS = 5 * 60 * 1000;
 
 async function assertSession(ctx: QueryCtx | MutationCtx, companyId: Id<"companies">, sessionId: Id<"aiChatSessions">) {
   const { membership, user } = await requireMembership(ctx, companyId);
@@ -35,7 +38,7 @@ async function deleteMessageBatch(ctx: MutationCtx, sessionId: Id<"aiChatSession
 }
 
 export const consumeRateLimit = mutation({
-  args: { kind: v.union(v.literal("ai-chat"), v.literal("ai-title")) },
+  args: { kind: v.union(v.literal("ai-chat"), v.literal("ai-title"), v.literal("ai-search")) },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new ConvexError("Authentication required.");
@@ -165,7 +168,7 @@ export const persistServerMessage = mutation({
       throw new ConvexError("AI persistence secret is not configured.");
     }
     const now = Date.now();
-    if (Math.abs(now - args.timestamp) > 5 * 60 * 1000) {
+    if (Math.abs(now - args.timestamp) > PERSISTENCE_REQUEST_WINDOW_MS) {
       throw new ConvexError("Persistence request expired.");
     }
 
@@ -194,6 +197,14 @@ export const persistServerMessage = mutation({
       requestId: args.requestId,
       createdAt: now,
     });
+
+    // Receipts outside the replay window can never match a valid request;
+    // dropping them keeps the table bounded without weakening replay checks.
+    const staleReceipts = await ctx.db
+      .query("aiChatPersistenceRequests")
+      .withIndex("by_createdAt", (q) => q.lt("createdAt", now - PERSISTENCE_REQUEST_WINDOW_MS * 2))
+      .take(50);
+    for (const receipt of staleReceipts) await ctx.db.delete(receipt._id);
 
     const { session } = await assertSession(ctx, args.companyId, args.sessionId);
 

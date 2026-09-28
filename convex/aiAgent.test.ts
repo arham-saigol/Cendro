@@ -284,6 +284,57 @@ describe("AI agent Convex boundaries", () => {
     expect(messages.some((m) => m.content === content && m.role === "assistant")).toBe(true);
   });
 
+  test("persistServerMessage drops stale receipts while keeping replay protection live", async () => {
+    const { t, companyId } = await seed();
+    const sessionId = await t.withIdentity(identity("admin")).mutation(api.aiChat.createSession, { companyId });
+    const secret = "super-secret-hmac-key-for-test-32b";
+    process.env.AI_CHAT_PERSISTENCE_SECRET = secret;
+
+    const now = Date.now();
+    const staleCutoff = now - 2 * 5 * 60 * 1000;
+    await t.run(async (ctx) => {
+      // Two receipts older than the purge horizon and one inside it.
+      await ctx.db.insert("aiChatPersistenceRequests", { requestId: "req_stale_1", createdAt: staleCutoff - 1 });
+      await ctx.db.insert("aiChatPersistenceRequests", { requestId: "req_stale_2", createdAt: staleCutoff - 60_000 });
+      await ctx.db.insert("aiChatPersistenceRequests", { requestId: "req_recent", createdAt: staleCutoff + 60_000 });
+    });
+
+    const payload = createAiPersistencePayload({ companyId, sessionId, role: "assistant", timestamp: now, requestId: "req_new", content: "Fresh reply." });
+    const signature = await signAiPersistencePayload(secret, payload);
+    await t.withIdentity(identity("admin")).mutation(api.aiChat.persistServerMessage, {
+      companyId, sessionId, role: "assistant", content: "Fresh reply.", timestamp: now, requestId: "req_new", signature,
+    });
+
+    const remaining = await t.run(async (ctx) => ctx.db.query("aiChatPersistenceRequests").collect());
+    expect(remaining.map((row) => row.requestId).sort()).toEqual(["req_new", "req_recent"]);
+
+    // The surviving receipt still blocks replay within the window.
+    const replayPayload = createAiPersistencePayload({ companyId, sessionId, role: "assistant", timestamp: now, requestId: "req_new", content: "Fresh reply." });
+    const replaySignature = await signAiPersistencePayload(secret, replayPayload);
+    await expect(
+      t.withIdentity(identity("admin")).mutation(api.aiChat.persistServerMessage, {
+        companyId, sessionId, role: "assistant", content: "Fresh reply.", timestamp: now, requestId: "req_new", signature: replaySignature,
+      })
+    ).rejects.toThrow("Replay detected: request ID already used.");
+  });
+
+  test("ai-search rate limit rejects over-budget callers and stays independent", async () => {
+    const { t } = await seed();
+    const user = t.withIdentity(identity("admin"));
+
+    for (let i = 0; i < 30; i += 1) {
+      const result = await user.mutation(api.aiChat.consumeRateLimit, { kind: "ai-search" });
+      expect(result.ok).toBe(true);
+    }
+    const rejected = await user.mutation(api.aiChat.consumeRateLimit, { kind: "ai-search" });
+    expect(rejected.ok).toBe(false);
+    expect((rejected as { retryAfter?: number }).retryAfter).toBeGreaterThan(0);
+
+    // Search budget is separate from chat/title budgets.
+    const chat = await user.mutation(api.aiChat.consumeRateLimit, { kind: "ai-chat" });
+    expect(chat.ok).toBe(true);
+  });
+
   test("enforces ai:use capability when reading individual sessions after revocation", async () => {
     const { t, companyId } = await seed();
     const sessionId = await t.withIdentity(identity("employee")).mutation(api.aiChat.createSession, { companyId });

@@ -630,7 +630,7 @@ describe("task import backend", () => {
 
   test("user cannot update a task outside their permissions or use an existing task code outside their permissions", async () => {
     const t = convexTest(schema, modules);
-    const { companyId, managerMembershipId, empAMembershipId, empBMembershipId, jdTaskBId } = await t.run(async (ctx) => {
+    const { companyId, empAMembershipId, empBMembershipId, jdTaskBId } = await t.run(async (ctx) => {
       const now = Date.now();
       const companyId = await ctx.db.insert("companies", { name: "Branch Corp", createdAt: now });
       const adminUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin", email: "admin@example.com", firstName: "Admin", createdAt: now, updatedAt: now });
@@ -704,7 +704,7 @@ describe("task import backend", () => {
 
   test("user cannot assign a task to someone outside their assignable scope", async () => {
     const t = convexTest(schema, modules);
-    const { companyId, managerMembershipId, empAMembershipId, empBMembershipId } = await t.run(async (ctx) => {
+    const { companyId } = await t.run(async (ctx) => {
       const now = Date.now();
       const companyId = await ctx.db.insert("companies", { name: "Branch Scope Corp", createdAt: now });
       const managerUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|mgr", email: "mgr@example.com", firstName: "Mgr", createdAt: now, updatedAt: now });

@@ -444,7 +444,7 @@ function TaskCellPopover({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [rect, setRect] = useState<{ top: number; bottom: number; left: number; width: number } | null>(null);
 
-  function measure() {
+  const measure = useCallback(() => {
     const bounds = triggerRef.current?.getBoundingClientRect();
     if (!bounds) return;
     // A popover with preferredWidth renders wider than its trigger; the left
@@ -452,7 +452,7 @@ function TaskCellPopover({
     const width = Math.min(Math.max(bounds.width + 28, preferredWidth ?? 220), window.innerWidth - 16);
     const left = Math.min(Math.max(8, bounds.left - 14), Math.max(8, window.innerWidth - width - 8));
     setRect({ top: bounds.top, bottom: bounds.bottom, left, width });
-  }
+  }, [preferredWidth]);
 
   useEffect(() => {
     if (!open) return;
@@ -468,7 +468,7 @@ function TaskCellPopover({
       window.removeEventListener("resize", measure);
       window.removeEventListener("scroll", measure, true);
     };
-  }, [onOpenChange, open]);
+  }, [measure, onOpenChange, open]);
 
   return (
     <span className="task-cell-popover-root">

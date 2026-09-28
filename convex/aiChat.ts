@@ -255,6 +255,25 @@ export const deleteSession = mutation({
   },
 });
 
+// Receipts past the replay horizon are useless; request-path cleanup is
+// bounded to 50/message, so this scheduled sweep guarantees a backlog created
+// before the cap existed (or while chats are idle) drains to empty.
+export const purgeExpiredPersistenceReceipts = internalMutation({
+  args: { cursor: v.optional(v.union(v.string(), v.null())) },
+  handler: async (ctx, args) => {
+    const cutoff = Date.now() - PERSISTENCE_REQUEST_WINDOW_MS * 2;
+    const page = await ctx.db
+      .query("aiChatPersistenceRequests")
+      .withIndex("by_createdAt", (q) => q.lt("createdAt", cutoff))
+      .paginate({ numItems: 200, cursor: args.cursor ?? null });
+    for (const receipt of page.page) await ctx.db.delete(receipt._id);
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.aiChat.purgeExpiredPersistenceReceipts, { cursor: page.continueCursor });
+    }
+    return null;
+  },
+});
+
 export const deleteSessionMessages = internalMutation({
   args: { sessionId: v.id("aiChatSessions") },
   handler: async (ctx, args) => {

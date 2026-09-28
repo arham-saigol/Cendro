@@ -335,6 +335,20 @@ describe("AI agent Convex boundaries", () => {
     expect(chat.ok).toBe(true);
   });
 
+  test("over-budget semantic search degrades to text results instead of failing", async () => {
+    const { t, companyId } = await seed();
+    const user = t.withIdentity(identity("admin"));
+    await user.mutation(api.sops.create, { companyId, title: "Fire drill", content: "Evacuate via stairwells", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
+    // Present so the quota gate is reached; the request must not reach the
+    // embed call, so the value never authenticates anywhere.
+    process.env.VOYAGE_API_KEY = "test-voyage-key";
+
+    for (let i = 0; i < 30; i += 1) await user.mutation(api.aiChat.consumeRateLimit, { kind: "ai-search" });
+
+    const results = await user.action(api.sops.semanticSearchAccessible, { companyId, query: "fire" });
+    expect(results.map((sop) => sop.title)).toEqual(["Fire drill"]);
+  });
+
   test("enforces ai:use capability when reading individual sessions after revocation", async () => {
     const { t, companyId } = await seed();
     const sessionId = await t.withIdentity(identity("employee")).mutation(api.aiChat.createSession, { companyId });

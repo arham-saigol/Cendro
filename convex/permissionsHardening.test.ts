@@ -117,6 +117,28 @@ describe("backend permissions hardening", () => {
     ).rejects.toThrow("You do not have access to delete this task.");
   });
 
+  test("delete:self requires sole assignment — a co-assignee cannot delete a shared task", async () => {
+    const f = await createAuthzFixture();
+    await f.setRoleCapabilities(f.companyA, "Employee", ["tasks:jd:delete:self"]);
+
+    // Sole assignee may delete.
+    await expect(
+      f.asUser("employeeA1").run(async (ctx) => {
+        const auth = await requireCompanyAccess(ctx, f.companyA);
+        await assertCanDeleteTask(ctx, f.companyA, auth.membership, [f.employee1M], "jd", auth.capabilities);
+      })
+    ).resolves.toBeNull();
+
+    // A task shared with a co-assignee is not "solely mine" — deleting would
+    // erase it for them too.
+    await expect(
+      f.asUser("employeeA1").run(async (ctx) => {
+        const auth = await requireCompanyAccess(ctx, f.companyA);
+        await assertCanDeleteTask(ctx, f.companyA, auth.membership, [f.employee1M, f.employee2M], "jd", auth.capabilities);
+      })
+    ).rejects.toThrow("You do not have access to delete this task.");
+  });
+
   test("targeted managed checks scan every branch assignment", async () => {
     const f = await createAuthzFixture();
     const targetMembershipId = await f.t.run(async (ctx) => {

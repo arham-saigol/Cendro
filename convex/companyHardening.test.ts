@@ -264,6 +264,81 @@ describe("company management & invitation hardening", () => {
     ).resolves.toBeNull();
   });
 
+  test("Revoking an invitation invalidates its token and writes an audit event", async () => {
+    const f = await createAuthzFixture();
+
+    const invite = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "revokeme@example.com",
+      role: "Employee",
+    });
+
+    await f.asUser("adminA").mutation(api.companyManagement.revokeInvitation, {
+      companyId: f.companyA,
+      invitationId: invite.id,
+    });
+
+    await expect(
+      f.t.withIdentity(identity("revokeme", "revokeme@example.com", true)).mutation(api.invitations.accept, {
+        token: invite.token,
+      })
+    ).rejects.toThrow("Invitation not found.");
+
+    // Revoking a second time is rejected — only pending invitations can be revoked.
+    await expect(
+      f.asUser("adminA").mutation(api.companyManagement.revokeInvitation, {
+        companyId: f.companyA,
+        invitationId: invite.id,
+      })
+    ).rejects.toThrow("Only pending invitations can be revoked.");
+
+    const auditEvent = await f.t.run(async (ctx) => {
+      return await ctx.db
+        .query("auditEvents")
+        .withIndex("by_company", (q) => q.eq("companyId", f.companyA))
+        .filter((q) => q.eq(q.field("action"), "invitation.revoke"))
+        .first();
+    });
+    expect(auditEvent).not.toBeNull();
+  });
+
+  test("setAssignments and setManagerScope write audit events", async () => {
+    const f = await createAuthzFixture();
+
+    await f.asUser("adminA").mutation(api.companyManagement.setAssignments, {
+      companyId: f.companyA,
+      membershipId: f.employee1M,
+      branchIds: [f.branchA2],
+      departmentIds: [f.deptA2],
+    });
+    await f.asUser("adminA").mutation(api.companyManagement.setManagerScope, {
+      companyId: f.companyA,
+      managerMembershipId: f.managerM,
+      branchIds: [f.branchA1],
+      departmentIds: [f.deptA1],
+      userMembershipIds: [f.employee2M],
+    });
+
+    const actions = await f.t.run(async (ctx) => {
+      const rows = await ctx.db
+        .query("auditEvents")
+        .withIndex("by_company", (q) => q.eq("companyId", f.companyA))
+        .collect();
+      return rows.map((row) => row.action).sort();
+    });
+    expect(actions).toEqual(["member.assignments_update", "member.manager_scope_update"]);
+
+    // The new scope rows replaced the previous ones.
+    const managed = await f.t.run(async (ctx) => {
+      const rows = await ctx.db
+        .query("managerUserScopes")
+        .withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", f.managerM))
+        .collect();
+      return rows.map((row) => row.userMembershipId);
+    });
+    expect(managed).toEqual([f.employee2M]);
+  });
+
   test("clearUserManagementRows deletes all matching rows across multiple batches", async () => {
     const f = await createAuthzFixture();
 

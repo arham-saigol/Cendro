@@ -62,6 +62,31 @@ describe("AI agent Convex boundaries", () => {
     expect(sops.map((sop) => sop.title)).toEqual(["Visible SOP"]);
   });
 
+  test("aiListVisible fills its limit across multiple evaluation chunks and reports truncation", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let i = 0; i < 120; i += 1) {
+        await ctx.db.insert("jdTasks", {
+          companyId,
+          reference: `JD-${String(i + 1).padStart(3, "0")}`,
+          title: `Bulk task ${i}`,
+          recurrence: "weekly",
+          cycleStartedAt: now,
+          status: "due",
+          assigneeMembershipIds: [adminMembershipId],
+          createdByMembershipId: adminMembershipId,
+          createdAt: now + i,
+          updatedAt: now + i,
+        });
+      }
+    });
+
+    const result = await t.withIdentity(identity("admin")).query(api.tasks.aiListVisible, { companyId, status: "all", limit: 30 });
+    expect(result.rows).toHaveLength(30);
+    expect(result.truncated).toBe(true);
+  });
+
   test("cross-company AI sessions and unauthorized writes fail", async () => {
     const { t, companyId, otherCompanyId, employeeMembershipId } = await seed();
     const sessionId = await t.withIdentity(identity("admin")).mutation(api.aiChat.createSession, { companyId });
@@ -383,6 +408,69 @@ describe("AI agent Convex boundaries", () => {
     await expect(
       t.withIdentity(identity("employee")).query(api.aiChat.listMessages, { companyId, sessionId })
     ).rejects.toThrow("You do not have permission to use AI.");
+  });
+
+  test("getOrCreateSession reuses the newest draft instead of minting another", async () => {
+    const { t, companyId } = await seed();
+    const user = t.withIdentity(identity("admin"));
+
+    const first = await user.mutation(api.aiChat.getOrCreateSession, { companyId });
+    const second = await user.mutation(api.aiChat.getOrCreateSession, { companyId });
+    expect(second).toBe(first);
+
+    // Once the draft has messages it is no longer a draft — the next call
+    // without a sessionId mints a fresh session.
+    await user.mutation(api.aiChat.appendMessage, { companyId, sessionId: first, role: "user", content: "Hello" });
+    const third = await user.mutation(api.aiChat.getOrCreateSession, { companyId });
+    expect(third).not.toBe(first);
+  });
+
+  test("deleting a session tombstones it so writes reject while the drain runs", async () => {
+    const { t, companyId } = await seed();
+    const user = t.withIdentity(identity("admin"));
+    const sessionId = await user.mutation(api.aiChat.createSession, { companyId });
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      // One full delete batch, so deleteSession leaves the drain scheduled.
+      for (let i = 0; i < 100; i += 1) await ctx.db.insert("aiChatMessages", { sessionId, role: "user", content: `Message ${i}`, createdAt: now + i });
+      await ctx.db.patch(sessionId, { hasMessages: true, updatedAt: now });
+    });
+
+    vi.useFakeTimers();
+    try {
+      await user.mutation(api.aiChat.deleteSession, { companyId, sessionId });
+
+      // Tombstoned: writes reject before the scheduled drain finishes.
+      await expect(
+        user.mutation(api.aiChat.appendMessage, { companyId, sessionId, role: "user", content: "late" })
+      ).rejects.toThrow("Chat session not found.");
+
+      // A deleting session is never reused by getOrCreateSession.
+      const fresh = await user.mutation(api.aiChat.getOrCreateSession, { companyId, sessionId });
+      expect(fresh).not.toBe(sessionId);
+
+      await t.finishAllScheduledFunctions(vi.runAllTimers);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const row = await t.run(async (ctx) => await ctx.db.get(sessionId));
+    expect(row).toBeNull();
+  });
+
+  test("appendMessage rejects oversized message content", async () => {
+    const { t, companyId } = await seed();
+    const user = t.withIdentity(identity("admin"));
+    const sessionId = await user.mutation(api.aiChat.createSession, { companyId });
+
+    await expect(
+      user.mutation(api.aiChat.appendMessage, {
+        companyId,
+        sessionId,
+        role: "user",
+        content: "x".repeat(64_001),
+      })
+    ).rejects.toThrow("Message is too long.");
   });
 });
 

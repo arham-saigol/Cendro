@@ -166,7 +166,10 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
     activityLabel: cendroAiActivityLabels.list_assignable_users,
     permission: ["tasks:jd:create", "tasks:one_time:create"],
     risk: "read",
-    execute: async (input, ctx) => ({ ok: true, people: (await ctx.client.query(api.tasks.aiAssignableUsers, { companyId: ctx.companyId, kind: input.kind })).map((row: any) => memberOut(ctx, row)) }),
+    execute: async (input, ctx) => {
+      const result = await ctx.client.query(api.tasks.aiAssignableUsers, { companyId: ctx.companyId, kind: input.kind });
+      return { ok: true, people: result.users.map((row: any) => memberOut(ctx, row)), ...(result.isTruncated ? { truncated: true } : {}) };
+    },
   },
   {
     name: "create_one_time_task",

@@ -41,6 +41,8 @@ function storageContentOf(message: any) {
 
 const MAX_AGENT_STEPS = 16;
 const FINAL_ANSWER_STEP = MAX_AGENT_STEPS - 1;
+const MAX_PERSISTED_CONTENT_CHARS = 64_000;
+const MODEL_CONTEXT_CHAR_BUDGET = 160_000;
 
 export async function POST(req: Request) {
   try {
@@ -53,8 +55,6 @@ export async function POST(req: Request) {
 
     const client = new ConvexHttpClient(env.data.NEXT_PUBLIC_CONVEX_URL);
     client.setAuth(token);
-    const rateLimit = await consumeAiRateLimit(client, "ai-chat");
-    if (!rateLimit.ok) return Response.json({ error: "Too many AI chat requests" }, { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } });
 
     const body = await readJsonRequest(req, AI_CHAT_MAX_REQUEST_BYTES);
     if (!body.ok) return Response.json({ error: body.reason === "too_large" ? "Chat request is too large" : "Invalid request body" }, { status: body.reason === "too_large" ? 413 : 400 });
@@ -72,12 +72,18 @@ export async function POST(req: Request) {
       return Response.json({ error: "Chat session not found" }, { status: 404 });
     }
 
+    // Rate limit after validation and session auth so malformed or
+    // unauthorized requests cannot burn the caller's quota.
+    const rateLimit = await consumeAiRateLimit(client, "ai-chat");
+    if (!rateLimit.ok) return Response.json({ error: "Too many AI chat requests" }, { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } });
+
     let persisted = await client.query(api.aiChat.listMessages, { companyId, sessionId });
     const latestUser = [...messages].reverse().find((message) => message.role === "user");
     const latestHasAttachment = latestUser ? hasFileAttachment(latestUser) : false;
 
     if (latestUser) {
       const content = storageContentOf(latestUser);
+      if (content.length > MAX_PERSISTED_CONTENT_CHARS) return Response.json({ error: "Message is too long" }, { status: 413 });
       const clientMessageId = typeof latestUser.id === "string" ? latestUser.id : undefined;
       const latestPersisted = persisted.at(-1);
       const alreadyPersisted = clientMessageId
@@ -91,10 +97,22 @@ export async function POST(req: Request) {
       }
     }
 
-    const modelMessages = persisted.map(toModelMessage);
+    // Bound serialized history by bytes, not just count: input tokens are the
+    // dominant request cost, so oldest messages drop out once the budget is
+    // spent. The latest user message always stays.
+    let contextSize = 0;
+    let historyStart = persisted.length;
+    for (let index = persisted.length - 1; index >= 0; index -= 1) {
+      const size = persisted[index].content.length + 32;
+      if (index !== persisted.length - 1 && contextSize + size > MODEL_CONTEXT_CHAR_BUDGET) break;
+      contextSize += size;
+      historyStart = index;
+    }
+    const contextRows = persisted.slice(historyStart);
+    const modelMessages = contextRows.map(toModelMessage);
     if (latestUser && latestHasAttachment) {
       const clientMessageId = typeof latestUser.id === "string" ? latestUser.id : undefined;
-      const index = clientMessageId ? persisted.findIndex((message) => message.clientMessageId === clientMessageId) : persisted.length - 1;
+      const index = clientMessageId ? contextRows.findIndex((message) => message.clientMessageId === clientMessageId) : contextRows.length - 1;
       if (index >= 0) modelMessages[index] = latestUser;
       else modelMessages.push(latestUser);
     }
@@ -118,29 +136,38 @@ export async function POST(req: Request) {
       headers: { "X-Accel-Buffering": "no" },
       onError: () => "Cendro AI could not complete that request.",
       onFinish: async ({ responseMessage, isAborted, finishReason }) => {
-        if (isAborted || finishReason === "length" || finishReason === "error" || !finalTextOfAssistantMessage(responseMessage).trim()) return;
-        const content = serializeAssistantMessage(responseMessage);
+        if (isAborted || finishReason === "error" || !finalTextOfAssistantMessage(responseMessage).trim()) return;
+        const content = serializeAssistantMessage(responseMessage).slice(0, MAX_PERSISTED_CONTENT_CHARS);
         const secret = env.data.AI_CHAT_PERSISTENCE_SECRET;
-        const timestamp = Date.now();
-        const requestId = crypto.randomUUID();
-        const payload = createAiPersistencePayload({
-          companyId,
-          sessionId,
-          role: "assistant",
-          timestamp,
-          requestId,
-          content,
-        });
-        const signature = await signAiPersistencePayload(secret, payload);
-        await client.mutation(api.aiChat.persistServerMessage, {
-          companyId,
-          sessionId,
-          role: "assistant",
-          content,
-          timestamp,
-          requestId,
-          signature,
-        });
+        // Persist through one retry — a dropped reply vanishes from history and
+        // silently removes it from the context of every later turn.
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            const timestamp = Date.now();
+            const requestId = crypto.randomUUID();
+            const payload = createAiPersistencePayload({
+              companyId,
+              sessionId,
+              role: "assistant",
+              timestamp,
+              requestId,
+              content,
+            });
+            const signature = await signAiPersistencePayload(secret, payload);
+            await client.mutation(api.aiChat.persistServerMessage, {
+              companyId,
+              sessionId,
+              role: "assistant",
+              content,
+              timestamp,
+              requestId,
+              signature,
+            });
+            return;
+          } catch (error) {
+            console.error("Cendro AI: assistant message persistence failed", error);
+          }
+        }
       },
     });
   } catch {

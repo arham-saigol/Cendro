@@ -127,13 +127,13 @@ async function canUpdateTask(
   const caps = auth?.caps ?? (await membershipCapabilities(ctx, membership));
   const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   const targets = updateAuthTargets(task);
-  if (caps.has(`${prefix}:update:any` as any)) return true;
-  if (caps.has(`${prefix}:update:managed` as any)) {
+  if (caps.has(`${prefix}:update:any` as Capability)) return true;
+  if (caps.has(`${prefix}:update:managed` as Capability)) {
     const scope = auth ? await auth.getManagedScope() : { ids: await getManagedMembershipIds(ctx, companyId, membership._id), complete: false };
     // A complete scope is authoritative; otherwise fall back to per-target checks.
     if (scope.complete ? targets.every((id) => scope.ids.has(id)) : await hasAllManagedMemberships(ctx, companyId, membership._id, targets, scope.ids)) return true;
   }
-  return Boolean(caps.has(`${prefix}:update:self` as any) && targets.includes(membership._id));
+  return Boolean(caps.has(`${prefix}:update:self` as Capability) && targets.includes(membership._id));
 }
 
 // Status moves with the assignee, not the permission system: anyone assigned
@@ -160,12 +160,13 @@ async function canDeleteTask(
   const caps = auth?.caps ?? (await membershipCapabilities(ctx, membership));
   const prefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   const targets = updateAuthTargets(task);
-  if (caps.has(`${prefix}:delete:any` as any)) return true;
-  if (caps.has(`${prefix}:delete:managed` as any)) {
+  if (caps.has(`${prefix}:delete:any` as Capability)) return true;
+  if (caps.has(`${prefix}:delete:managed` as Capability)) {
     const scope = auth ? await auth.getManagedScope() : { ids: await getManagedMembershipIds(ctx, companyId, membership._id), complete: false };
     if (scope.complete ? targets.every((id) => scope.ids.has(id)) : await hasAllManagedMemberships(ctx, companyId, membership._id, targets, scope.ids)) return true;
   }
-  return Boolean(caps.has(`${prefix}:delete:self` as any) && targets.includes(membership._id));
+  // Deleting removes the task for every assignee, so "my tasks" means solely mine.
+  return Boolean(caps.has(`${prefix}:delete:self` as Capability) && targets.every((id) => id === membership._id));
 }
 
 
@@ -214,7 +215,7 @@ export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks"
  * completion row before the stamp is overwritten, so deferred catch-up cannot
  * record the stamped cycle as missed. Bounded to one stamped cycle.
  */
-async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, timeZone: string) {
+export async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, timeZone: string) {
   if (task.status !== "completed" || task.statusCycleStart === undefined || task.statusCycleStart >= currentCycleStart) return;
   const stampedStart = task.statusCycleStart;
   const [existingCompletion, existingRecord] = await Promise.all([
@@ -234,7 +235,7 @@ async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">,
  * as `schedule` so the deferred run reconstructs the old grid — by the time it
  * executes, the task document already carries the new recurrence.
  */
-function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, schedule?: { recurrence: JdRecurrence; cycleStartedAt: number }) {
+export function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, schedule?: { recurrence: JdRecurrence; cycleStartedAt: number }) {
   if (task.cycleStartedAt < currentCycleStart) {
     return ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, { taskId: task._id, schedule });
   }
@@ -847,16 +848,14 @@ export const personalFilterOptions = query({
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     if (args.kind === "jd") {
-      const tasks = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
       const values = new Set<string>();
-      for (const t of tasks) {
+      for await (const t of ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId))) {
         if (t.assigneeMembershipIds.includes(membership._id)) values.add(t.recurrence);
       }
       return { values: Array.from(values) };
     } else {
-      const tasks = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
       const values = new Set<string>();
-      for (const t of tasks) {
+      for await (const t of ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId))) {
         if (t.assigneeMembershipIds.includes(membership._id)) values.add(t.priority);
       }
       return { values: Array.from(values) };
@@ -998,7 +997,7 @@ export const updateJdFields = mutation({
     const timeZone = await companyTimeZone(ctx, args.companyId);
     const currentCycleStart = currentJdCycle(task.recurrence, now, timeZone).start;
     await preserveJdCompletionStamp(ctx, task, currentCycleStart, timeZone);
-    await scheduleMissedJdCycleCatchUp(ctx, task, currentCycleStart);
+    await scheduleMissedJdCycleCatchUp(ctx, task, currentCycleStart, args.recurrence !== undefined && args.recurrence !== task.recurrence ? { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt } : undefined);
     const nextCycleStart = args.recurrence !== undefined ? currentJdCycle(args.recurrence, now, timeZone).start : undefined;
     const nextTask = { ...task };
     if (args.title !== undefined) nextTask.title = nonEmpty(args.title, "Task title");
@@ -1442,8 +1441,11 @@ const DELETE_BULK_TASK_LIMIT = 100;
  * transaction. Idempotent: rows are keyed by taskId, so re-runs only pick up
  * what remains.
  */
-async function deleteTaskRelatedBatch(ctx: MutationCtx, taskType: TaskKind, taskId: string): Promise<boolean> {
-  const loaders: (() => Promise<{ _id: Id<"jdTaskCompletions" | "jdTaskCycleRecords" | "taskComments" | "taskActivityLogs" | "taskAttachments">; storageId?: Id<"_storage"> }[]>)[] = [];
+async function deleteTaskRelatedBatch(ctx: MutationCtx, companyId: Id<"companies">, taskType: TaskKind, taskId: string): Promise<boolean> {
+  const loaders: (() => Promise<{ _id: Id<"jdTaskCompletions" | "jdTaskCycleRecords" | "taskComments" | "taskActivityLogs" | "taskAttachments" | "taskListOrderEntries">; storageId?: Id<"_storage"> }[]>)[] = [];
+  loaders.push(
+    () => ctx.db.query("taskListOrderEntries").withIndex("by_companyId_and_taskType_and_taskId", (q) => q.eq("companyId", companyId).eq("taskType", taskType).eq("taskId", taskId as Id<"jdTasks"> | Id<"oneTimeTasks">)).take(DELETE_RELATED_BATCH),
+  );
   if (taskType === "jd") {
     const jdTaskId = taskId as Id<"jdTasks">;
     loaders.push(
@@ -1473,9 +1475,9 @@ async function deleteTaskRelatedBatch(ctx: MutationCtx, taskType: TaskKind, task
  * initiating delete commits. Same pattern as aiChat.deleteSessionMessages.
  */
 export const purgeTaskRelatedRows = internalMutation({
-  args: { taskType: v.union(v.literal("jd"), v.literal("one_time")), taskId: v.string() },
+  args: { companyId: v.id("companies"), taskType: v.union(v.literal("jd"), v.literal("one_time")), taskId: v.string() },
   handler: async (ctx, args) => {
-    const more = await deleteTaskRelatedBatch(ctx, args.taskType, args.taskId);
+    const more = await deleteTaskRelatedBatch(ctx, args.companyId, args.taskType, args.taskId);
     if (more) await ctx.scheduler.runAfter(0, internal.tasks.purgeTaskRelatedRows, args);
     return null;
   },
@@ -1489,7 +1491,7 @@ async function purgeJdTask(ctx: MutationCtx, companyId: Id<"companies">, taskId:
   // Deleting the task doc makes its related rows unreachable (all reads go
   // through task visibility); the scheduled purge reclaims them in batches.
   await ctx.db.delete(taskId);
-  await ctx.scheduler.runAfter(0, internal.tasks.purgeTaskRelatedRows, { taskType: "jd", taskId });
+  await ctx.scheduler.runAfter(0, internal.tasks.purgeTaskRelatedRows, { companyId, taskType: "jd", taskId });
   const now = Date.now();
   await ctx.db.insert("auditEvents", { companyId, actorUserId: user._id, action: "jd_task.delete", targetType: "jdTask", targetId: taskId, createdAt: now });
 }
@@ -1500,7 +1502,7 @@ async function purgeOneTimeTask(ctx: MutationCtx, companyId: Id<"companies">, ta
   if (!task || task.companyId !== companyId) throw new ConvexError("Task not found.");
   await assertCanDeleteTask(ctx, companyId, membership, updateAuthTargets(task), "one_time");
   await ctx.db.delete(taskId);
-  await ctx.scheduler.runAfter(0, internal.tasks.purgeTaskRelatedRows, { taskType: "one_time", taskId });
+  await ctx.scheduler.runAfter(0, internal.tasks.purgeTaskRelatedRows, { companyId, taskType: "one_time", taskId });
   const now = Date.now();
   await ctx.db.insert("auditEvents", { companyId, actorUserId: user._id, action: "one_time_task.delete", targetType: "oneTimeTask", targetId: taskId, createdAt: now });
 }
@@ -1669,7 +1671,9 @@ export const deleteOrphanedUpload = mutation({
     const claim = await ctx.db.get(args.claimId);
     if (!claim || claim.companyId !== args.companyId || claim.membershipId !== membership._id) throw new ConvexError("Upload claim not found.");
     if (claim.storageId && args.storageId && claim.storageId !== args.storageId) throw new ConvexError("Upload claim is bound to a different file.");
-    const blobId = claim.storageId ?? args.storageId;
+    // Only the claim-bound blob is safe to delete — an unbound claim proves
+    // nothing about args.storageId, so let the expiry sweep reclaim it.
+    const blobId = claim.storageId;
     await ctx.db.delete(args.claimId);
     if (!blobId) return null;
     const [referenced, metadata] = await Promise.all([
@@ -1838,29 +1842,39 @@ export const aiListVisible = query({
     const matches = (status: string) => args.status === "all" || (args.status === "overdue" ? status === "Overdue" : args.status === "done" ? status === "Completed" : status !== "Completed" && status !== "Overdue");
     const now = Date.now();
     const timeZone = await companyTimeZone(ctx, args.companyId);
-    // Keep paging source rows until the requested count is filled or the scan
-    // budget runs out; `exhausted` reports whether matching rows may remain.
-    // Enrichment is deferred: candidates are only visibility- and
-    // state-checked here, and assignees load in one batch across all matches
-    // so the scan budget also bounds total reads below transaction limits.
+    // Scan a bounded window of source rows per table, stopping early once the
+    // requested count is filled; `truncated` reports whether matching rows
+    // may remain unreturned. Enrichment is deferred: candidates are only
+    // visibility- and state-checked here, and assignees load in one batch
+    // across all matches so the scan budget bounds total reads.
     const collect = async (kind: TaskKind, table: "jdTasks" | "oneTimeTasks") => {
+      // Convex permits a single paginate() per function, so a bounded take()
+      // is the only way to scan two tables here; it reads the same first-N
+      // candidate rows in index order.
+      const scannedRows = await ctx.db.query(table).withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(AI_LIST_TASK_SCAN_LIMIT);
       const matched: { task: Doc<"jdTasks"> | Doc<"oneTimeTasks">; state: { status: string; dueAt: number | null } }[] = [];
-      let cursor: string | null = null;
-      let scanned = 0;
-      let exhausted = false;
-      while (matched.length < limit && scanned < AI_LIST_TASK_SCAN_LIMIT) {
-        const page = await ctx.db.query(table).withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: Math.min(100, AI_LIST_TASK_SCAN_LIMIT - scanned) });
-        scanned += page.page.length;
-        const evaluated = await Promise.all(page.page.map(async (task) => {
+      // Hitting the scan cap means un-scanned rows may still match.
+      let truncated = scannedRows.length === AI_LIST_TASK_SCAN_LIMIT;
+      for (let offset = 0; offset < scannedRows.length; offset += 100) {
+        const evaluated = await Promise.all(scannedRows.slice(offset, offset + 100).map(async (task) => {
           if (!(await visible(ctx, args.companyId, membership, task, kind, auth))) return null;
           const state = kind === "jd" ? await jdState(ctx, task as Doc<"jdTasks">, now, timeZone) : oneState(task as Doc<"oneTimeTasks">);
           return matches(state.status) ? { task, state } : null;
         }));
-        for (const item of evaluated) if (item && matched.length < limit) matched.push(item);
-        if (page.isDone) { exhausted = true; break; }
-        cursor = page.continueCursor;
+        let dropped = false;
+        for (const item of evaluated) {
+          if (!item) continue;
+          if (matched.length < limit) matched.push(item);
+          else dropped = true;
+        }
+        // Once the limit fills, in-chunk drops and unevaluated chunks both
+        // mean more matches may exist beyond the returned window.
+        if (dropped || matched.length === limit) {
+          truncated = truncated || dropped || offset + 100 < scannedRows.length;
+          break;
+        }
       }
-      return { matched, exhausted };
+      return { matched, truncated };
     };
     const [jdScan, oneScan] = await Promise.all([
       collect("jd", "jdTasks"),
@@ -1878,7 +1892,7 @@ export const aiListVisible = query({
         ? aiJdRow(item.task as Doc<"jdTasks">, item.state, scopedJd, assignees)
         : aiOneTimeRow(item.task as Doc<"oneTimeTasks">, item.state, scopedOneTime, assignees),
     );
-    return { rows, truncated: !jdScan.exhausted || !oneScan.exhausted || jdScan.matched.length + oneScan.matched.length > rows.length };
+    return { rows, truncated: jdScan.truncated || oneScan.truncated };
   },
 });
 
@@ -1900,20 +1914,22 @@ export const aiAssignableUsers = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const caps = await membershipCapabilities(ctx, membership);
     const prefix = args.kind === "jd" ? "tasks:jd" : "tasks:one_time";
-    if (!caps.has(`${prefix}:create` as any)) return [];
+    if (!caps.has(`${prefix}:create` as Capability)) return { users: [], isTruncated: false };
     let ids: Set<Id<"companyMemberships">>;
-    if (caps.has(`${prefix}:assign:any` as any)) {
-      const all = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
-      ids = new Set(all.filter((m) => m.active).map((m) => m._id));
-    } else if (caps.has(`${prefix}:assign:managed` as any)) {
+    let isTruncated = false;
+    if (caps.has(`${prefix}:assign:any` as Capability)) {
+      const all = await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(501);
+      isTruncated = all.length > 500;
+      ids = new Set(all.slice(0, 500).filter((m) => m.active).map((m) => m._id));
+    } else if (caps.has(`${prefix}:assign:managed` as Capability)) {
       ids = await getManagedMembershipIds(ctx, args.companyId, membership._id);
-    } else if (caps.has(`${prefix}:assign:self` as any)) {
+    } else if (caps.has(`${prefix}:assign:self` as Capability)) {
       ids = new Set([membership._id]);
     } else {
-      return [];
+      return { users: [], isTruncated: false };
     }
     const rows = await enrich(ctx, Array.from(ids));
-    return rows.map((row: any) => ({ membershipId: row.membership._id, name: row.user.fullName ?? row.user.email, email: row.user.email, role: row.membership.role }));
+    return { isTruncated, users: rows.map((row) => ({ membershipId: row.membership._id, name: row.user.fullName ?? row.user.email, email: row.user.email, role: row.membership.role })) };
   },
 });
 

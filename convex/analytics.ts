@@ -360,8 +360,9 @@ export const dashboard = query({
     // Visibility is a JS-only check, so resolve it before touching the ledger
     // tables. The ledger fan-out below then only reads rows for tasks the
     // viewer can actually see.
+    // Unassigned tasks are attributed to their creator, matching canViewTask.
     const visibleJdTasks = jdTasks
-      .map((task) => ({ task, assignees: visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds) }))
+      .map((task) => ({ task, assignees: visibleAssigneeMembershipIds(task.assigneeMembershipIds.length ? task.assigneeMembershipIds : [task.createdByMembershipId], effectiveIds) }))
       .filter((entry) => entry.assignees.length > 0);
 
     // Two company-range scans grouped by task replace 2N per-task queries, but
@@ -490,7 +491,7 @@ export const dashboard = query({
     });
     for (const group of jdItemGroups) items.push(...group);
     for (const task of oneTimeTasks) {
-      const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds);
+      const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds.length ? task.assigneeMembershipIds : [task.createdByMembershipId], effectiveIds);
       if (!assignees.length) continue;
       const completed = task.status === "completed";
       const overdue = !completed && (task.overdueAt !== undefined || (task.dueDate !== undefined && task.dueDate < now));
@@ -687,7 +688,7 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
     jdTaskCount: visibleJd.length,
     oneTimeTaskCount: visibleOne.length,
     overdueTasks: overdueOne,
-    completionRate: visibleOne.length ? Math.round(completedOne / visibleOne.length * 100) : 100,
+    completionRate: safeRate(completedOne, visibleOne.length),
     sopCount,
     recent,
     isTruncated: completeness.isTruncated,

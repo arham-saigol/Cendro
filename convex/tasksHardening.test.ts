@@ -154,10 +154,11 @@ describe("task authorization hardening", () => {
     expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", otherStorageId))).not.toBeNull();
   });
 
-  test("Orphan cleanup binds an unbound claim so a skipped bind cannot leak the blob", async () => {
+  test("Orphan cleanup releases an unbound claim without touching the blob", async () => {
     const f = await createAuthzFixture();
 
-    // Simulate an upload POST that completed while bindUploadClaim never ran.
+    // An unbound claim proves nothing about the supplied storageId, so the
+    // caller's blob is left for the expiry sweep — never deleted on their say-so.
     const claimId = await f.t.run(async (ctx) =>
       ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, createdAt: Date.now() })
     );
@@ -166,7 +167,8 @@ describe("task authorization hardening", () => {
     await expect(
       f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId, storageId })
     ).resolves.toBeNull();
-    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", storageId))).toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.get(claimId))).toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", storageId))).not.toBeNull();
 
     // A blob already recorded as an attachment is never reclaimed.
     const jdTaskId = await f.asUser("adminA").mutation(api.tasks.createJd, {

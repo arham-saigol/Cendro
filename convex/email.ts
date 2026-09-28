@@ -10,19 +10,23 @@ function escapeHtml(value: string) {
 }
 
 export const sendInvitation = internalAction({
-  args: { companyId: v.id("companies"), invitationId: v.id("invitations"), email: v.string(), role: v.string(), token: v.string() },
+  // Reads the stored record so the delivery address can never drift from the
+  // normalized email the invitation was created with.
+  args: { invitationId: v.id("invitations") },
   handler: async (ctx, args) => {
+    const invitation = await ctx.runQuery(internal.invitations.getForSend, { invitationId: args.invitationId });
+    if (!invitation) throw new ConvexError("Invitation not found.");
     const apiKey = process.env.RESEND_API_KEY;
     const from = process.env.RESEND_FROM;
     const appUrl = process.env.APP_URL;
     if (!apiKey || !from || !appUrl) throw new ConvexError("Invitation email is not configured.");
-    const url = `${appUrl}/invite/${encodeURIComponent(args.token)}`;
+    const url = `${appUrl}/invite/${encodeURIComponent(invitation.token)}`;
     const result = await new Resend(apiKey).emails.send({
       from,
-      to: args.email,
+      to: invitation.email,
       subject: "You’re invited to Cendro",
-      html: `<p>You have been invited to join Cendro as <strong>${escapeHtml(args.role)}</strong>.</p><p><a href="${url}">Accept invitation</a></p>`,
-      text: `You have been invited to join Cendro as ${args.role}. Accept: ${url}`,
+      html: `<p>You have been invited to join Cendro as <strong>${escapeHtml(invitation.role)}</strong>.</p><p><a href="${url}">Accept invitation</a></p>`,
+      text: `You have been invited to join Cendro as ${invitation.role}. Accept: ${url}`,
     });
     if (result.error) throw new ConvexError("Could not send invitation email.");
     await ctx.runMutation(internal.invitations.markSent, { invitationId: args.invitationId });

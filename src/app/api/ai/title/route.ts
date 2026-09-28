@@ -77,8 +77,6 @@ export async function POST(req: Request) {
 
   const client = new ConvexHttpClient(convexUrl);
   client.setAuth(token);
-  const rateLimit = await consumeAiRateLimit(client, "ai-title");
-  if (!rateLimit.ok) return Response.json({ error: "Too many title requests" }, { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } });
 
   const body = await readJsonRequest(req, titleRequestMaxBytes);
   if (!body.ok) return Response.json({ error: body.reason === "too_large" ? "Title request is too large" : "Invalid request body" }, { status: body.reason === "too_large" ? 413 : 400 });
@@ -90,6 +88,11 @@ export async function POST(req: Request) {
   } catch (error) {
     return authorizeErrorResponse(error);
   }
+
+  // Rate limit after validation and session auth so malformed or
+  // unauthorized requests cannot burn the caller's quota.
+  const rateLimit = await consumeAiRateLimit(client, "ai-title");
+  if (!rateLimit.ok) return Response.json({ error: "Too many title requests" }, { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } });
 
   const messages = await client.query(api.aiChat.listMessages, { companyId, sessionId });
   const first = parsed.data.firstMessage || textOf(messages.find((message) => message.role === "user") ?? null);

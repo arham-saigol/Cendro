@@ -701,7 +701,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
       body: { ...(body ?? {}), messages: chatMessages.slice(-1) },
     }),
   }), [companyId, sessionId]);
-  const { messages, setMessages, sendMessage, status } = useChat({
+  const { messages, setMessages, sendMessage, regenerate, status, error, clearError } = useChat({
     id: sessionId ? `${companyId}:${sessionId}` : `pending:${companyId}`,
     transport,
     experimental_throttle: 50,
@@ -1060,6 +1060,14 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
         })}
 
         {isSending && lastMessage?.role === "user" && <PendingThinkingIndicator />}
+        {error && (
+          <div className="flex items-start gap-1.5 rounded-lg bg-[var(--danger-surface)] px-2.5 py-2 text-xs text-[var(--danger)]" role="alert">
+            <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span className="flex-1">Cendro AI could not respond to that message.</span>
+            <button type="button" className="shrink-0 font-medium underline underline-offset-2 hover:text-[var(--ink)]" onClick={() => { clearError(); void regenerate(); }}>Retry</button>
+            <button type="button" className="shrink-0 text-[var(--ink-muted)] hover:text-[var(--ink)]" aria-label="Dismiss error" onClick={() => clearError()}><X className="h-3.5 w-3.5" /></button>
+          </div>
+        )}
       </div>
 
       <form className="shrink-0 bg-[var(--chrome-translucent)] px-3 pb-1 pt-3" onSubmit={(event) => { event.preventDefault(); void submit(input); }}>

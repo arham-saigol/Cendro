@@ -52,6 +52,15 @@ function isPublicIp(address: string) {
   const firstHextet = Number.parseInt(normalized.split(":", 1)[0] || "0", 16);
   if (!Number.isInteger(firstHextet) || firstHextet < 0x2000 || firstHextet > 0x3fff) return false;
   if (normalized.startsWith("2001:0:") || normalized.startsWith("2001:2:") || normalized.startsWith("2001:db8:")) return false;
+  // 6to4 (2002::/16) embeds the tunneled IPv4 in the next 32 bits — judge the
+  // embedded address, not the global-unicast wrapper.
+  if (normalized.startsWith("2002:")) {
+    const parts = normalized.split(":");
+    const hi = Number.parseInt(parts[1] || "", 16);
+    const lo = Number.parseInt(parts[2] || "", 16);
+    if (!Number.isInteger(hi) || !Number.isInteger(lo) || hi < 0 || hi > 0xffff || lo < 0 || lo > 0xffff) return false;
+    return isPublicIpv4(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+  }
   return true;
 }
 

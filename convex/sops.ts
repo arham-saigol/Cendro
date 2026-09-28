@@ -7,12 +7,13 @@ import type { Capability } from "../src/lib/permissions";
 import { sopListOrderLimit, sopListOrderMaxSerializedBytes } from "../src/lib/sop-list-sort";
 import { sopListPreferenceResultValidator, sopListSortValidator } from "./sopListPreferences";
 import schema from "./schema";
-import { buildSopVisibilityContext, getManagedMembershipIds, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scopedMembershipIds, sopDeleteCapability, sopListScopeAuth, sopManageCapability, sopScopeRowsFor, visibleSop, visibleSopForSelf, type SopListRowAuth, type SopVisibilityContext } from "./permissions";
+import { buildSopVisibilityContext, getManagedMembershipIds, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, sopDeleteCapability, sopListScopeAuth, sopManageCapability, sopScopeRowsFor, visibleSop, visibleSopForSelf, type SopListRowAuth, type SopVisibilityContext } from "./permissions";
 import { nonEmpty } from "./validation";
 import { nextReference } from "./references";
+import { takeWithOverflow } from "./queryLimits";
 
 
-async function assertTargets(ctx: any, companyId: Id<"companies">, args: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
+async function assertTargets(ctx: QueryCtx | MutationCtx, companyId: Id<"companies">, args: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
   for (const branchId of args.branchIds) { const branch = await ctx.db.get(branchId); if (!branch || branch.companyId !== companyId) throw new ConvexError("Branch not found."); }
   for (const departmentId of args.departmentIds) { const department = await ctx.db.get(departmentId); if (!department || department.companyId !== companyId) throw new ConvexError("Department not found."); }
   for (const membershipId of args.userMembershipIds) { const membership = await ctx.db.get(membershipId); if (!membership || membership.companyId !== companyId || !membership.active) throw new ConvexError("User not found."); }
@@ -109,21 +110,21 @@ async function canDeleteSopTargets(
 }
 const sopViewValidator = v.union(v.literal("all"), v.literal("my"));
 const sopScopeFilterValidator = v.union(v.literal("all"), v.literal("company"), v.literal("branch"), v.literal("department"), v.literal("user"));
-async function deleteEmbeddings(ctx: any, sopId: Id<"sops">) {
+async function deleteEmbeddings(ctx: MutationCtx, sopId: Id<"sops">) {
   while (true) {
-    const rows = await ctx.db.query("sopEmbeddings").withIndex("by_sop", (q: any) => q.eq("sopId", sopId)).take(100);
+    const rows = await ctx.db.query("sopEmbeddings").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(100);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
 }
-async function deleteScopeRows(ctx: any, sopId: Id<"sops">) {
+async function deleteScopeRows(ctx: MutationCtx, sopId: Id<"sops">) {
   while (true) {
-    const rows = await ctx.db.query("sopBranchScopes").withIndex("by_sopId_and_branchId", (q: any) => q.eq("sopId", sopId)).take(500);
+    const rows = await ctx.db.query("sopBranchScopes").withIndex("by_sopId_and_branchId", (q) => q.eq("sopId", sopId)).take(500);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
   while (true) {
-    const rows = await ctx.db.query("sopDepartmentScopes").withIndex("by_sopId_and_departmentId", (q: any) => q.eq("sopId", sopId)).take(500);
+    const rows = await ctx.db.query("sopDepartmentScopes").withIndex("by_sopId_and_departmentId", (q) => q.eq("sopId", sopId)).take(500);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
@@ -539,11 +540,15 @@ export const scopeOptions = query({
     const canUseBranch = capabilities.has("sops:manage:branch");
     const canUseDepartment = capabilities.has("sops:manage:department");
     const canUseUser = capabilities.has("sops:manage:user");
-    const [branches, departments, memberships] = await Promise.all([
-      canUseBranch || canUseDepartment ? ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500) : Promise.resolve([]),
-      canUseDepartment ? ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500) : Promise.resolve([]),
-      canUseUser ? ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500) : Promise.resolve([]),
+    const [branchResult, departmentResult, membershipResult] = await Promise.all([
+      canUseBranch || canUseDepartment ? takeWithOverflow((limit) => ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), 500) : Promise.resolve({ rows: [] as Doc<"branches">[], isTruncated: false }),
+      canUseDepartment ? takeWithOverflow((limit) => ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), 500) : Promise.resolve({ rows: [] as Doc<"departments">[], isTruncated: false }),
+      canUseUser ? takeWithOverflow((limit) => ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), 500) : Promise.resolve({ rows: [] as Doc<"companyMemberships">[], isTruncated: false }),
     ]);
+    const branches = branchResult.rows;
+    const departments = departmentResult.rows;
+    const memberships = membershipResult.rows;
+    const isTruncated = branchResult.isTruncated || departmentResult.isTruncated || membershipResult.isTruncated;
     const managed = await getManagedScopeTargets(ctx, args.companyId, membership);
     const scopedBranches = canUseBranch ? (managed ? branches.filter((branch) => managed.branchIds.has(branch._id)) : branches) : [];
     const scopedDepartments = managed ? departments.filter((department) => managed.departmentIds.has(department._id)) : departments;
@@ -558,6 +563,7 @@ export const scopeOptions = query({
       branches: scopedBranches.map((branch) => ({ _id: branch._id, name: branch.name })),
       departments: scopedDepartments.map((department) => ({ _id: department._id, name: department.name, branchId: department.branchId, branchName: branchNames.get(department.branchId) ?? "Unknown branch" })),
       users,
+      isTruncated,
     };
   },
 });
@@ -583,8 +589,9 @@ export const filterOptions = query({
       for (const department of departments) departmentIds.add(department._id);
       userIds = new Set(memberships.filter((m) => m.active).map((m) => m._id));
     } else {
+      // managed is null only for sops:manage:company, which took the first branch.
       const managed = await getManagedScopeTargets(ctx, args.companyId, membership, caps);
-      userIds = managed?.userIds ?? await scopedMembershipIds(ctx, args.companyId, membership, caps, "sops:view:company");
+      userIds = managed?.userIds ?? new Set();
       for (const branchId of managed?.branchIds ?? []) branchIds.add(branchId);
       for (const departmentId of managed?.departmentIds ?? []) departmentIds.add(departmentId);
     }
@@ -624,7 +631,7 @@ export const create = mutation({
     await assertManagedTargets(ctx, args.companyId, membership, args);
     const now = Date.now();
     const reference = await nextReference(ctx, args.companyId, "sop");
-    const id = await ctx.db.insert("sops", { companyId: args.companyId, reference, title, content, scopeType: args.scopeType, creatorMembershipId: membership._id, updatedByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    const id = await ctx.db.insert("sops", { companyId: args.companyId, reference, title, content, scopeType: args.scopeType, creatorMembershipId: membership._id, updatedByMembershipId: membership._id, createdAt: now, updatedAt: now, contentUpdatedAt: now });
     await insertScopeRows(ctx, args.companyId, id, args);
     await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: id });
     return id;
@@ -663,12 +670,17 @@ export const update = mutation({
     const currentTargets = await currentSopTargets(ctx, args.sopId);
     await assertManagedTargets(ctx, args.companyId, membership, currentTargets);
 
+    if (args.scopeType === undefined && (args.branchIds?.length || args.departmentIds?.length || args.userMembershipIds?.length)) {
+      throw new ConvexError("Scope targets require a scopeType.");
+    }
+
     const patch: {
       title?: string;
       content?: string;
       scopeType?: Doc<"sops">["scopeType"];
       updatedByMembershipId: Id<"companyMemberships">;
       updatedAt: number;
+      contentUpdatedAt?: number;
     } = {
       updatedByMembershipId: membership._id,
       updatedAt: Date.now(),
@@ -677,8 +689,10 @@ export const update = mutation({
     if (args.title !== undefined) patch.title = nonEmpty(args.title, "Title");
     if (args.content !== undefined) patch.content = args.content.trim();
     // Embedding only depends on title + content, so scope-only edits and no-op
-    // saves should not pay for a re-index pass.
+    // saves should not pay for a re-index pass — and must not invalidate an
+    // in-flight storeEmbedding's stale-write guard.
     const indexedFieldsChanged = (patch.title !== undefined && patch.title !== sop.title) || (patch.content !== undefined && patch.content !== sop.content);
+    if (indexedFieldsChanged) patch.contentUpdatedAt = patch.updatedAt;
 
     if (args.scopeType !== undefined) {
       await requireCapability(ctx, args.companyId, sopManageCapability(args.scopeType));
@@ -698,7 +712,7 @@ export const update = mutation({
 });
 
 export const updateScope = mutation({
-  args: { companyId: v.id("companies"), sopId: v.id("sops"), scopeType: v.union(v.literal("company"), v.literal("branch"), v.literal("department"), v.literal("user")), branchIds: v.array(v.id("branches")), departmentIds: v.optional(v.array(v.id("departments"))), userMembershipIds: v.array(v.id("companyMemberships")) },
+  args: { companyId: v.id("companies"), sopId: v.id("sops"), scopeType: v.union(v.literal("company"), v.literal("branch"), v.literal("department"), v.literal("user")), branchIds: v.array(v.id("branches")), departmentIds: v.array(v.id("departments")), userMembershipIds: v.array(v.id("companyMemberships")) },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     const sop = await ctx.db.get(args.sopId);
@@ -708,7 +722,7 @@ export const updateScope = mutation({
     await assertManagedTargets(ctx, args.companyId, membership, currentTargets);
 
     await requireCapability(ctx, args.companyId, sopManageCapability(args.scopeType));
-    const scopeArgs = { scopeType: args.scopeType, branchIds: args.branchIds, departmentIds: args.departmentIds ?? [], userMembershipIds: args.userMembershipIds };
+    const scopeArgs = { scopeType: args.scopeType, branchIds: args.branchIds, departmentIds: args.departmentIds, userMembershipIds: args.userMembershipIds };
     assertScopeSelection(scopeArgs);
     await assertTargets(ctx, args.companyId, scopeArgs);
     await assertManagedTargets(ctx, args.companyId, membership, scopeArgs);
@@ -756,7 +770,7 @@ const TITLE_SCAN_CEILING = 500;
 const SEARCH_CONTENT_TARGET = 24;
 const SEARCH_CONTENT_SCAN_BUDGET = 200;
 
-async function visibleSopSearchCandidates(ctx: any, args: { companyId: Id<"companies">; query: string }) {
+async function visibleSopSearchCandidates(ctx: QueryCtx, args: { companyId: Id<"companies">; query: string }) {
   const { membership } = await requireMembership(ctx, args.companyId);
   const needle = args.query.trim();
   if (!needle) return { membership, sops: [] as Doc<"sops">[] };
@@ -768,7 +782,7 @@ async function visibleSopSearchCandidates(ctx: any, args: { companyId: Id<"compa
     let cursor: string | null = null;
     let scanned = 0;
     while (matched.length < TITLE_MATCH_TARGET && scanned < TITLE_SCAN_CEILING) {
-      const page: { page: Doc<"sops">[]; isDone: boolean; continueCursor: string } = await ctx.db.query("sops").withIndex("by_company", (q: any) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: Math.min(100, TITLE_SCAN_CEILING - scanned) });
+      const page: { page: Doc<"sops">[]; isDone: boolean; continueCursor: string } = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: Math.min(100, TITLE_SCAN_CEILING - scanned) });
       scanned += page.page.length;
       // Only visible matches count toward the target — a page of inaccessible
       // title hits must not stop the scan before real matches are found.
@@ -794,12 +808,10 @@ async function visibleSopSearchCandidates(ctx: any, args: { companyId: Id<"compa
   return { membership, sops: all.filter((_: Doc<"sops">, index: number) => flags[index]) };
 }
 
-async function textSearch(ctx: any, args: { companyId: Id<"companies">; query: string }) {
+async function textSearch(ctx: QueryCtx, args: { companyId: Id<"companies">; query: string }) {
   const { sops } = await visibleSopSearchCandidates(ctx, args);
   return sops.slice(0, 8).map((sop) => ({ id: sop._id, title: sop.title, excerpt: sop.content.slice(0, 500), scopeType: sop.scopeType }));
 }
-
-export const searchAccessible = query({ args: { companyId: v.id("companies"), query: v.string() }, handler: textSearch });
 
 export const visibleSearchRows = internalQuery({ args: { companyId: v.id("companies"), embeddingIds: v.array(v.id("sopEmbeddings")) }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const caps = await membershipCapabilities(ctx, membership); const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps); const embeddings = (await Promise.all(args.embeddingIds.map((embeddingId) => ctx.db.get(embeddingId)))).filter((embedding) => embedding && embedding.companyId === args.companyId); const sops = (await Promise.all(embeddings.map((embedding) => ctx.db.get(embedding!.sopId)))).filter(Boolean) as Doc<"sops">[]; const flags = await Promise.all(sops.map((sop) => visibleSop(ctx, args.companyId, membership, sop, visibility, caps))); const out = []; for (let index = 0; index < sops.length; index += 1) { if (!flags[index]) continue; const sop = sops[index]; const embedding = embeddings.find((e) => e!.sopId === sop._id); out.push({ id: sop._id, title: sop.title, excerpt: (embedding?.chunk ?? sop.content).slice(0, 500), scopeType: sop.scopeType }); } return out; } });
 
@@ -819,9 +831,13 @@ export const semanticSearchAccessible = action({
     if (!budget.ok) return await ctx.runQuery(internal.sops.searchFallback, args);
     const vector = await embed(apiKey, query);
     if (!vector) return await ctx.runQuery(internal.sops.searchFallback, args);
-    const results = await ctx.vectorSearch("sopEmbeddings", "by_embedding", { vector, limit: 16, filter: (q) => q.eq("companyId", args.companyId) });
+    // Over-fetch before the visibility filter so invisible hits cannot starve
+    // the result window, then fall back to text search when nothing visible
+    // remains — an empty vector page is worse recall than a text match.
+    const results = await ctx.vectorSearch("sopEmbeddings", "by_embedding", { vector, limit: 32, filter: (q) => q.eq("companyId", args.companyId) });
     if (!results.length) return await ctx.runQuery(internal.sops.searchFallback, args);
     const rows = await ctx.runQuery(internal.sops.visibleSearchRows, { companyId: args.companyId, embeddingIds: results.map((r) => r._id) });
+    if (!rows.length) return await ctx.runQuery(internal.sops.searchFallback, args);
     return rows.slice(0, 8);
   },
 });
@@ -829,7 +845,7 @@ export const semanticSearchAccessible = action({
 export const searchFallback = internalQuery({ args: { companyId: v.id("companies"), query: v.string() }, handler: textSearch });
 
 export const getForIndexing = internalQuery({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args): Promise<Doc<"sops"> | null> => { const sop = await ctx.db.get(args.sopId); return sop && sop.companyId === args.companyId ? sop : null; } });
-export const storeEmbedding = internalMutation({ args: { companyId: v.id("companies"), sopId: v.id("sops"), expectedUpdatedAt: v.number(), chunk: v.string(), embedding: v.array(v.number()) }, handler: async (ctx, args) => { const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId) throw new ConvexError("SOP not found."); if (sop.updatedAt !== args.expectedUpdatedAt) return null; if (args.embedding.length !== 1024) throw new ConvexError("SOP embedding dimensions did not match voyage-4."); await deleteEmbeddings(ctx, args.sopId); return await ctx.db.insert("sopEmbeddings", { companyId: args.companyId, sopId: args.sopId, chunk: args.chunk, embedding: args.embedding, metadata: { title: sop.title, scopeType: sop.scopeType }, updatedAt: Date.now() }); } });
+export const storeEmbedding = internalMutation({ args: { companyId: v.id("companies"), sopId: v.id("sops"), expectedContentUpdatedAt: v.optional(v.number()), chunk: v.string(), embedding: v.array(v.number()) }, handler: async (ctx, args) => { const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId) throw new ConvexError("SOP not found."); if ((sop.contentUpdatedAt ?? sop.updatedAt) !== args.expectedContentUpdatedAt) return null; if (args.embedding.length !== 1024) throw new ConvexError("SOP embedding dimensions did not match voyage-4."); await deleteEmbeddings(ctx, args.sopId); return await ctx.db.insert("sopEmbeddings", { companyId: args.companyId, sopId: args.sopId, chunk: args.chunk, embedding: args.embedding, updatedAt: Date.now() }); } });
 
 async function embed(apiKey: string, input: string) {
   const res = await fetch("https://api.voyageai.com/v1/embeddings", { method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: process.env.VOYAGE_EMBEDDING_MODEL || "voyage-4", input: [input], output_dimension: 1024 }) });
@@ -872,4 +888,8 @@ export const aiCreate = mutation({
   },
 });
 
-export const indexSop = internalAction({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args): Promise<{ skipped: boolean }> => { const sop: Doc<"sops"> | null = await ctx.runQuery(internal.sops.getForIndexing, args); if (!sop) return { skipped: true }; const apiKey = process.env.VOYAGE_API_KEY; if (!apiKey) return { skipped: true }; const input = sop.title + "\n\n" + sop.content; const embedding = await embed(apiKey, input); if (!embedding) return { skipped: true }; const stored: Id<"sopEmbeddings"> | null = await ctx.runMutation(internal.sops.storeEmbedding, { companyId: args.companyId, sopId: args.sopId, expectedUpdatedAt: sop.updatedAt, chunk: input, embedding }); return { skipped: !stored }; } });
+// Transient Voyage failures must not leave a SOP permanently absent from
+// semantic search — embed failures reschedule a bounded number of times. A
+// stale-write skip needs no retry: the newer edit already queued its own run.
+const INDEX_RETRY_DELAYS_MS = [30_000, 120_000, 600_000];
+export const indexSop = internalAction({ args: { companyId: v.id("companies"), sopId: v.id("sops"), attempt: v.optional(v.number()) }, handler: async (ctx, args): Promise<{ skipped: boolean }> => { const sop: Doc<"sops"> | null = await ctx.runQuery(internal.sops.getForIndexing, args); if (!sop) return { skipped: true }; const apiKey = process.env.VOYAGE_API_KEY; if (!apiKey) return { skipped: true }; const input = sop.title + "\n\n" + sop.content; const embedding = await embed(apiKey, input); const attempt = args.attempt ?? 0; if (!embedding) { if (attempt < INDEX_RETRY_DELAYS_MS.length) await ctx.scheduler.runAfter(INDEX_RETRY_DELAYS_MS[attempt], internal.sops.indexSop, { companyId: args.companyId, sopId: args.sopId, attempt: attempt + 1 }); return { skipped: true }; } const stored: Id<"sopEmbeddings"> | null = await ctx.runMutation(internal.sops.storeEmbedding, { companyId: args.companyId, sopId: args.sopId, expectedContentUpdatedAt: sop.contentUpdatedAt ?? sop.updatedAt, chunk: input, embedding }); return { skipped: !stored }; } });

@@ -1,6 +1,6 @@
 import type { UserIdentity } from "convex/server";
 import { ConvexError } from "convex/values";
-import type { Doc, Id, TableNames } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import {
   defaultRoleNames,
@@ -187,16 +187,37 @@ export async function assertRoleManagerRemains(
   change: RoleManagerChange = {}
 ) {
   const capCache = new Map<string, Promise<Set<Capability>>>();
-  for await (const membership of ctx.db
-    .query("companyMemberships")
-    .withIndex("by_company", (q) => q.eq("companyId", companyId))) {
+  // Only members whose role can grant company:manage_roles need reading —
+  // scoped by the role index instead of scanning every membership.
+  const managingRoleNames = new Set<string>();
+  for await (const role of ctx.db.query("roles").withIndex("by_company", (q) => q.eq("companyId", companyId))) {
+    const pendingCaps = change.capabilityChanges?.get(role.name);
+    const caps = pendingCaps ? pendingCaps.filter(isKnownCapability) : role.capabilities;
+    if (caps.includes("company:manage_roles")) managingRoleNames.add(role.name);
+  }
+  const candidates = new Map<Id<"companyMemberships">, Doc<"companyMemberships">>();
+  for (const roleName of managingRoleNames) {
+    for await (const membership of ctx.db
+      .query("companyMemberships")
+      .withIndex("by_companyId_and_role", (q) => q.eq("companyId", companyId).eq("role", roleName))) {
+      candidates.set(membership._id, membership);
+    }
+  }
+  for (const membershipId of change.roleChanges?.keys() ?? []) {
+    if (candidates.has(membershipId)) continue;
+    const membership = await ctx.db.get(membershipId);
+    if (membership && membership.companyId === companyId) candidates.set(membershipId, membership);
+  }
+  for (const membership of candidates.values()) {
     const isActive = change.activeChanges?.get(membership._id) ?? membership.active;
     if (!isActive) continue;
     const roleName = change.roleChanges?.get(membership._id) ?? membership.role;
     const pendingCaps = change.capabilityChanges?.get(roleName);
     const caps = pendingCaps
       ? new Set(pendingCaps.filter(isKnownCapability) as Capability[])
-      : await roleNameCapabilities(ctx, companyId, roleName, capCache);
+      : managingRoleNames.has(roleName)
+        ? new Set<Capability>(["company:manage_roles" as Capability])
+        : await roleNameCapabilities(ctx, companyId, roleName, capCache);
     if (caps.has("company:manage_roles")) return;
   }
   throw new ConvexError("At least one active member must be able to manage roles.");
@@ -272,20 +293,6 @@ export async function requireCapability(ctx: Ctx, companyId: Id<"companies">, ca
   const auth = await requireCompanyAccess(ctx, companyId);
   if (!auth.capabilities.has(capability)) throw new ConvexError("You do not have access to do that.");
   return auth;
-}
-
-export async function assertCompanyDocument<Table extends TableNames>(
-  ctx: Ctx,
-  companyId: Id<"companies">,
-  table: Table,
-  id: Id<Table>,
-  notFoundMessage = "Resource not found."
-): Promise<Doc<Table>> {
-  const doc = await ctx.db.get(id);
-  if (!doc || (doc as any).companyId !== companyId) {
-    throw new ConvexError(notFoundMessage);
-  }
-  return doc;
 }
 
 async function addActiveMembership(
@@ -491,10 +498,12 @@ export function visibleAssigneeMembershipIds(
 }
 
 export function taskHasVisibleAssignee(
-  task: { assigneeMembershipIds: readonly Id<"companyMemberships">[] },
+  task: { assigneeMembershipIds: readonly Id<"companyMemberships">[]; createdByMembershipId: Id<"companyMemberships"> },
   scopedIds: Set<Id<"companyMemberships">>
 ) {
-  return task.assigneeMembershipIds.some((id) => scopedIds.has(id));
+  // Unassigned tasks are attributed to their creator, matching canViewTask.
+  const targets = task.assigneeMembershipIds.length ? task.assigneeMembershipIds : [task.createdByMembershipId];
+  return targets.some((id) => scopedIds.has(id));
 }
 
 export async function canViewTask(
@@ -663,7 +672,8 @@ export async function assertCanDeleteTask(
     const scoped = await getManagedMembershipIds(ctx, companyId, m._id);
     if (await hasAllManagedMemberships(ctx, companyId, m._id, targets, scoped)) return;
   }
-  if (caps.has(`${prefix}:delete:self` as Capability) && targets.includes(m._id)) return;
+  // Deleting removes the task for every assignee, so "my tasks" means solely mine.
+  if (caps.has(`${prefix}:delete:self` as Capability) && targets.every((id) => id === m._id)) return;
   throw new ConvexError("You do not have access to delete this task.");
 }
 

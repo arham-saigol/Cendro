@@ -3,8 +3,8 @@ import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/s
 import type { Doc, Id } from "./_generated/dataModel";
 import { getManagedMembershipIds, hasAllManagedMemberships, isManagedMembership, membershipCapabilities, requireCapability } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
-import { currentJdCycle, nextJdCycleStart } from "./taskCycles";
-import { recordMissedJdCycles } from "./tasks";
+import { currentJdCycle, defaultTimeZone, nextJdCycleStart } from "./taskCycles";
+import { preserveJdCompletionStamp, scheduleMissedJdCycleCatchUp } from "./tasks";
 import { syncReferenceCounter } from "./references";
 import { normalizeEmail, nonEmpty } from "./validation";
 
@@ -444,7 +444,10 @@ export const commitTaskImportBatch = mutation({
           const recurrence = hasField(item.draft, "recurrence") && item.draft.recurrence ? item.draft.recurrence : task.recurrence;
           const currentCycle = currentJdCycle(recurrence, now, company.timeZone);
           const nextCycleStart = recurrence !== task.recurrence ? currentCycle.start : undefined;
-          await recordMissedJdCycles(ctx, task, now, company.timeZone);
+          // Deferred like the interactive paths: inline catch-up can blow the
+          // commit's transaction limits when a backlog of cycles elapsed.
+          await preserveJdCompletionStamp(ctx, task, currentCycle.start, company.timeZone ?? defaultTimeZone);
+          await scheduleMissedJdCycleCatchUp(ctx, task, currentCycle.start, recurrence !== task.recurrence ? { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt } : undefined);
           const rolled = await ctx.db.get(task._id);
           if (!rolled) fail("One or more import rows became unavailable. Re-preview and try again.");
           const activeCycleStart = nextCycleStart ?? currentCycle.start;

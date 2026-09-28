@@ -1,14 +1,15 @@
 import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
-import { action, internalMutation, mutation, query } from "./_generated/server";
+import { action, internalMutation, mutation, query, type ActionCtx, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { assertPlatformAdmin, ensureDefaultRoles, isPlatformAdminSubject } from "./permissions";
 import { nonEmpty, normalizeEmail } from "./validation";
 
-async function requirePlatformAdmin(ctx: { auth: { getUserIdentity: () => Promise<any> } }) {
+async function requirePlatformAdmin(ctx: QueryCtx | MutationCtx | ActionCtx) {
   const identity = await ctx.auth.getUserIdentity();
   assertPlatformAdmin(identity);
-  return identity!;
+  if (!identity) throw new ConvexError("Please sign in.");
+  return identity;
 }
 
 export const access = query({
@@ -31,10 +32,11 @@ export const adminDashboard = query({
     const limit = Math.min(Math.max(Math.floor(args.companyLimit), 1), MAX_ADMIN_COMPANIES);
     const page = await ctx.db.query("companies").order("desc").take(limit + 1);
     const companies = await Promise.all(
-      page.slice(0, limit).map(async (company) => ({
-        company,
-        memberCount: (await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", company._id)).take(500)).length,
-      })),
+      page.slice(0, limit).map(async (company) => {
+        const count = (await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", company._id)).take(501)).length;
+        // Cap displayed at 500 but disclose truncation instead of asserting it.
+        return { company, memberCount: Math.min(count, 500), memberCountTruncated: count > 500 };
+      }),
     );
     return { access, companies, hasMore: page.length > limit && limit < MAX_ADMIN_COMPANIES };
   },
@@ -46,10 +48,10 @@ export const listCompanies = query({
     await requirePlatformAdmin(ctx);
     const page = await ctx.db.query("companies").order("desc").paginate(args.paginationOpts);
     const rows = await Promise.all(
-      page.page.map(async (company) => ({
-        company,
-        memberCount: (await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", company._id)).take(500)).length,
-      })),
+      page.page.map(async (company) => {
+        const count = (await ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", company._id)).take(501)).length;
+        return { company, memberCount: Math.min(count, 500), memberCountTruncated: count > 500 };
+      }),
     );
     return { ...page, page: rows };
   },
@@ -80,7 +82,6 @@ export const createCompanyRecord = internalMutation({
       status: "pending",
       createdAt: now,
       expiresAt: now + 1_209_600_000,
-      authVersion: 1,
       issuedAt: now,
     });
     await ctx.db.insert("auditEvents", { companyId, actorEmail, action: "platform.company_create", targetType: "company", targetId: companyId, createdAt: now });
@@ -93,7 +94,7 @@ export const createCompany = action({
   handler: async (ctx, args): Promise<{ companyId: string }> => {
     await requirePlatformAdmin(ctx);
     const created = await ctx.runMutation(internal.platform.createCompanyRecord, args);
-    await ctx.runAction(internal.email.sendInvitation, { companyId: created.companyId, invitationId: created.invitationId, email: args.adminEmail, role: "Admin", token: created.token });
+    await ctx.runAction(internal.email.sendInvitation, { invitationId: created.invitationId });
     return { companyId: created.companyId };
   },
 });

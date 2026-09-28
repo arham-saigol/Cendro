@@ -1,5 +1,5 @@
 import { ConvexError, v } from "convex/values";
-import { internalMutation, mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { assertRoleManagerRemains, currentOrCreateUser, ensureDefaultRoles, roleDocByName } from "./permissions";
 
 export const preview = query({
@@ -26,11 +26,6 @@ export const accept = mutation({
     if (invitation.email.toLowerCase() !== user.email.toLowerCase()) throw new ConvexError("This invitation was sent to a different email address.");
     const company = await ctx.db.get(invitation.companyId);
     if (!company || company.deletedAt) throw new ConvexError("Company not found.");
-
-    const companyAuthVersion = company.authVersion ?? 1;
-    if (invitation.authVersion !== undefined && invitation.authVersion !== companyAuthVersion) {
-      throw new ConvexError("This invitation is invalid or has been superseded.");
-    }
 
     const now = Date.now();
     const existing = await ctx.db.query("companyMemberships").withIndex("by_company_user", (q) => q.eq("companyId", invitation.companyId).eq("userId", user._id)).unique();
@@ -90,6 +85,15 @@ export const accept = mutation({
     await ctx.db.patch(invitation._id, { status: "accepted" });
     await ctx.db.insert("auditEvents", { companyId: invitation.companyId, actorUserId: user._id, action: "invitation.accept", targetType: "membership", targetId: membershipId, metadata: { role: role.name }, createdAt: now });
     return { companyId: invitation.companyId };
+  },
+});
+
+export const getForSend = internalQuery({
+  args: { invitationId: v.id("invitations") },
+  handler: async (ctx, args) => {
+    const invitation = await ctx.db.get(args.invitationId);
+    if (!invitation || invitation.status !== "pending") return null;
+    return { email: invitation.email, role: invitation.role, token: invitation.token };
   },
 });
 

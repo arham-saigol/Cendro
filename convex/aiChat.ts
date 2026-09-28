@@ -24,12 +24,15 @@ async function assertSession(ctx: QueryCtx | MutationCtx, companyId: Id<"compani
   const caps = await membershipCapabilities(ctx, membership);
   if (!caps.has("ai:use")) throw new ConvexError("You do not have permission to use AI.");
   const session = await ctx.db.get(sessionId);
-  if (!session || session.companyId !== companyId || session.membershipId !== membership._id) throw new ConvexError("Chat session not found.");
+  if (!session || session.companyId !== companyId || session.membershipId !== membership._id || session.deleting) throw new ConvexError("Chat session not found.");
   return { session, membership, user, caps };
 }
 
 const DELETE_MESSAGE_BATCH_SIZE = 100;
 const MESSAGE_HISTORY_LIMIT = 100;
+// Stored messages feed the model verbatim; an individual document is bounded
+// by Convex (1MB) but unbounded input tokens are the dominant request cost.
+const MAX_MESSAGE_CONTENT_CHARS = 64_000;
 
 async function deleteMessageBatch(ctx: MutationCtx, sessionId: Id<"aiChatSessions">) {
   const messages = await ctx.db.query("aiChatMessages").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).take(DELETE_MESSAGE_BATCH_SIZE);
@@ -104,8 +107,13 @@ export const getOrCreateSession = mutation({
     if (!caps.has("ai:use")) throw new ConvexError("You do not have permission to use AI.");
     if (args.sessionId) {
       const existing = await ctx.db.get(args.sessionId);
-      if (existing && existing.companyId === args.companyId && existing.membershipId === membership._id) return existing._id;
+      if (existing && existing.companyId === args.companyId && existing.membershipId === membership._id && !existing.deleting) return existing._id;
     }
+    // Draft rows are indistinguishable, so reuse the newest one for this
+    // company instead of inserting a fresh empty session on every mount.
+    const recent = await ctx.db.query("aiChatSessions").withIndex("by_membership_and_updatedAt", (q) => q.eq("membershipId", membership._id)).order("desc").take(20);
+    const draft = recent.find((row) => row.companyId === args.companyId && row.hasMessages === false && !row.deleting);
+    if (draft) return draft._id;
     const now = Date.now();
     return await ctx.db.insert("aiChatSessions", { companyId: args.companyId, membershipId: membership._id, hasMessages: false, createdAt: now, updatedAt: now });
   },
@@ -140,6 +148,7 @@ export const appendMessage = mutation({
   handler: async (ctx, args) => {
     const { session } = await assertSession(ctx, args.companyId, args.sessionId);
     const content = nonEmpty(args.content, "Message");
+    if (content.length > MAX_MESSAGE_CONTENT_CHARS) throw new ConvexError("Message is too long.");
     if (args.clientMessageId) {
       const existing = await ctx.db.query("aiChatMessages").withIndex("by_session_and_clientMessageId", (q) => q.eq("sessionId", args.sessionId).eq("clientMessageId", args.clientMessageId)).unique();
       if (existing) return existing._id;
@@ -155,7 +164,7 @@ export const persistServerMessage = mutation({
   args: {
     companyId: v.id("companies"),
     sessionId: v.id("aiChatSessions"),
-    role: v.union(v.literal("assistant"), v.literal("tool")),
+    role: v.literal("assistant"),
     content: v.string(),
     clientMessageId: v.optional(v.string()),
     timestamp: v.number(),
@@ -206,6 +215,7 @@ export const persistServerMessage = mutation({
       .take(50);
     for (const receipt of staleReceipts) await ctx.db.delete(receipt._id);
 
+    if (args.content.length > MAX_MESSAGE_CONTENT_CHARS) throw new ConvexError("Message is too long.");
     const { session } = await assertSession(ctx, args.companyId, args.sessionId);
 
     if (args.clientMessageId) {
@@ -247,6 +257,9 @@ export const deleteSession = mutation({
     await assertSession(ctx, args.companyId, args.sessionId);
     const shouldContinue = await deleteMessageBatch(ctx, args.sessionId);
     if (shouldContinue) {
+      // Tombstone first: while the drain runs, assertSession rejects new
+      // writes so nothing can orphan rows onto the doomed session.
+      await ctx.db.patch(args.sessionId, { hasMessages: false, deleting: true });
       await ctx.scheduler.runAfter(0, internal.aiChat.deleteSessionMessages, { sessionId: args.sessionId });
       return null;
     }

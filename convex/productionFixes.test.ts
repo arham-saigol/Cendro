@@ -383,14 +383,14 @@ describe("production permission and validation fixes", () => {
     });
     const sopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Policy", content: "Body", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
 
-    await expect(t.withIdentity(identity("employee")).mutation(api.sops.updateScope, { companyId, sopId, scopeType: "branch", branchIds: [branchId], userMembershipIds: [] })).rejects.toThrow("access");
-    await expect(t.withIdentity(identity("admin")).mutation(api.sops.updateScope, { companyId, sopId, scopeType: "branch", branchIds: [branchId], userMembershipIds: [] })).resolves.toBeNull();
+    await expect(t.withIdentity(identity("employee")).mutation(api.sops.updateScope, { companyId, sopId, scopeType: "branch", branchIds: [branchId], departmentIds: [], userMembershipIds: [] })).rejects.toThrow("access");
+    await expect(t.withIdentity(identity("admin")).mutation(api.sops.updateScope, { companyId, sopId, scopeType: "branch", branchIds: [branchId], departmentIds: [], userMembershipIds: [] })).resolves.toBeNull();
     await expect(t.withIdentity(identity("employee")).query(api.sops.get, { companyId, sopId })).resolves.toMatchObject({ scopeType: "branch", scopeTargetName: "Warehouse", branchIds: [branchId], userMembershipIds: [] });
 
     await expect(t.withIdentity(identity("admin")).mutation(api.sops.updateScope, { companyId, sopId, scopeType: "department", branchIds: [], departmentIds: [departmentId], userMembershipIds: [] })).resolves.toBeNull();
     await expect(t.withIdentity(identity("employee")).query(api.sops.get, { companyId, sopId })).resolves.toMatchObject({ scopeType: "department", scopeTargetName: "Bakery", branchIds: [], departmentIds: [departmentId], userMembershipIds: [] });
 
-    await expect(t.withIdentity(identity("admin")).mutation(api.sops.updateScope, { companyId, sopId, scopeType: "user", branchIds: [], userMembershipIds: [employeeMembershipId] })).resolves.toBeNull();
+    await expect(t.withIdentity(identity("admin")).mutation(api.sops.updateScope, { companyId, sopId, scopeType: "user", branchIds: [], departmentIds: [], userMembershipIds: [employeeMembershipId] })).resolves.toBeNull();
     await expect(t.withIdentity(identity("employee")).query(api.sops.get, { companyId, sopId })).resolves.toMatchObject({ scopeType: "user", scopeTargetName: "Employee", branchIds: [], departmentIds: [], userMembershipIds: [employeeMembershipId] });
   });
 
@@ -443,9 +443,9 @@ describe("production permission and validation fixes", () => {
     await expect(t.withIdentity(identity("manager")).mutation(api.sops.create, { companyId, title: "In scope department", content: "Body", scopeType: "department", branchIds: [], departmentIds: [managedDepartmentId], userMembershipIds: [] })).resolves.toEqual(expect.any(String));
 
     const inScopeSopId = await t.withIdentity(identity("manager")).mutation(api.sops.create, { companyId, title: "For update", content: "Body", scopeType: "branch", branchIds: [managedBranchId], departmentIds: [], userMembershipIds: [] });
-    await expect(t.withIdentity(identity("manager")).mutation(api.sops.updateScope, { companyId, sopId: inScopeSopId, scopeType: "branch", branchIds: [unmanagedBranchId], userMembershipIds: [] })).rejects.toThrow("managed scope");
+    await expect(t.withIdentity(identity("manager")).mutation(api.sops.updateScope, { companyId, sopId: inScopeSopId, scopeType: "branch", branchIds: [unmanagedBranchId], departmentIds: [], userMembershipIds: [] })).rejects.toThrow("managed scope");
     await expect(t.withIdentity(identity("manager")).mutation(api.sops.updateScope, { companyId, sopId: inScopeSopId, scopeType: "department", branchIds: [], departmentIds: [unmanagedDepartmentId], userMembershipIds: [] })).rejects.toThrow("managed scope");
-    await expect(t.withIdentity(identity("manager")).mutation(api.sops.updateScope, { companyId, sopId: inScopeSopId, scopeType: "user", branchIds: [], userMembershipIds: [unmanagedUserMembershipId] })).rejects.toThrow("managed scope");
+    await expect(t.withIdentity(identity("manager")).mutation(api.sops.updateScope, { companyId, sopId: inScopeSopId, scopeType: "user", branchIds: [], departmentIds: [], userMembershipIds: [unmanagedUserMembershipId] })).rejects.toThrow("managed scope");
     await expect(t.withIdentity(identity("manager")).mutation(api.sops.updateScope, { companyId, sopId: inScopeSopId, scopeType: "department", branchIds: [], departmentIds: [managedDepartmentId], userMembershipIds: [] })).resolves.toBeNull();
   });
 
@@ -571,9 +571,9 @@ describe("production permission and validation fixes", () => {
     const sopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Policy", content: "Old body", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
     const before = await t.run(async (ctx) => await ctx.db.get(sopId));
     if (!before) throw new Error("SOP was not created");
-    await t.run(async (ctx) => await ctx.db.patch(sopId, { content: "New body", updatedAt: before.updatedAt + 1 }));
+    await t.run(async (ctx) => await ctx.db.patch(sopId, { content: "New body", updatedAt: before.updatedAt + 1, contentUpdatedAt: before.updatedAt + 1 }));
 
-    await expect(t.mutation(internal.sops.storeEmbedding, { companyId, sopId, expectedUpdatedAt: before.updatedAt, chunk: "Policy\n\nOld body", embedding: Array(1024).fill(0) })).resolves.toBeNull();
+    await expect(t.mutation(internal.sops.storeEmbedding, { companyId, sopId, expectedContentUpdatedAt: before.updatedAt, chunk: "Policy\n\nOld body", embedding: Array(1024).fill(0) })).resolves.toBeNull();
     const embeddings = await t.run(async (ctx) => await ctx.db.query("sopEmbeddings").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(10));
     expect(embeddings).toEqual([]);
   });

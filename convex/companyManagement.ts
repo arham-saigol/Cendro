@@ -1,5 +1,5 @@
 import { ConvexError, v } from "convex/values";
-import { action, internalMutation, mutation, query, type QueryCtx } from "./_generated/server";
+import { action, internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
@@ -30,17 +30,17 @@ function cleanTimeZone(value: string) {
   }
 }
 
-async function assertBranch(ctx: any, companyId: Id<"companies">, branchId: Id<"branches">) {
+async function assertBranch(ctx: QueryCtx | MutationCtx, companyId: Id<"companies">, branchId: Id<"branches">) {
   const branch = await ctx.db.get(branchId);
   if (!branch || branch.companyId !== companyId) throw new ConvexError("Branch not found.");
   return branch;
 }
-async function assertDepartment(ctx: any, companyId: Id<"companies">, departmentId: Id<"departments">) {
+async function assertDepartment(ctx: QueryCtx | MutationCtx, companyId: Id<"companies">, departmentId: Id<"departments">) {
   const department = await ctx.db.get(departmentId);
   if (!department || department.companyId !== companyId) throw new ConvexError("Department not found.");
   return department;
 }
-async function assertMembership(ctx: any, companyId: Id<"companies">, membershipId: Id<"companyMemberships">) {
+async function assertMembership(ctx: QueryCtx | MutationCtx, companyId: Id<"companies">, membershipId: Id<"companyMemberships">) {
   const membership = await ctx.db.get(membershipId);
   if (!membership || membership.companyId !== companyId) throw new ConvexError("User not found in this company.");
   return membership;
@@ -52,52 +52,34 @@ function assertSameIdSet<T>(actual: T[], expected: T[], message: string) {
   if (actual.some((id) => !expectedSet.has(id))) throw new ConvexError(message);
 }
 
-async function managerScope(
-  ctx: QueryCtx,
-  managerMembershipId: Id<"companyMemberships">,
-  onTruncated?: () => void,
-) {
-  const [branches, departments, users] = await Promise.all([
-    takeWithOverflow((limit) => ctx.db.query("managerBranchScopes").withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
-    takeWithOverflow((limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
-    takeWithOverflow((limit) => ctx.db.query("managerUserScopes").withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", managerMembershipId)).take(limit), overviewListLimit),
-  ]);
-  if (branches.isTruncated || departments.isTruncated || users.isTruncated) onTruncated?.();
-  return {
-    branchIds: branches.rows.map((row) => row.branchId),
-    departmentIds: departments.rows.map((row) => row.departmentId),
-    userMembershipIds: users.rows.map((row) => row.userMembershipId),
-  };
-}
-
-async function clearUserManagementRows(ctx: any, membershipId: Id<"companyMemberships">) {
+async function clearUserManagementRows(ctx: MutationCtx, membershipId: Id<"companyMemberships">) {
   while (true) {
-    const rows = await ctx.db.query("userBranchAssignments").withIndex("by_membershipId_and_branchId", (q: any) => q.eq("membershipId", membershipId)).take(500);
+    const rows = await ctx.db.query("userBranchAssignments").withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", membershipId)).take(500);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
   while (true) {
-    const rows = await ctx.db.query("userDepartmentAssignments").withIndex("by_membershipId_and_departmentId", (q: any) => q.eq("membershipId", membershipId)).take(500);
+    const rows = await ctx.db.query("userDepartmentAssignments").withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", membershipId)).take(500);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
   while (true) {
-    const rows = await ctx.db.query("managerBranchScopes").withIndex("by_managerMembershipId_and_branchId", (q: any) => q.eq("managerMembershipId", membershipId)).take(500);
+    const rows = await ctx.db.query("managerBranchScopes").withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", membershipId)).take(500);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
   while (true) {
-    const rows = await ctx.db.query("managerDepartmentScopes").withIndex("by_managerMembershipId_and_departmentId", (q: any) => q.eq("managerMembershipId", membershipId)).take(500);
+    const rows = await ctx.db.query("managerDepartmentScopes").withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", membershipId)).take(500);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
   while (true) {
-    const rows = await ctx.db.query("managerUserScopes").withIndex("by_managerMembershipId_and_userMembershipId", (q: any) => q.eq("managerMembershipId", membershipId)).take(500);
+    const rows = await ctx.db.query("managerUserScopes").withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", membershipId)).take(500);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
   while (true) {
-    const rows = await ctx.db.query("managerUserScopes").withIndex("by_user", (q: any) => q.eq("userMembershipId", membershipId)).take(500);
+    const rows = await ctx.db.query("managerUserScopes").withIndex("by_user", (q) => q.eq("userMembershipId", membershipId)).take(500);
     if (!rows.length) break;
     for (const row of rows) await ctx.db.delete(row._id);
   }
@@ -136,26 +118,36 @@ export const overview = query({
     const branches = branchResult.rows.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
     const departments = departmentResult.rows.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
     let userDetailsTruncated = false;
+    // Assignment and manager-scope rows load once per company and group by
+    // membership — five bounded scans instead of ~6 reads per member.
+    const [branchAssignments, departmentAssignments, managerBranches, managerDepartments, managerUsers] = await Promise.all([
+      canReadUsers ? takeWithOverflow((limit) => ctx.db.query("userBranchAssignments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit) : skipped,
+      canReadUsers ? takeWithOverflow((limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit) : skipped,
+      canReadRoles ? takeWithOverflow((limit) => ctx.db.query("managerBranchScopes").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit) : skipped,
+      canReadRoles ? takeWithOverflow((limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit) : skipped,
+      canReadRoles ? takeWithOverflow((limit) => ctx.db.query("managerUserScopes").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit) : skipped,
+    ]);
+    if (branchAssignments.isTruncated || departmentAssignments.isTruncated || managerBranches.isTruncated || managerDepartments.isTruncated || managerUsers.isTruncated) userDetailsTruncated = true;
+    const branchIdsByMembership = new Map<Id<"companyMemberships">, Id<"branches">[]>();
+    for (const row of branchAssignments.rows) {
+      const list = branchIdsByMembership.get(row.membershipId) ?? [];
+      list.push(row.branchId);
+      branchIdsByMembership.set(row.membershipId, list);
+    }
+    const departmentIdsByMembership = new Map<Id<"companyMemberships">, Id<"departments">[]>();
+    for (const row of departmentAssignments.rows) {
+      const list = departmentIdsByMembership.get(row.membershipId) ?? [];
+      list.push(row.departmentId);
+      departmentIdsByMembership.set(row.membershipId, list);
+    }
+    const managerScopesByMembership = new Map<Id<"companyMemberships">, { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }>();
+    for (const row of managerBranches.rows) (managerScopesByMembership.get(row.managerMembershipId) ?? managerScopesByMembership.set(row.managerMembershipId, { branchIds: [], departmentIds: [], userMembershipIds: [] }).get(row.managerMembershipId)!).branchIds.push(row.branchId);
+    for (const row of managerDepartments.rows) (managerScopesByMembership.get(row.managerMembershipId) ?? managerScopesByMembership.set(row.managerMembershipId, { branchIds: [], departmentIds: [], userMembershipIds: [] }).get(row.managerMembershipId)!).departmentIds.push(row.departmentId);
+    for (const row of managerUsers.rows) (managerScopesByMembership.get(row.managerMembershipId) ?? managerScopesByMembership.set(row.managerMembershipId, { branchIds: [], departmentIds: [], userMembershipIds: [] }).get(row.managerMembershipId)!).userMembershipIds.push(row.userMembershipId);
     const users = (
       await Promise.all(
         membershipResult.rows.map(async (m) => {
-          const [user, branchAssignmentResult, departmentAssignmentResult, scope] = await Promise.all([
-            ctx.db.get(m.userId),
-            takeWithOverflow(
-              (limit) => ctx.db.query("userBranchAssignments").withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", m._id)).take(limit),
-              overviewListLimit,
-            ),
-            takeWithOverflow(
-              (limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", m._id)).take(limit),
-              overviewListLimit,
-            ),
-            canReadRoles
-              ? managerScope(ctx, m._id, () => { userDetailsTruncated = true; })
-              : { branchIds: [], departmentIds: [], userMembershipIds: [] },
-          ]);
-          if (branchAssignmentResult.isTruncated || departmentAssignmentResult.isTruncated) {
-            userDetailsTruncated = true;
-          }
+          const user = await ctx.db.get(m.userId);
           if (!user) return null;
           const memFirstName = memberFirstName(m, user);
           const memSecondName = m.secondName !== undefined ? m.secondName.trim() : (user.secondName?.trim() ?? "");
@@ -163,9 +155,9 @@ export const overview = query({
           return {
             membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt },
             user: { _id: user._id, name: memFullName, firstName: memFirstName, secondName: memSecondName, email: user.email },
-            branchIds: branchAssignmentResult.rows.map((assignment) => assignment.branchId),
-            departmentIds: departmentAssignmentResult.rows.map((assignment) => assignment.departmentId),
-            scope,
+            branchIds: branchIdsByMembership.get(m._id) ?? [],
+            departmentIds: departmentIdsByMembership.get(m._id) ?? [],
+            scope: canReadRoles ? (managerScopesByMembership.get(m._id) ?? { branchIds: [], departmentIds: [], userMembershipIds: [] }) : { branchIds: [], departmentIds: [], userMembershipIds: [] },
           };
         }),
       )
@@ -423,23 +415,32 @@ export const updateMemberName = mutation({
 export const setAssignments = mutation({
   args: { companyId: v.id("companies"), membershipId: v.id("companyMemberships"), branchIds: v.array(v.id("branches")), departmentIds: v.array(v.id("departments")) },
   handler: async (ctx, args) => {
-    await requireCapability(ctx, args.companyId, "company:manage_users");
+    const { user } = await requireCapability(ctx, args.companyId, "company:manage_users");
     await assertMembership(ctx, args.companyId, args.membershipId);
     const branchIds = unique(args.branchIds);
     const departmentIds = unique(args.departmentIds);
     for (const branchId of branchIds) await assertBranch(ctx, args.companyId, branchId);
     for (const departmentId of departmentIds) await assertDepartment(ctx, args.companyId, departmentId);
-    for (const r of await ctx.db.query("userBranchAssignments").withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", args.membershipId)).take(500)) await ctx.db.delete(r._id);
-    for (const r of await ctx.db.query("userDepartmentAssignments").withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", args.membershipId)).take(500)) await ctx.db.delete(r._id);
+    while (true) {
+      const stale = await ctx.db.query("userBranchAssignments").withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", args.membershipId)).take(500);
+      if (!stale.length) break;
+      for (const r of stale) await ctx.db.delete(r._id);
+    }
+    while (true) {
+      const stale = await ctx.db.query("userDepartmentAssignments").withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", args.membershipId)).take(500);
+      if (!stale.length) break;
+      for (const r of stale) await ctx.db.delete(r._id);
+    }
     for (const branchId of branchIds) await ctx.db.insert("userBranchAssignments", { companyId: args.companyId, membershipId: args.membershipId, branchId });
     for (const departmentId of departmentIds) await ctx.db.insert("userDepartmentAssignments", { companyId: args.companyId, membershipId: args.membershipId, departmentId });
+    await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "member.assignments_update", targetType: "membership", targetId: args.membershipId, metadata: { branchIds, departmentIds }, createdAt: Date.now() });
   },
 });
 
 export const setManagerScope = mutation({
   args: { companyId: v.id("companies"), managerMembershipId: v.id("companyMemberships"), branchIds: v.array(v.id("branches")), departmentIds: v.array(v.id("departments")), userMembershipIds: v.array(v.id("companyMemberships")) },
   handler: async (ctx, args) => {
-    await requireCapability(ctx, args.companyId, "company:manage_roles");
+    const { user } = await requireCapability(ctx, args.companyId, "company:manage_roles");
     await assertMembership(ctx, args.companyId, args.managerMembershipId);
     const branchIds = unique(args.branchIds);
     const departmentIds = unique(args.departmentIds);
@@ -447,13 +448,26 @@ export const setManagerScope = mutation({
     for (const branchId of branchIds) await assertBranch(ctx, args.companyId, branchId);
     for (const departmentId of departmentIds) await assertDepartment(ctx, args.companyId, departmentId);
     for (const membershipId of userMembershipIds) await assertMembership(ctx, args.companyId, membershipId);
-    for (const r of await ctx.db.query("managerBranchScopes").withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", args.managerMembershipId)).take(500)) await ctx.db.delete(r._id);
-    for (const r of await ctx.db.query("managerDepartmentScopes").withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", args.managerMembershipId)).take(500)) await ctx.db.delete(r._id);
-    for (const r of await ctx.db.query("managerUserScopes").withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", args.managerMembershipId)).take(500)) await ctx.db.delete(r._id);
+    while (true) {
+      const stale = await ctx.db.query("managerBranchScopes").withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", args.managerMembershipId)).take(500);
+      if (!stale.length) break;
+      for (const r of stale) await ctx.db.delete(r._id);
+    }
+    while (true) {
+      const stale = await ctx.db.query("managerDepartmentScopes").withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", args.managerMembershipId)).take(500);
+      if (!stale.length) break;
+      for (const r of stale) await ctx.db.delete(r._id);
+    }
+    while (true) {
+      const stale = await ctx.db.query("managerUserScopes").withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", args.managerMembershipId)).take(500);
+      if (!stale.length) break;
+      for (const r of stale) await ctx.db.delete(r._id);
+    }
     const updatedAt = Date.now();
     for (const branchId of branchIds) await ctx.db.insert("managerBranchScopes", { companyId: args.companyId, managerMembershipId: args.managerMembershipId, branchId, updatedAt });
     for (const departmentId of departmentIds) await ctx.db.insert("managerDepartmentScopes", { companyId: args.companyId, managerMembershipId: args.managerMembershipId, departmentId, updatedAt });
     for (const userMembershipId of userMembershipIds) await ctx.db.insert("managerUserScopes", { companyId: args.companyId, managerMembershipId: args.managerMembershipId, userMembershipId, updatedAt });
+    await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "member.manager_scope_update", targetType: "membership", targetId: args.managerMembershipId, metadata: { branchIds, departmentIds, userMembershipIds }, createdAt: Date.now() });
   },
 });
 
@@ -469,7 +483,7 @@ export const createInvitationRecord = internalMutation({
     managedUserMembershipIds: v.optional(v.array(v.id("companyMemberships"))),
   },
   handler: async (ctx, args) => {
-    const { user, company, capabilities: caps } = await requireCapability(ctx, args.companyId, "company:invite_users");
+    const { user, capabilities: caps } = await requireCapability(ctx, args.companyId, "company:invite_users");
     await ensureDefaultRoles(ctx, args.companyId);
     const role = await roleDocByName(ctx, args.companyId, args.role);
     if (!role) throw new ConvexError("Role not found.");
@@ -521,7 +535,6 @@ export const createInvitationRecord = internalMutation({
       await ctx.db.patch(inv._id, { status: "revoked" });
     }
 
-    const companyAuthVersion = company.authVersion ?? 1;
     const token = crypto.randomUUID();
     const patch = {
       role: role.name,
@@ -539,7 +552,6 @@ export const createInvitationRecord = internalMutation({
       token,
       status: "pending",
       invitedBy: user._id,
-      authVersion: companyAuthVersion,
       issuedAt: now,
       targetMembershipId: targetMembership?._id,
       targetMembershipUpdatedAt: targetMembership?.updatedAt,
@@ -564,7 +576,42 @@ export const inviteUser = action({
   args: { companyId: v.id("companies"), email: v.string(), role: v.string(), branchIds: v.optional(v.array(v.id("branches"))), departmentIds: v.optional(v.array(v.id("departments"))), managedBranchIds: v.optional(v.array(v.id("branches"))), managedDepartmentIds: v.optional(v.array(v.id("departments"))), managedUserMembershipIds: v.optional(v.array(v.id("companyMemberships"))) },
   handler: async (ctx, args): Promise<{ ok: boolean }> => {
     const invite = await ctx.runMutation(internal.companyManagement.createInvitationRecord, args);
-    await ctx.runAction(internal.email.sendInvitation, { companyId: args.companyId, invitationId: invite.id, email: args.email, role: args.role, token: invite.token });
+    await ctx.runAction(internal.email.sendInvitation, { invitationId: invite.id });
     return { ok: true };
+  },
+});
+
+export const revokeInvitation = mutation({
+  args: { companyId: v.id("companies"), invitationId: v.id("invitations") },
+  handler: async (ctx, args) => {
+    const { user } = await requireCapability(ctx, args.companyId, "company:invite_users");
+    const invitation = await ctx.db.get(args.invitationId);
+    if (!invitation || invitation.companyId !== args.companyId) throw new ConvexError("Invitation not found.");
+    if (invitation.status !== "pending") throw new ConvexError("Only pending invitations can be revoked.");
+    await ctx.db.patch(args.invitationId, { status: "revoked" });
+    await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "invitation.revoke", targetType: "invitation", targetId: args.invitationId, metadata: { email: invitation.email, role: invitation.role }, createdAt: Date.now() });
+    return null;
+  },
+});
+
+export const resendInvitation = action({
+  args: { companyId: v.id("companies"), invitationId: v.id("invitations") },
+  handler: async (ctx, args): Promise<{ ok: boolean }> => {
+    await ctx.runMutation(internal.companyManagement.prepareResend, args);
+    await ctx.runAction(internal.email.sendInvitation, { invitationId: args.invitationId });
+    return { ok: true };
+  },
+});
+
+export const prepareResend = internalMutation({
+  args: { companyId: v.id("companies"), invitationId: v.id("invitations") },
+  handler: async (ctx, args) => {
+    const { user } = await requireCapability(ctx, args.companyId, "company:invite_users");
+    const invitation = await ctx.db.get(args.invitationId);
+    if (!invitation || invitation.companyId !== args.companyId) throw new ConvexError("Invitation not found.");
+    if (invitation.status !== "pending") throw new ConvexError("Only pending invitations can be resent.");
+    if (invitation.expiresAt <= Date.now()) throw new ConvexError("This invitation has expired. Invite them again.");
+    await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "invitation.resend", targetType: "invitation", targetId: args.invitationId, metadata: { email: invitation.email }, createdAt: Date.now() });
+    return null;
   },
 });

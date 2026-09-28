@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { authDiagnostic, bootEpisode, clearBootEpisode, reportAuthDiagnostic } from "@/lib/auth-diagnostics";
 import {
   SHELL_STALL_WARN_MS,
   bumpShellRetries,
@@ -36,14 +37,14 @@ export function useShellStall(accessStatus: string, stage: ShellLoadingStage | n
 
   const diagnostics = useCallback(
     (elapsed: number) =>
-      shellStallSummary({
+      authDiagnostic(shellStallSummary({
         status: accessStatus,
         stage,
         elapsedMs: elapsed,
         connection,
         autoRetries: readShellRetries(shellRetryStorage()),
         online: browserOnline(),
-      }),
+      })),
     [accessStatus, stage, connection],
   );
   // The stall interval outlives renders, so it reads diagnostics through a ref
@@ -55,17 +56,25 @@ export function useShellStall(accessStatus: string, stage: ShellLoadingStage | n
 
   const retry = useCallback(() => {
     bumpShellRetries(shellRetryStorage());
-    console.warn("[cendro] app shell retry requested", diagnosticsRef.current(elapsedRef.current));
+    const snapshot = diagnosticsRef.current(elapsedRef.current);
+    console.warn("[cendro] app shell retry requested", snapshot);
+    reportAuthDiagnostic("retry", snapshot);
     window.location.reload();
   }, []);
 
   useEffect(() => {
     if (!waiting) {
+      if (elapsedRef.current >= SHELL_STALL_WARN_MS) {
+        const snapshot = diagnosticsRef.current(elapsedRef.current);
+        if (snapshot.status === "ready" || snapshot.status === "noCompanies") reportAuthDiagnostic("recovered", snapshot);
+      }
+      clearBootEpisode();
       elapsedRef.current = 0;
       setElapsedMs(0);
       clearShellRetries(shellRetryStorage());
       return;
     }
+    bootEpisode();
     const storage = shellRetryStorage();
     const persistable = shellRetriesPersistable(storage);
     const startedAt = Date.now();
@@ -77,12 +86,16 @@ export function useShellStall(accessStatus: string, stage: ShellLoadingStage | n
       setElapsedMs(elapsed);
       if (elapsed >= SHELL_STALL_WARN_MS && !warned) {
         warned = true;
-        console.warn("[cendro] app shell still waiting", diagnosticsRef.current(elapsed));
+        const snapshot = diagnosticsRef.current(elapsed);
+        console.warn("[cendro] app shell still waiting", snapshot);
+        reportAuthDiagnostic("stall", snapshot);
       }
       if (!autoRetried && persistable && shouldAutoRetry(elapsed, readShellRetries(storage))) {
         autoRetried = true;
         bumpShellRetries(storage);
-        console.warn("[cendro] app shell auto-retrying after stall", diagnosticsRef.current(elapsed));
+        const snapshot = diagnosticsRef.current(elapsed);
+        console.warn("[cendro] app shell auto-retrying after stall", snapshot);
+        reportAuthDiagnostic("retry", snapshot);
         window.location.reload();
       }
     }, 1000);
@@ -92,5 +105,5 @@ export function useShellStall(accessStatus: string, stage: ShellLoadingStage | n
   }, [waiting]);
 
   // Read per render so the count persists across auto-reload remounts.
-  return { stalled: waiting && elapsedMs >= SHELL_STALL_WARN_MS, elapsedMs, reloads: readShellRetries(shellRetryStorage()), retry };
+  return { stalled: waiting && elapsedMs >= SHELL_STALL_WARN_MS, elapsedMs, reloads: readShellRetries(shellRetryStorage()), diagnostic: waiting ? diagnostics(elapsedMs) : null, retry };
 }

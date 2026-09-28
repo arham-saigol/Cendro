@@ -30,7 +30,7 @@ function UserSync() {
             console.error("[cendro] user sync requires an email claim; ask an administrator to check this account.");
             return;
           }
-          if (attempt === 0 || attempt % 10 === 0) console.warn("[cendro] user sync failed; retrying", err);
+          if (attempt === 0 || attempt % 10 === 0) console.warn("[cendro] user sync failed; retrying");
           // A transient failure must not permanently strand an already signed-in
           // user on the profile screen after a fixed number of attempts.
           await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** Math.min(attempt, 6), 60_000)));

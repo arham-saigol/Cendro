@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { canAccessCompanyManagement, canViewDashboard } from "@/lib/permissions";
 import { shellStageLabel, type ShellConnection, type ShellLoadingStage } from "@/lib/shell-access";
+import type { AuthDiagnostic } from "@/lib/auth-diagnostics";
 import { useShellStall } from "./shell-stall";
 import { cn, initials } from "@/lib/utils";
 
@@ -322,21 +323,21 @@ function AssistantOrb({ onClick }: { onClick: () => void }) {
   );
 }
 
-function stallCopy(accessStatus: string, stage: ShellLoadingStage | null): { title: string; body: string } {
+function stallCopy(accessStatus: string, stage: ShellLoadingStage | null, diagnostic: AuthDiagnostic): { title: string; body: string } {
   if (accessStatus === "convexUnauthenticated") {
-    return { title: "Couldn't verify your sign-in", body: "The server rejected the session token or never confirmed it. A firewall, VPN, or browser extension may be interfering with the secure connection." };
+    return { title: "Couldn't verify your sign-in", body: diagnostic.token?.result === "obtained" ? "Cendro has not confirmed this session. Authentication failed; try again or share the support diagnostic." : "Clerk is signed in, but Cendro could not obtain or confirm a session token. Try again or share the support diagnostic." };
   }
   if (accessStatus === "profileMissing") {
     return { title: "Your profile is still syncing", body: "Your account record hasn't been created yet. If this keeps happening, your account may be missing an email address — ask an administrator to check." };
   }
   if (stage === "session") {
-    return { title: "Sign-in is taking a while", body: "The sign-in service hasn't finished loading. A network filter or browser extension may be blocking it." };
+    return { title: "Sign-in is taking a while", body: "The sign-in service hasn't finished loading. Try again if this persists." };
   }
   if (stage === "convex-auth") {
-    return { title: "Securing your session", body: "You're signed in, but the secure connection hasn't been confirmed. A firewall or VPN may be blocking the connection to Cendro's servers." };
+    return { title: "Securing your session", body: diagnostic.token?.result === "obtained" ? "Clerk is signed in; Cendro is waiting to confirm your session." : "Clerk is signed in; Cendro has not confirmed your session. Token acquisition or confirmation may still be pending." };
   }
   if (stage === "data") {
-    return { title: "Loading your workspace", body: "You're connected and signed in, but the workspace data hasn't arrived yet. The connection may have been interrupted." };
+    return { title: "Loading your workspace", body: "Your session is confirmed, but workspace data has not arrived yet." };
   }
   return { title: "Still loading", body: "This is taking longer than usual." };
 }
@@ -349,8 +350,10 @@ function StallCard({
   connection,
   email,
   onRetry,
+  diagnostic,
 }: {
   accessStatus: string;
+  diagnostic: AuthDiagnostic;
   stage: ShellLoadingStage | null;
   elapsedMs: number;
   reloads: number;
@@ -358,13 +361,13 @@ function StallCard({
   email: string | null;
   onRetry: () => void;
 }) {
-  const { title, body } = stallCopy(accessStatus, stage);
+  const { title, body } = stallCopy(accessStatus, stage, diagnostic);
   const elapsedSeconds = Math.round(elapsedMs / 1000);
   const socket = connection
     ? connection.isWebSocketConnected
       ? "websocket connected"
       : connection.hasEverConnected
-        ? `reconnecting (attempt ${connection.connectionRetries})`
+        ? "websocket disconnected"
         : "websocket not connected"
     : "websocket state unknown";
   return (
@@ -378,11 +381,16 @@ function StallCard({
       <p className="mt-2 text-sm text-[var(--ink-muted)]">{body}</p>
       <p className="mt-3 text-xs text-[var(--ink-faint)]">
         {stage ? `Waiting on ${shellStageLabel(stage)} · ` : ""}
-        {elapsedSeconds}s · {socket}
+        {elapsedSeconds}s · {socket} · connection retries {connection?.connectionRetries ?? 0}
         {reloads > 0 ? ` · retried ${reloads}x` : ""}
         {typeof navigator !== "undefined" && navigator.onLine === false ? " · offline" : ""}
       </p>
       {email && <p className="mt-1 text-xs text-[var(--ink-faint)]">Signed in as {email}</p>}
+      <details className="mt-3 text-xs text-[var(--ink-muted)]">
+        <summary className="cursor-pointer">Support diagnostic</summary>
+        <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap break-all select-text">{JSON.stringify(diagnostic, null, 2)}</pre>
+        <Button variant="secondary" size="sm" onClick={() => void navigator.clipboard?.writeText(JSON.stringify(diagnostic)).catch(() => {})}>Copy diagnostic</Button>
+      </details>
       <div className="mt-5 flex gap-2">
         <Button variant="primary" onClick={onRetry}>Try again</Button>
       </div>
@@ -395,7 +403,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
   const router = useRouter();
   const { accessStatus, email, activeCompanyId, active, loadingStage, connection } = useCompany();
   const [aiOpen, setAiOpen] = useState(false);
-  const { stalled, elapsedMs, reloads, retry } = useShellStall(accessStatus, loadingStage, connection);
+  const { stalled, elapsedMs, reloads, diagnostic, retry } = useShellStall(accessStatus, loadingStage, connection);
 
   useEffect(() => {
     if (accessStatus === "signedOut") router.replace(`/sign-in?redirect_url=${encodeURIComponent(path)}`);
@@ -416,6 +424,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
           connection={connection}
           email={email}
           onRetry={retry}
+          diagnostic={diagnostic!}
         />
       );
     }
@@ -443,6 +452,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
           connection={connection}
           email={email}
           onRetry={retry}
+          diagnostic={diagnostic!}
         />
       );
     }

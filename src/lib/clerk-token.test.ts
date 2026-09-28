@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { CLERK_GET_TOKEN_TIMEOUT_MS, boundGetToken } from "./clerk-token";
+import { tokenOutcome } from "./auth-diagnostics";
 
 describe("boundGetToken", () => {
   afterEach(() => {
@@ -29,15 +30,15 @@ describe("boundGetToken", () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 
-  test("returns null when getToken throws before returning a promise", async () => {
-    const bounded = boundGetToken(() => { throw new Error("session unavailable"); }, 50);
-    await expect(bounded({ template: "convex" })).resolves.toBeNull();
-  });
-
-  test("returns null when getToken rejects, matching the uncaught wrapper behavior", async () => {
+  test("redacts rejected or synchronously thrown token failures", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const bounded = boundGetToken(() => Promise.reject(new Error("fetch failed")), 50);
-    await expect(bounded({})).resolves.toBeNull();
-    expect(warn).not.toHaveBeenCalled();
+    const secret = "secret-claim@example.com";
+    const bounded = boundGetToken(() => { throw { message: secret, code: secret, status: 429, requestId: "req_123", token: secret }; }, 50);
+    await expect(bounded({ skipCache: true })).resolves.toBeNull();
+    expect(tokenOutcome()).toMatchObject({ result: "rejected", refresh: true, status: 429, requestId: "req_123" });
+    expect(JSON.stringify(tokenOutcome())).not.toContain(secret);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(secret);
+    await expect(boundGetToken(() => Promise.reject(null), 50)({})).resolves.toBeNull();
+    expect(tokenOutcome()?.result).toBe("rejected");
   });
 });

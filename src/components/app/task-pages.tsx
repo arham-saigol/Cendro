@@ -1474,9 +1474,12 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
         await bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId });
         await addAttachment({ companyId: activeCompanyId, taskType: taskTypeFor(kind), taskId, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
       } catch (err) {
-        // The blob is already stored; reclaim it so the failure does not leak
-        // storage — the storageId binds the claim even if binding never ran.
-        void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId }).catch(() => {});
+        // The blob is already stored; bind it to the claim (idempotent — no-op
+        // when binding already ran) then reclaim it so the failure does not
+        // leak storage. Orphan cleanup only touches the claim's bound blob.
+        void bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId })
+          .then(() => deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId }))
+          .catch(() => {});
         throw err;
       }
       setValues((current) => ({ ...current, files: current.files.filter((candidate) => candidate !== file) }));
@@ -2738,7 +2741,11 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
           await bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId });
           await addAttachment({ companyId: activeCompanyId, taskType, taskId: id, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
         } catch (attachErr) {
-          void deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId }).catch(() => {});
+          // Bind first (idempotent) so orphan cleanup can only see the blob
+          // through the claim — it never accepts a supplied storage id.
+          void bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId })
+            .then(() => deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId }))
+            .catch(() => {});
           throw attachErr;
         }
       } catch (err) {

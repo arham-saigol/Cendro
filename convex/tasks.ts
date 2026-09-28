@@ -1668,31 +1668,23 @@ const TASK_UPLOAD_CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
 
 // Reclaims the bound blob when recording an upload as an attachment failed
 // (e.g. the task was deleted mid-upload). The claim both proves the caller
-// was issued this upload slot and scopes which blob cleanup may delete, so
-// a caller can never touch another tenant's pending upload. When the upload
-// POST completed but bindUploadClaim never committed, the supplied blob is
-// deleted only while no claim or attachment references it.
+// was issued this upload slot and names the only blob cleanup may delete —
+// a blob the caller never bound to their claim is left to its owner and the
+// sweep. Callers reclaiming an unbound blob bind it first via bindUploadClaim.
 export const deleteOrphanedUpload = mutation({
-  args: { companyId: v.id("companies"), claimId: v.id("taskUploadClaims"), storageId: v.optional(v.id("_storage")) },
+  args: { companyId: v.id("companies"), claimId: v.id("taskUploadClaims") },
   handler: async (ctx, args) => {
     const { membership } = await requireCapability(ctx, args.companyId, "tasks:attachment:add");
     const claim = await ctx.db.get(args.claimId);
     if (!claim || claim.companyId !== args.companyId || claim.membershipId !== membership._id) throw new ConvexError("Upload claim not found.");
-    if (claim.storageId && args.storageId && claim.storageId !== args.storageId) throw new ConvexError("Upload claim is bound to a different file.");
-    // A blob is only safe to delete when nothing references it: the claim's
-    // own bound blob once this claim is gone, or a supplied blob no claim or
-    // attachment tracks AND that postdates the claim — uploads always follow
-    // claim issuance, so an older supplied blob can only be someone else's.
-    const blobId = claim.storageId ?? args.storageId ?? null;
+    const blobId = claim.storageId ?? null;
     await ctx.db.delete(args.claimId);
     if (!blobId) return null;
-    const [attachmentRef, claimRef, metadata] = await Promise.all([
+    const [attachmentRef, claimRef] = await Promise.all([
       ctx.db.query("taskAttachments").withIndex("by_storageId", (q) => q.eq("storageId", blobId)).first(),
       ctx.db.query("taskUploadClaims").withIndex("by_storageId", (q) => q.eq("storageId", blobId)).first(),
-      ctx.db.system.get("_storage", blobId),
     ]);
-    const claimProvesOwnership = claim.storageId === blobId || (metadata !== null && metadata._creationTime >= claim.createdAt);
-    if (!attachmentRef && !claimRef && metadata && claimProvesOwnership) await ctx.storage.delete(blobId);
+    if (!attachmentRef && !claimRef) await ctx.storage.delete(blobId);
     return null;
   },
 });

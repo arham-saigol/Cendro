@@ -130,7 +130,7 @@ describe("task authorization hardening", () => {
       f.asUser("adminB").mutation(api.tasks.bindUploadClaim, { companyId: f.companyB, claimId, storageId })
     ).rejects.toThrow("Upload claim not found.");
     await expect(
-      f.asUser("adminB").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyB, claimId, storageId })
+      f.asUser("adminB").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyB, claimId })
     ).rejects.toThrow("Upload claim not found.");
 
     // The owner binds the uploaded blob; rebinding to another blob is refused.
@@ -141,45 +141,43 @@ describe("task authorization hardening", () => {
     await expect(
       f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId, storageId: otherStorageId })
     ).rejects.toThrow("Upload claim is already bound.");
-    await expect(
-      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId, storageId: otherStorageId })
-    ).rejects.toThrow("Upload claim is bound to a different file.");
 
     // Cleanup deletes the bound unreferenced blob and consumes the claim.
     await expect(
-      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId, storageId })
+      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId })
     ).resolves.toBeNull();
     expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", storageId))).toBeNull();
     expect(await f.t.run(async (ctx) => ctx.db.get(claimId))).toBeNull();
     expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", otherStorageId))).not.toBeNull();
   });
 
-  test("Orphan cleanup deletes an unreferenced supplied blob but never a referenced one", async () => {
+  test("Orphan cleanup deletes only the claim's bound blob and never a referenced one", async () => {
     const f = await createAuthzFixture();
 
-    // An unbound claim plus a blob nothing tracks can only be this flow's own
-    // abandoned upload — deleting it keeps the failed-bind path from leaking.
+    // The failed-bind path reclaims by binding the blob first — cleanup only
+    // ever touches the blob the caller's own claim names.
     const claimId = await f.t.run(async (ctx) =>
       ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, createdAt: Date.now() })
     );
     const storageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["late-bind"], { type: "text/plain" })));
+    await f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId, storageId });
 
     await expect(
-      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId, storageId })
+      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId })
     ).resolves.toBeNull();
     expect(await f.t.run(async (ctx) => ctx.db.get(claimId))).toBeNull();
     expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", storageId))).toBeNull();
 
-    // A supplied blob that predates the claim can only be someone else's
-    // upload — the claim is consumed but the file is left alone.
-    const foreignStorageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["foreign"], { type: "text/plain" })));
-    const lateClaimId = await f.t.run(async (ctx) =>
-      ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, createdAt: Date.now() + 60_000 })
+    // An unbound claim carries no blob reference — deleting it consumes the
+    // claim but leaves every unattached blob alone.
+    const strayStorageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["stray"], { type: "text/plain" })));
+    const unboundClaimId = await f.t.run(async (ctx) =>
+      ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, createdAt: Date.now() })
     );
     await expect(
-      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId: lateClaimId, storageId: foreignStorageId })
+      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId: unboundClaimId })
     ).resolves.toBeNull();
-    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", foreignStorageId))).not.toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", strayStorageId))).not.toBeNull();
 
     // A blob already recorded as an attachment is never reclaimed.
     const jdTaskId = await f.asUser("adminA").mutation(api.tasks.createJd, {
@@ -202,7 +200,7 @@ describe("task authorization hardening", () => {
       ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, storageId: attachedStorageId, createdAt: Date.now() })
     );
     await expect(
-      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId: attachedClaimId, storageId: attachedStorageId })
+      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId: attachedClaimId })
     ).resolves.toBeNull();
     expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", attachedStorageId))).not.toBeNull();
   });

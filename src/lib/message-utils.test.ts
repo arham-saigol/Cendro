@@ -23,14 +23,15 @@ describe("AI message persistence helpers", () => {
     expect(toUiMessage({ _id: "assistant_1", role: "assistant", content: serialized }).parts[0].text).toBe(parsed.text);
   });
 
-  test("escaped characters can only over-trim, never exceed the cap", () => {
-    // Escapes expand in the JSON string, so removing N raw chars shrinks the
-    // output by at least N — a single-pass trim always lands under the cap.
+  test("escaped characters shrink the kept prefix, never exceed the cap", () => {
+    // Escapes expand in the JSON string; a raw-excess slice can erase an
+    // answer that mostly fits — binary search keeps the longest prefix.
     const newlineHeavy = "a" + "\n".repeat(35_000) + "x".repeat(40_000);
     const serialized = serializeAssistantMessage({ role: "assistant", parts: [{ type: "text", text: newlineHeavy }] }, 64_000);
 
     expect(serialized.length).toBeLessThanOrEqual(64_000);
     const text = JSON.parse(serialized).text;
+    expect(text.length).toBeGreaterThan(30_000);
     expect(text).toBe("a" + "\n".repeat(text.length - 1));
   });
 

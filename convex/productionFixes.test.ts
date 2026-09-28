@@ -587,6 +587,56 @@ describe("production permission and validation fixes", () => {
     expect(embeddings).toEqual([]);
   });
 
+  test("scope edits on a legacy SOP do not discard a pending embedding", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const sopId = await t.run(async (ctx) =>
+      await ctx.db.insert("sops", {
+        companyId, reference: "SOP-001", title: "Legacy", content: "Body", scopeType: "company",
+        creatorMembershipId: adminMembershipId, updatedByMembershipId: adminMembershipId,
+        createdAt: Date.now(), updatedAt: Date.now(), // no contentUpdatedAt — a pre-migration row
+      })
+    );
+    const before = await t.run(async (ctx) => await ctx.db.get(sopId));
+    if (!before) throw new Error("SOP was not created");
+
+    // A scope-only save bumps updatedAt; the effective content stamp must not
+    // move, or the in-flight store is dropped with no reindex to replace it.
+    await t.withIdentity(identity("admin")).mutation(api.sops.updateScope, { companyId, sopId, scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
+
+    const stored = await t.mutation(internal.sops.storeEmbedding, { companyId, sopId, expectedContentUpdatedAt: before.updatedAt, chunk: "Legacy\n\nBody", embedding: Array(1024).fill(0) });
+    expect(stored).not.toBeNull();
+  });
+
+  test("transient embedding failures reschedule the index action", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.clearAllTimers(); // drop pending scheduled functions left over from earlier tests
+      vi.stubEnv("VOYAGE_API_KEY", "test-key");
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("connection reset"));
+      const { t, companyId, adminMembershipId } = await seedCompany();
+      const sopId = await t.run(async (ctx) =>
+        await ctx.db.insert("sops", {
+          companyId, reference: "SOP-001", title: "Policy", content: "Body", scopeType: "company",
+          creatorMembershipId: adminMembershipId, updatedByMembershipId: adminMembershipId,
+          createdAt: Date.now(), updatedAt: Date.now(), contentUpdatedAt: Date.now(),
+        })
+      );
+
+      // One initial attempt plus three bounded retries (30s, 2m, 10m) — a
+      // fetch-level throw must reach the same retry path as a null result.
+      // (Other pending timers also run here, so count only Voyage calls.)
+      await t.action(internal.sops.indexSop, { companyId, sopId, attempt: 0 });
+      await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+      const voyageCalls = fetchSpy.mock.calls.filter((c) => String(c[0]).includes("api.voyageai.com") && String(c[1]?.body).includes("Policy\\n\\nBody"));
+      expect(voyageCalls).toHaveLength(4);
+      const embeddings = await t.run(async (ctx) => await ctx.db.query("sopEmbeddings").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(10));
+      expect(embeddings).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("clearing optional fields on one-time tasks removes them from storage", async () => {
     const { t, companyId, adminMembershipId } = await seedCompany();
     const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, {
@@ -805,6 +855,7 @@ describe("production permission and validation fixes", () => {
     expect(personalOpts.values).toContain("high");
     expect(personalOpts.values).toContain("critical");
     expect(personalOpts.values).toContain("low");
+    expect(personalOpts.truncated).toBe(false);
   });
 
   test("migrateTaskCodes backfills 4-digit JD and OT tasks to 3-digit format", async () => {

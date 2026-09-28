@@ -690,9 +690,11 @@ export const update = mutation({
     if (args.content !== undefined) patch.content = args.content.trim();
     // Embedding only depends on title + content, so scope-only edits and no-op
     // saves should not pay for a re-index pass — and must not invalidate an
-    // in-flight storeEmbedding's stale-write guard.
+    // in-flight storeEmbedding's stale-write guard. For a legacy document that
+    // predates contentUpdatedAt, pin the effective stamp (updatedAt) in place
+    // before it moves, or the pending store would be rejected with no reindex.
     const indexedFieldsChanged = (patch.title !== undefined && patch.title !== sop.title) || (patch.content !== undefined && patch.content !== sop.content);
-    if (indexedFieldsChanged) patch.contentUpdatedAt = patch.updatedAt;
+    patch.contentUpdatedAt = indexedFieldsChanged ? patch.updatedAt : (sop.contentUpdatedAt ?? sop.updatedAt);
 
     if (args.scopeType !== undefined) {
       await requireCapability(ctx, args.companyId, sopManageCapability(args.scopeType));
@@ -727,7 +729,9 @@ export const updateScope = mutation({
     await assertTargets(ctx, args.companyId, scopeArgs);
     await assertManagedTargets(ctx, args.companyId, membership, scopeArgs);
     await deleteScopeRows(ctx, args.sopId);
-    await ctx.db.patch(args.sopId, { scopeType: args.scopeType, updatedByMembershipId: membership._id, updatedAt: Date.now() });
+    // Scope edits bump updatedAt; pin the content stamp so a pending store
+    // is not invalidated by an edit that never touched indexed fields.
+    await ctx.db.patch(args.sopId, { scopeType: args.scopeType, updatedByMembershipId: membership._id, updatedAt: Date.now(), contentUpdatedAt: sop.contentUpdatedAt ?? sop.updatedAt });
     await insertScopeRows(ctx, args.companyId, args.sopId, scopeArgs);
     return null;
   },
@@ -881,7 +885,7 @@ export const aiCreate = mutation({
     const content = args.content?.trim() ?? "";
     const now = Date.now();
     const reference = await nextReference(ctx, args.companyId, "sop");
-    const id = await ctx.db.insert("sops", { companyId: args.companyId, reference, title, content, scopeType: "company", creatorMembershipId: membership._id, updatedByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    const id = await ctx.db.insert("sops", { companyId: args.companyId, reference, title, content, scopeType: "company", creatorMembershipId: membership._id, updatedByMembershipId: membership._id, createdAt: now, updatedAt: now, contentUpdatedAt: now });
     await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: id });
     return { id, title, content: content.slice(0, 8000), scopeType: "company" as const };
   },
@@ -891,4 +895,4 @@ export const aiCreate = mutation({
 // semantic search — embed failures reschedule a bounded number of times. A
 // stale-write skip needs no retry: the newer edit already queued its own run.
 const INDEX_RETRY_DELAYS_MS = [30_000, 120_000, 600_000];
-export const indexSop = internalAction({ args: { companyId: v.id("companies"), sopId: v.id("sops"), attempt: v.optional(v.number()) }, handler: async (ctx, args): Promise<{ skipped: boolean }> => { const sop: Doc<"sops"> | null = await ctx.runQuery(internal.sops.getForIndexing, args); if (!sop) return { skipped: true }; const apiKey = process.env.VOYAGE_API_KEY; if (!apiKey) return { skipped: true }; const input = sop.title + "\n\n" + sop.content; const embedding = await embed(apiKey, input); const attempt = args.attempt ?? 0; if (!embedding) { if (attempt < INDEX_RETRY_DELAYS_MS.length) await ctx.scheduler.runAfter(INDEX_RETRY_DELAYS_MS[attempt], internal.sops.indexSop, { companyId: args.companyId, sopId: args.sopId, attempt: attempt + 1 }); return { skipped: true }; } const stored: Id<"sopEmbeddings"> | null = await ctx.runMutation(internal.sops.storeEmbedding, { companyId: args.companyId, sopId: args.sopId, expectedContentUpdatedAt: sop.contentUpdatedAt ?? sop.updatedAt, chunk: input, embedding }); return { skipped: !stored }; } });
+export const indexSop = internalAction({ args: { companyId: v.id("companies"), sopId: v.id("sops"), attempt: v.optional(v.number()) }, handler: async (ctx, args): Promise<{ skipped: boolean }> => { const sop: Doc<"sops"> | null = await ctx.runQuery(internal.sops.getForIndexing, { companyId: args.companyId, sopId: args.sopId }); if (!sop) return { skipped: true }; const apiKey = process.env.VOYAGE_API_KEY; if (!apiKey) return { skipped: true }; const input = sop.title + "\n\n" + sop.content; const embedding = await embed(apiKey, input).catch(() => null); const attempt = args.attempt ?? 0; if (!embedding) { if (attempt < INDEX_RETRY_DELAYS_MS.length) await ctx.scheduler.runAfter(INDEX_RETRY_DELAYS_MS[attempt], internal.sops.indexSop, { companyId: args.companyId, sopId: args.sopId, attempt: attempt + 1 }); return { skipped: true }; } const stored: Id<"sopEmbeddings"> | null = await ctx.runMutation(internal.sops.storeEmbedding, { companyId: args.companyId, sopId: args.sopId, expectedContentUpdatedAt: sop.contentUpdatedAt ?? sop.updatedAt, chunk: input, embedding }); return { skipped: !stored }; } });

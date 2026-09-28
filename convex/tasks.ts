@@ -38,6 +38,9 @@ const TASK_LIST_ORDER_LIMIT = 2_000;
 const TASK_LIST_ORDER_MAX_SERIALIZED_BYTES = 128 * 1024;
 const TASK_LIST_ORDER_KEY_MAX_LENGTH = 512;
 const ASSIGNABLE_USER_INITIAL_LIMIT = DEFAULT_QUERY_LIMIT;
+// Distinct filter values come from small enums, but reaching them can mean
+// scanning the whole company — bound the read and report incompleteness.
+const FILTER_OPTIONS_SCAN_LIMIT = 20_000;
 const ASSIGNABLE_USER_SEARCH_MIN_LENGTH = 3;
 const ASSIGNABLE_USER_SEARCH_SCAN_LIMIT = 1_000;
 const ASSIGNABLE_USER_SEARCH_RESULT_LIMIT = 50;
@@ -847,19 +850,24 @@ export const personalFilterOptions = query({
   args: { companyId: v.id("companies"), kind: v.union(v.literal("jd"), v.literal("one_time")) },
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
-    if (args.kind === "jd") {
-      const values = new Set<string>();
-      for await (const t of ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId))) {
-        if (t.assigneeMembershipIds.includes(membership._id)) values.add(t.recurrence);
+    const table = args.kind === "jd" ? ("jdTasks" as const) : ("oneTimeTasks" as const);
+    const domainSize = args.kind === "jd" ? 8 : 4; // recurrence / priority literal counts
+    const values = new Set<string>();
+    let scanned = 0;
+    let truncated = false;
+    for await (const task of ctx.db.query(table).withIndex("by_company", (q) => q.eq("companyId", args.companyId))) {
+      if (task.assigneeMembershipIds.includes(membership._id)) {
+        values.add(args.kind === "jd" ? (task as Doc<"jdTasks">).recurrence : (task as Doc<"oneTimeTasks">).priority);
       }
-      return { values: Array.from(values) };
-    } else {
-      const values = new Set<string>();
-      for await (const t of ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId))) {
-        if (t.assigneeMembershipIds.includes(membership._id)) values.add(t.priority);
+      // The option domain is tiny: a saturated set or the scan bound means
+      // every later row can only repeat work already done.
+      if (values.size === domainSize) break;
+      if (++scanned === FILTER_OPTIONS_SCAN_LIMIT) {
+        truncated = true;
+        break;
       }
-      return { values: Array.from(values) };
     }
+    return { values: Array.from(values), truncated };
   },
 });
 
@@ -1854,12 +1862,15 @@ export const aiListVisible = query({
       // Convex permits a single paginate() per function, so a bounded take()
       // is the only way to scan two tables here; it reads the same first-N
       // candidate rows in index order.
-      const scannedRows = await ctx.db.query(table).withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(AI_LIST_TASK_SCAN_LIMIT);
+      // Probe one row past the cap: `truncated` means more candidates exist,
+      // not merely that the scan budget was fully used.
+      const scannedRows = await ctx.db.query(table).withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(AI_LIST_TASK_SCAN_LIMIT + 1);
+      const evalRows = scannedRows.slice(0, AI_LIST_TASK_SCAN_LIMIT);
       const matched: { task: Doc<"jdTasks"> | Doc<"oneTimeTasks">; state: { status: string; dueAt: number | null } }[] = [];
-      // Hitting the scan cap means un-scanned rows may still match.
-      let truncated = scannedRows.length === AI_LIST_TASK_SCAN_LIMIT;
-      for (let offset = 0; offset < scannedRows.length; offset += 100) {
-        const evaluated = await Promise.all(scannedRows.slice(offset, offset + 100).map(async (task) => {
+      // Rows beyond the cap prove un-scanned candidates may still match.
+      let truncated = scannedRows.length > AI_LIST_TASK_SCAN_LIMIT;
+      for (let offset = 0; offset < evalRows.length; offset += 100) {
+        const evaluated = await Promise.all(evalRows.slice(offset, offset + 100).map(async (task) => {
           if (!(await visible(ctx, args.companyId, membership, task, kind, auth))) return null;
           const state = kind === "jd" ? await jdState(ctx, task as Doc<"jdTasks">, now, timeZone) : oneState(task as Doc<"oneTimeTasks">);
           return matches(state.status) ? { task, state } : null;
@@ -1873,7 +1884,7 @@ export const aiListVisible = query({
         // Once the limit fills, in-chunk drops and unevaluated chunks both
         // mean more matches may exist beyond the returned window.
         if (dropped || matched.length === limit) {
-          truncated = truncated || dropped || offset + 100 < scannedRows.length;
+          truncated = truncated || dropped || offset + 100 < evalRows.length;
           break;
         }
       }

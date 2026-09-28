@@ -125,6 +125,33 @@ describe("AI agent Convex boundaries", () => {
     expect(result.truncated).toBe(true);
   });
 
+  test("aiListVisible at exactly the scan cap reports a complete result", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let i = 0; i < 400; i += 1) {
+        await ctx.db.insert("jdTasks", {
+          companyId,
+          reference: `JD-${String(i + 1).padStart(3, "0")}`,
+          title: `Exact-cap task ${i}`,
+          recurrence: "weekly",
+          cycleStartedAt: now,
+          status: "due",
+          assigneeMembershipIds: [adminMembershipId],
+          createdByMembershipId: adminMembershipId,
+          createdAt: now + i,
+          updatedAt: now + i,
+        });
+      }
+    });
+
+    // Exactly 400 rows fill the scan budget; none are visible to the employee,
+    // so nothing was actually left unreturned.
+    const result = await t.withIdentity(identity("employee")).query(api.tasks.aiListVisible, { companyId, status: "all", limit: 30 });
+    expect(result.rows).toHaveLength(0);
+    expect(result.truncated).toBe(false);
+  });
+
   test("cross-company AI sessions and unauthorized writes fail", async () => {
     const { t, companyId, otherCompanyId, employeeMembershipId } = await seed();
     const sessionId = await t.withIdentity(identity("admin")).mutation(api.aiChat.createSession, { companyId });

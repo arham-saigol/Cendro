@@ -63,14 +63,22 @@ export function CompanyProvider({ children }: { children: React.ReactNode }) {
   const email = queryResult && "email" in queryResult ? queryResult.email : null;
   const [selectedCompanyId, setSelectedCompanyId] = useState<Id<"companies"> | null>(() => {
     if (typeof window === "undefined") return null;
-    return localStorage.getItem("cendro.company") as Id<"companies"> | null;
+    try {
+      return localStorage.getItem("cendro.company") as Id<"companies"> | null;
+    } catch {
+      return null; // Blocked storage must not prevent the app from hydrating.
+    }
   });
 
   const active = companies.find((c) => c.company._id === selectedCompanyId) ?? companies.find((c) => c.membership.active) ?? companies[0] ?? null;
   const activeCompanyId = active?.company._id ?? null;
 
   const setActiveCompanyId = (id: Id<"companies">) => {
-    localStorage.setItem("cendro.company", id);
+    try {
+      localStorage.setItem("cendro.company", id);
+    } catch {
+      // Workspace selection still works for this tab when storage is blocked.
+    }
     setSelectedCompanyId(id);
   };
 

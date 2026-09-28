@@ -1,27 +1,15 @@
 "use client";
 
 import { useAuth } from "@clerk/nextjs";
-import { ConvexProviderWithClerk } from "convex/react-clerk";
 import { ConvexReactClient, useConvexAuth, useMutation } from "convex/react";
-import { useEffect, useMemo } from "react";
+import { ConvexError } from "convex/values";
+import { useEffect } from "react";
 import { api } from "../../../convex/_generated/api";
 import { PwaAgent } from "./pwa-agent";
-import { boundGetToken } from "@/lib/clerk-token";
+import { ConvexClerkAuthProvider } from "./convex-clerk-auth";
 
 const url = process.env.NEXT_PUBLIC_CONVEX_URL;
 const convex = url ? new ConvexReactClient(url) : null;
-
-// Clerk's getToken can hang forever (the underlying request has no timeout);
-// Convex awaits it to start the auth handshake, so an unanswered request froze
-// the app on the skeleton screen indefinitely. Bounding it lets Convex's own
-// retry path resolve to a recoverable error state instead.
-function useBoundedClerkAuth() {
-  const auth = useAuth();
-  const getToken = useMemo(() => boundGetToken(auth.getToken), [auth.getToken]);
-  return { ...auth, getToken };
-}
-
-const SYNC_MAX_ATTEMPTS = 4;
 
 function UserSync() {
   const { isSignedIn } = useAuth();
@@ -32,17 +20,20 @@ function UserSync() {
     if (!isSignedIn || !isAuthenticated) return;
     let cancelled = false;
     const run = async () => {
-      for (let attempt = 1; attempt <= SYNC_MAX_ATTEMPTS && !cancelled; attempt++) {
+      for (let attempt = 0; !cancelled; attempt++) {
         try {
           await sync({});
           return;
         } catch (err) {
-          console.warn(`[cendro] user sync failed (attempt ${attempt}/${SYNC_MAX_ATTEMPTS})`, err);
-          if (attempt === SYNC_MAX_ATTEMPTS) {
-            console.error("[cendro] user sync did not complete; the app may stay on the profile-sync screen.", err);
+          if (cancelled) return;
+          if (err instanceof ConvexError && err.data === "Authenticated email is required.") {
+            console.error("[cendro] user sync requires an email claim; ask an administrator to check this account.");
             return;
           }
-          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+          if (attempt === 0 || attempt % 10 === 0) console.warn("[cendro] user sync failed; retrying", err);
+          // A transient failure must not permanently strand an already signed-in
+          // user on the profile screen after a fixed number of attempts.
+          await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** Math.min(attempt, 6), 60_000)));
         }
       }
     };
@@ -59,10 +50,10 @@ export function ConvexClientProvider({ children }: { children: React.ReactNode }
   if (!convex) return <div className="p-6">Set NEXT_PUBLIC_CONVEX_URL in your environment.</div>;
 
   return (
-    <ConvexProviderWithClerk client={convex} useAuth={useBoundedClerkAuth}>
+    <ConvexClerkAuthProvider client={convex}>
       <UserSync />
       <PwaAgent />
       {children}
-    </ConvexProviderWithClerk>
+    </ConvexClerkAuthProvider>
   );
 }

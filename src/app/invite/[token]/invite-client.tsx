@@ -26,7 +26,11 @@ export function InviteClient({ token }: { token: string }) {
     setIsAccepting(true);
     try {
       const result = await accept({ token });
-      localStorage.setItem("cendro.company", result.companyId);
+      try {
+        localStorage.setItem("cendro.company", result.companyId);
+      } catch {
+        // The invitation was accepted; blocked preferences must not prevent navigation.
+      }
       router.push("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not accept invitation.");

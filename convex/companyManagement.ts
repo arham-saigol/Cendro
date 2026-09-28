@@ -118,50 +118,43 @@ export const overview = query({
     const branches = branchResult.rows.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
     const departments = departmentResult.rows.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt - b.createdAt);
     let userDetailsTruncated = false;
-    // Assignment and manager-scope rows load once per company and group by
-    // membership — five bounded scans instead of ~6 reads per member.
-    const [branchAssignments, departmentAssignments, managerBranches, managerDepartments, managerUsers] = await Promise.all([
-      canReadUsers ? takeWithOverflow((limit) => ctx.db.query("userBranchAssignments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit) : skipped,
-      canReadUsers ? takeWithOverflow((limit) => ctx.db.query("userDepartmentAssignments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit) : skipped,
-      canReadRoles ? takeWithOverflow((limit) => ctx.db.query("managerBranchScopes").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit) : skipped,
-      canReadRoles ? takeWithOverflow((limit) => ctx.db.query("managerDepartmentScopes").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit) : skipped,
-      canReadRoles ? takeWithOverflow((limit) => ctx.db.query("managerUserScopes").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit) : skipped,
-    ]);
-    if (branchAssignments.isTruncated || departmentAssignments.isTruncated || managerBranches.isTruncated || managerDepartments.isTruncated || managerUsers.isTruncated) userDetailsTruncated = true;
-    const branchIdsByMembership = new Map<Id<"companyMemberships">, Id<"branches">[]>();
-    for (const row of branchAssignments.rows) {
-      const list = branchIdsByMembership.get(row.membershipId) ?? [];
-      list.push(row.branchId);
-      branchIdsByMembership.set(row.membershipId, list);
+    // Assignment and manager-scope rows read per displayed membership — a
+    // company-wide prefix read would silently hide a member's rows, and the
+    // assignment editor replaces on save, so partial data is a write hazard.
+    const userRows = await Promise.all(
+      membershipResult.rows.map(async (m) => {
+        const user = await ctx.db.get(m.userId);
+        if (!user) return null;
+        const [branchRows, departmentRows, mBranchRows, mDepartmentRows, mUserRows] = await Promise.all([
+          ctx.db.query("userBranchAssignments").withIndex("by_membershipId_and_branchId", (q) => q.eq("membershipId", m._id)).take(overviewListLimit + 1),
+          ctx.db.query("userDepartmentAssignments").withIndex("by_membershipId_and_departmentId", (q) => q.eq("membershipId", m._id)).take(overviewListLimit + 1),
+          canReadRoles ? ctx.db.query("managerBranchScopes").withIndex("by_managerMembershipId_and_branchId", (q) => q.eq("managerMembershipId", m._id)).take(overviewListLimit + 1) : Promise.resolve([]),
+          canReadRoles ? ctx.db.query("managerDepartmentScopes").withIndex("by_managerMembershipId_and_departmentId", (q) => q.eq("managerMembershipId", m._id)).take(overviewListLimit + 1) : Promise.resolve([]),
+          canReadRoles ? ctx.db.query("managerUserScopes").withIndex("by_managerMembershipId_and_userMembershipId", (q) => q.eq("managerMembershipId", m._id)).take(overviewListLimit + 1) : Promise.resolve([]),
+        ]);
+        const memberTruncated = branchRows.length > overviewListLimit || departmentRows.length > overviewListLimit || mBranchRows.length > overviewListLimit || mDepartmentRows.length > overviewListLimit || mUserRows.length > overviewListLimit;
+        const memFirstName = memberFirstName(m, user);
+        const memSecondName = m.secondName !== undefined ? m.secondName.trim() : (user.secondName?.trim() ?? "");
+        const memFullName = memberFullName(m, user);
+        return {
+          memberTruncated,
+          membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt },
+          user: { _id: user._id, name: memFullName, firstName: memFirstName, secondName: memSecondName, email: user.email },
+          branchIds: branchRows.slice(0, overviewListLimit).map((row) => row.branchId),
+          departmentIds: departmentRows.slice(0, overviewListLimit).map((row) => row.departmentId),
+          scope: canReadRoles
+            ? { branchIds: mBranchRows.slice(0, overviewListLimit).map((row) => row.branchId), departmentIds: mDepartmentRows.slice(0, overviewListLimit).map((row) => row.departmentId), userMembershipIds: mUserRows.slice(0, overviewListLimit).map((row) => row.userMembershipId) }
+            : { branchIds: [], departmentIds: [], userMembershipIds: [] },
+        };
+      }),
+    );
+    const users: { membership: { _id: Id<"companyMemberships">; role: string; active: boolean; createdAt: number }; user: { _id: Id<"appUsers">; name: string; firstName: string; secondName: string; email: string }; branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; scope: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] } }[] = [];
+    for (const row of userRows) {
+      if (!row) continue;
+      if (row.memberTruncated) userDetailsTruncated = true;
+      const { memberTruncated: _memberTruncated, ...userRow } = row;
+      users.push(userRow);
     }
-    const departmentIdsByMembership = new Map<Id<"companyMemberships">, Id<"departments">[]>();
-    for (const row of departmentAssignments.rows) {
-      const list = departmentIdsByMembership.get(row.membershipId) ?? [];
-      list.push(row.departmentId);
-      departmentIdsByMembership.set(row.membershipId, list);
-    }
-    const managerScopesByMembership = new Map<Id<"companyMemberships">, { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }>();
-    for (const row of managerBranches.rows) (managerScopesByMembership.get(row.managerMembershipId) ?? managerScopesByMembership.set(row.managerMembershipId, { branchIds: [], departmentIds: [], userMembershipIds: [] }).get(row.managerMembershipId)!).branchIds.push(row.branchId);
-    for (const row of managerDepartments.rows) (managerScopesByMembership.get(row.managerMembershipId) ?? managerScopesByMembership.set(row.managerMembershipId, { branchIds: [], departmentIds: [], userMembershipIds: [] }).get(row.managerMembershipId)!).departmentIds.push(row.departmentId);
-    for (const row of managerUsers.rows) (managerScopesByMembership.get(row.managerMembershipId) ?? managerScopesByMembership.set(row.managerMembershipId, { branchIds: [], departmentIds: [], userMembershipIds: [] }).get(row.managerMembershipId)!).userMembershipIds.push(row.userMembershipId);
-    const users = (
-      await Promise.all(
-        membershipResult.rows.map(async (m) => {
-          const user = await ctx.db.get(m.userId);
-          if (!user) return null;
-          const memFirstName = memberFirstName(m, user);
-          const memSecondName = m.secondName !== undefined ? m.secondName.trim() : (user.secondName?.trim() ?? "");
-          const memFullName = memberFullName(m, user);
-          return {
-            membership: { _id: m._id, role: m.role, active: m.active, createdAt: m.createdAt },
-            user: { _id: user._id, name: memFullName, firstName: memFirstName, secondName: memSecondName, email: user.email },
-            branchIds: branchIdsByMembership.get(m._id) ?? [],
-            departmentIds: departmentIdsByMembership.get(m._id) ?? [],
-            scope: canReadRoles ? (managerScopesByMembership.get(m._id) ?? { branchIds: [], departmentIds: [], userMembershipIds: [] }) : { branchIds: [], departmentIds: [], userMembershipIds: [] },
-          };
-        }),
-      )
-    ).filter((row) => row !== null);
     const memberCountByRole = new Map<string, number>();
     for (const m of membershipResult.rows) {
       memberCountByRole.set(m.role, (memberCountByRole.get(m.role) ?? 0) + 1);

@@ -3,6 +3,7 @@
 import { convexTest } from "convex-test";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 import { defaultRoleCapabilities, defaultRoleNames, type Capability } from "../src/lib/permissions";
 
@@ -856,6 +857,42 @@ describe("production permission and validation fixes", () => {
     expect(personalOpts.values).toContain("critical");
     expect(personalOpts.values).toContain("low");
     expect(personalOpts.truncated).toBe(false);
+  });
+
+  test("documents carrying deprecated fields still satisfy the schema", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    // Deploy-time validation rejects stored documents whose fields the schema
+    // no longer declares — the deprecated validators must stay until a cleanup
+    // actually clears the data.
+    await t.run(async (ctx) => {
+      await ctx.db.patch(companyId, { authVersion: 2 });
+      const sopId = await ctx.db.insert("sops", { companyId, reference: "SOP-001", title: "T", content: "C", scopeType: "company", creatorMembershipId: adminMembershipId, updatedByMembershipId: adminMembershipId, createdAt: 1, updatedAt: 1 });
+      await ctx.db.insert("sopEmbeddings", { companyId, sopId, chunk: "x", embedding: [], metadata: { title: "T", scopeType: "company" }, updatedAt: 1 });
+      await ctx.db.insert("invitations", { companyId, email: "legacy@example.com", role: "Employee", authVersion: 2, token: "tok", status: "pending", createdAt: 1, expiresAt: 1 });
+    });
+  });
+
+  test("overview shows a member's assignments beyond the company-wide row cap", async () => {
+    const { t, companyId, adminMembershipId, employeeMembershipId } = await seedCompany();
+    const employeeBranchId = await t.run(async (ctx) => {
+      const now = Date.now();
+      let firstBranchId: Id<"branches"> | null = null;
+      // The admin's 500 assignment rows land first in by_company order; the
+      // employee's row sits at position 501 — beyond a company-wide prefix
+      // read but inside the employee's own range.
+      for (let i = 0; i < 500; i += 1) {
+        const branchId = await ctx.db.insert("branches", { companyId, name: `Branch ${i}`, createdAt: now + i, updatedAt: now + i });
+        if (i === 0) firstBranchId = branchId;
+        await ctx.db.insert("userBranchAssignments", { companyId, membershipId: adminMembershipId, branchId });
+      }
+      await ctx.db.insert("userBranchAssignments", { companyId, membershipId: employeeMembershipId, branchId: firstBranchId! });
+      return firstBranchId;
+    });
+
+    const overview = await t.withIdentity(identity("admin")).query(api.companyManagement.overview, { companyId });
+    const employee = overview.users.find((u) => u.membership._id === employeeMembershipId);
+    expect(employee?.branchIds).toEqual([employeeBranchId]);
+    expect(overview.truncated.userDetails).toBe(false);
   });
 
   test("migrateTaskCodes backfills 4-digit JD and OT tasks to 3-digit format", async () => {

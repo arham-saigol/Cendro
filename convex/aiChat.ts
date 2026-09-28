@@ -109,11 +109,8 @@ export const getOrCreateSession = mutation({
       const existing = await ctx.db.get(args.sessionId);
       if (existing && existing.companyId === args.companyId && existing.membershipId === membership._id && !existing.deleting) return existing._id;
     }
-    // Draft rows are indistinguishable, so reuse the newest one for this
-    // company instead of inserting a fresh empty session on every mount.
-    const recent = await ctx.db.query("aiChatSessions").withIndex("by_membership_and_updatedAt", (q) => q.eq("membershipId", membership._id)).order("desc").take(20);
-    const draft = recent.find((row) => row.companyId === args.companyId && row.hasMessages === false && !row.deleting);
-    if (draft) return draft._id;
+    // A session is only reused by its client-presented id: drafts created on
+    // another device are a different conversation, not a resumable draft.
     const now = Date.now();
     return await ctx.db.insert("aiChatSessions", { companyId: args.companyId, membershipId: membership._id, hasMessages: false, createdAt: now, updatedAt: now });
   },

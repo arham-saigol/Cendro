@@ -475,19 +475,19 @@ describe("AI agent Convex boundaries", () => {
     ).rejects.toThrow("You do not have permission to use AI.");
   });
 
-  test("getOrCreateSession reuses the newest draft instead of minting another", async () => {
+  test("getOrCreateSession reuses a session only when the client presents its id", async () => {
     const { t, companyId } = await seed();
     const user = t.withIdentity(identity("admin"));
 
+    // Two calls without an id mint separate sessions — a draft created on one
+    // device must never absorb another's conversation.
     const first = await user.mutation(api.aiChat.getOrCreateSession, { companyId });
     const second = await user.mutation(api.aiChat.getOrCreateSession, { companyId });
-    expect(second).toBe(first);
+    expect(second).not.toBe(first);
 
-    // Once the draft has messages it is no longer a draft — the next call
-    // without a sessionId mints a fresh session.
-    await user.mutation(api.aiChat.appendMessage, { companyId, sessionId: first, role: "user", content: "Hello" });
-    const third = await user.mutation(api.aiChat.getOrCreateSession, { companyId });
-    expect(third).not.toBe(first);
+    // Presenting the id returns the same session.
+    const again = await user.mutation(api.aiChat.getOrCreateSession, { companyId, sessionId: first });
+    expect(again).toBe(first);
   });
 
   test("deleting a session tombstones it so writes reject while the drain runs", async () => {

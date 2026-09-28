@@ -12,7 +12,9 @@ const taskType = v.union(v.literal("jd"), v.literal("one_time"));
 
 export default defineSchema({
   appUsers: defineTable({ clerkSubject: v.string(), email: v.string(), firstName: v.string(), secondName: v.optional(v.string()), imageUrl: v.optional(v.string()), createdAt: v.number(), updatedAt: v.number() }).index("by_subject", ["clerkSubject"]).index("by_email", ["email"]),
-  companies: defineTable({ name: v.string(), timeZone: v.optional(v.string()), createdAt: v.number(), createdBy: v.optional(v.id("appUsers")), deletedAt: v.optional(v.number()) }).index("by_deleted", ["deletedAt"]),
+  // Deprecated: authVersion is no longer written or read. Retained so older
+  // company documents remain valid until the cleanup clears the field.
+  companies: defineTable({ name: v.string(), timeZone: v.optional(v.string()), createdAt: v.number(), createdBy: v.optional(v.id("appUsers")), deletedAt: v.optional(v.number()), authVersion: v.optional(v.number()) }).index("by_deleted", ["deletedAt"]),
   companyMemberships: defineTable({ companyId: v.id("companies"), userId: v.id("appUsers"), role, active: v.boolean(), firstName: v.optional(v.string()), secondName: v.optional(v.string()), createdAt: v.number(), updatedAt: v.number() }).index("by_company", ["companyId"]).index("by_user", ["userId"]).index("by_company_user", ["companyId", "userId"]).index("by_companyId_and_role", ["companyId", "role"]),
   branches: defineTable({ companyId: v.id("companies"), name: v.string(), order: v.optional(v.number()), createdAt: v.number(), updatedAt: v.number() }).index("by_company", ["companyId"]),
   departments: defineTable({ companyId: v.id("companies"), branchId: v.id("branches"), name: v.string(), order: v.optional(v.number()), createdAt: v.number(), updatedAt: v.number() }).index("by_company", ["companyId"]).index("by_branch", ["branchId"]),
@@ -37,6 +39,7 @@ export default defineSchema({
     // Deprecated: no longer written or read. Retained so older invitation
     // documents remain valid until the cleanup clears the field.
     permissionOverrides: v.optional(v.array(v.object({ capability: v.string(), effect: v.union(v.literal("allow"), v.literal("deny")) }))),
+    authVersion: v.optional(v.number()),
     token: v.string(),
     status: v.union(v.literal("pending"), v.literal("accepted"), v.literal("revoked")),
     invitedBy: v.optional(v.id("appUsers")),
@@ -67,7 +70,9 @@ export default defineSchema({
   sopDepartmentScopes: defineTable({ companyId: v.id("companies"), sopId: v.id("sops"), departmentId: v.id("departments") }).index("by_department", ["departmentId"]).index("by_company", ["companyId"]).index("by_sopId_and_departmentId", ["sopId", "departmentId"]),
   sopUserScopes: defineTable({ companyId: v.id("companies"), sopId: v.id("sops"), userMembershipId: v.id("companyMemberships") }).index("by_user", ["userMembershipId"]).index("by_company", ["companyId"]).index("by_sopId_and_userMembershipId", ["sopId", "userMembershipId"]),
   sopListPreferences: defineTable(sopListPreferenceValidator).index("by_companyId_and_membershipId", ["companyId", "membershipId"]),
-  sopEmbeddings: defineTable({ companyId: v.id("companies"), sopId: v.id("sops"), chunk: v.string(), embedding: v.array(v.number()), updatedAt: v.number() }).index("by_sop", ["sopId"]).index("by_company", ["companyId"]).vectorIndex("by_embedding", { vectorField: "embedding", dimensions: 1024, filterFields: ["companyId"] }),
+  // Deprecated: metadata is no longer written or read. Retained so older
+  // embedding documents remain valid until the cleanup clears the field.
+  sopEmbeddings: defineTable({ companyId: v.id("companies"), sopId: v.id("sops"), chunk: v.string(), embedding: v.array(v.number()), metadata: v.optional(v.object({ title: v.string(), scopeType: scope })), updatedAt: v.number() }).index("by_sop", ["sopId"]).index("by_company", ["companyId"]).vectorIndex("by_embedding", { vectorField: "embedding", dimensions: 1024, filterFields: ["companyId"] }),
   auditEvents: defineTable({ companyId: v.optional(v.id("companies")), actorUserId: v.optional(v.id("appUsers")), actorEmail: v.optional(v.string()), action: v.string(), targetType: v.string(), targetId: v.optional(v.string()), metadata: v.optional(v.any()), createdAt: v.number() }).index("by_company", ["companyId"]),
   aiChatSessions: defineTable({ companyId: v.id("companies"), membershipId: v.id("companyMemberships"), title: v.optional(v.string()), hasMessages: v.optional(v.boolean()), deleting: v.optional(v.boolean()), createdAt: v.number(), updatedAt: v.number() }).index("by_membership_and_updatedAt", ["membershipId", "updatedAt"]).index("by_company", ["companyId"]),
   aiChatMessages: defineTable({ sessionId: v.id("aiChatSessions"), role: v.union(v.literal("user"), v.literal("assistant"), v.literal("tool")), content: v.string(), clientMessageId: v.optional(v.string()), createdAt: v.number() }).index("by_session", ["sessionId"]).index("by_session_and_clientMessageId", ["sessionId", "clientMessageId"]),

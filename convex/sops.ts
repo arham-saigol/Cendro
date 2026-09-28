@@ -574,20 +574,22 @@ export const filterOptions = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const caps = await membershipCapabilities(ctx, membership);
     const canFilterManaged = caps.has("sops:view:company") || caps.has("sops:view:managed") || caps.has("sops:manage:company") || caps.has("sops:manage:branch") || caps.has("sops:manage:department") || caps.has("sops:manage:user");
-    if (!canFilterManaged) return { branches: [], departments: [], users: [] };
+    if (!canFilterManaged) return { branches: [], departments: [], users: [], isTruncated: false };
 
     const branchIds = new Set<Id<"branches">>();
     const departmentIds = new Set<Id<"departments">>();
     let userIds: Set<Id<"companyMemberships">>;
+    let isTruncated = false;
     if (caps.has("sops:view:company") || caps.has("sops:manage:company")) {
-      const [branches, departments, memberships] = await Promise.all([
-        ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500),
-        ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500),
-        ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500),
+      const [branchResult, departmentResult, membershipResult] = await Promise.all([
+        takeWithOverflow((limit) => ctx.db.query("branches").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), 500),
+        takeWithOverflow((limit) => ctx.db.query("departments").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), 500),
+        takeWithOverflow((limit) => ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), 500),
       ]);
-      for (const branch of branches) branchIds.add(branch._id);
-      for (const department of departments) departmentIds.add(department._id);
-      userIds = new Set(memberships.filter((m) => m.active).map((m) => m._id));
+      isTruncated = branchResult.isTruncated || departmentResult.isTruncated || membershipResult.isTruncated;
+      for (const branch of branchResult.rows) branchIds.add(branch._id);
+      for (const department of departmentResult.rows) departmentIds.add(department._id);
+      userIds = new Set(membershipResult.rows.filter((m) => m.active).map((m) => m._id));
     } else {
       // managed is null only for sops:manage:company, which took the first branch.
       const managed = await getManagedScopeTargets(ctx, args.companyId, membership, caps);
@@ -615,7 +617,7 @@ export const filterOptions = query({
     branches.sort((a, b) => a.name.localeCompare(b.name));
     departments.sort((a, b) => a.name.localeCompare(b.name));
     users.sort((a, b) => a.user.name.localeCompare(b.user.name));
-    return { branches, departments, users };
+    return { branches, departments, users, isTruncated };
   },
 });
 

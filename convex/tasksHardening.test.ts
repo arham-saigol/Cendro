@@ -170,6 +170,17 @@ describe("task authorization hardening", () => {
     expect(await f.t.run(async (ctx) => ctx.db.get(claimId))).toBeNull();
     expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", storageId))).toBeNull();
 
+    // A supplied blob that predates the claim can only be someone else's
+    // upload — the claim is consumed but the file is left alone.
+    const foreignStorageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["foreign"], { type: "text/plain" })));
+    const lateClaimId = await f.t.run(async (ctx) =>
+      ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, createdAt: Date.now() + 60_000 })
+    );
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId: lateClaimId, storageId: foreignStorageId })
+    ).resolves.toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", foreignStorageId))).not.toBeNull();
+
     // A blob already recorded as an attachment is never reclaimed.
     const jdTaskId = await f.asUser("adminA").mutation(api.tasks.createJd, {
       companyId: f.companyA,

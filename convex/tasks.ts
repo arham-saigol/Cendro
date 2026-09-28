@@ -1681,8 +1681,8 @@ export const deleteOrphanedUpload = mutation({
     if (claim.storageId && args.storageId && claim.storageId !== args.storageId) throw new ConvexError("Upload claim is bound to a different file.");
     // A blob is only safe to delete when nothing references it: the claim's
     // own bound blob once this claim is gone, or a supplied blob no claim or
-    // attachment tracks (the leftover of a failed bind). Anything referenced
-    // elsewhere belongs to another upload — leave it to its owner.
+    // attachment tracks AND that postdates the claim — uploads always follow
+    // claim issuance, so an older supplied blob can only be someone else's.
     const blobId = claim.storageId ?? args.storageId ?? null;
     await ctx.db.delete(args.claimId);
     if (!blobId) return null;
@@ -1691,7 +1691,8 @@ export const deleteOrphanedUpload = mutation({
       ctx.db.query("taskUploadClaims").withIndex("by_storageId", (q) => q.eq("storageId", blobId)).first(),
       ctx.db.system.get("_storage", blobId),
     ]);
-    if (!attachmentRef && !claimRef && metadata) await ctx.storage.delete(blobId);
+    const claimProvesOwnership = claim.storageId === blobId || (metadata !== null && metadata._creationTime >= claim.createdAt);
+    if (!attachmentRef && !claimRef && metadata && claimProvesOwnership) await ctx.storage.delete(blobId);
     return null;
   },
 });

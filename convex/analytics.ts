@@ -670,8 +670,8 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
       ? ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(8)
       : Promise.resolve([]),
   ]);
-  const visibleJd = jd.filter((task) => taskHasVisibleAssignee(task, scoped));
-  const visibleOne = one.filter((task) => taskHasVisibleAssignee(task, scoped));
+  const visibleJd = jd.filter((task) => taskHasVisibleAssignee(task, scoped, caps.has("analytics:view:company")));
+  const visibleOne = one.filter((task) => taskHasVisibleAssignee(task, scoped, caps.has("analytics:view:company")));
   const overdueOne = visibleOne.filter((t) => t.status !== "completed" && (t.overdueAt || (t.dueDate && t.dueDate < Date.now()))).length;
   const completedOne = visibleOne.filter((t) => t.status === "completed").length;
   const markTruncated = () => { completeness.isTruncated = true; };

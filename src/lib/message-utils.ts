@@ -123,8 +123,7 @@ export function serializeAssistantMessage(message: any, maxChars = 64_000) {
 
   // Stored content must fit the persistence byte cap as valid JSON — slicing
   // the serialized string would corrupt parse on read. Evict non-text parts
-  // first so the final answer survives in `parts`; drop oldest text parts
-  // next (toUiMessage falls back to `text`), then trim `text` itself.
+  // first so the final answer survives in `parts`.
   const envelope = (finalText: string) => JSON.stringify({
     kind: STORED_ASSISTANT_MESSAGE_KIND,
     version: STORED_ASSISTANT_MESSAGE_VERSION,
@@ -132,16 +131,21 @@ export function serializeAssistantMessage(message: any, maxChars = 64_000) {
     parts,
   } satisfies StoredAssistantMessage);
   let serialized = envelope(text);
-  while (serialized.length > maxChars && parts.length) {
+  while (serialized.length > maxChars) {
     let dropAt = -1;
     for (let i = parts.length - 1; i >= 0; i -= 1) if (parts[i].type !== "text") { dropAt = i; break; }
-    parts.splice(dropAt === -1 ? 0 : dropAt, 1);
+    if (dropAt === -1) break;
+    parts.splice(dropAt, 1);
     serialized = envelope(text);
   }
   if (serialized.length > maxChars) {
     // Escaped characters expand, so the raw-text excess is only a lower bound
     // on the fitting prefix — binary search the longest prefix that serializes
-    // under the cap so the answer degrades instead of vanishing.
+    // under the cap so the answer degrades instead of vanishing. toUiMessage
+    // prefers parts over `text`, so surviving text parts would mask the
+    // trimmed answer with stale content — drop them and let the UI fall back
+    // to `text`, which also keeps the answer from being stored twice.
+    parts.length = 0;
     let lo = 0;
     let hi = text.length;
     while (lo < hi) {

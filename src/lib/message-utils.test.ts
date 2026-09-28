@@ -35,6 +35,25 @@ describe("AI message persistence helpers", () => {
     expect(text).toBe("a" + "\n".repeat(text.length - 1));
   });
 
+  test("a truncated multipart answer keeps the same text the model saw", () => {
+    // Surviving text parts would mask the stored `text` — they are dropped so
+    // the UI falls back to the same trimmed answer the model context uses.
+    const serialized = serializeAssistantMessage({
+      role: "assistant",
+      parts: [
+        { type: "text", text: "A".repeat(30_000), state: "done" },
+        { type: "text", text: "B".repeat(35_000), state: "done" },
+        { type: "reasoning", text: "r".repeat(2_000) },
+      ],
+    }, 64_000);
+
+    expect(serialized.length).toBeLessThanOrEqual(64_000);
+    const parsed = JSON.parse(serialized);
+    expect(parsed.parts).toHaveLength(0);
+    expect(parsed.text.length).toBeGreaterThan(30_000);
+    expect(toUiMessage({ _id: "a", role: "assistant", content: serialized }).parts[0].text).toBe(parsed.text);
+  });
+
   test("budget eviction drops reasoning and tool parts before the final answer part", () => {
     const message = {
       role: "assistant",

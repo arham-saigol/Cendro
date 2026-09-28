@@ -859,6 +859,19 @@ describe("production permission and validation fixes", () => {
     expect(personalOpts.truncated).toBe(false);
   });
 
+  test("company analytics still count unassigned tasks whose creator went inactive", async () => {
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    await t.run(async (ctx) => {
+      await ctx.db.insert("oneTimeTasks", { companyId, reference: "OT-001", title: "Orphaned", priority: "medium", status: "due", assigneeMembershipIds: [], createdByMembershipId: adminMembershipId, createdAt: 1, updatedAt: 1 });
+      await ctx.db.patch(adminMembershipId, { active: false });
+    });
+
+    // canViewTask's view:any still shows the task — company totals must too,
+    // even though the creator is out of the active-membership scope.
+    const summary = await t.withIdentity(identity("admin2")).query(api.analytics.summary, { companyId });
+    expect(summary.oneTimeTaskCount).toBe(1);
+  });
+
   test("documents carrying deprecated fields still satisfy the schema", async () => {
     const { t, companyId, adminMembershipId } = await seedCompany();
     // Deploy-time validation rejects stored documents whose fields the schema

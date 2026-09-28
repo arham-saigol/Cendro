@@ -506,9 +506,13 @@ export function visibleAssigneeMembershipIds(
 
 export function taskHasVisibleAssignee(
   task: { assigneeMembershipIds: readonly Id<"companyMemberships">[]; createdByMembershipId: Id<"companyMemberships"> },
-  scopedIds: Set<Id<"companyMemberships">>
+  scopedIds: Set<Id<"companyMemberships">>,
+  includeUnassigned = false
 ) {
   // Unassigned tasks are attributed to their creator, matching canViewTask.
+  // In company-wide scope the scope set only covers active members, so an
+  // inactive creator would hide a task view:any still shows — include it.
+  if (!task.assigneeMembershipIds.length && includeUnassigned) return true;
   const targets = task.assigneeMembershipIds.length ? task.assigneeMembershipIds : [task.createdByMembershipId];
   return targets.some((id) => scopedIds.has(id));
 }

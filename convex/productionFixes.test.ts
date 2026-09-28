@@ -557,6 +557,15 @@ describe("production permission and validation fixes", () => {
     expect(invitations[0].sentAt).toBeUndefined();
   });
 
+  test("a missing APP_URL alone also blocks the invitation email", async () => {
+    vi.stubEnv("RESEND_API_KEY", "re_test");
+    vi.stubEnv("RESEND_FROM", "invites@example.com");
+    vi.stubEnv("APP_URL", "");
+    const { t, companyId } = await seedCompany();
+
+    await expect(t.withIdentity(identity("admin")).action(api.companyManagement.inviteUser, { companyId, email: "new@example.com", role: "Employee" })).rejects.toThrow("Invitation email is not configured");
+  });
+
   test("semantic SOP search authorizes before embedding", async () => {
     vi.stubEnv("VOYAGE_API_KEY", "test-key");
     const fetchSpy = vi.spyOn(globalThis, "fetch");

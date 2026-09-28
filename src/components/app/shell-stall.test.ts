@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi, type MockInstance } 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { useShellStall } from "./shell-stall";
+import { createMockElement } from "./test-dom";
 import { ConvexClerkAuthProvider } from "./convex-clerk-auth";
 
 const clerkState = vi.hoisted(() => ({ signedIn: true, sessionId: "session-a", orgId: null as string | null, token: null as string | null, calls: [] as unknown[] }));
@@ -54,93 +55,6 @@ import {
   type ShellConnection,
 } from "@/lib/shell-access";
 
-class MockNode {}
-class MockElement extends MockNode {}
-class MockHTMLElement extends MockElement {}
-class MockHTMLIFrameElement extends MockHTMLElement {}
-class MockHTMLInputElement extends MockHTMLElement {}
-
-(globalThis as any).Node = MockNode;
-(globalThis as any).Element = MockElement;
-(globalThis as any).HTMLElement = MockHTMLElement;
-(globalThis as any).HTMLIFrameElement = MockHTMLIFrameElement;
-(globalThis as any).HTMLInputElement = MockHTMLInputElement;
-(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-
-function createMockElement(tag = "div"): any {
-  const el = new MockHTMLElement() as any;
-  const children: any[] = [];
-  const attributes = new Map<string, string>();
-  const listeners = new Map<string, ((...args: any[]) => void)[]>();
-
-  el.nodeType = 1;
-  el.tagName = tag.toUpperCase();
-  el.nodeName = tag.toUpperCase();
-  el.children = children;
-  el.childNodes = children;
-  el.style = {};
-  el.dataset = {};
-  el.ownerDocument = globalThis.document;
-  el.appendChild = (child: any) => {
-    child.parentNode = el;
-    children.push(child);
-    return child;
-  };
-  el.insertBefore = (child: any, before: any) => {
-    child.parentNode = el;
-    const index = children.indexOf(before);
-    if (index !== -1) children.splice(index, 0, child);
-    else children.push(child);
-    return child;
-  };
-  el.removeChild = (child: any) => {
-    const index = children.indexOf(child);
-    if (index !== -1) children.splice(index, 1);
-    child.parentNode = null;
-    return child;
-  };
-  el.setAttribute = (name: string, value: string) => attributes.set(name, value);
-  el.getAttribute = (name: string) => attributes.get(name) ?? null;
-  el.removeAttribute = (name: string) => attributes.delete(name);
-  el.addEventListener = (event: string, fn: (...args: any[]) => void) => {
-    if (!listeners.has(event)) listeners.set(event, []);
-    listeners.get(event)!.push(fn);
-  };
-  el.removeEventListener = (event: string, fn: (...args: any[]) => void) => {
-    const arr = listeners.get(event);
-    if (arr) {
-      const idx = arr.indexOf(fn);
-      if (idx !== -1) arr.splice(idx, 1);
-    }
-  };
-  el.querySelector = () => null;
-  el.getBoundingClientRect = () => ({ left: 0, right: 0 });
-  return el;
-}
-
-const mockDoc: any = new MockNode();
-mockDoc.nodeType = 9;
-mockDoc.createElement = createMockElement;
-mockDoc.createTextNode = (text: string) => {
-  const node: any = new MockNode();
-  node.nodeType = 3;
-  node.nodeValue = text;
-  node.parentNode = null;
-  return node;
-};
-mockDoc.createComment = () => {
-  const node: any = new MockNode();
-  node.nodeType = 8;
-  node.parentNode = null;
-  return node;
-};
-mockDoc.documentElement = createMockElement("html");
-mockDoc.head = createMockElement("head");
-mockDoc.body = createMockElement("body");
-mockDoc.activeElement = null;
-mockDoc.addEventListener = () => {};
-mockDoc.removeEventListener = () => {};
-
 function fakeStorage() {
   const map = new Map<string, string>();
   return {
@@ -151,9 +65,6 @@ function fakeStorage() {
 }
 
 const disconnected: ShellConnection = { isWebSocketConnected: false, hasEverConnected: false, connectionRetries: 0 };
-
-(globalThis as any).document = mockDoc;
-(globalThis as any).window = globalThis;
 
 describe("useShellStall", () => {
   let sessionStorage: ReturnType<typeof fakeStorage>;
@@ -320,6 +231,22 @@ describe("useShellStall", () => {
     expect(reloadSpy).toHaveBeenCalledTimes(1);
   });
 
+  test("recovery after an automatic reload reports the previous stall episode", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null));
+    try {
+      await render();
+      await advance(SHELL_AUTO_RETRY_MS);
+      await remount();
+      await advance(5_000);
+      status = "ready";
+      await render();
+      expect(fetchSpy.mock.calls.some(([, options]) => JSON.parse(options?.body as string).event === "recovered")).toBe(true);
+      expect(readShellRetries(sessionStorage)).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   test("recovering resets the timer and clears the retry counter", async () => {
     await render();
     await advance(SHELL_AUTO_RETRY_MS);
@@ -341,7 +268,7 @@ describe("useShellStall", () => {
   });
 });
 
-test("a failed token handshake reauthenticates when Clerk recovers, and a session switch fetches a new token", async () => {
+test("mocked adapter policy retries terminal failure and invalidates on session switch", async () => {
   vi.useFakeTimers();
   clerkState.signedIn = true;
   clerkState.sessionId = "session-a";
@@ -373,7 +300,7 @@ test("a failed token handshake reauthenticates when Clerk recovers, and a sessio
   }
 });
 
-test("a later auth failure starts a fresh backoff after successful recovery", async () => {
+test("mocked adapter policy resets backoff after recovery", async () => {
   vi.useFakeTimers();
   clerkState.signedIn = true;
   clerkState.sessionId = "same-session";
@@ -406,7 +333,7 @@ test("a later auth failure starts a fresh backoff after successful recovery", as
   }
 });
 
-test("retry backoff resets when the signed-in Clerk session changes", async () => {
+test("mocked adapter policy resets backoff on session change", async () => {
   vi.useFakeTimers();
   clerkState.signedIn = true;
   clerkState.sessionId = "unavailable-session";

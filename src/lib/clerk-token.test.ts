@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { CLERK_GET_TOKEN_TIMEOUT_MS, boundGetToken } from "./clerk-token";
+import { tokenOutcome } from "./auth-diagnostics";
 
 describe("boundGetToken", () => {
   afterEach(() => {
@@ -29,15 +30,26 @@ describe("boundGetToken", () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 
-  test("returns null when getToken throws before returning a promise", async () => {
-    const bounded = boundGetToken(() => { throw new Error("session unavailable"); }, 50);
-    await expect(bounded({ template: "convex" })).resolves.toBeNull();
+  test("redacts rejected or synchronously thrown token failures", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const secret = "secret-claim@example.com";
+    const bounded = boundGetToken(() => { throw { message: secret, code: secret, status: 429, requestId: "req_123", token: secret }; }, 50);
+    await expect(bounded({ skipCache: true })).resolves.toBeNull();
+    expect(tokenOutcome()).toMatchObject({ result: "rejected", refresh: true, status: 429, requestId: "req_123" });
+    expect(JSON.stringify(tokenOutcome())).not.toContain(secret);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(secret);
+    await expect(boundGetToken(() => Promise.reject(null), 50)({})).resolves.toBeNull();
+    expect(tokenOutcome()?.result).toBe("rejected");
   });
 
-  test("returns null when getToken rejects, matching the uncaught wrapper behavior", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const bounded = boundGetToken(() => Promise.reject(new Error("fetch failed")), 50);
-    await expect(bounded({})).resolves.toBeNull();
-    expect(warn).not.toHaveBeenCalled();
+  test("a late result from a replaced token request cannot describe the current session", async () => {
+    let finishOld!: (token: string) => void;
+    const old = boundGetToken(() => new Promise<string>((resolve) => { finishOld = resolve; }), 1000, "session-a")({});
+    expect(tokenOutcome("session-b")).toBeNull();
+    await expect(boundGetToken(async () => null, 1000, "session-b")({})).resolves.toBeNull();
+    finishOld("old-session-token");
+    await expect(old).resolves.toBe("old-session-token"); // SDK still guards obsolete auth configs.
+    expect(tokenOutcome("session-b")?.result).toBe("empty");
+    expect(tokenOutcome("session-a")).toBeNull();
   });
 });

@@ -328,7 +328,9 @@ function stallCopy(accessStatus: string, stage: ShellLoadingStage | null, diagno
     return { title: "Couldn't verify your sign-in", body: diagnostic.token?.result === "obtained" ? "Cendro has not confirmed this session. Authentication failed; try again or share the support diagnostic." : "Clerk is signed in, but Cendro could not obtain or confirm a session token. Try again or share the support diagnostic." };
   }
   if (accessStatus === "profileMissing") {
-    return { title: "Your profile is still syncing", body: "Your account record hasn't been created yet. If this keeps happening, your account may be missing an email address — ask an administrator to check." };
+    return diagnostic.profile === "missing-email"
+      ? { title: "Your profile needs attention", body: "Your account is missing the email claim required for setup. Ask an administrator to check your account." }
+      : { title: "Your profile is still syncing", body: "Your account record hasn't been created yet. If this keeps happening, ask an administrator to check." };
   }
   if (stage === "session") {
     return { title: "Sign-in is taking a while", body: "The sign-in service hasn't finished loading. Try again if this persists." };

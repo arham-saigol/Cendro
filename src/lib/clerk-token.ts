@@ -6,7 +6,7 @@
  * The race does not abort the underlying Clerk request.
  */
 
-import { recordToken, safeTokenError } from "./auth-diagnostics";
+import { beginTokenAttempt, recordToken, safeTokenError } from "./auth-diagnostics";
 
 export type GetTokenOptions = { template?: string; skipCache?: boolean };
 export type GetToken = (options: GetTokenOptions) => Promise<string | null>;
@@ -15,9 +15,10 @@ export const CLERK_GET_TOKEN_TIMEOUT_MS = 10_000;
 
 const TIMED_OUT = Symbol("clerk-get-token-timeout");
 
-export function boundGetToken(getToken: GetToken, timeoutMs = CLERK_GET_TOKEN_TIMEOUT_MS): GetToken {
+export function boundGetToken(getToken: GetToken, timeoutMs = CLERK_GET_TOKEN_TIMEOUT_MS, sessionId?: string | null): GetToken {
   return async (options) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const request = beginTokenAttempt(sessionId);
     const startedAt = Date.now();
     const attempt = Promise.resolve().then(() => getToken(options)).then(
       (token) => ({ ok: true as const, token }),
@@ -31,14 +32,14 @@ export function boundGetToken(getToken: GetToken, timeoutMs = CLERK_GET_TOKEN_TI
     const durationMs = Date.now() - startedAt;
     const refresh = options.skipCache === true;
     if (result === TIMED_OUT) {
-      recordToken({ result: "timeout", durationMs, refresh });
+      recordToken({ result: "timeout", durationMs, refresh }, request);
       return null;
     }
     if (!result.ok) {
-      recordToken({ result: "rejected", durationMs, refresh, ...safeTokenError(result.error) });
+      recordToken({ result: "rejected", durationMs, refresh, ...safeTokenError(result.error) }, request);
       return null;
     }
-    recordToken({ result: result.token ? "obtained" : "empty", durationMs, refresh });
+    recordToken({ result: result.token ? "obtained" : "empty", durationMs, refresh }, request);
     return result.token;
   };
 }

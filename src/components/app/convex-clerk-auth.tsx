@@ -14,7 +14,7 @@ function useClerkAuthForConvex() {
   const { isLoaded, isSignedIn, sessionId, orgId, orgRole, sessionClaims, getToken } = useAuth();
   const retry = useContext(RetryContext);
   if (!retry) throw new Error("Missing Convex auth retry provider");
-  const fetchToken = useMemo(() => boundGetToken(getToken), [getToken]);
+  const fetchToken = useMemo(() => boundGetToken(getToken, undefined, sessionId), [getToken, sessionId]);
   const fetchAccessToken = useCallback(
     ({ forceRefreshToken }: { forceRefreshToken: boolean }) =>
       fetchToken(sessionClaims?.aud === "convex"

@@ -41,4 +41,15 @@ describe("boundGetToken", () => {
     await expect(boundGetToken(() => Promise.reject(null), 50)({})).resolves.toBeNull();
     expect(tokenOutcome()?.result).toBe("rejected");
   });
+
+  test("a late result from a replaced token request cannot describe the current session", async () => {
+    let finishOld!: (token: string) => void;
+    const old = boundGetToken(() => new Promise<string>((resolve) => { finishOld = resolve; }), 1000, "session-a")({});
+    expect(tokenOutcome("session-b")).toBeNull();
+    await expect(boundGetToken(async () => null, 1000, "session-b")({})).resolves.toBeNull();
+    finishOld("old-session-token");
+    await expect(old).resolves.toBe("old-session-token"); // SDK still guards obsolete auth configs.
+    expect(tokenOutcome("session-b")?.result).toBe("empty");
+    expect(tokenOutcome("session-a")).toBeNull();
+  });
 });

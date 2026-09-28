@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useAuth } from "@clerk/nextjs";
 import { authDiagnostic, bootEpisode, clearBootEpisode, reportAuthDiagnostic } from "@/lib/auth-diagnostics";
 import {
   SHELL_STALL_WARN_MS,
@@ -32,6 +33,7 @@ function browserOnline(): boolean {
  */
 export function useShellStall(accessStatus: string, stage: ShellLoadingStage | null, connection: ShellConnection | null) {
   const waiting = isShellWaiting(accessStatus);
+  const { sessionId } = useAuth();
   const [elapsedMs, setElapsedMs] = useState(0);
   const elapsedRef = useRef(0);
 
@@ -44,8 +46,8 @@ export function useShellStall(accessStatus: string, stage: ShellLoadingStage | n
         connection,
         autoRetries: readShellRetries(shellRetryStorage()),
         online: browserOnline(),
-      })),
-    [accessStatus, stage, connection],
+      }), sessionId),
+    [accessStatus, stage, connection, sessionId],
   );
   // The stall interval outlives renders, so it reads diagnostics through a ref
   // kept fresh after each commit; stage can advance while status stays "loading".

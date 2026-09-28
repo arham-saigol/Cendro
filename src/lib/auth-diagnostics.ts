@@ -26,12 +26,28 @@ export function safeTokenError(error: unknown): Pick<TokenOutcome, "code" | "sta
 }
 
 let tokenAttempt = 0;
+let currentTokenRequest = Symbol();
+let latestTokenScope: string | null | undefined;
 let latestToken: TokenOutcome | null = null;
-export function recordToken(result: Omit<TokenOutcome, "attempt">) {
-  latestToken = { ...result, attempt: ++tokenAttempt };
+export function beginTokenAttempt(sessionId?: string | null): symbol {
+  currentTokenRequest = Symbol();
+  latestToken = null;
+  latestTokenScope = sessionId;
+  tokenAttempt++;
+  return currentTokenRequest;
+}
+export function recordToken(result: Omit<TokenOutcome, "attempt">, request: symbol) {
+  if (request !== currentTokenRequest) return; // Superseded token work must not describe the new session.
+  latestToken = { ...result, attempt: tokenAttempt };
   if (result.result === "rejected" || result.result === "timeout") console.warn("[cendro] token acquisition", latestToken);
 }
-export function tokenOutcome() { return latestToken; }
+export function tokenOutcome(sessionId?: string | null) {
+  return sessionId === latestTokenScope ? latestToken : null;
+}
+
+export type ProfileOutcome = "synced" | "missing-email" | "convex-error" | "other-failure";
+let latestProfile: ProfileOutcome | null = null;
+export function recordProfileSync(outcome: ProfileOutcome | null) { latestProfile = outcome; }
 
 const EPISODE_KEY = "cendro.bootEpisode";
 let fallbackId: string | null = null;
@@ -47,6 +63,9 @@ export function bootEpisode(): string {
 export function clearBootEpisode() {
   fallbackId = null;
   latestToken = null;
+  latestTokenScope = undefined;
+  latestProfile = null;
+  currentTokenRequest = Symbol();
   tokenAttempt = 0;
   try { sessionStorage.removeItem(EPISODE_KEY); } catch { /* private browsing */ }
 }
@@ -55,14 +74,16 @@ export type AuthDiagnostic = ShellStallSummary & {
   episode: string;
   build: string;
   token: TokenOutcome | null;
+  profile: ProfileOutcome | null;
   confirmation: "confirmed" | "pending" | "terminal" | "not-applicable";
 };
-export function authDiagnostic(summary: ShellStallSummary): AuthDiagnostic {
+export function authDiagnostic(summary: ShellStallSummary, sessionId?: string | null): AuthDiagnostic {
   return {
     ...summary,
     episode: bootEpisode(),
     build: process.env.NEXT_PUBLIC_APP_BUILD ?? "local",
-    token: tokenOutcome(),
+    token: tokenOutcome(sessionId),
+    profile: latestProfile,
     confirmation: summary.status === "convexUnauthenticated" ? "terminal" : summary.stage === "convex-auth" ? "pending" : summary.stage === "data" || summary.status === "ready" || summary.status === "profileMissing" ? "confirmed" : "not-applicable",
   };
 }

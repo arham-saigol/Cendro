@@ -1643,6 +1643,8 @@ export const bindUploadClaim = mutation({
     if (!metadata) throw new ConvexError("Uploaded file not found.");
     const claimRef = await ctx.db.query("taskUploadClaims").withIndex("by_storageId", (q) => q.eq("storageId", args.storageId)).first();
     if (claimRef) throw new ConvexError("Uploaded file is already claimed.");
+    const attachmentRef = await ctx.db.query("taskAttachments").withIndex("by_storageId", (q) => q.eq("storageId", args.storageId)).first();
+    if (attachmentRef) throw new ConvexError("Uploaded file is already attached.");
     if (claim.expectedSha256 === undefined || claim.expectedSize === undefined) throw new ConvexError("This upload claim cannot bind a storage id.");
     // The digest was declared before upload, so the blob must postdate the
     // claim — a blob that already existed when the claim was minted can only
@@ -1720,17 +1722,27 @@ export const deleteAttachment = mutation({
 const TASK_UPLOAD_CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
 
 // Reclaims the bound blob when recording an upload as an attachment failed
-// (e.g. the task was deleted mid-upload). The claim both proves the caller
-// was issued this upload slot and names the only blob cleanup may delete —
-// a blob the caller never bound to their claim is left to its owner and the
-// sweep. Callers reclaiming an unbound blob bind it first via bindUploadClaim.
+// (e.g. the task was deleted mid-upload), and cleans up after a failed bind —
+// the upload POST stored a blob the claim never learned. An unbound claim can
+// name that blob only under the same proof bindUploadClaim requires: the blob
+// must match the digest the claim declared before upload and postdate it, so
+// cleanup can never reach another tenant's file.
 export const deleteOrphanedUpload = mutation({
-  args: { companyId: v.id("companies"), claimId: v.id("taskUploadClaims") },
+  args: { companyId: v.id("companies"), claimId: v.id("taskUploadClaims"), storageId: v.optional(v.id("_storage")) },
   handler: async (ctx, args) => {
     const { membership } = await requireCapability(ctx, args.companyId, "tasks:attachment:add");
     const claim = await ctx.db.get(args.claimId);
     if (!claim || claim.companyId !== args.companyId || claim.membershipId !== membership._id) throw new ConvexError("Upload claim not found.");
-    const blobId = claim.storageId ?? null;
+    let blobId = claim.storageId ?? null;
+    if (!blobId && args.storageId) {
+      const metadata = await ctx.db.system.get("_storage", args.storageId);
+      if (metadata) {
+        if (claim.expectedSha256 !== metadata.sha256 || claim.expectedSize !== metadata.size || metadata._creationTime < claim.createdAt) {
+          throw new ConvexError("Uploaded file does not match this claim.");
+        }
+        blobId = args.storageId;
+      }
+    }
     await ctx.db.delete(args.claimId);
     if (!blobId) return null;
     const [attachmentRef, claimRef] = await Promise.all([

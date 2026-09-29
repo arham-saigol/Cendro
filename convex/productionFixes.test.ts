@@ -877,6 +877,32 @@ describe("production permission and validation fixes", () => {
     expect(dashboard.tasks.assigned).toBe(1);
   });
 
+  test("team-filtered dashboards exclude unassigned tasks whose creators fall outside the filter", async () => {
+    const { t, companyId, adminMembershipId, employeeMembershipId } = await seedCompany();
+    const { branchId, departmentId } = await t.run(async (ctx) => {
+      const now = Date.now();
+      const branchId = await ctx.db.insert("branches", { companyId, name: "Ops", order: 0, createdAt: now, updatedAt: now });
+      const departmentId = await ctx.db.insert("departments", { companyId, branchId, name: "Floor", order: 0, createdAt: now, updatedAt: now });
+      await ctx.db.insert("userBranchAssignments", { companyId, membershipId: employeeMembershipId, branchId });
+      await ctx.db.insert("userDepartmentAssignments", { companyId, membershipId: employeeMembershipId, departmentId });
+      // An unassigned task per creator: only the employee's belongs to the
+      // selected team — the admin is not part of the branch/department.
+      await ctx.db.insert("oneTimeTasks", { companyId, reference: "OT-100", title: "Outside team", priority: "medium", status: "due", assigneeMembershipIds: [], createdByMembershipId: adminMembershipId, createdAt: now, updatedAt: now });
+      await ctx.db.insert("oneTimeTasks", { companyId, reference: "OT-101", title: "Inside team", priority: "medium", status: "due", assigneeMembershipIds: [], createdByMembershipId: employeeMembershipId, createdAt: now, updatedAt: now });
+      return { branchId, departmentId };
+    });
+
+    // The unfiltered company view still counts both via creator attribution.
+    const unfiltered = await t.withIdentity(identity("admin2")).query(api.analytics.dashboard, { companyId, now: Date.now(), range: { preset: "this_year" } });
+    expect(unfiltered.tasks.assigned).toBe(2);
+
+    // Filtered views intersect the creator with the selected team.
+    const byBranch = await t.withIdentity(identity("admin2")).query(api.analytics.dashboard, { companyId, now: Date.now(), range: { preset: "this_year" }, branchId });
+    expect(byBranch.tasks.assigned).toBe(1);
+    const byDepartment = await t.withIdentity(identity("admin2")).query(api.analytics.dashboard, { companyId, now: Date.now(), range: { preset: "this_year" }, departmentId });
+    expect(byDepartment.tasks.assigned).toBe(1);
+  });
+
   test("documents carrying deprecated fields still satisfy the schema", async () => {
     const { t, companyId, adminMembershipId } = await seedCompany();
     // Deploy-time validation rejects stored documents whose fields the schema

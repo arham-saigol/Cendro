@@ -1466,7 +1466,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
   async function uploadFiles(taskId: string, files: File[]) {
     if (!activeCompanyId || files.length === 0 || !active?.capabilities.includes("tasks:attachment:add")) return;
     await Promise.all([...files].map(async (file) => {
-      const upload = await uploadAttachmentFile({ companyId: activeCompanyId, file, generateUploadUrl, bindUploadClaim });
+      const upload = await uploadAttachmentFile({ companyId: activeCompanyId, file, generateUploadUrl, bindUploadClaim, deleteOrphanedUpload });
       try {
         await addAttachment({ companyId: activeCompanyId, taskType: taskTypeFor(kind), taskId, storageId: upload.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
       } catch (err) {
@@ -1474,7 +1474,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
         // when binding already ran) then reclaim it so the failure does not
         // leak storage. Orphan cleanup only touches the claim's bound blob.
         void bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: upload.storageId })
-          .then(() => deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId }))
+          .then(() => deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId, storageId: upload.storageId }))
           .catch(() => {});
         throw err;
       }
@@ -2728,14 +2728,15 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
     await Promise.all(files.map(async (file, index) => {
       const key = pending[index].key;
       try {
-        const upload = await uploadAttachmentFile({ companyId: activeCompanyId, file, generateUploadUrl, bindUploadClaim });
+        const upload = await uploadAttachmentFile({ companyId: activeCompanyId, file, generateUploadUrl, bindUploadClaim, deleteOrphanedUpload });
         try {
           await addAttachment({ companyId: activeCompanyId, taskType, taskId: id, storageId: upload.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
         } catch (attachErr) {
-          // Bind first (idempotent) so orphan cleanup can only see the blob
-          // through the claim — it never accepts a supplied storage id.
+          // Bind first (idempotent) so orphan cleanup sees the blob through
+          // the claim — a supplied id is only ever reclaimed when it matches
+          // the digest the claim declared before upload.
           void bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: upload.storageId })
-            .then(() => deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId }))
+            .then(() => deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId, storageId: upload.storageId }))
             .catch(() => {});
           throw attachErr;
         }

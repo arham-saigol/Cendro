@@ -100,6 +100,11 @@ export const getForSend = internalQuery({
 export const markSent = internalMutation({
   args: { invitationId: v.id("invitations") },
   handler: async (ctx, args) => {
+    // A revoke racing the send can't recall the delivered email, but its link
+    // is already dead (preview/accept require "pending") — and the revoked
+    // row should not record a successful send it never authorized.
+    const invitation = await ctx.db.get(args.invitationId);
+    if (!invitation || invitation.status !== "pending") return;
     await ctx.db.patch(args.invitationId, { sentAt: Date.now() });
   },
 });

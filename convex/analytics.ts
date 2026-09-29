@@ -361,10 +361,11 @@ export const dashboard = query({
     // tables. The ledger fan-out below then only reads rows for tasks the
     // viewer can actually see.
     // Unassigned tasks are attributed to their creator, matching canViewTask.
-    // A company-wide viewer still counts them when the creator has since been
-    // deactivated — matching analyticsSummary's view:any path — while scoped
-    // and member-filtered views keep the active-membership attribution.
-    const includeInactiveCreator = scope.dashboardScope === "company" && !args.membershipId;
+    // An unfiltered company-wide viewer still counts them when the creator has
+    // since been deactivated — matching analyticsSummary's view:any path —
+    // while scoped and filtered views keep the active-membership attribution,
+    // so a team filter never pulls in work from outside the selected team.
+    const includeInactiveCreator = scope.dashboardScope === "company" && !args.membershipId && !args.branchId && !args.departmentId;
     const assigneesOf = (task: Doc<"jdTasks"> | Doc<"oneTimeTasks">) =>
       task.assigneeMembershipIds.length
         ? visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds)

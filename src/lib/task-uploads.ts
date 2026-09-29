@@ -29,8 +29,9 @@ export async function uploadAttachmentFile(opts: {
   file: File;
   generateUploadUrl: (args: { companyId: Id<"companies">; sha256?: string; size?: number }) => Promise<{ url: string; claimId: Id<"taskUploadClaims">; uploadSecret: string }>;
   bindUploadClaim: (args: { companyId: Id<"companies">; claimId: Id<"taskUploadClaims">; storageId: Id<"_storage"> }) => Promise<unknown>;
+  deleteOrphanedUpload: (args: { companyId: Id<"companies">; claimId: Id<"taskUploadClaims">; storageId?: Id<"_storage"> }) => Promise<unknown>;
 }): Promise<AttachmentUploadResult> {
-  const { companyId, file, generateUploadUrl, bindUploadClaim } = opts;
+  const { companyId, file, generateUploadUrl, bindUploadClaim, deleteOrphanedUpload } = opts;
   if (file.size <= TASK_UPLOAD_PROXY_MAX_BYTES) {
     const claim = await generateUploadUrl({ companyId });
     const site = convexSiteUrl();
@@ -51,6 +52,13 @@ export async function uploadAttachmentFile(opts: {
   if (!response.ok) throw new Error(`Could not upload ${file.name}.`);
   const json = (await response.json()) as { storageId?: Id<"_storage"> };
   if (!json.storageId) throw new Error(`Could not upload ${file.name}.`);
-  await bindUploadClaim({ companyId, claimId: claim.claimId, storageId: json.storageId });
+  try {
+    await bindUploadClaim({ companyId, claimId: claim.claimId, storageId: json.storageId });
+  } catch (error) {
+    // The blob is stored but the claim never bound it; reclaim it now — once
+    // the empty claim is swept there is no link left to find the file by.
+    await deleteOrphanedUpload({ companyId, claimId: claim.claimId, storageId: json.storageId }).catch(() => {});
+    throw error;
+  }
   return { claimId: claim.claimId, storageId: json.storageId };
 }

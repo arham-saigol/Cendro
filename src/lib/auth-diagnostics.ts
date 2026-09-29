@@ -31,7 +31,7 @@ let currentTokenRequest = Symbol();
 let latestTokenScope: string | null | undefined;
 let latestToken: TokenOutcome | null = null;
 export function beginTokenAttempt(sessionId?: string | null): symbol {
-  if (latestTokenScope !== undefined && latestTokenScope !== sessionId) clearTransportDiagnostic();
+  if (latestTokenScope !== undefined && latestTokenScope !== sessionId) clearTransportDiagnostic(true);
   currentTokenRequest = Symbol();
   latestToken = null;
   latestTokenScope = sessionId;
@@ -81,7 +81,8 @@ export function clearBootEpisode() {
   fallbackId = null;
   clearTransportDiagnostic();
   latestToken = null;
-  latestTokenScope = undefined;
+  // Retain only the comparison key so the next token attempt can distinguish
+  // the same session from a different one after a completed boot.
   latestProfile = null;
   currentTokenRequest = Symbol();
   tokenAttempt = 0;

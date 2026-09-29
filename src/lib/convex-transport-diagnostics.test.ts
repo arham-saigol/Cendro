@@ -95,11 +95,40 @@ test("an active socket keeps counters and endpoint consistent across boot and se
   beginTokenAttempt("session-a");
   beginTokenAttempt("session-b");
   socket.send(JSON.stringify({ type: "Authenticate", tokenType: "User", baseVersion: 2, value: "secret-jwt" }));
-  socket.dispatchEvent(Object.assign(new Event("message"), { data: JSON.stringify({ type: "AuthError", baseVersion: 2 }) }));
+  socket.dispatchEvent(Object.assign(new Event("message"), { data: JSON.stringify({ type: "AuthError", baseVersion: 2, authUpdateAttempted: true }) }));
   expect(transportDiagnostic()).toMatchObject({
     endpoint: "happy-otter-123.convex.cloud", sdk: "1.41.0", attempts: 0, messages: 1, authSends: 1, authErrors: 1,
   });
   expect(transportDiagnostic()!.events.map((event) => event.kind)).toEqual(["authenticate", "auth-error"]);
+  expect(JSON.stringify(transportDiagnostic())).not.toContain("secret");
+});
+
+test("a reused socket does not attribute a previous session's auth error to the next session", async () => {
+  const { socket, transportDiagnostic } = await harness();
+  const { beginTokenAttempt, clearBootEpisode } = await import("./auth-diagnostics");
+  const authenticate = (version: number) => socket.send(JSON.stringify({
+    type: "Authenticate", tokenType: "User", baseVersion: version, value: "secret-jwt",
+  }));
+  const reject = (version: number) => socket.dispatchEvent(Object.assign(new Event("message"), {
+    data: JSON.stringify({ type: "AuthError", baseVersion: version, authUpdateAttempted: true }),
+  }));
+  beginTokenAttempt("session-a");
+  authenticate(4);
+  clearBootEpisode(); // Successful boot clears evidence, not the identity comparison key.
+  beginTokenAttempt("session-b");
+  reject(4); // Response to the old session, after the diagnostic reset.
+  expect(transportDiagnostic()!.authErrors).toBe(0);
+  authenticate(5);
+  reject(4);
+  reject(5);
+  expect(transportDiagnostic()!.authErrors).toBe(1);
+  expect(transportDiagnostic()!.events.filter((event) => event.kind === "auth-error")).toEqual([
+    { kind: "auth-error", socket: 1, version: 5, authUpdateAttempted: true, atMs: expect.any(Number) },
+  ]);
+  beginTokenAttempt("session-c");
+  authenticate(5); // A reused identity version cannot prove which session produced a late response.
+  reject(5);
+  expect(transportDiagnostic()!.authErrors).toBe(0);
   expect(JSON.stringify(transportDiagnostic())).not.toContain("secret");
 });
 

@@ -29,6 +29,7 @@ export type SavedTransport = z.infer<typeof savedTransportSchema>;
 type TransportEvent = Omit<TransportDiagnostic["events"][number], "atMs">;
 let trace: TransportDiagnostic | null = null;
 let nextSocket = 0;
+let sessionGeneration = 0;
 const observedPolicyEvents = new WeakSet<Event>();
 
 function currentTrace(): TransportDiagnostic {
@@ -42,7 +43,10 @@ export function recordTransportEvent(event: TransportEvent) {
 export function transportDiagnostic(): TransportDiagnostic | null {
   return trace ? { ...trace, events: trace.events.map((event) => ({ ...event })) } : null;
 }
-export function clearTransportDiagnostic() { trace = null; }
+export function clearTransportDiagnostic(sessionChanged = false) {
+  trace = null;
+  if (sessionChanged) sessionGeneration++;
+}
 
 /** Observe only this client's native socket, using Convex's public constructor option.
  * No global patch, extra connection, retry, or change to SDK handlers. Browser error
@@ -54,6 +58,9 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
     private readonly diagnosticSocket: number;
     private readonly diagnosticEndpoint: string | null;
     private readonly diagnosticSdk: string | null;
+    private readonly initialSessionGeneration: number;
+    private latestAuth: { version: number; generation: number } | null = null;
+    private priorAuthVersion = -1;
 
     private socketTrace() {
       const current = currentTrace();
@@ -85,6 +92,7 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
       this.diagnosticSocket = socket;
       this.diagnosticEndpoint = endpoint;
       this.diagnosticSdk = sdk;
+      this.initialSessionGeneration = sessionGeneration;
       let received = false;
       let opened = false;
       let observingPolicy = typeof document !== "undefined";
@@ -118,6 +126,14 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
         try {
           const message = JSON.parse(event.data);
           if (message.type !== "AuthError") return;
+          // A response on a reused socket may belong to the preceding Clerk session.
+          // After a switch, only attribute an auth-update rejection to a version
+          // sent in this session. A reused version is ambiguous, so omit it.
+          if (sessionGeneration !== this.initialSessionGeneration &&
+            (message.authUpdateAttempted !== true ||
+              this.latestAuth?.generation !== sessionGeneration ||
+              this.latestAuth.version !== message.baseVersion ||
+              message.baseVersion <= this.priorAuthVersion)) return;
           this.socketTrace().authErrors++;
           this.recordSocketEvent({ kind: "auth-error", socket,
             ...(Number.isSafeInteger(message.baseVersion) && message.baseVersion >= 0 && { version: message.baseVersion }),
@@ -153,6 +169,12 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
       try {
         const message = JSON.parse(data);
         if (message.type !== "Authenticate" || (message.tokenType !== "User" && message.tokenType !== "None")) return;
+        if (Number.isSafeInteger(message.baseVersion) && message.baseVersion >= 0) {
+          if (this.latestAuth && this.latestAuth.generation !== sessionGeneration) {
+            this.priorAuthVersion = Math.max(this.priorAuthVersion, this.latestAuth.version);
+          }
+          this.latestAuth = { version: message.baseVersion, generation: sessionGeneration };
+        }
         if (message.tokenType === "User") this.socketTrace().authSends++;
         this.recordSocketEvent({ kind: message.tokenType === "User" ? "authenticate" : "clear-auth", socket: this.diagnosticSocket,
           ...(Number.isSafeInteger(message.baseVersion) && message.baseVersion >= 0 && { version: message.baseVersion }),

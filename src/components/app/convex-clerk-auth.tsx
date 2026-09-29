@@ -4,6 +4,7 @@ import { useAuth } from "@clerk/nextjs";
 import { ConvexProviderWithAuth, useConvexAuth } from "convex/react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { boundGetToken } from "@/lib/clerk-token";
+import { recordTransportEvent } from "@/lib/convex-transport-diagnostics";
 
 const RetryContext = createContext<{ attempt: number; failures: number; retry: () => void; recovered: () => void } | null>(null);
 
@@ -35,6 +36,10 @@ function RetryFailedAuth() {
   const { isLoaded, isSignedIn, sessionId } = useAuth();
   const { isLoading, isAuthenticated } = useConvexAuth();
   const retry = useContext(RetryContext)!;
+
+  useEffect(() => {
+    if (isAuthenticated) recordTransportEvent({ kind: "auth-confirmed" });
+  }, [isAuthenticated]);
 
   useEffect(() => {
     if (isAuthenticated) retry.recovered();

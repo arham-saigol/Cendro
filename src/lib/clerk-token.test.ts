@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { CLERK_GET_TOKEN_TIMEOUT_MS, boundGetToken } from "./clerk-token";
-import { tokenOutcome } from "./auth-diagnostics";
+import { clearBootEpisode, tokenOutcome } from "./auth-diagnostics";
+import { recordTransportEvent, transportDiagnostic } from "./convex-transport-diagnostics";
 
 describe("boundGetToken", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    clearBootEpisode();
   });
 
   test("returns the token when getToken resolves in time", async () => {
@@ -40,6 +42,15 @@ describe("boundGetToken", () => {
     expect(JSON.stringify(warn.mock.calls)).not.toContain(secret);
     await expect(boundGetToken(() => Promise.reject(null), 50)({})).resolves.toBeNull();
     expect(tokenOutcome()?.result).toBe("rejected");
+  });
+
+  test("a new session and a completed boot cannot inherit the previous transport trace", async () => {
+    await boundGetToken(async () => "old-token", 50, "session-a")({});
+    recordTransportEvent({ kind: "auth-error", socket: 1 });
+    await boundGetToken(async () => "new-token", 50, "session-b")({});
+    expect(transportDiagnostic()!.events.map((event) => event.kind)).toEqual(["token-start", "token-obtained"]);
+    clearBootEpisode();
+    expect(transportDiagnostic()).toBeNull();
   });
 
   test("a late result from a replaced token request cannot describe the current session", async () => {

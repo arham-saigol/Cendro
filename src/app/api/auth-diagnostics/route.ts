@@ -1,5 +1,6 @@
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
+import { savedTransportSchema, transportDiagnosticSchema } from "@/lib/convex-transport-diagnostics";
 
 // This endpoint is independent of Convex transport. Strict parsing prevents
 // accidental collection of credentials, identities, arbitrary errors or URLs.
@@ -7,6 +8,10 @@ const diagnostic = z.strictObject({
   event: z.enum(["stall", "retry", "recovered"]),
   episode: z.uuid(),
   build: z.string().max(64).regex(/^[a-zA-Z0-9._-]+$/),
+  // Optional while already-open tabs on the previous build still report.
+  capturedAt: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+  transport: transportDiagnosticSchema.nullable().optional(),
+  previousTransport: savedTransportSchema.nullable().optional(),
   status: z.enum(["loading", "convexUnauthenticated", "profileMissing", "ready", "noCompanies", "signedOut"]),
   stage: z.enum(["session", "convex-auth", "data"]).nullable(),
   elapsedSeconds: z.number().int().min(0).max(86400),
@@ -34,10 +39,10 @@ export async function POST(req: Request) {
   const { sessionId } = await auth();
   if (!sessionId) return new Response(null, { status: 401 });
   if (req.headers.get("origin") !== new URL(req.url).origin || !req.headers.get("content-type")?.startsWith("application/json")) return new Response(null, { status: 403 });
-  if (Number(req.headers.get("content-length") ?? 0) > 2048) return new Response(null, { status: 413 });
+  if (Number(req.headers.get("content-length") ?? 0) > 8192) return new Response(null, { status: 413 });
   if (!req.body) return new Response(null, { status: 400 });
   const reader = req.body.getReader();
-  const bytes = new Uint8Array(2048);
+  const bytes = new Uint8Array(8192);
   let length = 0;
   while (true) {
     const { done, value: chunk } = await reader.read();

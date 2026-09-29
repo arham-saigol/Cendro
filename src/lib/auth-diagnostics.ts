@@ -1,4 +1,5 @@
 import type { ShellStallSummary } from "./shell-access";
+import { clearTransportDiagnostic, recordTransportEvent, savedTransportSchema, transportDiagnostic, type SavedTransport, type TransportDiagnostic } from "./convex-transport-diagnostics";
 
 export type TokenOutcome = {
   result: "obtained" | "empty" | "timeout" | "rejected";
@@ -30,6 +31,7 @@ let currentTokenRequest = Symbol();
 let latestTokenScope: string | null | undefined;
 let latestToken: TokenOutcome | null = null;
 export function beginTokenAttempt(sessionId?: string | null): symbol {
+  if (latestTokenScope !== undefined && latestTokenScope !== sessionId) clearTransportDiagnostic(true);
   currentTokenRequest = Symbol();
   latestToken = null;
   latestTokenScope = sessionId;
@@ -39,6 +41,7 @@ export function beginTokenAttempt(sessionId?: string | null): symbol {
 export function recordToken(result: Omit<TokenOutcome, "attempt">, request: symbol) {
   if (request !== currentTokenRequest) return; // Superseded token work must not describe the new session.
   latestToken = { ...result, attempt: tokenAttempt };
+  recordTransportEvent({ kind: `token-${result.result}`, refresh: result.refresh });
   if (result.result === "rejected" || result.result === "timeout") console.warn("[cendro] token acquisition", latestToken);
 }
 export function tokenOutcome(sessionId?: string | null) {
@@ -50,6 +53,20 @@ let latestProfile: ProfileOutcome | null = null;
 export function recordProfileSync(outcome: ProfileOutcome | null) { latestProfile = outcome; }
 
 const EPISODE_KEY = "cendro.bootEpisode";
+const TRANSPORT_KEY = "cendro.bootTransport";
+
+function previousTransport(episode: string): SavedTransport | null {
+  try {
+    const raw = sessionStorage.getItem(TRANSPORT_KEY);
+    if (!raw || raw.length > 4096) return null;
+    const saved = savedTransportSchema.safeParse(JSON.parse(raw));
+    if (saved.success && saved.data.episode === episode) {
+      const age = Date.now() - saved.data.capturedAt;
+      if (age >= 0 && age < 86400_000) return saved.data;
+    }
+  } catch { /* Blocked storage or invalid/obsolete data must not affect boot. */ }
+  return null;
+}
 let fallbackId: string | null = null;
 export function bootEpisode(): string {
   if (!fallbackId) fallbackId = crypto.randomUUID();
@@ -62,26 +79,38 @@ export function bootEpisode(): string {
 }
 export function clearBootEpisode() {
   fallbackId = null;
+  clearTransportDiagnostic();
   latestToken = null;
-  latestTokenScope = undefined;
+  // Retain only the comparison key so the next token attempt can distinguish
+  // the same session from a different one after a completed boot.
   latestProfile = null;
   currentTokenRequest = Symbol();
   tokenAttempt = 0;
-  try { sessionStorage.removeItem(EPISODE_KEY); } catch { /* private browsing */ }
+  try {
+    sessionStorage.removeItem(EPISODE_KEY);
+    sessionStorage.removeItem(TRANSPORT_KEY);
+  } catch { /* private browsing */ }
 }
 
 export type AuthDiagnostic = ShellStallSummary & {
   episode: string;
   build: string;
+  capturedAt: number;
+  transport: TransportDiagnostic | null;
+  previousTransport: SavedTransport | null;
   token: TokenOutcome | null;
   profile: ProfileOutcome | null;
   confirmation: "confirmed" | "pending" | "terminal" | "not-applicable";
 };
 export function authDiagnostic(summary: ShellStallSummary, sessionId?: string | null): AuthDiagnostic {
+  const episode = bootEpisode();
   return {
     ...summary,
-    episode: bootEpisode(),
+    episode,
     build: process.env.NEXT_PUBLIC_APP_BUILD ?? "local",
+    capturedAt: Date.now(),
+    transport: transportDiagnostic(),
+    previousTransport: previousTransport(episode),
     token: tokenOutcome(sessionId),
     profile: latestProfile,
     confirmation: summary.status === "convexUnauthenticated" ? "terminal" : summary.stage === "convex-auth" ? "pending" : summary.stage === "data" || summary.status === "ready" || summary.status === "profileMissing" ? "confirmed" : "not-applicable",
@@ -91,6 +120,15 @@ export function authDiagnostic(summary: ShellStallSummary, sessionId?: string | 
 // Best effort; independent of Convex's WebSocket. At most a few summaries per episode.
 export function reportAuthDiagnostic(event: "stall" | "retry" | "recovered", snapshot: AuthDiagnostic) {
   if (typeof window === "undefined") return;
+  // Retain the last pre-reload transport evidence even if log delivery fails.
+  // Only one bounded trace, never a recursive diagnostic or a token.
+  if (event === "retry" && snapshot.transport) {
+    try {
+      sessionStorage.setItem(TRANSPORT_KEY, JSON.stringify({
+        episode: snapshot.episode, build: snapshot.build, capturedAt: snapshot.capturedAt, transport: snapshot.transport,
+      }));
+    } catch { /* Local copy remains available when storage is denied. */ }
+  }
   try {
     void fetch("/api/auth-diagnostics", {
       method: "POST", headers: { "Content-Type": "application/json" },

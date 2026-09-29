@@ -34,6 +34,26 @@ test("accepts only a redacted, authenticated same-origin diagnostic", async () =
   expect(warn.mock.calls[1][1]).toMatchObject({ autoRetries: 1, stage: "data" });
 });
 
+test("accepts bounded transport history across reloads but rejects raw payloads and reasons", async () => {
+  authState.sessionId = "transport-session";
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const transport = {
+    startedAt: Date.now(), endpoint: "happy-otter-123.convex.cloud", sdk: "1.41.0",
+    attempts: 44, opens: 0, messages: 0, authSends: 0, authErrors: 0,
+    events: Array.from({ length: 12 }, (_, i) => ({ atMs: i * 16000, kind: "close", socket: i + 1, code: 1006, clean: false })),
+  };
+  const body = { ...snapshot, capturedAt: Date.now(), transport,
+    previousTransport: { episode: snapshot.episode, build: snapshot.build, capturedAt: Date.now(), transport },
+  };
+  expect((await POST(request({ ...body, transport: { ...transport, events: [{ atMs: 0, kind: "close", reason: "secret" }] } }))).status).toBe(400);
+  expect((await POST(request({ ...body, transport: { ...transport, payload: "secret-jwt" } }))).status).toBe(400);
+  expect((await POST(request({ ...body, transport: { ...transport, events: [...transport.events, transport.events[0]] } }))).status).toBe(400);
+  expect((await POST(request({ ...body, previousTransport: { ...body.previousTransport, token: "secret-jwt" } }))).status).toBe(400);
+  expect(warn).not.toHaveBeenCalled();
+  expect((await POST(request(body))).status).toBe(204);
+  expect(warn.mock.calls[0][1]).toEqual(body);
+});
+
 test("ingestion bounds diagnostics per signed-in session", async () => {
   authState.sessionId = "rate-test-session";
   const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -58,7 +78,7 @@ test("dedupe cache eviction does not reset active session quotas", async () => {
 });
 
 test("rejects a streaming body that exceeds the byte limit without a Content-Length", async () => {
-  const body = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("x".repeat(4096))); controller.close(); } });
+  const body = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("x".repeat(16384))); controller.close(); } });
   const req = new Request("https://cendro.app/api/auth-diagnostics", {
     method: "POST", headers: { origin: "https://cendro.app", "content-type": "application/json" }, body,
     duplex: "half",

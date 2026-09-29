@@ -119,15 +119,18 @@ test("a reused socket does not attribute a previous session's auth error to the 
   reject(4); // Response to the old session, after the diagnostic reset.
   expect(transportDiagnostic()!.authErrors).toBe(0);
   authenticate(5);
+  authenticate(6);
   reject(4);
-  reject(5);
-  expect(transportDiagnostic()!.authErrors).toBe(1);
+  reject(5); // Earlier current-session attempt is still observable after version 6 is sent.
+  reject(6);
+  expect(transportDiagnostic()!.authErrors).toBe(2);
   expect(transportDiagnostic()!.events.filter((event) => event.kind === "auth-error")).toEqual([
     { kind: "auth-error", socket: 1, version: 5, authUpdateAttempted: true, atMs: expect.any(Number) },
+    { kind: "auth-error", socket: 1, version: 6, authUpdateAttempted: true, atMs: expect.any(Number) },
   ]);
   beginTokenAttempt("session-c");
-  authenticate(5); // A reused identity version cannot prove which session produced a late response.
-  reject(5);
+  authenticate(6); // A reused identity version cannot prove which session produced a late response.
+  reject(6);
   expect(transportDiagnostic()!.authErrors).toBe(0);
   expect(JSON.stringify(transportDiagnostic())).not.toContain("secret");
 });

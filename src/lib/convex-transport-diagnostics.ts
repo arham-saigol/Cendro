@@ -59,8 +59,10 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
     private readonly diagnosticEndpoint: string | null;
     private readonly diagnosticSdk: string | null;
     private readonly initialSessionGeneration: number;
-    private latestAuth: { version: number; generation: number } | null = null;
+    private authGeneration: number;
+    private highestAuthVersion = -1;
     private priorAuthVersion = -1;
+    private readonly currentAuthVersions = new Set<number>();
 
     private socketTrace() {
       const current = currentTrace();
@@ -93,6 +95,7 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
       this.diagnosticEndpoint = endpoint;
       this.diagnosticSdk = sdk;
       this.initialSessionGeneration = sessionGeneration;
+      this.authGeneration = sessionGeneration;
       let received = false;
       let opened = false;
       let observingPolicy = typeof document !== "undefined";
@@ -131,9 +134,8 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
           // sent in this session. A reused version is ambiguous, so omit it.
           if (sessionGeneration !== this.initialSessionGeneration &&
             (message.authUpdateAttempted !== true ||
-              this.latestAuth?.generation !== sessionGeneration ||
-              this.latestAuth.version !== message.baseVersion ||
-              message.baseVersion <= this.priorAuthVersion)) return;
+              this.authGeneration !== sessionGeneration ||
+              !this.currentAuthVersions.has(message.baseVersion))) return;
           this.socketTrace().authErrors++;
           this.recordSocketEvent({ kind: "auth-error", socket,
             ...(Number.isSafeInteger(message.baseVersion) && message.baseVersion >= 0 && { version: message.baseVersion }),
@@ -170,10 +172,18 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
         const message = JSON.parse(data);
         if (message.type !== "Authenticate" || (message.tokenType !== "User" && message.tokenType !== "None")) return;
         if (Number.isSafeInteger(message.baseVersion) && message.baseVersion >= 0) {
-          if (this.latestAuth && this.latestAuth.generation !== sessionGeneration) {
-            this.priorAuthVersion = Math.max(this.priorAuthVersion, this.latestAuth.version);
+          if (this.authGeneration !== sessionGeneration) {
+            this.priorAuthVersion = this.highestAuthVersion;
+            this.currentAuthVersions.clear();
+            this.authGeneration = sessionGeneration;
           }
-          this.latestAuth = { version: message.baseVersion, generation: sessionGeneration };
+          this.highestAuthVersion = Math.max(this.highestAuthVersion, message.baseVersion);
+          if (message.baseVersion > this.priorAuthVersion) {
+            this.currentAuthVersions.add(message.baseVersion);
+            if (this.currentAuthVersions.size > TRANSPORT_EVENT_LIMIT) {
+              this.currentAuthVersions.delete(this.currentAuthVersions.values().next().value!);
+            }
+          }
         }
         if (message.tokenType === "User") this.socketTrace().authSends++;
         this.recordSocketEvent({ kind: message.tokenType === "User" ? "authenticate" : "clear-auth", socket: this.diagnosticSocket,

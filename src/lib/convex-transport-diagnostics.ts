@@ -40,6 +40,7 @@ export function recordTransportEvent(event: TransportEvent) {
 export function transportDiagnostic(): TransportDiagnostic | null {
   return trace ? { ...trace, events: trace.events.map((event) => ({ ...event })) } : null;
 }
+export function clearTransportDiagnostic() { trace = null; }
 
 /** Observe only this client's native socket, using Convex's public constructor option.
  * No global patch, extra connection, retry, or change to SDK handlers. Browser error
@@ -64,14 +65,26 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
       }
       this.diagnosticSocket = socket;
       let received = false;
+      let opened = false;
+      let observingPolicy = typeof document !== "undefined";
+      let policyCleanup: ReturnType<typeof setTimeout> | undefined;
+      const stopPolicyObservation = () => {
+        if (policyCleanup) clearTimeout(policyCleanup);
+        if (observingPolicy) document.removeEventListener("securitypolicyviolation", onPolicyViolation);
+        observingPolicy = false;
+      };
       this.addEventListener("open", () => {
+        opened = true;
+        stopPolicyObservation();
         current.opens++;
         recordTransportEvent({ kind: "open", socket });
       });
       this.addEventListener("error", () => recordTransportEvent({ kind: "error", socket }));
       this.addEventListener("close", (event) => {
         recordTransportEvent({ kind: "close", socket, code: event.code, clean: event.wasClean });
-        if (typeof document !== "undefined") document.removeEventListener("securitypolicyviolation", onPolicyViolation);
+        // The document's CSP violation can arrive after the socket close event.
+        // Keep observing briefly for failed upgrades, but never retain a listener indefinitely.
+        if (!opened && observingPolicy) policyCleanup = setTimeout(stopPolicyObservation, 5_000);
       });
       this.addEventListener("message", (event) => {
         current.messages++;
@@ -96,10 +109,13 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
         if (event.disposition !== "enforce" || event.effectiveDirective !== "connect-src") return;
         try {
           const blocked = new URL(event.blockedURI);
-          if (blocked.protocol === target.protocol && blocked.host === target.host) recordTransportEvent({ kind: "csp-blocked", socket });
+          if (blocked.protocol === target.protocol && blocked.host === target.host) {
+            recordTransportEvent({ kind: "csp-blocked", socket });
+            stopPolicyObservation();
+          }
         } catch { /* Browser may redact blockedURI. */ }
       };
-      if (typeof document !== "undefined") document.addEventListener("securitypolicyviolation", onPolicyViolation);
+      if (observingPolicy) document.addEventListener("securitypolicyviolation", onPolicyViolation);
     }
 
     override send(data: Parameters<WebSocket["send"]>[0]) {

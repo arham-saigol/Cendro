@@ -60,6 +60,7 @@ test("observation preserves native constructor and send failures without exposin
 });
 
 test("bounded history distinguishes enforced CSP from generic failures and client closes", async () => {
+  vi.useFakeTimers();
   const document = new EventTarget();
   vi.stubGlobal("document", document);
   const { socket, transportDiagnostic, TRANSPORT_EVENT_LIMIT } = await harness();
@@ -78,5 +79,29 @@ test("bounded history distinguishes enforced CSP from generic failures and clien
   expect(transportDiagnostic()!.events).toHaveLength(TRANSPORT_EVENT_LIMIT);
   socket.dispatchEvent(Object.assign(new Event("close"), { code: 1006, wasClean: false }));
   document.dispatchEvent(violation("enforce", "happy-otter-123.convex.cloud"));
-  expect(transportDiagnostic()!.events.at(-1)?.kind).toBe("close");
+  expect(transportDiagnostic()!.events.at(-1)?.kind).toBe("close"); // Already observed before close.
+});
+
+test("a CSP violation delivered after a failed socket closes is captured, then observation expires", async () => {
+  vi.useFakeTimers();
+  const document = new EventTarget();
+  vi.stubGlobal("document", document);
+  const { socket, transportDiagnostic } = await harness();
+  const violation = () => Object.assign(new Event("securitypolicyviolation"), {
+    disposition: "enforce", effectiveDirective: "connect-src",
+    blockedURI: "wss://happy-otter-123.convex.cloud/api/1.41.0/sync",
+  });
+  socket.dispatchEvent(Object.assign(new Event("close"), { code: 1006, wasClean: false }));
+  document.dispatchEvent(violation());
+  expect(transportDiagnostic()!.events.at(-1)?.kind).toBe("csp-blocked");
+  const events = transportDiagnostic()!.events.length;
+  document.dispatchEvent(violation());
+  expect(transportDiagnostic()!.events).toHaveLength(events);
+
+  const { socket: another } = await harness();
+  another.dispatchEvent(Object.assign(new Event("close"), { code: 1006, wasClean: false }));
+  await vi.advanceTimersByTimeAsync(5_000);
+  const expiredEvents = transportDiagnostic()!.events.length;
+  document.dispatchEvent(violation());
+  expect(transportDiagnostic()!.events).toHaveLength(expiredEvents);
 });

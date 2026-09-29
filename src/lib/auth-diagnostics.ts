@@ -1,5 +1,5 @@
 import type { ShellStallSummary } from "./shell-access";
-import { recordTransportEvent, savedTransportSchema, transportDiagnostic, type SavedTransport, type TransportDiagnostic } from "./convex-transport-diagnostics";
+import { clearTransportDiagnostic, recordTransportEvent, savedTransportSchema, transportDiagnostic, type SavedTransport, type TransportDiagnostic } from "./convex-transport-diagnostics";
 
 export type TokenOutcome = {
   result: "obtained" | "empty" | "timeout" | "rejected";
@@ -31,6 +31,7 @@ let currentTokenRequest = Symbol();
 let latestTokenScope: string | null | undefined;
 let latestToken: TokenOutcome | null = null;
 export function beginTokenAttempt(sessionId?: string | null): symbol {
+  if (latestTokenScope !== undefined && latestTokenScope !== sessionId) clearTransportDiagnostic();
   currentTokenRequest = Symbol();
   latestToken = null;
   latestTokenScope = sessionId;
@@ -78,6 +79,7 @@ export function bootEpisode(): string {
 }
 export function clearBootEpisode() {
   fallbackId = null;
+  clearTransportDiagnostic();
   latestToken = null;
   latestTokenScope = undefined;
   latestProfile = null;

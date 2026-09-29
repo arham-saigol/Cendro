@@ -79,7 +79,7 @@ After deploying this change, ask the employee to refresh Cendro once to load the
 ### What the new fields establish
 
 - `capturedAt`: capture time in Unix milliseconds, for correlating service/edge logs.
-- `transport.startedAt`: start of this page's transport/token trace. Counts cover the page lifetime, not just the current sign-in or socket; each socket has a local numeric identifier.
+- `transport.startedAt`: start of the current transport/token trace. Counts reset after a completed boot or a new Clerk session, not on every socket reconnect; each socket has a local numeric identifier.
 - `endpoint` / `sdk`: public Convex deployment hostname and SDK version extracted from the sync endpoint, without its full URL/query.
 - `attempts` / `opens`: actual constructor attempts and native socket open events. Unlike the SDK's `hasEverConnected`, `opens` includes a socket that opened while auth sending was paused.
 - `messages` / `authSends` / `authErrors`: received native messages, successful calls to native `send` for user authentication, and observed server `AuthError` frames. A successful `send` means queued by the browser, **not** acknowledgement by the server.

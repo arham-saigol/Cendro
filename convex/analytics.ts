@@ -361,8 +361,18 @@ export const dashboard = query({
     // tables. The ledger fan-out below then only reads rows for tasks the
     // viewer can actually see.
     // Unassigned tasks are attributed to their creator, matching canViewTask.
+    // A company-wide viewer still counts them when the creator has since been
+    // deactivated — matching analyticsSummary's view:any path — while scoped
+    // and member-filtered views keep the active-membership attribution.
+    const includeInactiveCreator = scope.dashboardScope === "company" && !args.membershipId;
+    const assigneesOf = (task: Doc<"jdTasks"> | Doc<"oneTimeTasks">) =>
+      task.assigneeMembershipIds.length
+        ? visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds)
+        : includeInactiveCreator
+          ? [task.createdByMembershipId]
+          : visibleAssigneeMembershipIds([task.createdByMembershipId], effectiveIds);
     const visibleJdTasks = jdTasks
-      .map((task) => ({ task, assignees: visibleAssigneeMembershipIds(task.assigneeMembershipIds.length ? task.assigneeMembershipIds : [task.createdByMembershipId], effectiveIds) }))
+      .map((task) => ({ task, assignees: assigneesOf(task) }))
       .filter((entry) => entry.assignees.length > 0);
 
     // Two company-range scans grouped by task replace 2N per-task queries, but
@@ -491,7 +501,7 @@ export const dashboard = query({
     });
     for (const group of jdItemGroups) items.push(...group);
     for (const task of oneTimeTasks) {
-      const assignees = visibleAssigneeMembershipIds(task.assigneeMembershipIds.length ? task.assigneeMembershipIds : [task.createdByMembershipId], effectiveIds);
+      const assignees = assigneesOf(task);
       if (!assignees.length) continue;
       const completed = task.status === "completed";
       const overdue = !completed && (task.overdueAt !== undefined || (task.dueDate !== undefined && task.dueDate < now));

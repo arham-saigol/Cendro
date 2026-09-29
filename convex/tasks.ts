@@ -1602,7 +1602,7 @@ export const generateAttachmentUploadUrl = mutation({
 });
 
 export const addAttachment = mutation({
-  args: { companyId: v.id("companies"), taskType: v.union(v.literal("jd"), v.literal("one_time")), taskId: v.string(), storageId: v.id("_storage"), fileName: v.string(), contentType: v.string(), size: v.number(), claimId: v.optional(v.id("taskUploadClaims")) },
+  args: { companyId: v.id("companies"), taskType: v.union(v.literal("jd"), v.literal("one_time")), taskId: v.string(), storageId: v.id("_storage"), fileName: v.string(), contentType: v.string(), size: v.number(), claimId: v.id("taskUploadClaims") },
   handler: async (ctx, args) => {
     const { membership } = await requireCapability(ctx, args.companyId, "tasks:attachment:add");
     const { normalized } = await getVisibleTask(ctx, args.companyId, membership, args.taskType, args.taskId);
@@ -1613,13 +1613,12 @@ export const addAttachment = mutation({
     if (existing) throw new ConvexError("This file is already attached.");
     const metadata = await ctx.db.system.get("_storage", args.storageId);
     if (!metadata) throw new ConvexError("Uploaded file not found.");
+    // Attaching requires a claim bound to this exact blob: provenance is
+    // proven at bind time, so a member can never name another company's file.
+    const claim = await ctx.db.get(args.claimId);
+    if (!claim || claim.companyId !== args.companyId || claim.membershipId !== membership._id || claim.storageId !== args.storageId) throw new ConvexError("Upload claim not found.");
     const attachmentId = await ctx.db.insert("taskAttachments", { companyId: args.companyId, taskType: args.taskType, taskId: normalized, storageId: args.storageId, fileName: nonEmpty(args.fileName, "File name"), contentType: metadata.contentType ?? args.contentType, size: metadata.size ?? args.size, createdByMembershipId: membership._id, createdAt: Date.now() });
-    // Consume the upload claim so it cannot later "clean up" this blob. A
-    // claim bound to a different blob stays for the sweep to reclaim it.
-    if (args.claimId) {
-      const claim = await ctx.db.get(args.claimId);
-      if (claim && claim.companyId === args.companyId && claim.membershipId === membership._id && claim.storageId === args.storageId) await ctx.db.delete(args.claimId);
-    }
+    await ctx.db.delete(args.claimId);
     return attachmentId;
   },
 });
@@ -1645,9 +1644,24 @@ export const bindUploadClaim = mutation({
     const claimRef = await ctx.db.query("taskUploadClaims").withIndex("by_storageId", (q) => q.eq("storageId", args.storageId)).first();
     if (claimRef) throw new ConvexError("Uploaded file is already claimed.");
     if (claim.expectedSha256 === undefined || claim.expectedSize === undefined) throw new ConvexError("This upload claim cannot bind a storage id.");
+    // The digest was declared before upload, so the blob must postdate the
+    // claim — a blob that already existed when the claim was minted can only
+    // be someone else's file, regardless of what its id is.
+    if (metadata._creationTime < claim.createdAt) throw new ConvexError("Uploaded file does not match this claim.");
     if (metadata.sha256 !== claim.expectedSha256 || metadata.size !== claim.expectedSize) throw new ConvexError("Uploaded file does not match this claim.");
     await ctx.db.patch(args.claimId, { storageId: args.storageId });
     return null;
+  },
+});
+
+// Cheap credential check for the upload endpoint: lets it reject invalid or
+// consumed claims before buffering and storing the request body. The binding
+// itself still happens in commitUploadClaimBlob after the bytes are stored.
+export const checkUploadClaim = internalQuery({
+  args: { claimId: v.id("taskUploadClaims"), uploadSecret: v.string() },
+  handler: async (ctx, args) => {
+    const claim = await ctx.db.get(args.claimId);
+    return Boolean(claim && !claim.storageId && claim.uploadSecret === args.uploadSecret);
   },
 });
 
@@ -1900,27 +1914,24 @@ export const aiListVisible = query({
       const evalRows = scannedRows.slice(0, AI_LIST_TASK_SCAN_LIMIT);
       const matched: { task: Doc<"jdTasks"> | Doc<"oneTimeTasks">; state: { status: string; dueAt: number | null } }[] = [];
       // Rows beyond the cap prove un-scanned candidates may still match.
-      let truncated = scannedRows.length > AI_LIST_TASK_SCAN_LIMIT;
+      const scanTruncated = scannedRows.length > AI_LIST_TASK_SCAN_LIMIT;
+      // Keep evaluating after the limit fills: overflow only reports a proven
+      // extra match, never an unevaluated remainder.
+      let overflow = false;
       for (let offset = 0; offset < evalRows.length; offset += 100) {
         const evaluated = await Promise.all(evalRows.slice(offset, offset + 100).map(async (task) => {
           if (!(await visible(ctx, args.companyId, membership, task, kind, auth))) return null;
           const state = kind === "jd" ? await jdState(ctx, task as Doc<"jdTasks">, now, timeZone) : oneState(task as Doc<"oneTimeTasks">);
           return matches(state.status) ? { task, state } : null;
         }));
-        let dropped = false;
         for (const item of evaluated) {
           if (!item) continue;
           if (matched.length < limit) matched.push(item);
-          else dropped = true;
+          else overflow = true;
         }
-        // Once the limit fills, in-chunk drops and unevaluated chunks both
-        // mean more matches may exist beyond the returned window.
-        if (dropped || matched.length === limit) {
-          truncated = truncated || dropped || offset + 100 < evalRows.length;
-          break;
-        }
+        if (overflow) break;
       }
-      return { matched, truncated };
+      return { matched, truncated: scanTruncated || overflow };
     };
     const [jdScan, oneScan] = await Promise.all([
       collect("jd", "jdTasks"),

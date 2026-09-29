@@ -79,6 +79,9 @@ describe("task authorization hardening", () => {
     const storageId = await f.t.run(async (ctx) => {
       return await ctx.storage.store(new Blob(["test-attachment-content"], { type: "text/plain" }));
     });
+    const claimId = await f.t.run(async (ctx) =>
+      ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, storageId, createdAt: Date.now() })
+    );
 
     // Company A attaches the file
     await expect(
@@ -90,6 +93,7 @@ describe("task authorization hardening", () => {
         fileName: "audit.txt",
         contentType: "text/plain",
         size: 23,
+        claimId,
       })
     ).resolves.toBeDefined();
 
@@ -103,6 +107,7 @@ describe("task authorization hardening", () => {
         fileName: "duplicate.txt",
         contentType: "text/plain",
         size: 23,
+        claimId,
       })
     ).rejects.toThrow("This file is already attached.");
 
@@ -116,6 +121,7 @@ describe("task authorization hardening", () => {
         fileName: "cross-company-stolen.txt",
         contentType: "text/plain",
         size: 23,
+        claimId,
       })
     ).rejects.toThrow("This file is already attached.");
   });
@@ -266,6 +272,17 @@ describe("task authorization hardening", () => {
       f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId: wrongSizeClaim.claimId, storageId })
     ).rejects.toThrow("Uploaded file does not match this claim.");
 
+    // A claim minted after the blob already existed can never bind it — the
+    // declared digest must genuinely precede the upload.
+    const staleStorageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["pre-existing"], { type: "text/plain" })));
+    const staleSha256 = await sha256Of("pre-existing");
+    const lateClaimId = await f.t.run(async (ctx) =>
+      ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, expectedSha256: staleSha256, expectedSize: 12, createdAt: Date.now() + 60_000 })
+    );
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId: lateClaimId, storageId: staleStorageId })
+    ).rejects.toThrow("Uploaded file does not match this claim.");
+
     // The blob the claim's own upload produced binds and cleans up normally.
     await expect(
       f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId, storageId })
@@ -312,6 +329,9 @@ describe("task authorization hardening", () => {
       assigneeMembershipIds: [f.adminM],
     });
     const attachedStorageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["attached"], { type: "text/plain" })));
+    const attachClaimId = await f.t.run(async (ctx) =>
+      ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, storageId: attachedStorageId, createdAt: Date.now() })
+    );
     await f.asUser("adminA").mutation(api.tasks.addAttachment, {
       companyId: f.companyA,
       taskType: "jd",
@@ -320,6 +340,7 @@ describe("task authorization hardening", () => {
       fileName: "attached.txt",
       contentType: "text/plain",
       size: 8,
+      claimId: attachClaimId,
     });
     const attachedClaimId = await f.t.run(async (ctx) =>
       ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, storageId: attachedStorageId, createdAt: Date.now() })
@@ -348,6 +369,9 @@ describe("task authorization hardening", () => {
     });
 
     // Employee 1 adds an attachment
+    const emp1ClaimId = await f.t.run(async (ctx) =>
+      ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.employee1M, storageId: storageId1, createdAt: Date.now() })
+    );
     const emp1AttachmentId = await f.asUser("employeeA1").mutation(api.tasks.addAttachment, {
       companyId: f.companyA,
       taskType: "one_time",
@@ -356,9 +380,13 @@ describe("task authorization hardening", () => {
       fileName: "emp1.txt",
       contentType: "text/plain",
       size: 9,
+      claimId: emp1ClaimId,
     });
 
     // Admin adds an attachment
+    const adminClaimId = await f.t.run(async (ctx) =>
+      ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, storageId: storageId2, createdAt: Date.now() })
+    );
     const adminAttachmentId = await f.asUser("adminA").mutation(api.tasks.addAttachment, {
       companyId: f.companyA,
       taskType: "one_time",
@@ -367,6 +395,7 @@ describe("task authorization hardening", () => {
       fileName: "admin.txt",
       contentType: "text/plain",
       size: 10,
+      claimId: adminClaimId,
     });
 
     // Employee 1 CANNOT delete their OWN attachment by default (disabled for Employee by default)

@@ -125,6 +125,48 @@ describe("AI agent Convex boundaries", () => {
     expect(result.truncated).toBe(true);
   });
 
+  test("aiListVisible does not report truncation when remaining rows have no matches", async () => {
+    const { t, companyId, adminMembershipId, employeeMembershipId } = await seed();
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let i = 0; i < 70; i += 1) {
+        await ctx.db.insert("jdTasks", {
+          companyId,
+          reference: `JD-${String(i + 1).padStart(3, "0")}`,
+          title: `Admin-only task ${i}`,
+          recurrence: "weekly",
+          cycleStartedAt: now,
+          status: "due",
+          assigneeMembershipIds: [adminMembershipId],
+          createdByMembershipId: adminMembershipId,
+          createdAt: now + i,
+          updatedAt: now + i,
+        });
+      }
+      for (let i = 0; i < 30; i += 1) {
+        await ctx.db.insert("jdTasks", {
+          companyId,
+          reference: `JD-E${String(i + 1).padStart(3, "0")}`,
+          title: `Employee task ${i}`,
+          recurrence: "weekly",
+          cycleStartedAt: now,
+          status: "due",
+          assigneeMembershipIds: [employeeMembershipId],
+          createdByMembershipId: adminMembershipId,
+          createdAt: now + 100 + i,
+          updatedAt: now + 100 + i,
+        });
+      }
+    });
+
+    // The employee's 30 tasks scan first (newest ids first) and fill the
+    // limit exactly; the admin-only remainder proves nothing — the flag must
+    // only mark a real overflow.
+    const result = await t.withIdentity(identity("employee")).query(api.tasks.aiListVisible, { companyId, status: "all", limit: 30 });
+    expect(result.rows).toHaveLength(30);
+    expect(result.truncated).toBe(false);
+  });
+
   test("aiListVisible at exactly the scan cap reports a complete result", async () => {
     const { t, companyId, adminMembershipId } = await seed();
     await t.run(async (ctx) => {

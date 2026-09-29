@@ -13,14 +13,19 @@ const http = httpRouter();
 // minted at claim issuance and never exposed by any query.
 
 function corsHeaders(request: Request): Record<string, string> {
-  const origin = request.headers.get("Origin") ?? "*";
-  return {
-    "Access-Control-Allow-Origin": origin,
+  const headers: Record<string, string> = {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",
   };
+  // Only the app's own origin may call this endpoint cross-origin: the
+  // uploadSecret is a bearer credential, so echoing every Origin would let
+  // any site that learns one spend it from a browser.
+  const origin = request.headers.get("Origin");
+  const appUrl = (process.env.APP_URL ?? "").replace(/\/+$/, "");
+  if (origin && appUrl && origin === appUrl) headers["Access-Control-Allow-Origin"] = origin;
+  return headers;
 }
 
 function jsonResponse(status: number, body: Record<string, unknown>, headers: Record<string, string>): Response {
@@ -53,6 +58,17 @@ http.route({
     if (declaredLength > TASK_UPLOAD_PROXY_MAX_BYTES) {
       return jsonResponse(413, { error: "File exceeds the upload size limit." }, cors);
     }
+
+    // Reject bad credentials before buffering and storing the body — the
+    // binding is verified again in commitUploadClaimBlob after the blob
+    // exists, but invalid claims must not cost storage operations.
+    let claimOk = false;
+    try {
+      claimOk = await ctx.runQuery(internal.tasks.checkUploadClaim, { claimId: claimId as Id<"taskUploadClaims">, uploadSecret });
+    } catch {
+      claimOk = false;
+    }
+    if (!claimOk) return jsonResponse(403, { error: "Upload claim not found." }, cors);
 
     const blob = await request.blob();
     if (blob.size > TASK_UPLOAD_PROXY_MAX_BYTES) {

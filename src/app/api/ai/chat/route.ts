@@ -140,20 +140,23 @@ export async function POST(req: Request) {
         const content = serializeAssistantMessage(responseMessage, MAX_PERSISTED_CONTENT_CHARS);
         const secret = env.data.AI_CHAT_PERSISTENCE_SECRET;
         // Persist through one retry — a dropped reply vanishes from history and
-        // silently removes it from the context of every later turn.
+        // silently removes it from the context of every later turn. The same
+        // requestId is reused: if the first attempt committed but its response
+        // was lost, the retried mutation replays instead of duplicating the
+        // reply.
+        const timestamp = Date.now();
+        const requestId = crypto.randomUUID();
+        const payload = createAiPersistencePayload({
+          companyId,
+          sessionId,
+          role: "assistant",
+          timestamp,
+          requestId,
+          content,
+        });
+        const signature = await signAiPersistencePayload(secret, payload);
         for (let attempt = 0; attempt < 2; attempt += 1) {
           try {
-            const timestamp = Date.now();
-            const requestId = crypto.randomUUID();
-            const payload = createAiPersistencePayload({
-              companyId,
-              sessionId,
-              role: "assistant",
-              timestamp,
-              requestId,
-              content,
-            });
-            const signature = await signAiPersistencePayload(secret, payload);
             await client.mutation(api.aiChat.persistServerMessage, {
               companyId,
               sessionId,
@@ -165,6 +168,9 @@ export async function POST(req: Request) {
             });
             return;
           } catch (error) {
+            // A replayed requestId means an earlier attempt already committed;
+            // the reply is persisted, so the retry succeeds.
+            if (error instanceof Error && error.message.includes("Replay detected")) return;
             console.error("Cendro AI: assistant message persistence failed", error);
           }
         }

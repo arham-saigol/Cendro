@@ -94,7 +94,7 @@ http.route({
         await reader.cancel().catch(() => {});
         return jsonResponse(413, { error: "File exceeds the upload size limit." }, cors);
       }
-      blob = new Blob(chunks as BlobPart[]);
+      blob = new Blob(chunks as BlobPart[], { type: request.headers.get("Content-Type") ?? "" });
     } else {
       blob = await request.blob();
       if (blob.size > TASK_UPLOAD_PROXY_MAX_BYTES) {

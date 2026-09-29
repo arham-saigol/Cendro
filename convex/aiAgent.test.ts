@@ -467,7 +467,7 @@ describe("AI agent Convex boundaries", () => {
     expect(chat.ok).toBe(true);
   });
 
-  test("over-budget semantic search degrades to text results instead of failing", async () => {
+  test("over-budget semantic search runs no search work at all", async () => {
     const { t, companyId } = await seed();
     const user = t.withIdentity(identity("admin"));
     await user.mutation(api.sops.create, { companyId, title: "Fire drill", content: "Evacuate via stairwells", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
@@ -477,8 +477,10 @@ describe("AI agent Convex boundaries", () => {
 
     for (let i = 0; i < 30; i += 1) await user.mutation(api.aiChat.consumeRateLimit, { kind: "ai-search" });
 
+    // Over the budget the costly text fallback must not run either — the
+    // quota caps backend search work, not just the embedding call.
     const results = await user.action(api.sops.semanticSearchAccessible, { companyId, query: "fire" });
-    expect(results.map((sop) => sop.title)).toEqual(["Fire drill"]);
+    expect(results).toEqual([]);
   });
 
   test("enforces ai:use capability when reading individual sessions after revocation", async () => {

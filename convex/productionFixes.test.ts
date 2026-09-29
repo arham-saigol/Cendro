@@ -859,6 +859,23 @@ describe("production permission and validation fixes", () => {
     expect(personalOpts.truncated).toBe(false);
   });
 
+  test("personalFilterOptions stays bounded on a large single-frequency company", async () => {
+    const { t, companyId, employeeMembershipId } = await seedCompany();
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      // One frequency only: the option domain can never saturate, so the
+      // scan cap is the only thing standing between this query and the
+      // transaction's document/byte budgets.
+      for (let i = 0; i < 4_001; i += 1) {
+        await ctx.db.insert("jdTasks", { companyId, reference: `JD-${String(i).padStart(5, "0")}`, title: `Daily task ${i}`, recurrence: "daily", cycleStartedAt: now, status: "due", assigneeMembershipIds: [employeeMembershipId], createdByMembershipId: employeeMembershipId, createdAt: now + i, updatedAt: now + i });
+      }
+    });
+
+    const opts = await t.withIdentity(identity("employee")).query(api.tasks.personalFilterOptions, { companyId, kind: "jd" });
+    expect(opts.values).toEqual(["daily"]);
+    expect(opts.truncated).toBe(true);
+  });
+
   test("company analytics still count unassigned tasks whose creator went inactive", async () => {
     const { t, companyId, adminMembershipId } = await seedCompany();
     await t.run(async (ctx) => {

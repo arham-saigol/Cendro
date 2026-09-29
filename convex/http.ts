@@ -70,9 +70,36 @@ http.route({
     }
     if (!claimOk) return jsonResponse(403, { error: "Upload claim not found." }, cors);
 
-    const blob = await request.blob();
-    if (blob.size > TASK_UPLOAD_PROXY_MAX_BYTES) {
-      return jsonResponse(413, { error: "File exceeds the upload size limit." }, cors);
+    // Read the body incrementally: without a trustworthy Content-Length,
+    // request.blob() would buffer the whole payload before the size check —
+    // an oversized upload must be cut off at the cap, not after it lands.
+    const stream = request.body;
+    let blob: Blob;
+    if (stream && typeof stream.getReader === "function") {
+      const reader = stream.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      let oversize = false;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > TASK_UPLOAD_PROXY_MAX_BYTES) {
+          oversize = true;
+          break;
+        }
+        chunks.push(value);
+      }
+      if (oversize) {
+        await reader.cancel().catch(() => {});
+        return jsonResponse(413, { error: "File exceeds the upload size limit." }, cors);
+      }
+      blob = new Blob(chunks as BlobPart[]);
+    } else {
+      blob = await request.blob();
+      if (blob.size > TASK_UPLOAD_PROXY_MAX_BYTES) {
+        return jsonResponse(413, { error: "File exceeds the upload size limit." }, cors);
+      }
     }
 
     // The blob this claim may ever bind to is fixed the moment the bytes are

@@ -40,7 +40,10 @@ const TASK_LIST_ORDER_KEY_MAX_LENGTH = 512;
 const ASSIGNABLE_USER_INITIAL_LIMIT = DEFAULT_QUERY_LIMIT;
 // Distinct filter values come from small enums, but reaching them can mean
 // scanning the whole company — bound the read and report incompleteness.
-const FILTER_OPTIONS_SCAN_LIMIT = 20_000;
+// Stay well under the transaction's scanned-document and read-byte budgets
+// (32k docs / 16 MiB) so a large company degrades to a truncated flag
+// instead of a failed query.
+const FILTER_OPTIONS_SCAN_LIMIT = 4_000;
 const ASSIGNABLE_USER_SEARCH_MIN_LENGTH = 3;
 const ASSIGNABLE_USER_SEARCH_SCAN_LIMIT = 1_000;
 const ASSIGNABLE_USER_SEARCH_RESULT_LIMIT = 50;
@@ -1647,9 +1650,10 @@ export const bindUploadClaim = mutation({
     if (attachmentRef) throw new ConvexError("Uploaded file is already attached.");
     if (claim.expectedSha256 === undefined || claim.expectedSize === undefined) throw new ConvexError("This upload claim cannot bind a storage id.");
     // The digest was declared before upload, so the blob must postdate the
-    // claim — a blob that already existed when the claim was minted can only
-    // be someone else's file, regardless of what its id is.
-    if (metadata._creationTime < claim.createdAt) throw new ConvexError("Uploaded file does not match this claim.");
+    // claim and arrive within the claim's own upload window — a blob that
+    // existed before the claim, or one stored long after it, can only be
+    // someone else's file, regardless of what its id is.
+    if (metadata._creationTime < claim.createdAt || metadata._creationTime > claim.createdAt + TASK_UPLOAD_CLAIM_TTL_MS) throw new ConvexError("Uploaded file does not match this claim.");
     if (metadata.sha256 !== claim.expectedSha256 || metadata.size !== claim.expectedSize) throw new ConvexError("Uploaded file does not match this claim.");
     await ctx.db.patch(args.claimId, { storageId: args.storageId });
     return null;
@@ -1737,7 +1741,7 @@ export const deleteOrphanedUpload = mutation({
     if (!blobId && args.storageId) {
       const metadata = await ctx.db.system.get("_storage", args.storageId);
       if (metadata) {
-        if (claim.expectedSha256 !== metadata.sha256 || claim.expectedSize !== metadata.size || metadata._creationTime < claim.createdAt) {
+        if (claim.expectedSha256 !== metadata.sha256 || claim.expectedSize !== metadata.size || metadata._creationTime < claim.createdAt || metadata._creationTime > claim.createdAt + TASK_UPLOAD_CLAIM_TTL_MS) {
           throw new ConvexError("Uploaded file does not match this claim.");
         }
         blobId = args.storageId;

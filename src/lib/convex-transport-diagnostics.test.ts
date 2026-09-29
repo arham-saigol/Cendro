@@ -82,6 +82,46 @@ test("bounded history distinguishes enforced CSP from generic failures and clien
   expect(transportDiagnostic()!.events.at(-1)?.kind).toBe("close"); // Already observed before close.
 });
 
+test("an active socket keeps counters and endpoint consistent across boot and session trace resets", async () => {
+  const { socket, transportDiagnostic } = await harness();
+  const { clearBootEpisode, beginTokenAttempt } = await import("./auth-diagnostics");
+  socket.dispatchEvent(new Event("open"));
+  clearBootEpisode();
+  socket.dispatchEvent(Object.assign(new Event("message"), { data: "{}" }));
+  expect(transportDiagnostic()).toMatchObject({
+    endpoint: "happy-otter-123.convex.cloud", sdk: "1.41.0", attempts: 0, opens: 0, messages: 1,
+    events: [{ kind: "first-message", socket: 1, atMs: expect.any(Number) }],
+  });
+  beginTokenAttempt("session-a");
+  beginTokenAttempt("session-b");
+  socket.send(JSON.stringify({ type: "Authenticate", tokenType: "User", baseVersion: 2, value: "secret-jwt" }));
+  socket.dispatchEvent(Object.assign(new Event("message"), { data: JSON.stringify({ type: "AuthError", baseVersion: 2 }) }));
+  expect(transportDiagnostic()).toMatchObject({
+    endpoint: "happy-otter-123.convex.cloud", sdk: "1.41.0", attempts: 0, messages: 1, authSends: 1, authErrors: 1,
+  });
+  expect(transportDiagnostic()!.events.map((event) => event.kind)).toEqual(["authenticate", "auth-error"]);
+  expect(JSON.stringify(transportDiagnostic())).not.toContain("secret");
+});
+
+test("overlapping reconnects record one endpoint-level CSP violation without guessing its socket", async () => {
+  vi.useFakeTimers();
+  const document = new EventTarget();
+  vi.stubGlobal("document", document);
+  vi.resetModules();
+  const { diagnosticWebSocket, transportDiagnostic } = await import("./convex-transport-diagnostics");
+  const ObservedSocket = diagnosticWebSocket(Socket as unknown as typeof WebSocket);
+  const endpoint = "wss://happy-otter-123.convex.cloud/api/1.41.0/sync";
+  const first = new ObservedSocket(endpoint);
+  first.dispatchEvent(Object.assign(new Event("close"), { code: 1006, wasClean: false }));
+  new ObservedSocket(endpoint);
+  document.dispatchEvent(Object.assign(new Event("securitypolicyviolation"), {
+    disposition: "enforce", effectiveDirective: "connect-src", blockedURI: endpoint,
+  }));
+  expect(transportDiagnostic()!.events.filter((event) => event.kind === "csp-blocked")).toEqual([
+    { kind: "csp-blocked", atMs: expect.any(Number) },
+  ]);
+});
+
 test("a CSP violation delivered after a failed socket closes is captured, then observation expires", async () => {
   vi.useFakeTimers();
   const document = new EventTarget();

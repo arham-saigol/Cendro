@@ -28,6 +28,8 @@ export type TransportDiagnostic = z.infer<typeof transportDiagnosticSchema>;
 export type SavedTransport = z.infer<typeof savedTransportSchema>;
 type TransportEvent = Omit<TransportDiagnostic["events"][number], "atMs">;
 let trace: TransportDiagnostic | null = null;
+let nextSocket = 0;
+const observedPolicyEvents = new WeakSet<Event>();
 
 function currentTrace(): TransportDiagnostic {
   return trace ??= { startedAt: Date.now(), endpoint: null, sdk: null, attempts: 0, opens: 0, messages: 0, authSends: 0, authErrors: 0, events: [] };
@@ -50,20 +52,39 @@ export function clearTransportDiagnostic() { trace = null; }
 export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
   return class extends Base {
     private readonly diagnosticSocket: number;
+    private readonly diagnosticEndpoint: string | null;
+    private readonly diagnosticSdk: string | null;
+
+    private socketTrace() {
+      const current = currentTrace();
+      // The SDK can keep this socket open across a completed boot or session change.
+      if (!current.endpoint) current.endpoint = this.diagnosticEndpoint;
+      if (!current.sdk) current.sdk = this.diagnosticSdk;
+      return current;
+    }
+    private recordSocketEvent(event: TransportEvent) {
+      this.socketTrace();
+      recordTransportEvent(event);
+    }
 
     constructor(url: string | URL, protocols?: string | string[]) {
       const current = currentTrace();
-      const socket = ++current.attempts;
+      const socket = ++nextSocket;
+      current.attempts++;
       // Only the public Convex deployment hostname and numeric SDK version.
       const target = new URL(url);
-      current.endpoint = /^[a-z0-9-]+\.convex\.cloud$/.test(target.hostname) ? target.hostname : null;
-      current.sdk = target.pathname.match(/^\/api\/(\d+\.\d+\.\d+)\/sync$/)?.[1] ?? null;
+      const endpoint = /^[a-z0-9-]+\.convex\.cloud$/.test(target.hostname) ? target.hostname : null;
+      const sdk = target.pathname.match(/^\/api\/(\d+\.\d+\.\d+)\/sync$/)?.[1] ?? null;
+      current.endpoint = endpoint;
+      current.sdk = sdk;
       recordTransportEvent({ kind: "connecting", socket });
       try { super(url, protocols); } catch (error) {
         recordTransportEvent({ kind: "constructor-error", socket });
         throw error;
       }
       this.diagnosticSocket = socket;
+      this.diagnosticEndpoint = endpoint;
+      this.diagnosticSdk = sdk;
       let received = false;
       let opened = false;
       let observingPolicy = typeof document !== "undefined";
@@ -76,29 +97,29 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
       this.addEventListener("open", () => {
         opened = true;
         stopPolicyObservation();
-        current.opens++;
-        recordTransportEvent({ kind: "open", socket });
+        this.socketTrace().opens++;
+        this.recordSocketEvent({ kind: "open", socket });
       });
-      this.addEventListener("error", () => recordTransportEvent({ kind: "error", socket }));
+      this.addEventListener("error", () => this.recordSocketEvent({ kind: "error", socket }));
       this.addEventListener("close", (event) => {
-        recordTransportEvent({ kind: "close", socket, code: event.code, clean: event.wasClean });
+        this.recordSocketEvent({ kind: "close", socket, code: event.code, clean: event.wasClean });
         // The document's CSP violation can arrive after the socket close event.
         // Keep observing briefly for failed upgrades, but never retain a listener indefinitely.
         if (!opened && observingPolicy) policyCleanup = setTimeout(stopPolicyObservation, 5_000);
       });
       this.addEventListener("message", (event) => {
-        current.messages++;
+        this.socketTrace().messages++;
         if (!received) {
           received = true;
-          recordTransportEvent({ kind: "first-message", socket });
+          this.recordSocketEvent({ kind: "first-message", socket });
         }
         // Inspect only small auth-control frames, not workspace data or chunks.
         if (typeof event.data !== "string" || event.data.length > 8192 || !/"type"\s*:\s*"AuthError"/.test(event.data)) return;
         try {
           const message = JSON.parse(event.data);
           if (message.type !== "AuthError") return;
-          current.authErrors++;
-          recordTransportEvent({ kind: "auth-error", socket,
+          this.socketTrace().authErrors++;
+          this.recordSocketEvent({ kind: "auth-error", socket,
             ...(Number.isSafeInteger(message.baseVersion) && message.baseVersion >= 0 && { version: message.baseVersion }),
             ...(typeof message.authUpdateAttempted === "boolean" && { authUpdateAttempted: message.authUpdateAttempted }),
           });
@@ -110,7 +131,12 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
         try {
           const blocked = new URL(event.blockedURI);
           if (blocked.protocol === target.protocol && blocked.host === target.host) {
-            recordTransportEvent({ kind: "csp-blocked", socket });
+            // CSP events identify an endpoint, not a particular socket. Several
+            // failed reconnects may still be observing the same document event.
+            if (!observedPolicyEvents.has(event)) {
+              observedPolicyEvents.add(event);
+              this.recordSocketEvent({ kind: "csp-blocked" });
+            }
             stopPolicyObservation();
           }
         } catch { /* Browser may redact blockedURI. */ }
@@ -120,22 +146,22 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
 
     override send(data: Parameters<WebSocket["send"]>[0]) {
       try { super.send(data); } catch (error) {
-        recordTransportEvent({ kind: "send-error", socket: this.diagnosticSocket });
+        this.recordSocketEvent({ kind: "send-error", socket: this.diagnosticSocket });
         throw error;
       }
       if (typeof data !== "string" || data.length > 32768 || !/"type"\s*:\s*"Authenticate"/.test(data)) return;
       try {
         const message = JSON.parse(data);
         if (message.type !== "Authenticate" || (message.tokenType !== "User" && message.tokenType !== "None")) return;
-        if (message.tokenType === "User") currentTrace().authSends++;
-        recordTransportEvent({ kind: message.tokenType === "User" ? "authenticate" : "clear-auth", socket: this.diagnosticSocket,
+        if (message.tokenType === "User") this.socketTrace().authSends++;
+        this.recordSocketEvent({ kind: message.tokenType === "User" ? "authenticate" : "clear-auth", socket: this.diagnosticSocket,
           ...(Number.isSafeInteger(message.baseVersion) && message.baseVersion >= 0 && { version: message.baseVersion }),
         });
       } catch { /* Never retain the token or affect sending. */ }
     }
 
     override close(code?: number, reason?: string) {
-      recordTransportEvent({ kind: "client-close", socket: this.diagnosticSocket });
+      this.recordSocketEvent({ kind: "client-close", socket: this.diagnosticSocket });
       super.close(code, reason);
     }
   };

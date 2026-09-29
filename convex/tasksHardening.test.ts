@@ -2,7 +2,8 @@
 
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
-import { createAuthzFixture } from "./authz.fixture";
+import type { Id } from "./_generated/dataModel";
+import { createAuthzFixture, type AuthzFixture } from "./authz.fixture";
 import { defaultRoleCapabilities } from "../src/lib/permissions";
 
 describe("task authorization hardening", () => {
@@ -119,11 +120,33 @@ describe("task authorization hardening", () => {
     ).rejects.toThrow("This file is already attached.");
   });
 
-  test("Upload claims bind a single blob and gate orphan cleanup", async () => {
+  // Base64, matching the sha256 encoding Convex records on _storage docs.
+  async function sha256Of(content: string): Promise<string> {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+    return btoa(String.fromCharCode(...new Uint8Array(digest)));
+  }
+
+  // Uploads through the claim-bound endpoint, like a real client small-file
+  // upload: POST the bytes under the claim's upload secret, get a bound blob.
+  async function endpointUpload(f: AuthzFixture, opts: { claimId: string; secret: string | null; body: BodyInit; contentType?: string; headers?: Record<string, string> }) {
+    const headers: Record<string, string> = { ...opts.headers };
+    if (opts.secret !== null) headers.Authorization = `Bearer ${opts.secret}`;
+    if (opts.contentType) headers["Content-Type"] = opts.contentType;
+    return f.t.fetch(`/task-uploads?claimId=${encodeURIComponent(opts.claimId)}`, { method: "POST", headers, body: opts.body });
+  }
+
+  test("Claim-bound upload endpoint stores and binds the exact uploaded blob", async () => {
     const f = await createAuthzFixture();
 
-    const { claimId } = await f.asUser("adminA").mutation(api.tasks.generateAttachmentUploadUrl, { companyId: f.companyA });
-    const storageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["orphan"], { type: "text/plain" })));
+    const { claimId, uploadSecret } = await f.asUser("adminA").mutation(api.tasks.generateAttachmentUploadUrl, { companyId: f.companyA });
+
+    // The endpoint mints the claim -> blob binding itself.
+    const response = await endpointUpload(f, { claimId, secret: uploadSecret, body: "orphan", contentType: "text/plain" });
+    expect(response.status).toBe(200);
+    const { storageId } = await response.json() as { storageId: Id<"_storage"> };
+    expect(await f.t.run(async (ctx) => (await ctx.db.get(claimId))?.storageId)).toBe(storageId);
+    const metadata = await f.t.run(async (ctx) => ctx.db.system.get("_storage", storageId));
+    expect(metadata?.size).toBe(6);
 
     // A claim is only usable by the member it was issued to, in its company.
     await expect(
@@ -133,14 +156,14 @@ describe("task authorization hardening", () => {
       f.asUser("adminB").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyB, claimId })
     ).rejects.toThrow("Upload claim not found.");
 
-    // The owner binds the uploaded blob; rebinding to another blob is refused.
-    await expect(
-      f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId, storageId })
-    ).resolves.toBeNull();
+    // Rebinding to another blob is refused; confirming the bound blob is fine.
     const otherStorageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["other"], { type: "text/plain" })));
     await expect(
       f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId, storageId: otherStorageId })
     ).rejects.toThrow("Upload claim is already bound.");
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId, storageId })
+    ).resolves.toBeNull();
 
     // Cleanup deletes the bound unreferenced blob and consumes the claim.
     await expect(
@@ -151,16 +174,118 @@ describe("task authorization hardening", () => {
     expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", otherStorageId))).not.toBeNull();
   });
 
+  test("Upload endpoint rejects missing, wrong, and consumed claims without leaking blobs", async () => {
+    const f = await createAuthzFixture();
+
+    const { claimId, uploadSecret } = await f.asUser("adminA").mutation(api.tasks.generateAttachmentUploadUrl, { companyId: f.companyA });
+
+    // No credential and the wrong credential are refused, and nothing the
+    // request stored is left behind.
+    expect((await endpointUpload(f, { claimId, secret: null, body: "no-secret" })).status).toBe(400);
+    expect((await endpointUpload(f, { claimId, secret: "wrong-secret", body: "bad-secret" })).status).toBe(403);
+    expect(await f.t.run(async (ctx) => (await ctx.db.get(claimId))?.storageId ?? null)).toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.system.query("_storage").collect())).toHaveLength(0);
+
+    // The real upload binds the claim; a second upload on the consumed claim
+    // is refused and leaves the original blob in place.
+    const response = await endpointUpload(f, { claimId, secret: uploadSecret, body: "first", contentType: "text/plain" });
+    expect(response.status).toBe(200);
+    const { storageId } = await response.json() as { storageId: Id<"_storage"> };
+    expect((await endpointUpload(f, { claimId, secret: uploadSecret, body: "second" })).status).toBe(403);
+    const remaining = await f.t.run(async (ctx) => ctx.db.system.query("_storage").collect());
+    expect(remaining.map((row) => row._id)).toEqual([storageId]);
+  });
+
+  test("Cross-company pending-upload claim cannot adopt another tenant's blob", async () => {
+    const f = await createAuthzFixture();
+
+    // Company B uploads through the claim-bound endpoint and has not attached
+    // the blob yet — the attacker's window in the reported repro.
+    const { claimId: claimB, uploadSecret: secretB } = await f.asUser("adminB").mutation(api.tasks.generateAttachmentUploadUrl, { companyId: f.companyB });
+    const uploadResponse = await endpointUpload(f, { claimId: claimB, secret: secretB, body: "victim-blob", contentType: "text/plain" });
+    expect(uploadResponse.status).toBe(200);
+    const { storageId: victimStorageId } = await uploadResponse.json() as { storageId: Id<"_storage"> };
+
+    // Company A knows the storage id. Its own claim can never name B's blob:
+    // the blob already has a live claim, and A's claim declared no digest.
+    const { claimId: claimA } = await f.asUser("adminA").mutation(api.tasks.generateAttachmentUploadUrl, { companyId: f.companyA });
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId: claimA, storageId: victimStorageId })
+    ).rejects.toThrow();
+
+    // Even a claim that declared B's content digest cannot steal a bound blob.
+    const victimSha256 = await sha256Of("victim-blob");
+    const { claimId: claimA2 } = await f.asUser("adminA").mutation(api.tasks.generateAttachmentUploadUrl, { companyId: f.companyA, sha256: victimSha256, size: 11 });
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId: claimA2, storageId: victimStorageId })
+    ).rejects.toThrow("Uploaded file is already claimed.");
+
+    // The reported repro ends with deleteOrphanedUpload(A claim): it now only
+    // ever touches A's own blob — B's pending upload survives intact.
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId: claimA })
+    ).resolves.toBeNull();
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId: claimA2 })
+    ).resolves.toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", victimStorageId))).not.toBeNull();
+
+    // And B's pending upload completes normally: attachment consumes the claim.
+    const taskB = await f.asUser("adminB").mutation(api.tasks.createJd, { companyId: f.companyB, title: "B task", recurrence: "daily", assigneeMembershipIds: [f.adminBM] });
+    await expect(
+      f.asUser("adminB").mutation(api.tasks.addAttachment, {
+        companyId: f.companyB,
+        taskType: "jd",
+        taskId: taskB,
+        storageId: victimStorageId,
+        fileName: "victim.txt",
+        contentType: "text/plain",
+        size: 11,
+        claimId: claimB,
+      })
+    ).resolves.toBeDefined();
+    expect(await f.t.run(async (ctx) => ctx.db.get(claimB))).toBeNull();
+  });
+
+  test("Digest-declared claims bind only the matching blob", async () => {
+    const f = await createAuthzFixture();
+
+    // The large-file path: the claim declares the blob's digest up front.
+    const content = "large-file-content";
+    const sha256 = await sha256Of(content);
+    const { claimId } = await f.asUser("adminA").mutation(api.tasks.generateAttachmentUploadUrl, { companyId: f.companyA, sha256, size: content.length });
+    const storageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob([content], { type: "text/plain" })));
+
+    // A mismatched digest never binds — a storage id alone proves nothing.
+    const foreignStorageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["other-content"], { type: "text/plain" })));
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId, storageId: foreignStorageId })
+    ).rejects.toThrow("Uploaded file does not match this claim.");
+    const wrongSizeClaim = await f.asUser("adminA").mutation(api.tasks.generateAttachmentUploadUrl, { companyId: f.companyA, sha256, size: content.length + 1 });
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId: wrongSizeClaim.claimId, storageId })
+    ).rejects.toThrow("Uploaded file does not match this claim.");
+
+    // The blob the claim's own upload produced binds and cleans up normally.
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId, storageId })
+    ).resolves.toBeNull();
+    await expect(
+      f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId })
+    ).resolves.toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", storageId))).toBeNull();
+    expect(await f.t.run(async (ctx) => ctx.db.system.get("_storage", foreignStorageId))).not.toBeNull();
+  });
+
   test("Orphan cleanup deletes only the claim's bound blob and never a referenced one", async () => {
     const f = await createAuthzFixture();
 
-    // The failed-bind path reclaims by binding the blob first — cleanup only
+    // The failed-attach path reclaims by binding the blob first — cleanup only
     // ever touches the blob the caller's own claim names.
-    const claimId = await f.t.run(async (ctx) =>
-      ctx.db.insert("taskUploadClaims", { companyId: f.companyA, membershipId: f.adminM, createdAt: Date.now() })
-    );
-    const storageId = await f.t.run(async (ctx) => ctx.storage.store(new Blob(["late-bind"], { type: "text/plain" })));
-    await f.asUser("adminA").mutation(api.tasks.bindUploadClaim, { companyId: f.companyA, claimId, storageId });
+    const { claimId, uploadSecret } = await f.asUser("adminA").mutation(api.tasks.generateAttachmentUploadUrl, { companyId: f.companyA });
+    const uploadResponse = await endpointUpload(f, { claimId, secret: uploadSecret, body: "late-bind", contentType: "text/plain" });
+    expect(uploadResponse.status).toBe(200);
+    const { storageId } = await uploadResponse.json() as { storageId: Id<"_storage"> };
 
     await expect(
       f.asUser("adminA").mutation(api.tasks.deleteOrphanedUpload, { companyId: f.companyA, claimId })

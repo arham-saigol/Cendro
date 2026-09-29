@@ -63,6 +63,7 @@ import {
   type TaskListTaskType,
 } from "@/lib/task-list-sort";
 import { ASSIGNEE_SEARCH_MAX_LENGTH } from "@/lib/assignee-search";
+import { uploadAttachmentFile } from "@/lib/task-uploads";
 import { startInteraction } from "@/lib/perf";
 import { getDetailPreview, seedDetailPreview } from "@/lib/detail-preview";
 import { prependToListFirstPage, removeFromListPages, updateInDetailQueries, updateInListPages } from "@/lib/convex-optimistic";
@@ -1465,19 +1466,14 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
   async function uploadFiles(taskId: string, files: File[]) {
     if (!activeCompanyId || files.length === 0 || !active?.capabilities.includes("tasks:attachment:add")) return;
     await Promise.all([...files].map(async (file) => {
-      const upload = await generateUploadUrl({ companyId: activeCompanyId });
-      const response = await fetch(upload.url, { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
-      if (!response.ok) throw new Error(`Could not upload ${file.name}.`);
-      const json = await response.json() as { storageId?: Id<"_storage"> };
-      if (!json.storageId) throw new Error(`Could not upload ${file.name}.`);
+      const upload = await uploadAttachmentFile({ companyId: activeCompanyId, file, generateUploadUrl, bindUploadClaim });
       try {
-        await bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId });
-        await addAttachment({ companyId: activeCompanyId, taskType: taskTypeFor(kind), taskId, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
+        await addAttachment({ companyId: activeCompanyId, taskType: taskTypeFor(kind), taskId, storageId: upload.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
       } catch (err) {
         // The blob is already stored; bind it to the claim (idempotent — no-op
         // when binding already ran) then reclaim it so the failure does not
         // leak storage. Orphan cleanup only touches the claim's bound blob.
-        void bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId })
+        void bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: upload.storageId })
           .then(() => deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId }))
           .catch(() => {});
         throw err;
@@ -2732,18 +2728,13 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
     await Promise.all(files.map(async (file, index) => {
       const key = pending[index].key;
       try {
-        const upload = await generateUploadUrl({ companyId: activeCompanyId });
-        const response = await fetch(upload.url, { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
-        if (!response.ok) throw new Error(`Could not upload ${file.name}.`);
-        const json = await response.json() as { storageId?: Id<"_storage"> };
-        if (!json.storageId) throw new Error(`Could not upload ${file.name}.`);
+        const upload = await uploadAttachmentFile({ companyId: activeCompanyId, file, generateUploadUrl, bindUploadClaim });
         try {
-          await bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId });
-          await addAttachment({ companyId: activeCompanyId, taskType, taskId: id, storageId: json.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
+          await addAttachment({ companyId: activeCompanyId, taskType, taskId: id, storageId: upload.storageId, fileName: file.name, contentType: file.type || "application/octet-stream", size: file.size, claimId: upload.claimId });
         } catch (attachErr) {
           // Bind first (idempotent) so orphan cleanup can only see the blob
           // through the claim — it never accepts a supplied storage id.
-          void bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: json.storageId })
+          void bindUploadClaim({ companyId: activeCompanyId, claimId: upload.claimId, storageId: upload.storageId })
             .then(() => deleteOrphanedUpload({ companyId: activeCompanyId, claimId: upload.claimId }))
             .catch(() => {});
           throw attachErr;

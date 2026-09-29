@@ -61,10 +61,14 @@ export default defineSchema({
   taskComments: defineTable({ companyId: v.id("companies"), taskType, taskId: v.string(), authorMembershipId: v.id("companyMemberships"), body: v.string(), createdAt: v.number() }).index("by_task", ["taskType", "taskId"]).index("by_company", ["companyId"]),
   taskActivityLogs: defineTable({ companyId: v.id("companies"), taskType, taskId: v.string(), actorMembershipId: v.id("companyMemberships"), event: v.union(v.literal("created"), v.literal("status_changed")), fromStatus: v.optional(taskStatus), toStatus: v.optional(taskStatus), createdAt: v.number() }).index("by_task", ["taskType", "taskId"]).index("by_company", ["companyId"]),
   taskAttachments: defineTable({ companyId: v.id("companies"), taskType, taskId: v.string(), fileName: v.string(), contentType: v.string(), size: v.number(), storageId: v.id("_storage"), createdByMembershipId: v.id("companyMemberships"), createdAt: v.number() }).index("by_task", ["taskType", "taskId"]).index("by_company", ["companyId"]).index("by_storageId", ["storageId"]),
-  // One row per issued upload URL. Held until addAttachment consumes it, so
+  // One row per issued upload slot. Held until addAttachment consumes it, so
   // orphan cleanup can prove the caller was issued an upload slot in this
   // company instead of deleting arbitrary unreferenced blobs cross-tenant.
-  taskUploadClaims: defineTable({ companyId: v.id("companies"), membershipId: v.id("companyMemberships"), storageId: v.optional(v.id("_storage")), createdAt: v.number() }).index("by_company", ["companyId"]).index("by_storageId", ["storageId"]),
+  // storageId is only ever written by trusted paths: the upload endpoint binds
+  // it when the request bytes pass through it (uploadSecret is its bearer
+  // credential), or bindUploadClaim binds it when the declared digest matches
+  // the blob's content. A bare storageId proves nothing by itself.
+  taskUploadClaims: defineTable({ companyId: v.id("companies"), membershipId: v.id("companyMemberships"), storageId: v.optional(v.id("_storage")), uploadSecret: v.optional(v.string()), expectedSha256: v.optional(v.string()), expectedSize: v.optional(v.number()), createdAt: v.number() }).index("by_company", ["companyId"]).index("by_storageId", ["storageId"]),
   sops: defineTable({ companyId: v.id("companies"), reference: v.string(), title: v.string(), content: v.string(), scopeType: scope, creatorMembershipId: v.id("companyMemberships"), updatedByMembershipId: v.id("companyMemberships"), createdAt: v.number(), updatedAt: v.number(), contentUpdatedAt: v.optional(v.number()) }).index("by_company", ["companyId"]).searchIndex("search_content", { searchField: "content", filterFields: ["companyId"] }),
   sopBranchScopes: defineTable({ companyId: v.id("companies"), sopId: v.id("sops"), branchId: v.id("branches") }).index("by_branch", ["branchId"]).index("by_company", ["companyId"]).index("by_sopId_and_branchId", ["sopId", "branchId"]),
   sopDepartmentScopes: defineTable({ companyId: v.id("companies"), sopId: v.id("sops"), departmentId: v.id("departments") }).index("by_department", ["departmentId"]).index("by_company", ["companyId"]).index("by_sopId_and_departmentId", ["sopId", "departmentId"]),

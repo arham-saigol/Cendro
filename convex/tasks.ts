@@ -1579,12 +1579,25 @@ export const updateComment = mutation({ args: { companyId: v.id("companies"), co
 
 export const deleteComment = mutation({ args: { companyId: v.id("companies"), commentId: v.id("taskComments") }, handler: async (ctx, args) => { const { membership } = await requireCapability(ctx, args.companyId, "tasks:comment"); const comment = await ctx.db.get(args.commentId); if (!comment || comment.companyId !== args.companyId || comment.authorMembershipId !== membership._id) throw new ConvexError("Comment not found."); await getVisibleTask(ctx, args.companyId, membership, comment.taskType, comment.taskId); await ctx.db.delete(args.commentId); return null; } });
 
+// Matches the sha256 encoding Convex records on _storage docs (base64).
+const SHA256_BASE64 = /^[A-Za-z0-9+/]{43}=$/;
+
+// Mints one upload slot. Small files upload through the claim-bound HTTP
+// endpoint, which proves provenance by storing the blob itself; uploadSecret
+// is its bearer credential. Files too large for that endpoint upload through
+// the generated URL and must instead declare the blob's digest up front so
+// bindUploadClaim can verify the claim's upload produced this exact blob.
 export const generateAttachmentUploadUrl = mutation({
-  args: { companyId: v.id("companies") },
+  args: { companyId: v.id("companies"), sha256: v.optional(v.string()), size: v.optional(v.number()) },
   handler: async (ctx, args) => {
     const { membership } = await requireCapability(ctx, args.companyId, "tasks:attachment:add");
-    const claimId = await ctx.db.insert("taskUploadClaims", { companyId: args.companyId, membershipId: membership._id, createdAt: Date.now() });
-    return { url: await ctx.storage.generateUploadUrl(), claimId };
+    const sha256 = args.sha256;
+    if ((sha256 === undefined) !== (args.size === undefined)) throw new ConvexError("Declare the file digest and size together.");
+    if (sha256 !== undefined && !SHA256_BASE64.test(sha256)) throw new ConvexError("Invalid file digest.");
+    if (args.size !== undefined && (!(args.size >= 0) || args.size % 1 !== 0)) throw new ConvexError("Invalid file size.");
+    const uploadSecret = crypto.randomUUID();
+    const claimId = await ctx.db.insert("taskUploadClaims", { companyId: args.companyId, membershipId: membership._id, uploadSecret, expectedSha256: sha256, expectedSize: args.size, createdAt: Date.now() });
+    return { url: await ctx.storage.generateUploadUrl(), claimId, uploadSecret };
   },
 });
 
@@ -1613,7 +1626,10 @@ export const addAttachment = mutation({
 
 // Binds the blob produced by an upload POST to the claim issued with its URL.
 // Binding is what makes the claim a single-use cleanup token: orphan cleanup
-// can only ever delete this exact blob.
+// can only ever delete this exact blob — so a binding must prove the claim's
+// own upload produced it. Knowing a blob's storage id is not proof: the claim
+// must have declared the blob's sha256/size before upload, the blob must match
+// them, and no other live claim may already reference it.
 export const bindUploadClaim = mutation({
   args: { companyId: v.id("companies"), claimId: v.id("taskUploadClaims"), storageId: v.id("_storage") },
   handler: async (ctx, args) => {
@@ -1626,8 +1642,31 @@ export const bindUploadClaim = mutation({
     }
     const metadata = await ctx.db.system.get("_storage", args.storageId);
     if (!metadata) throw new ConvexError("Uploaded file not found.");
+    const claimRef = await ctx.db.query("taskUploadClaims").withIndex("by_storageId", (q) => q.eq("storageId", args.storageId)).first();
+    if (claimRef) throw new ConvexError("Uploaded file is already claimed.");
+    if (claim.expectedSha256 === undefined || claim.expectedSize === undefined) throw new ConvexError("This upload claim cannot bind a storage id.");
+    if (metadata.sha256 !== claim.expectedSha256 || metadata.size !== claim.expectedSize) throw new ConvexError("Uploaded file does not match this claim.");
     await ctx.db.patch(args.claimId, { storageId: args.storageId });
     return null;
+  },
+});
+
+// Server-side binding for the claim-bound upload endpoint: the request bytes
+// passed through the endpoint, so the blob it just stored is the only blob the
+// claim may ever name. The claim's uploadSecret is the credential — claim ids
+// are not secret, and this path is how a blob's provenance is proven rather
+// than asserted.
+export const commitUploadClaimBlob = internalMutation({
+  args: { claimId: v.id("taskUploadClaims"), uploadSecret: v.string(), storageId: v.id("_storage") },
+  handler: async (ctx, args) => {
+    const claim = await ctx.db.get(args.claimId);
+    if (!claim || claim.uploadSecret !== args.uploadSecret) throw new ConvexError("Upload claim not found.");
+    if (claim.storageId) {
+      if (claim.storageId !== args.storageId) throw new ConvexError("Upload claim is already bound.");
+      return args.storageId;
+    }
+    await ctx.db.patch(args.claimId, { storageId: args.storageId });
+    return args.storageId;
   },
 });
 

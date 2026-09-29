@@ -363,6 +363,15 @@ function StallCard({
   email: string | null;
   onRetry: () => void;
 }) {
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+  async function copyDiagnostic() {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(diagnostic));
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("failed");
+    }
+  }
   const { title, body } = stallCopy(accessStatus, stage, diagnostic);
   const elapsedSeconds = Math.round(elapsedMs / 1000);
   const socket = connection
@@ -391,11 +400,15 @@ function StallCard({
       <details className="mt-3 text-xs text-[var(--ink-muted)]">
         <summary className="cursor-pointer">Support diagnostic</summary>
         <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap break-all select-text">{JSON.stringify(diagnostic, null, 2)}</pre>
-        <Button variant="secondary" size="sm" onClick={() => void navigator.clipboard?.writeText(JSON.stringify(diagnostic)).catch(() => {})}>Copy diagnostic</Button>
       </details>
-      <div className="mt-5 flex gap-2">
+      <p className="mt-3 text-xs text-[var(--ink-muted)]">Copy the support diagnostic and send it to your administrator. No developer tools needed; it excludes tokens and workspace content.</p>
+      <div className="mt-5 flex flex-wrap gap-2">
         <Button variant="primary" onClick={onRetry}>Try again</Button>
+        <Button variant="secondary" onClick={() => void copyDiagnostic()}>Copy support diagnostic</Button>
       </div>
+      <p role="status" className="mt-2 text-xs text-[var(--ink-muted)]">
+        {copyStatus === "copied" ? "Copied. Paste it into your message to support." : copyStatus === "failed" ? "Copy was blocked. Open Support diagnostic above and select and copy the text." : ""}
+      </p>
     </ShellCard>
   );
 }

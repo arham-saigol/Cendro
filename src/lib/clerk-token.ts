@@ -7,6 +7,7 @@
  */
 
 import { beginTokenAttempt, recordToken, safeTokenError } from "./auth-diagnostics";
+import { recordTransportEvent } from "./convex-transport-diagnostics";
 
 export type GetTokenOptions = { template?: string; skipCache?: boolean };
 export type GetToken = (options: GetTokenOptions) => Promise<string | null>;
@@ -19,6 +20,8 @@ export function boundGetToken(getToken: GetToken, timeoutMs = CLERK_GET_TOKEN_TI
   return async (options) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const request = beginTokenAttempt(sessionId);
+    const refresh = options.skipCache === true;
+    recordTransportEvent({ kind: "token-start", refresh });
     const startedAt = Date.now();
     const attempt = Promise.resolve().then(() => getToken(options)).then(
       (token) => ({ ok: true as const, token }),
@@ -30,7 +33,6 @@ export function boundGetToken(getToken: GetToken, timeoutMs = CLERK_GET_TOKEN_TI
     const result = await Promise.race([attempt, timeout]);
     clearTimeout(timer);
     const durationMs = Date.now() - startedAt;
-    const refresh = options.skipCache === true;
     if (result === TIMED_OUT) {
       recordToken({ result: "timeout", durationMs, refresh }, request);
       return null;

@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { useShellStall } from "./shell-stall";
 import { createMockElement } from "./test-dom";
 import { ConvexClerkAuthProvider } from "./convex-clerk-auth";
+import { recordTransportEvent } from "@/lib/convex-transport-diagnostics";
 
 const clerkState = vi.hoisted(() => ({ signedIn: true, sessionId: "session-a", orgId: null as string | null, token: null as string | null, calls: [] as unknown[] }));
 const syncState = vi.hoisted(() => ({ calls: 0, failUntil: 0, missingEmail: false }));
@@ -231,20 +232,34 @@ describe("useShellStall", () => {
     expect(reloadSpy).toHaveBeenCalledTimes(1);
   });
 
-  test("recovery after an automatic reload reports the previous stall episode", async () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null));
+  test("pre-reload transport survives failed delivery and is included in recovery", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network unavailable"));
     try {
+      recordTransportEvent({ kind: "close", socket: 1, code: 1006, clean: false });
       await render();
       await advance(SHELL_AUTO_RETRY_MS);
+      const saved = JSON.parse(sessionStorage.getItem("cendro.bootTransport")!);
+      expect(saved.transport.events).toContainEqual(expect.objectContaining({ kind: "close", code: 1006 }));
       await remount();
+      expect(result!.diagnostic?.previousTransport).toEqual(saved);
       await advance(5_000);
       status = "ready";
       await render();
-      expect(fetchSpy.mock.calls.some(([, options]) => JSON.parse(options?.body as string).event === "recovered")).toBe(true);
+      const recovery = fetchSpy.mock.calls.map(([, options]) => JSON.parse(options?.body as string)).find((body) => body.event === "recovered");
+      expect(recovery.previousTransport).toEqual(saved);
       expect(readShellRetries(sessionStorage)).toBe(0);
+      expect(sessionStorage.getItem("cendro.bootTransport")).toBeNull();
     } finally {
       fetchSpy.mockRestore();
     }
+  });
+
+  test("untrusted saved transport cannot leak arbitrary fields into a copied diagnostic", async () => {
+    await render();
+    sessionStorage.setItem("cendro.bootTransport", JSON.stringify({ episode: result!.diagnostic!.episode, token: "secret-jwt" }));
+    await advance(1_000);
+    expect(result!.diagnostic?.previousTransport).toBeNull();
+    expect(JSON.stringify(result!.diagnostic)).not.toContain("secret-jwt");
   });
 
   test("recovering resets the timer and clears the retry counter", async () => {

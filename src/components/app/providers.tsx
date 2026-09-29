@@ -8,9 +8,13 @@ import { api } from "../../../convex/_generated/api";
 import { PwaAgent } from "./pwa-agent";
 import { ConvexClerkAuthProvider } from "./convex-clerk-auth";
 import { recordProfileSync } from "@/lib/auth-diagnostics";
+import { diagnosticWebSocket } from "@/lib/convex-transport-diagnostics";
 
 const url = process.env.NEXT_PUBLIC_CONVEX_URL;
-const convex = url ? new ConvexReactClient(url) : null;
+const convex = url ? new ConvexReactClient(url, {
+  // Native event observation only; Convex still owns connection/auth recovery.
+  ...(typeof window !== "undefined" && typeof WebSocket !== "undefined" && { webSocketConstructor: diagnosticWebSocket(WebSocket) }),
+}) : null;
 
 function UserSync() {
   const { isSignedIn } = useAuth();

@@ -8,9 +8,9 @@ import { recordTransportEvent } from "@/lib/convex-transport-diagnostics";
 
 const RetryContext = createContext<{ attempt: number; failures: number; retry: () => void; recovered: () => void } | null>(null);
 
-// Convex's Clerk adapter only watches orgId/orgRole. It does not reauthenticate
-// on a signed-in -> signed-in session switch, and after two failed token fetches
-// its auth manager remains unauthenticated until setAuth is called again.
+// Match the stock Clerk adapter's token selection and session/org invalidation.
+// Keep a bounded token fetch and retry generation because two failed token
+// fetches still leave Convex unauthenticated until setAuth is called again.
 function useClerkAuthForConvex() {
   const { isLoaded, isSignedIn, sessionId, orgId, orgRole, sessionClaims, getToken } = useAuth();
   const retry = useContext(RetryContext);

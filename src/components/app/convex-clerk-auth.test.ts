@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { ConvexReactClient, useConvexAuth } from "convex/react";
+import { version as convexVersion } from "convex";
 import { ConvexClerkAuthProvider } from "./convex-clerk-auth";
 import { createMockElement } from "./test-dom";
 import { diagnosticWebSocket, transportDiagnostic } from "@/lib/convex-transport-diagnostics";
@@ -110,13 +111,34 @@ describe("real Convex auth boundary", () => {
     expect(trace.opens - initialOpens).toBe(0);
     expect(trace.events).toContainEqual(expect.objectContaining({ kind: "close", code: 1006, clean: false }));
     expect(trace.endpoint).toBe("happy-otter-123.convex.cloud");
-    expect(trace.sdk).toBe("1.41.0");
+    expect(trace.sdk).toBe(convexVersion);
 
     // Restore only the transport, not Clerk or the provider. The pending token
     // is sent on reconnect; auth still requires the server's acknowledgement.
     const socket = ControlledSocket.sockets.at(-1)!;
     await act(async () => { socket.open(); });
     expect(state.isAuthenticated).toBe(false);
+    const authMessage = socket.sent.find((message) => message.type === "Authenticate" && message.baseVersion !== undefined);
+    expect(authMessage).toBeDefined();
+    await act(async () => { socket.message({
+      type: "Transition", startVersion: { querySet: 0, ts: "AAAAAAAAAAA=", identity: authMessage!.baseVersion },
+      endVersion: { querySet: 0, ts: "AAAAAAAAAAA=", identity: authMessage!.baseVersion! + 1 }, modifications: [],
+    }); });
+    expect(state).toMatchObject({ isLoading: false, isAuthenticated: true });
+  });
+
+  test("a slow socket handshake remains pending and authenticates when the server responds", async () => {
+    clerk.token.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve("test-token"), 410)));
+    clerk.sessionId = "delayed-handshake-session";
+    await act(async () => { root.render(React.createElement(ConvexClerkAuthProvider, { client }, React.createElement(Probe))); });
+    await flush();
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    expect(ControlledSocket.sockets).toHaveLength(1);
+    expect(ControlledSocket.sockets[0].readyState).toBe(0);
+    expect(transportDiagnostic()!.events.some((event) => event.kind === "client-close")).toBe(false);
+    expect(state).toMatchObject({ isLoading: true, isAuthenticated: false });
+    const socket = ControlledSocket.sockets[0];
+    await act(async () => { socket.open(); });
     const authMessage = socket.sent.find((message) => message.type === "Authenticate" && message.baseVersion !== undefined);
     expect(authMessage).toBeDefined();
     await act(async () => { socket.message({

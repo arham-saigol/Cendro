@@ -59,6 +59,10 @@ server-confirmed authentication, consistent with the official integration.
   Convex's public version export. Fixtures representing reports from 1.41.0
   remain intentional. This upgrade is maintenance, not a verified fix for the
   reported failed connection openings.
+- Refreshed `convex/_generated/ai/guidelines.md` from the CLI's canonical
+  `https://version.convex.dev/v1/guidelines` source and updated its managed hash.
+  The upstream document now targets `^1.44.0`, a range that includes 1.46.0;
+  its document-validator and platform-environment guidance is preserved exactly.
 
 Other relevant npm versions were Clerk Next.js 7.5.6 versus latest 7.9.8, Next
 16.3.0 versus 16.3.7, React/React DOM 19.2.7 versus 19.3.0, and convex-test
@@ -77,6 +81,22 @@ proxy. The server accepted that versioned endpoint and origin. The probe
 sent no Convex protocol messages or credentials, and was stopped after
 12 seconds. That stop is not a measured connection-establishment timeout.
 This is point-in-time engineering reachability, not affected-user verification.
+
+Regional HTTPS controls at 14:36 UTC returned 200 with valid TLS from
+Lahore/PTCL (1,319 ms), Islamabad/Virtury Cloud (894 ms), and Buffalo/HostPapa
+(160 ms). A Karachi/Virtury Cloud probe failed DNS resolution. Pinned-probe
+DNS controls at 14:41 UTC failed on that same Karachi probe for both the Convex
+hostname and `www.cendro.app`; Lahore, Islamabad and Buffalo resolved both.
+That failure therefore does not isolate a Convex-specific fault. Globalping
+rejected WebSocket Upgrade headers internally before network I/O, so these
+regional checks establish ordinary HTTPS/DNS behavior, not WebSocket reachability.
+Measurement IDs: `20oayJgYx3gd4McaX00021EOC`, `2nV7ygDmHTuJK4Gh700021EOH`,
+and `2che4VtAKdsEJGomw00021EOH` at `https://api.globalping.io/v1/measurements/`.
+
+Convex's current abuse-protection documentation explicitly excludes its realtime
+WebSocket API from Vercel external rewrites. A custom Convex domain requires a
+Pro plan and deployment configuration. No domain-reputation defect was established,
+so no speculative transport proxy or production routing change was added.
 
 The connected Vercel API confirms production deployment
 `dpl_Fakd32weXg6dQbqZYGj1mHpPkqgx` is READY on commit `58bf13a`, with

@@ -9,11 +9,16 @@ import { PwaAgent } from "./pwa-agent";
 import { ConvexClerkAuthProvider } from "./convex-clerk-auth";
 import { recordProfileSync } from "@/lib/auth-diagnostics";
 import { diagnosticWebSocket } from "@/lib/convex-transport-diagnostics";
+import { recoveringWebSocket } from "@/lib/convex-connection-recovery";
 
 const url = process.env.NEXT_PUBLIC_CONVEX_URL;
 const convex = url ? new ConvexReactClient(url, {
-  // Native event observation only; Convex still owns connection/auth recovery.
-  ...(typeof window !== "undefined" && typeof WebSocket !== "undefined" && { webSocketConstructor: diagnosticWebSocket(WebSocket) }),
+  // Convex owns auth/retries. A failed direct upgrade can use our Vercel relay
+  // without replacing the client or discarding its subscriptions/mutations.
+  ...(typeof window !== "undefined" && typeof WebSocket !== "undefined" && {
+    webSocketConstructor: diagnosticWebSocket(process.env.NEXT_PUBLIC_CONVEX_RELAY === "true"
+      ? recoveringWebSocket(WebSocket, window.location.origin) : WebSocket),
+  }),
 }) : null;
 
 function UserSync() {

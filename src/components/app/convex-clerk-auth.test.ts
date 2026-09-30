@@ -6,6 +6,7 @@ import { version as convexVersion } from "convex";
 import { ConvexClerkAuthProvider } from "./convex-clerk-auth";
 import { createMockElement } from "./test-dom";
 import { diagnosticWebSocket, transportDiagnostic } from "@/lib/convex-transport-diagnostics";
+import { recoveringWebSocket } from "@/lib/convex-connection-recovery";
 
 const clerk = vi.hoisted(() => ({ token: vi.fn<() => Promise<string | null>>(), sessionId: "session-1" }));
 vi.mock("@clerk/nextjs", () => ({ useAuth: () => ({
@@ -22,10 +23,11 @@ class ControlledSocket extends EventTarget {
   onmessage: ((event: { data: string }) => void) | null = null;
   sent: Array<{ type: string; baseVersion?: number }> = [];
   readyState = 0;
-  constructor() { super(); ControlledSocket.sockets.push(this); }
+  constructor(public readonly url: string) { super(); ControlledSocket.sockets.push(this); }
   send(data: string) { this.sent.push(JSON.parse(data)); }
   close() { this.finishClose(1000); }
   failUpgrade() { this.dispatchEvent(new Event("error")); this.finishClose(1006); }
+  restartServer() { this.finishClose(1012); }
   private finishClose(code: number) {
     this.readyState = 3;
     this.dispatchEvent(Object.assign(new Event("close"), { code, reason: "", wasClean: code === 1000 }));
@@ -56,7 +58,7 @@ describe("real Convex auth boundary", () => {
     clerk.sessionId = "session-1";
     clerk.token.mockReset().mockResolvedValue("test-token");
     client = new ConvexReactClient("https://happy-otter-123.convex.cloud", {
-      webSocketConstructor: diagnosticWebSocket(ControlledSocket as unknown as typeof WebSocket), logger: false,
+      webSocketConstructor: diagnosticWebSocket(recoveringWebSocket(ControlledSocket as unknown as typeof WebSocket, "https://www.cendro.app")), logger: false,
     });
     root = createRoot(createMockElement());
     await act(async () => { root.render(React.createElement(ConvexClerkAuthProvider, { client }, React.createElement(Probe))); });
@@ -146,6 +148,32 @@ describe("real Convex auth boundary", () => {
       endVersion: { querySet: 0, ts: "AAAAAAAAAAA=", identity: authMessage!.baseVersion! + 1 }, modifications: [],
     }); });
     expect(state).toMatchObject({ isLoading: false, isAuthenticated: true });
+  });
+
+  test("repeated failed direct upgrades recover through the relay and retain it after rotation", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      expect(ControlledSocket.sockets.at(-1)!.url).toContain("happy-otter-123.convex.cloud");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_200);
+        ControlledSocket.sockets.at(-1)!.failUpgrade();
+        await vi.advanceTimersByTimeAsync(8_000);
+      });
+    }
+    const relay = ControlledSocket.sockets.at(-1)!;
+    expect(relay.url).toBe(`wss://www.cendro.app/api/convex-relay/${convexVersion}`);
+    expect(clerk.token).toHaveBeenCalledTimes(1);
+    await act(async () => { relay.open(); });
+    expect(state).toMatchObject({ isLoading: true, isAuthenticated: false });
+    const auth = relay.sent.find((message) => message.type === "Authenticate" && message.baseVersion !== undefined)!;
+    expect(auth).toBeDefined();
+    await act(async () => { relay.message({
+      type: "Transition", startVersion: { querySet: 0, ts: "AAAAAAAAAAA=", identity: auth.baseVersion },
+      endVersion: { querySet: 0, ts: "AAAAAAAAAAA=", identity: auth.baseVersion! + 1 }, modifications: [],
+    }); });
+    expect(state).toMatchObject({ isLoading: false, isAuthenticated: true });
+    await act(async () => { relay.restartServer(); await vi.advanceTimersByTimeAsync(2_000); });
+    expect(ControlledSocket.sockets.at(-1)!.url).toBe(relay.url);
   });
 
   test("a late token from a replaced Clerk session cannot overwrite the new handshake", async () => {

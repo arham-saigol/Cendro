@@ -1,5 +1,47 @@
 # Loading investigation
 
+## Runtime recovery added to PR #39
+
+Cendro previously retried the same direct Convex route until startup reloaded.
+The new shared socket constructor tries a same-origin Vercel relay after three
+native failures before opening. The existing Convex client still owns backoff,
+authentication, subscriptions and mutation identities. A relay HTTP upgrade
+alone does not authenticate the user: Convex must send its identity transition.
+If the relay closes without any upstream frames, the SDK can try direct again.
+Healthy direct connections continue to use Convex directly.
+
+The Node route requires an existing Clerk session and a matching Origin. It
+connects only to the configured convex.cloud deployment; clients cannot choose
+an upstream. Frames are forwarded without interpreting JWTs or application
+data. Buffers and frame sizes are bounded at 16 MiB. Browser disconnects release
+the upstream; upstream failures close the client. Connections rotate gracefully
+after 285 seconds, before the 300-second function limit; SDK reconnection keeps
+the relay route and restores native protocol state.
+
+This uses Vercel's documented native WebSocket Functions support and the
+installed `@vercel/functions` Next.js upgrade API, not external rewrites. Fluid
+compute is explicitly enabled. Relay recovery is enabled only in Vercel builds
+because ordinary `next dev` does not provide the upgrade context. The API and
+platform feature are experimental/beta and need deployment verification. The
+recovery adds function usage for clients whose direct route fails and cannot
+help a network that blocks both available WebSocket routes.
+
+Regression evidence includes the actual Convex SDK failing direct upgrades,
+recovering through the relay and authenticating only after server confirmation.
+Real Node sockets exercise the installed Vercel upgrade adapter, queued auth,
+text and binary forwarding, close codes, rejected upgrades and disconnect
+cleanup. This is a runtime availability fix for the observed failure class;
+the specific external cause of the direct failure remains unproven. No claim
+of affected-device or production success is made before deployment verification.
+
+Release validation for runtime recovery: 40 test files / 313 tests passed;
+frontend and Convex TypeScript checks passed; lint passed with six existing
+warnings; production build passed with `VERCEL=1`, a placeholder Clerk key
+and the reported public Convex URL. The relay route is included in build output.
+
+Platform references: https://vercel.com/docs/functions/websockets and
+https://vercel.com/docs/functions/functions-api-reference/vercel-functions-package
+
 ## September 30: native sockets never open on build 58bf13a
 
 The new report records seven native connection attempts, zero opens, zero
@@ -54,7 +96,7 @@ server-confirmed authentication, consistent with the official integration.
   bounded token acquisition and terminal-auth retry remain necessary because
   the latest auth manager still awaits the supplied token fetcher without an
   application deadline or automatic retry after terminal failure.
-- The branch updates only Convex to 1.46.0, obtains those upstream fixes, fixes
+- The initial maintenance change updates Convex to 1.46.0, obtains those upstream fixes, fixes
   the obsolete adapter comment, and tests the reported SDK version against
   Convex's public version export. Fixtures representing reports from 1.41.0
   remain intentional. This upgrade is maintenance, not a verified fix for the
@@ -96,7 +138,8 @@ and `2che4VtAKdsEJGomw00021EOH` at `https://api.globalping.io/v1/measurements/`.
 Convex's current abuse-protection documentation explicitly excludes its realtime
 WebSocket API from Vercel external rewrites. A custom Convex domain requires a
 Pro plan and deployment configuration. No domain-reputation defect was established,
-so no speculative transport proxy or production routing change was added.
+The later runtime recovery above instead uses Vercel's native WebSocket
+upgrade API; it does not use external rewrites or a new Convex domain.
 
 The connected Vercel API confirms production deployment
 `dpl_Fakd32weXg6dQbqZYGj1mHpPkqgx` is READY on commit `58bf13a`, with
@@ -114,7 +157,7 @@ and its advertised build-log call returns `Tool ... not found`. Deployment
 environment values and Convex edge logs have therefore not been inspected.
 No browser login was attempted, as requested.
 
-The incident remains unresolved. The missing evidence is still the failed
+The cause of the direct failure remains unresolved. The missing evidence is the failed
 upgrade response or browser network error, or matching Convex edge evidence.
 The existing same-origin diagnostic reports can be correlated by episode
 `620f7455-1f8c-4e58-aaac-2e533247898c` and the UTC times above. Vercel logs can
@@ -129,7 +172,9 @@ Upgrade validation: 37 test files / 307 tests passed; frontend and Convex
 TypeScript checks passed; ESLint passed with six existing warnings; production
 build passed using a placeholder Clerk publishable key and the reported public
 Convex URL. No authenticated end-to-end or affected-device check was performed.
-No backend functions, schema, production settings, or deployment were changed.
+Those checks preceded the runtime recovery. No backend functions or schema
+were changed; the new relay and Fluid configuration are proposed in this PR
+and have not been deployed to production.
 
 ## Previous investigation: build 9296c7f
 

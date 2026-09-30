@@ -1,4 +1,182 @@
-# Loading incident: build 9296c7f
+# Loading investigation
+
+## Runtime recovery added to PR #39
+
+Cendro previously retried the same direct Convex route until startup reloaded.
+The new shared socket constructor tries a same-origin Vercel relay after three
+native failures before opening. The existing Convex client still owns backoff,
+authentication, subscriptions and mutation identities. A relay HTTP upgrade
+alone does not authenticate the user: Convex must send its identity transition.
+If the relay closes without any upstream frames, the SDK can try direct again.
+Healthy direct connections continue to use Convex directly.
+
+The Node route requires an existing Clerk session and a matching Origin. It
+connects only to the configured convex.cloud deployment; clients cannot choose
+an upstream. Frames are forwarded without interpreting JWTs or application
+data. Buffers and frame sizes are bounded at 16 MiB. Browser disconnects release
+the upstream; upstream failures close the client. Connections rotate gracefully
+after 285 seconds, before the 300-second function limit; SDK reconnection keeps
+the relay route and restores native protocol state.
+
+This uses Vercel's documented native WebSocket Functions support and the
+installed `@vercel/functions` Next.js upgrade API, not external rewrites. Fluid
+compute is explicitly enabled. Relay recovery is enabled only in Vercel builds
+because ordinary `next dev` does not provide the upgrade context. The API and
+platform feature are experimental/beta and need deployment verification. The
+recovery adds function usage for clients whose direct route fails and cannot
+help a network that blocks both available WebSocket routes.
+
+Regression evidence includes the actual Convex SDK failing direct upgrades,
+recovering through the relay and authenticating only after server confirmation.
+Real Node sockets exercise the installed Vercel upgrade adapter, queued auth,
+text and binary forwarding, close codes, rejected upgrades and disconnect
+cleanup. This is a runtime availability fix for the observed failure class;
+the specific external cause of the direct failure remains unproven. No claim
+of affected-device or production success is made before deployment verification.
+
+Release validation for runtime recovery: 40 test files / 313 tests passed;
+frontend and Convex TypeScript checks passed; lint passed with six existing
+warnings; production build passed with `VERCEL=1`, a placeholder Clerk key
+and the reported public Convex URL. The relay route is included in build output.
+
+Platform references: https://vercel.com/docs/functions/websockets and
+https://vercel.com/docs/functions/functions-api-reference/vercel-functions-package
+
+## September 30: native sockets never open on build 58bf13a
+
+The new report records seven native connection attempts, zero opens, zero
+messages and zero authentication sends. Clerk returned a token in 410 ms.
+The four retained attempts fail after 1,179, 1,207, 1,164 and 1,186 ms with an
+error followed by unclean close 1006. The earlier saved report independently
+records six attempts and zero opens. This establishes a failure before the
+WebSocket opens, rather than the earlier ambiguous SDK connection flags.
+It does not identify the DNS, TLS, browser, routing, or HTTP upgrade cause.
+Capture times are 2026-09-30 12:40:15.459 UTC and 12:17:31.911 UTC.
+
+### Performance PR review
+
+Reviewed the complete file lists for PRs #28 and #30 and their changes to the
+startup path. Neither PR changed the shared Convex client, the Clerk adapter,
+root provider order, deployment URL handling, dependencies, or connection
+timeouts. PR #28 lazy-loaded the optional AI panel, optimized list/details
+rendering, added optimistic updates and batched backend reads. PR #30 changed
+backend indexes and read batching. The changed workspace query and profile
+mutation are downstream of server-confirmed auth and cannot run in this
+reported boot state. No matching transport regression was established in
+these PRs. The timing of first reports alone cannot establish causation.
+
+Also reviewed subsequent auth recovery and PWA changes. The service worker
+handles same-origin static assets and navigation requests; it does not handle
+the cross-origin Convex WebSocket. The current source has one module-scoped
+client beneath Clerk. Workspace queries and user sync wait for Convex's
+server-confirmed authentication, consistent with the official integration.
+
+### Timeout and version checks
+
+- The installed Convex 1.41.0 WebSocket manager uses a 60,000 ms inactivity
+  threshold, including during connection establishment. Its reconnect backoff
+  is not a connection deadline. Cendro has no added WebSocket deadline.
+- The 10,000 ms Clerk deadline bounds token acquisition, which completed in
+  410 ms in this report. The shell warns after 20 seconds and can reload after
+  45 seconds, neither of which explains repeated failures around 1.2 seconds.
+- The bounded trace records native `close()` calls as `client-close`. No such
+  event appears before the four retained failures. Zero opens also excludes
+  the SDK path that waits for an opening socket before closing it.
+- A real-SDK regression test holds the connection unopened for 15 seconds
+  with a token returned after 410 ms. The application retains one connection
+  attempt and remains pending; opening the socket and delivering the identity
+  transition authenticates successfully. This test also passed on 1.41.0.
+- npm's latest stable Convex version was 1.46.0 at this review. The project's
+  lockfile used 1.41.0, with a single deduplicated Convex copy. The published
+  `web_socket_manager.ts` source is unchanged between those versions.
+  There is no evidence that this report represents a protocol version mismatch.
+- Newer releases fix Clerk session-change handling in 1.42.2 and auth-context
+  referential stability in 1.44.0. The custom adapter already tracks session
+  changes and uses the supported `ConvexProviderWithAuth` interface. Its
+  bounded token acquisition and terminal-auth retry remain necessary because
+  the latest auth manager still awaits the supplied token fetcher without an
+  application deadline or automatic retry after terminal failure.
+- The initial maintenance change updates Convex to 1.46.0, obtains those upstream fixes, fixes
+  the obsolete adapter comment, and tests the reported SDK version against
+  Convex's public version export. Fixtures representing reports from 1.41.0
+  remain intentional. This upgrade is maintenance, not a verified fix for the
+  reported failed connection openings.
+- Refreshed `convex/_generated/ai/guidelines.md` from the CLI's canonical
+  `https://version.convex.dev/v1/guidelines` source and updated its managed hash.
+  The upstream document now targets `^1.44.0`, a range that includes 1.46.0;
+  its document-validator and platform-environment guidance is preserved exactly.
+
+Other relevant npm versions were Clerk Next.js 7.5.6 versus latest 7.9.8, Next
+16.3.0 versus 16.3.7, React/React DOM 19.2.7 versus 19.3.0, and convex-test
+0.0.53 versus 0.0.60. Several UI and AI dependencies are also behind current
+releases. They were not upgraded without a demonstrated relationship to this
+failure. The existing test dependency accepts the upgraded Convex package.
+
+### Independent production check and remaining evidence
+
+The production sign-in page responded with HTTP 200. Its observed response
+had no Content-Security-Policy header. A credential-free HTTP/1.1 WebSocket
+upgrade to `animated-opossum-192.convex.cloud/api/1.41.0/sync`, with Origin
+`https://www.cendro.app`, returned **101 Switching Protocols** at
+2026-09-30 13:56:57 UTC through the engineering environment's normal network
+proxy. The server accepted that versioned endpoint and origin. The probe
+sent no Convex protocol messages or credentials, and was stopped after
+12 seconds. That stop is not a measured connection-establishment timeout.
+This is point-in-time engineering reachability, not affected-user verification.
+
+Regional HTTPS controls at 14:36 UTC returned 200 with valid TLS from
+Lahore/PTCL (1,319 ms), Islamabad/Virtury Cloud (894 ms), and Buffalo/HostPapa
+(160 ms). A Karachi/Virtury Cloud probe failed DNS resolution. Pinned-probe
+DNS controls at 14:41 UTC failed on that same Karachi probe for both the Convex
+hostname and `www.cendro.app`; Lahore, Islamabad and Buffalo resolved both.
+That failure therefore does not isolate a Convex-specific fault. Globalping
+rejected WebSocket Upgrade headers internally before network I/O, so these
+regional checks establish ordinary HTTPS/DNS behavior, not WebSocket reachability.
+Measurement IDs: `20oayJgYx3gd4McaX00021EOC`, `2nV7ygDmHTuJK4Gh700021EOH`,
+and `2che4VtAKdsEJGomw00021EOH` at `https://api.globalping.io/v1/measurements/`.
+
+Convex's current abuse-protection documentation explicitly excludes its realtime
+WebSocket API from Vercel external rewrites. A custom Convex domain requires a
+Pro plan and deployment configuration. No domain-reputation defect was established,
+The later runtime recovery above instead uses Vercel's native WebSocket
+upgrade API; it does not use external rewrites or a new Convex domain.
+
+The connected Vercel API confirms production deployment
+`dpl_Fakd32weXg6dQbqZYGj1mHpPkqgx` is READY on commit `58bf13a`, with
+`www.cendro.app` and `cendro.app` among its aliases. Its function region is
+`iad1`; that region is not a browser-to-Convex connection timeout. The runtime
+error query for the past 24 hours returned no errors. Accessible recent request
+logs include HTTP 200 responses for sign-in, dashboard and task pages, plus
+successful cached service-worker requests. A separate recent warning/error
+query returned no matching logs. These observations do not verify an affected
+browser's direct WebSocket or authenticated startup.
+
+The incident-time runtime log query returned `ExceedsBillingLimitError` rather
+than log entries. The connector's project-detail call fails argument validation,
+and its advertised build-log call returns `Tool ... not found`. Deployment
+environment values and Convex edge logs have therefore not been inspected.
+No browser login was attempted, as requested.
+
+The cause of the direct failure remains unresolved. The missing evidence is the failed
+upgrade response or browser network error, or matching Convex edge evidence.
+The existing same-origin diagnostic reports can be correlated by episode
+`620f7455-1f8c-4e58-aaac-2e533247898c` and the UTC times above. Vercel logs can
+provide context for report delivery and frontend requests; the direct Convex
+WebSocket does not traverse Vercel.
+
+Sources: https://docs.convex.dev/auth/clerk and the published Convex 1.41.0 /
+1.46.0 packages, compared with
+https://github.com/get-convex/convex-js/blob/main/CHANGELOG.md.
+
+Upgrade validation: 37 test files / 307 tests passed; frontend and Convex
+TypeScript checks passed; ESLint passed with six existing warnings; production
+build passed using a placeholder Clerk publishable key and the reported public
+Convex URL. No authenticated end-to-end or affected-device check was performed.
+Those checks preceded the runtime recovery. No backend functions or schema
+were changed; the new relay and Fluid configuration are proposed in this PR
+and have not been deployed to production.
+
+## Previous investigation: build 9296c7f
 
 ## Result
 

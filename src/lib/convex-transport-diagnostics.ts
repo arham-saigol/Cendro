@@ -9,7 +9,7 @@ export const transportDiagnosticSchema = z.strictObject({
   attempts: count, opens: count, messages: count, authSends: count, authErrors: count,
   events: z.array(z.strictObject({
     atMs: count,
-    kind: z.enum(["connecting", "open", "error", "close", "client-close", "constructor-error", "send-error", "csp-blocked", "first-message", "authenticate", "clear-auth", "auth-error", "auth-confirmed", "token-start", "token-obtained", "token-empty", "token-timeout", "token-rejected"]),
+    kind: z.enum(["connecting", "relay-attempt", "open", "error", "close", "client-close", "constructor-error", "send-error", "csp-blocked", "first-message", "authenticate", "clear-auth", "auth-error", "auth-confirmed", "token-start", "token-obtained", "token-empty", "token-timeout", "token-rejected"]),
     socket: count.optional(),
     code: z.number().int().min(0).max(4999).optional(),
     clean: z.boolean().optional(),
@@ -96,6 +96,7 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
       this.diagnosticSdk = sdk;
       this.initialSessionGeneration = sessionGeneration;
       this.authGeneration = sessionGeneration;
+      const nativeTarget = new URL(this.url || target);
       let received = false;
       let opened = false;
       let observingPolicy = typeof document !== "undefined";
@@ -148,7 +149,7 @@ export function diagnosticWebSocket(Base: typeof WebSocket): typeof WebSocket {
         if (event.disposition !== "enforce" || event.effectiveDirective !== "connect-src") return;
         try {
           const blocked = new URL(event.blockedURI);
-          if (blocked.protocol === target.protocol && blocked.host === target.host) {
+          if (blocked.protocol === nativeTarget.protocol && blocked.host === nativeTarget.host) {
             // CSP events identify an endpoint, not a particular socket. Several
             // failed reconnects may still be observing the same document event.
             if (!observedPolicyEvents.has(event)) {

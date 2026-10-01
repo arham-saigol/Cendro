@@ -8,7 +8,7 @@ export type TaskRailScrollOptions = {
   railRef: RefObject<HTMLElement | null>;
   activeCompanyId?: string | null;
   canUseAllTasks: boolean;
-  effectiveTaskView: "all" | "my";
+  effectiveTaskView: "all" | "my" | "custom";
   activeView: string;
   ownFilterCount: number;
 };

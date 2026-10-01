@@ -17,6 +17,7 @@ import {
   Flag,
   Hash,
   Inbox,
+  ListOrdered,
   PanelRight,
   Paperclip,
   Pencil,
@@ -42,7 +43,7 @@ import { TaskRail, useTaskRailAutoScroll } from "./task-rail-scroll";
 import { ListDragOverlay, ListDragRailRow, ListSortableRow, useListDrag, type ListDrag } from "./list-dnd";
 import { ListSortHeader } from "./list-sort-header";
 import { ListPreferenceController, type ListPreference, type ListPreferenceControllerOptions } from "@/lib/list-preference-controller";
-import { mergeFilteredListOrder, sameListOrder } from "@/lib/list-order";
+import { mergeFilteredListOrder, restoreListCustomOrder, sameListOrder } from "@/lib/list-order";
 import { insertListItem } from "@/lib/list-drag";
 import { useIsCoarsePointer } from "@/lib/use-is-coarse-pointer";
 import { Button } from "@/components/ui/button";
@@ -76,7 +77,7 @@ type Priority = "low" | "medium" | "high" | "critical";
 type Frequency = "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "quarterly" | "semiannually" | "annually";
 type ManualStatus = "due" | "in_progress" | "completed";
 type StatusFilter = "all" | ManualStatus | "overdue";
-type TaskView = "all" | "my";
+type TaskView = "all" | "my" | "custom";
 type PriorityFilter = "all" | Priority;
 type FrequencyFilter = Frequency | "all";
 
@@ -713,6 +714,11 @@ function taskSortDirections(taskType: TaskListTaskType, sort: TaskListSort, fiel
     ? initialTaskListSortDirection(field)
     : direction === "asc" ? "desc" : "asc";
   return { direction, nextDirection };
+}
+
+function TaskColumnHeader({ custom, label, icon, className, ...sortProps }: React.ComponentProps<typeof ListSortHeader> & { custom: boolean }) {
+  if (custom) return <th scope="col" className={className}><span className="inline-flex items-center gap-1.5">{icon}{label}</span></th>;
+  return <ListSortHeader label={label} icon={icon} className={className} {...sortProps} />;
 }
 
 function SortableTaskRow({
@@ -1652,6 +1658,10 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     api.tasks.getListPreference,
     activeCompanyId ? { companyId: activeCompanyId, taskType } : "skip",
   );
+  const customViewResult = useQuery(api.tasks.getCustomView, activeCompanyId ? { companyId: activeCompanyId, taskType } : "skip");
+  const subscribedCustomView = useMemo<ListPreference<TaskListSort> | undefined>(() => customViewResult && ({
+    sort: { mode: "custom" }, customOrder: customViewResult.orderedIds, orderFormat: "vector", revision: customViewResult.revision,
+  }), [customViewResult]);
   const subscribedPreference = useMemo<ListPreference<TaskListSort> | undefined>(() => {
     if (!preferenceResult) return undefined;
     return {
@@ -1677,6 +1687,13 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   });
   const setListSort = useMutation(api.tasks.setListSort);
   const saveListOrder = useMutation(api.tasks.saveListOrder);
+  const saveCustomView = useMutation(api.tasks.saveCustomView);
+  const [customViewController] = useState(() => new ListPreferenceController<TaskListSort>(async (command) => {
+    if (!activeCompanyId || !command.orderedIds) throw new Error("No custom order to save.");
+    const saved = await saveCustomView({ companyId: activeCompanyId, taskType, orderedIds: command.orderedIds, expectedRevision: command.expectedRevision });
+    return { sort: { mode: "custom" }, customOrder: saved.orderedIds, orderFormat: "vector", revision: saved.revision };
+  }, taskListPreferenceMessages));
+  const customViewState = useSyncExternalStore(customViewController.subscribe, customViewController.getSnapshot, customViewController.getSnapshot);
   const [preferenceController] = useState(() => new ListPreferenceController<TaskListSort>(async (command) => {
     if (!activeCompanyId) throw new Error("No active company.");
     const args = { companyId: activeCompanyId, taskType, expectedRevision: command.expectedRevision };
@@ -1695,10 +1712,13 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   useLayoutEffect(() => {
     if (subscribedPreference) preferenceController.receive(subscribedPreference);
   }, [preferenceController, subscribedPreference]);
-  useEffect(() => () => preferenceController.cancel(), [preferenceController]);
+  useLayoutEffect(() => {
+    if (subscribedCustomView) customViewController.receive(subscribedCustomView);
+  }, [customViewController, subscribedCustomView]);
+  useEffect(() => () => { preferenceController.cancel(); customViewController.cancel(); }, [preferenceController, customViewController]);
   useEffect(() => {
-    if (preferenceState.error) setInlineError(preferenceState.error);
-  }, [preferenceState.error]);
+    if (preferenceState.error || customViewState.error) setInlineError(preferenceState.error ?? customViewState.error);
+  }, [preferenceState.error, customViewState.error]);
   const base = kind === "jd" ? "/jd-tasks" : "/one-time-tasks";
   const pageTitle = kind === "jd" ? "Job Description" : "Tasks";
   const description = kind === "jd" ? "Track and manage recurring responsibilities and scheduled duties." : "Track and manage assignments, action items, and upcoming deadlines.";
@@ -1709,7 +1729,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const priorityFilterActive = kind === "one" && priorityFilter !== "all";
   const frequencyViewActive = kind === "jd" && personalFrequencyView !== "all";
   const priorityViewActive = kind === "one" && personalPriorityView !== "all";
-  const effectiveTaskView: TaskView = canUseAllTasks ? taskView : "my";
+  const effectiveTaskView: TaskView = taskView === "custom" ? "custom" : canUseAllTasks ? taskView : "my";
+  const isCustomView = effectiveTaskView === "custom";
   const currentMembershipId = active?.membership._id as string | undefined;
   const preferenceScope = `${activeCompanyId ?? "none"}:${active?.membership._id ?? "none"}:${taskType}`;
   const activePreference = preferenceState.preference ?? subscribedPreference;
@@ -1725,8 +1746,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     }
     return keys;
   }, [allTasks, activePreference?.orderFormat]);
-  const dataReady = Boolean(activeCompanyId && subscribedPreference && taskPageStatus === "Exhausted");
-  const customOrderingEnabled = dataReady && allTasks.length <= TASK_LIST_ORDER_LIMIT;
+  const dataReady = Boolean(activeCompanyId && subscribedPreference && (!isCustomView || subscribedCustomView) && taskPageStatus === "Exhausted");
+  const customOrderingEnabled = dataReady && (isCustomView ? allTasks.filter((task) => taskHasAssignee(task, currentMembershipId)).length : allTasks.length) <= TASK_LIST_ORDER_LIMIT;
   const ownFrequencyValues = useMemo(() => {
     if (kind !== "jd") return [] as Frequency[];
     const set = new Set(allTasks.filter((task) => taskHasAssignee(task, currentMembershipId)).map((task) => task.recurrence).filter((value): value is Frequency => Boolean(value)));
@@ -1738,16 +1759,21 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     return priorities.filter((priority) => set.has(priority));
   }, [allTasks, currentMembershipId, kind]);
   const showAssigneeColumn = canUseAllTasks && effectiveTaskView === "all";
-  const showFrequencyColumn = kind === "jd" && !frequencyFilterActive;
-  const showPriorityColumn = kind === "one" && !priorityFilterActive;
+  const showFrequencyColumn = kind === "jd" && (isCustomView || !frequencyFilterActive);
+  const showPriorityColumn = kind === "one" && (isCustomView || !priorityFilterActive);
   const orderedTasks = useMemo(() => {
+    if (isCustomView) {
+      const ownTasks = allTasks.filter((task) => taskHasAssignee(task, currentMembershipId));
+      return restoreListCustomOrder(ownTasks, (customViewState.preference ?? subscribedCustomView)?.customOrder, sortTaskListRows(ownTasks, taskType, { mode: "default" }));
+    }
     if (activeSort.mode === "custom") {
       return restoreTaskListCustomOrder(allTasks, taskType, activePreference?.customOrder, taskOrderKeys);
     }
     return sortTaskListRows(allTasks, taskType, activeSort);
-  }, [activePreference?.customOrder, activeSort, allTasks, taskOrderKeys, taskType]);
+  }, [activePreference?.customOrder, activeSort, allTasks, currentMembershipId, customViewState.preference, isCustomView, subscribedCustomView, taskOrderKeys, taskType]);
   const filteredTasks = useMemo(() => (
     orderedTasks.filter((task) => {
+      if (isCustomView) return true;
       const needle = search.trim().toLowerCase();
       if (needle && !task.title.toLowerCase().includes(needle) && !task.reference.toLowerCase().includes(needle)) return false;
       if (effectiveTaskView === "my" && !taskHasAssignee(task, currentMembershipId)) return false;
@@ -1757,7 +1783,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
       if (assigneeFilter !== "all" && !taskHasAssignee(task, assigneeFilter)) return false;
       return true;
     })
-  ), [assigneeFilter, currentMembershipId, effectiveTaskView, frequency, kind, orderedTasks, priorityFilter, search, statusFilter]);
+  ), [assigneeFilter, currentMembershipId, effectiveTaskView, frequency, isCustomView, kind, orderedTasks, priorityFilter, search, statusFilter]);
   const displayedTasks = filteredTasks;
   const renderedTasks = useMemo(() => displayedTasks.slice(0, renderedCount), [displayedTasks, renderedCount]);
   const visibleIds = useMemo(() => renderedTasks.filter((task) => !isPendingTask(task)).map((task) => task._id), [renderedTasks]);
@@ -1772,16 +1798,16 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   // The rendered window grows independently of page exhaustion so streamed-in
   // pages become visible as they arrive.
   const hasMoreRenderedTasks = renderedTasks.length < displayedTasks.length;
-  const dragDisabled = !customOrderingEnabled || preferenceState.sorting;
+  const dragDisabled = !customOrderingEnabled || (isCustomView ? customViewState.sorting : preferenceState.sorting);
   const taskDragWrapperRef = useRef<HTMLDivElement>(null);
   const taskDragBodyRef = useRef<HTMLTableSectionElement>(null);
   const dragSessionKey = useMemo(
     () => JSON.stringify([
-      preferenceScope, preferenceState.dragVersion, search, effectiveTaskView, frequency,
+      preferenceScope, preferenceState.dragVersion, customViewState.dragVersion, search, effectiveTaskView, frequency,
       priorityFilter, statusFilter, assigneeFilter,
       filteredTasks.map((task) => task._id), orderedTasks.map((task) => task._id),
     ]),
-    [preferenceScope, preferenceState.dragVersion, search, effectiveTaskView, frequency, priorityFilter, statusFilter, assigneeFilter, filteredTasks, orderedTasks],
+    [preferenceScope, preferenceState.dragVersion, customViewState.dragVersion, search, effectiveTaskView, frequency, priorityFilter, statusFilter, assigneeFilter, filteredTasks, orderedTasks],
   );
   const drag = useListDrag({
     ids: visibleIds,
@@ -1790,11 +1816,15 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     wrapperRef: taskDragWrapperRef,
     bodyRef: taskDragBodyRef,
     onDrop(sourceId, insertion) {
-      const visible = filteredTasks.map((task) => task._id);
+      const visible = filteredTasks.filter((task) => !isPendingTask(task)).map((task) => task._id);
       const nextVisible = insertListItem(visible, sourceId, insertion);
       if (sameListOrder(visible, nextVisible)) return;
-      const baseline = restoreTaskListCustomOrder(allTasks, taskType, activePreference?.customOrder, taskOrderKeys).map((task) => task._id);
-      preferenceController.saveOrder(mergeFilteredListOrder(baseline, visible, nextVisible));
+      if (isCustomView) {
+        customViewController.saveOrder(nextVisible);
+      } else {
+        const baseline = restoreTaskListCustomOrder(allTasks.filter((task) => !isPendingTask(task)), taskType, activePreference?.customOrder, taskOrderKeys).map((task) => task._id);
+        preferenceController.saveOrder(mergeFilteredListOrder(baseline, visible, nextVisible));
+      }
     },
   });
 
@@ -1827,7 +1857,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   }, [dataReady, kind, ownPriorityValues, personalPriorityView]);
 
   const ownFilterCount = kind === "jd" ? ownFrequencyValues.length : ownPriorityValues.length;
-  const activeView = kind === "jd" ? personalFrequencyView : personalPriorityView;
+  const activeView = isCustomView ? "custom" : kind === "jd" ? personalFrequencyView : personalPriorityView;
 
   const { syncToggleScrollState } = useTaskRailAutoScroll({
     railRef: viewToggleRef,
@@ -2030,6 +2060,11 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     setPersonalPriorityView("all");
   }
 
+  function selectCustomView() {
+    setSelectedIds(new Set());
+    setTaskView("custom");
+  }
+
   function selectTaskSortField(field: TaskListSortField) {
     const direction = taskSortDirectionForField(taskType, activeSort, field);
     const nextSort: TaskListSort = {
@@ -2039,13 +2074,13 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
         ? initialTaskListSortDirection(field)
         : direction === "asc" ? "desc" : "asc",
     };
-    if (dataReady) preferenceController.saveSort(nextSort);
+    if (dataReady && !isCustomView) preferenceController.saveSort(nextSort);
   }
 
   const jdColumns = 5 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional frequency + optional assignee + status + time + quantity
   const oneColumns = 5 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional priority + optional assignee + status + date assigned + due
   const filterCount = [statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
-  const hasActiveFilters = filterCount > 0 || search.trim() !== "";
+  const hasActiveFilters = !isCustomView && (filterCount > 0 || search.trim() !== "");
 
   return (
     <div>
@@ -2076,32 +2111,38 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
         >
           {kind === "jd" ? (
             <>
-              <button type="button" className="task-view-button" data-active={(!canUseAllTasks && !frequencyViewActive) || (canUseAllTasks && effectiveTaskView === "all")} onClick={() => { setFrequency("all"); setPersonalFrequencyView("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
+              <button type="button" className="task-view-button" data-active={!isCustomView && ((!canUseAllTasks && !frequencyViewActive) || (canUseAllTasks && effectiveTaskView === "all"))} onClick={() => { setFrequency("all"); setPersonalFrequencyView("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
                 <StarIcon className="h-4 w-4" />All Tasks
               </button>
               {canUseAllTasks && (
-                <button type="button" className="task-view-button" data-active={effectiveTaskView === "my" && !frequencyViewActive} onClick={() => { setFrequency("all"); setPersonalFrequencyView("all"); setTaskView("my"); setAssigneeFilter("all"); }}>
+                <button type="button" className="task-view-button" data-active={!isCustomView && effectiveTaskView === "my" && !frequencyViewActive} onClick={() => { setFrequency("all"); setPersonalFrequencyView("all"); setTaskView("my"); setAssigneeFilter("all"); }}>
                   <User className="h-4 w-4" />My Tasks
                 </button>
               )}
+              <button type="button" className="task-view-button" data-active={isCustomView} onClick={selectCustomView}>
+                <ListOrdered className="h-4 w-4" aria-hidden="true" />Custom
+              </button>
               {ownFrequencyValues.map((option) => (
-                <button key={option} type="button" className="task-view-button" data-active={personalFrequencyView === option} onClick={() => { setFrequency(option); setPersonalFrequencyView(option); setTaskView("my"); setAssigneeFilter("all"); }}>
+                <button key={option} type="button" className="task-view-button" data-active={!isCustomView && personalFrequencyView === option} onClick={() => { setFrequency(option); setPersonalFrequencyView(option); setTaskView("my"); setAssigneeFilter("all"); }}>
                   <FrequencyIcon className="h-4 w-4" />{frequencyLabel(option)}
                 </button>
               ))}
             </>
           ) : (
             <>
-              <button type="button" className="task-view-button" data-active={(!canUseAllTasks && !priorityViewActive) || (canUseAllTasks && effectiveTaskView === "all")} onClick={() => { setPriorityFilter("all"); setPersonalPriorityView("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
+              <button type="button" className="task-view-button" data-active={!isCustomView && ((!canUseAllTasks && !priorityViewActive) || (canUseAllTasks && effectiveTaskView === "all"))} onClick={() => { setPriorityFilter("all"); setPersonalPriorityView("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
                 <StarIcon className="h-4 w-4" />All Tasks
               </button>
               {canUseAllTasks && (
-                <button type="button" className="task-view-button" data-active={effectiveTaskView === "my" && !priorityViewActive} onClick={() => { setPriorityFilter("all"); setPersonalPriorityView("all"); setTaskView("my"); setAssigneeFilter("all"); }}>
+                <button type="button" className="task-view-button" data-active={!isCustomView && effectiveTaskView === "my" && !priorityViewActive} onClick={() => { setPriorityFilter("all"); setPersonalPriorityView("all"); setTaskView("my"); setAssigneeFilter("all"); }}>
                   <User className="h-4 w-4" />My Tasks
                 </button>
               )}
+              <button type="button" className="task-view-button" data-active={isCustomView} onClick={selectCustomView}>
+                <ListOrdered className="h-4 w-4" aria-hidden="true" />Custom
+              </button>
               {ownPriorityValues.map((priority) => (
-                <button key={priority} type="button" className="task-view-button" data-active={personalPriorityView === priority} onClick={() => { setPriorityFilter(priority); setPersonalPriorityView(priority); setTaskView("my"); setAssigneeFilter("all"); }}>
+                <button key={priority} type="button" className="task-view-button" data-active={!isCustomView && personalPriorityView === priority} onClick={() => { setPriorityFilter(priority); setPersonalPriorityView(priority); setTaskView("my"); setAssigneeFilter("all"); }}>
                   <Flag className="h-4 w-4" />{priorityLabel(priority)}
                 </button>
               ))}
@@ -2109,13 +2150,13 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
           )}
         </TaskRail>
         <div className="flex flex-wrap items-center justify-end gap-2 shrink-0 md:flex-nowrap md:ml-auto">
-          <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
+          {!isCustomView && <div className="task-search-control" data-open={searchOpen || search.trim() !== ""}>
             <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder="Search title or code" aria-label="Search tasks by title or code" tabIndex={searchOpen || search.trim() !== "" ? 0 : -1} />
             <button type="button" className="task-search-button" aria-label={search ? "Clear search" : "Search tasks"} onClick={() => { if (search) setSearch(""); else setSearchOpen((open) => !open); }}>
               {search ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
             </button>
-          </div>
-          <TaskFilterMenu
+          </div>}
+          {!isCustomView && <TaskFilterMenu
             kind={kind}
             statusFilter={statusFilter}
             frequency={frequency}
@@ -2128,7 +2169,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
             onFrequencyChange={changeFrequencyFilter}
             onPriorityChange={changePriorityFilter}
             onAssigneeChange={setAssigneeFilter}
-          />
+          />}
           {(canImport || canExport) && (
             <TaskImportExportMenu kind={kind} onNotification={(notif) => setImportBanner(notif)} />
           )}
@@ -2218,28 +2259,28 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
           <thead>
             {kind === "jd" ? (
               <tr>
-                <ListSortHeader {...taskSortDirections(taskType, activeSort, "code")} label="CODE" icon={<Hash className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("code")} className="w-[92px] whitespace-nowrap" />
-                <ListSortHeader {...taskSortDirections(taskType, activeSort, "title")} label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("title")} className="min-w-[200px] max-w-[250px]" />
-                {showFrequencyColumn && <ListSortHeader {...taskSortDirections(taskType, activeSort, "frequency")} label="FREQUENCY" icon={<FrequencyIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("frequency")} />}
-                {showAssigneeColumn && <ListSortHeader {...taskSortDirections(taskType, activeSort, "user")} label="ASSIGNED TO" icon={<UsersIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("user")} />}
+                <TaskColumnHeader custom={isCustomView} {...taskSortDirections(taskType, activeSort, "code")} label="CODE" icon={<Hash className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("code")} className="w-[92px] whitespace-nowrap" />
+                <TaskColumnHeader custom={isCustomView} {...taskSortDirections(taskType, activeSort, "title")} label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("title")} className="min-w-[200px] max-w-[250px]" />
+                {showFrequencyColumn && <TaskColumnHeader custom={isCustomView} {...taskSortDirections(taskType, activeSort, "frequency")} label="FREQUENCY" icon={<FrequencyIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("frequency")} />}
+                {showAssigneeColumn && <TaskColumnHeader custom={isCustomView} {...taskSortDirections(taskType, activeSort, "user")} label="ASSIGNED TO" icon={<UsersIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("user")} />}
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
                 <th><span className="inline-flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />TIME</span></th>
-                <ListSortHeader {...taskSortDirections(taskType, activeSort, "quantity")} label="QUANTITY" icon={<QuantityIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("quantity")} />
+                <TaskColumnHeader custom={isCustomView} {...taskSortDirections(taskType, activeSort, "quantity")} label="QUANTITY" icon={<QuantityIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("quantity")} />
               </tr>
             ) : (
               <tr>
-                <ListSortHeader {...taskSortDirections(taskType, activeSort, "code")} label="CODE" icon={<Hash className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("code")} className="w-[92px] whitespace-nowrap" />
-                <ListSortHeader {...taskSortDirections(taskType, activeSort, "title")} label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("title")} className="min-w-[200px] max-w-[250px]" />
-                {showPriorityColumn && <ListSortHeader {...taskSortDirections(taskType, activeSort, "priority")} label="PRIORITY" icon={<Tag className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("priority")} />}
-                {showAssigneeColumn && <ListSortHeader {...taskSortDirections(taskType, activeSort, "user")} label="ASSIGNED TO" icon={<UsersIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("user")} />}
+                <TaskColumnHeader custom={isCustomView} {...taskSortDirections(taskType, activeSort, "code")} label="CODE" icon={<Hash className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("code")} className="w-[92px] whitespace-nowrap" />
+                <TaskColumnHeader custom={isCustomView} {...taskSortDirections(taskType, activeSort, "title")} label="TITLE" icon={<TaskIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("title")} className="min-w-[200px] max-w-[250px]" />
+                {showPriorityColumn && <TaskColumnHeader custom={isCustomView} {...taskSortDirections(taskType, activeSort, "priority")} label="PRIORITY" icon={<Tag className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("priority")} />}
+                {showAssigneeColumn && <TaskColumnHeader custom={isCustomView} {...taskSortDirections(taskType, activeSort, "user")} label="ASSIGNED TO" icon={<UsersIcon className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("user")} />}
                 <th><span className="inline-flex items-center gap-1.5"><StatusIcon className="h-3.5 w-3.5" />STATUS</span></th>
-                <ListSortHeader {...taskSortDirections(taskType, activeSort, "dateAssigned")} label="DATE ASSIGNED" icon={<CalendarClock className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("dateAssigned")} />
-                <ListSortHeader {...taskSortDirections(taskType, activeSort, "dueDate")} label="DUE DATE" icon={<CalendarDays className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("dueDate")} />
+                <TaskColumnHeader custom={isCustomView} {...taskSortDirections(taskType, activeSort, "dateAssigned")} label="DATE ASSIGNED" icon={<CalendarClock className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("dateAssigned")} />
+                <TaskColumnHeader custom={isCustomView} {...taskSortDirections(taskType, activeSort, "dueDate")} label="DUE DATE" icon={<CalendarDays className="h-3.5 w-3.5" />} disabled={!dataReady || preferencePending} onSelect={() => selectTaskSortField("dueDate")} />
               </tr>
             )}
           </thead>
           <tbody ref={taskDragBodyRef}>
-            {tasks === undefined || !subscribedPreference ? (
+            {tasks === undefined || !subscribedPreference || (isCustomView && !subscribedCustomView) ? (
               Array.from({ length: 6 }).map((_, index) => (
                 <tr key={`skel-${index}`}>
                   <td colSpan={kind === "jd" ? jdColumns : oneColumns} className="pl-4">
@@ -2258,9 +2299,9 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                   ) : (
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
-                    <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{!hasActiveFilters && allTasks.length === 0 ? "No tasks yet" : "No matching tasks"}</div>
-                    <p className="mt-1 max-w-[280px] text-[13px] text-[var(--ink-muted)]">{!hasActiveFilters && allTasks.length === 0 ? "Create your first task to get started." : "Try adjusting your search or filters."}</p>
-                    {canCreate && !hasActiveFilters && allTasks.length === 0 && (
+                    <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{!hasActiveFilters && (isCustomView || allTasks.length === 0) ? "No tasks yet" : "No matching tasks"}</div>
+                    {!isCustomView && <p className="mt-1 max-w-[280px] text-[13px] text-[var(--ink-muted)]">{!hasActiveFilters && allTasks.length === 0 ? "Create your first task to get started." : "Try adjusting your search or filters."}</p>}
+                    {canCreate && !hasActiveFilters && (isCustomView || allTasks.length === 0) && (
                       <Button className="mt-4" size="sm" variant="primary" onClick={() => setCreateOpen(true)}>
                         <Plus className="h-3.5 w-3.5" />New task
                       </Button>

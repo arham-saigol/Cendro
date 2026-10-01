@@ -418,14 +418,14 @@ async function validateTaskListOrder(
   membership: Doc<"companyMemberships">,
   taskType: "jd",
   orderedIds: string[],
-): Promise<Id<"jdTasks">[]>;
+): Promise<Doc<"jdTasks">[]>;
 async function validateTaskListOrder(
   ctx: MutationCtx,
   companyId: Id<"companies">,
   membership: Doc<"companyMemberships">,
   taskType: "one_time",
   orderedIds: string[],
-): Promise<Id<"oneTimeTasks">[]>;
+): Promise<Doc<"oneTimeTasks">[]>;
 async function validateTaskListOrder(
   ctx: MutationCtx,
   companyId: Id<"companies">,
@@ -435,7 +435,7 @@ async function validateTaskListOrder(
 ) {
   const auth = await taskVisibilityAuth(ctx, companyId, membership);
   if (taskType === "jd") {
-    const normalized: Id<"jdTasks">[] = [];
+    const normalized: Doc<"jdTasks">[] = [];
     for (const rawId of orderedIds) {
       const id = ctx.db.normalizeId("jdTasks", rawId);
       if (!id) throw new ConvexError("Task not found.");
@@ -443,12 +443,12 @@ async function validateTaskListOrder(
       if (!task || task.companyId !== companyId || !(await visible(ctx, companyId, membership, task, "jd", auth))) {
         throw new ConvexError("Task not found.");
       }
-      normalized.push(id);
+      normalized.push(task);
     }
     return normalized;
   }
 
-  const normalized: Id<"oneTimeTasks">[] = [];
+  const normalized: Doc<"oneTimeTasks">[] = [];
   for (const rawId of orderedIds) {
     const id = ctx.db.normalizeId("oneTimeTasks", rawId);
     if (!id) throw new ConvexError("Task not found.");
@@ -456,7 +456,7 @@ async function validateTaskListOrder(
     if (!task || task.companyId !== companyId || !(await visible(ctx, companyId, membership, task, "one_time", auth))) {
       throw new ConvexError("Task not found.");
     }
-    normalized.push(id);
+    normalized.push(task);
   }
   return normalized;
 }
@@ -469,9 +469,10 @@ async function applyTaskListOrderKeyUpdates(
   orderKeyUpdates: { taskId: string; orderKey: string }[],
   now: number,
 ) {
-  const taskIds = taskType === "jd"
+  const tasks = taskType === "jd"
     ? await validateTaskListOrder(ctx, companyId, membership, "jd", orderKeyUpdates.map(({ taskId }) => taskId))
     : await validateTaskListOrder(ctx, companyId, membership, "one_time", orderKeyUpdates.map(({ taskId }) => taskId));
+  const taskIds = tasks.map((task) => task._id);
   const entries = await ctx.db
     .query("taskListOrderEntries")
     .withIndex("by_companyId_and_membershipId_and_taskType_and_taskId", (q) =>
@@ -649,6 +650,47 @@ export const getListPreference = query({
   },
 });
 
+const customViewResultValidator = v.object({ orderedIds: v.array(v.string()), revision: v.number() });
+
+export const getCustomView = query({
+  args: { companyId: v.id("companies"), taskType: taskListTaskTypeValidator },
+  returns: customViewResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const view = await ctx.db.query("taskCustomViews")
+      .withIndex("by_companyId_and_membershipId_and_taskType", (q) => q.eq("companyId", args.companyId).eq("membershipId", membership._id).eq("taskType", args.taskType))
+      .unique();
+    return { orderedIds: view?.orderedIds ?? [], revision: view?.revision ?? 0 };
+  },
+});
+
+export const saveCustomView = mutation({
+  args: { companyId: v.id("companies"), taskType: taskListTaskTypeValidator, orderedIds: v.array(v.string()), expectedRevision: v.number() },
+  returns: customViewResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    assertTaskListOrderInput(args.orderedIds);
+    const view = await ctx.db.query("taskCustomViews")
+      .withIndex("by_companyId_and_membershipId_and_taskType", (q) => q.eq("companyId", args.companyId).eq("membershipId", membership._id).eq("taskType", args.taskType))
+      .unique();
+    if (!Number.isSafeInteger(args.expectedRevision) || args.expectedRevision < 0 || (view?.revision ?? 0) !== args.expectedRevision) {
+      throw new ConvexError("Task custom view was updated. Refresh and try again.");
+    }
+    const tasks = args.taskType === "jd"
+      ? await validateTaskListOrder(ctx, args.companyId, membership, "jd", args.orderedIds)
+      : await validateTaskListOrder(ctx, args.companyId, membership, "one_time", args.orderedIds);
+    // Visible managed tasks are not necessarily the caller's own tasks.
+    for (const task of tasks) {
+      if (!task.assigneeMembershipIds.includes(membership._id)) throw new ConvexError("Task not found.");
+    }
+    const orderedIds = tasks.map((task) => task._id);
+    const revision = args.expectedRevision + 1;
+    if (view) await ctx.db.patch(view._id, { orderedIds, revision });
+    else await ctx.db.insert("taskCustomViews", { companyId: args.companyId, membershipId: membership._id, taskType: args.taskType, orderedIds, revision });
+    return { orderedIds, revision };
+  },
+});
+
 export const setListSort = mutation({
   args: {
     companyId: v.id("companies"),
@@ -713,7 +755,8 @@ export const saveListOrder = mutation({
     let preferenceId: Id<"taskListPreferences">;
 
     if (args.taskType === "jd") {
-      const customOrder = await validateTaskListOrder(ctx, args.companyId, membership, "jd", args.orderedIds);
+      const tasks = await validateTaskListOrder(ctx, args.companyId, membership, "jd", args.orderedIds);
+      const customOrder = tasks.map((task) => task._id);
       if (preference) {
         await ctx.db.patch(preference._id, { sort: { mode: "custom" }, customOrder, orderFormat: "vector", revision, updatedAt: now });
         preferenceId = preference._id;
@@ -730,7 +773,8 @@ export const saveListOrder = mutation({
         });
       }
     } else {
-      const customOrder = await validateTaskListOrder(ctx, args.companyId, membership, "one_time", args.orderedIds);
+      const tasks = await validateTaskListOrder(ctx, args.companyId, membership, "one_time", args.orderedIds);
+      const customOrder = tasks.map((task) => task._id);
       if (preference) {
         await ctx.db.patch(preference._id, { sort: { mode: "custom" }, customOrder, orderFormat: "vector", revision, updatedAt: now });
         preferenceId = preference._id;

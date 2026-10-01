@@ -649,6 +649,50 @@ export const getListPreference = query({
   },
 });
 
+const customViewResultValidator = v.object({ orderedIds: v.array(v.string()), revision: v.number() });
+
+export const getCustomView = query({
+  args: { companyId: v.id("companies"), taskType: taskListTaskTypeValidator },
+  returns: customViewResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const view = await ctx.db.query("taskCustomViews")
+      .withIndex("by_companyId_and_membershipId_and_taskType", (q) => q.eq("companyId", args.companyId).eq("membershipId", membership._id).eq("taskType", args.taskType))
+      .unique();
+    return { orderedIds: view?.orderedIds ?? [], revision: view?.revision ?? 0 };
+  },
+});
+
+export const saveCustomView = mutation({
+  args: { companyId: v.id("companies"), taskType: taskListTaskTypeValidator, orderedIds: v.array(v.string()), expectedRevision: v.number() },
+  returns: customViewResultValidator,
+  handler: async (ctx, args) => {
+    const { membership } = await requireMembership(ctx, args.companyId);
+    assertTaskListOrderInput(args.orderedIds);
+    const view = await ctx.db.query("taskCustomViews")
+      .withIndex("by_companyId_and_membershipId_and_taskType", (q) => q.eq("companyId", args.companyId).eq("membershipId", membership._id).eq("taskType", args.taskType))
+      .unique();
+    if (!Number.isSafeInteger(args.expectedRevision) || args.expectedRevision < 0 || (view?.revision ?? 0) !== args.expectedRevision) {
+      throw new ConvexError("Task custom view was updated. Refresh and try again.");
+    }
+    const taskIds = args.taskType === "jd"
+      ? await validateTaskListOrder(ctx, args.companyId, membership, "jd", args.orderedIds)
+      : await validateTaskListOrder(ctx, args.companyId, membership, "one_time", args.orderedIds);
+    // Visible managed tasks are not necessarily the caller's own tasks.
+    for (const id of taskIds) {
+      const task = args.taskType === "jd"
+        ? await ctx.db.get("jdTasks", id as Id<"jdTasks">)
+        : await ctx.db.get("oneTimeTasks", id as Id<"oneTimeTasks">);
+      if (!task?.assigneeMembershipIds.includes(membership._id)) throw new ConvexError("Task not found.");
+    }
+    const orderedIds = [...taskIds];
+    const revision = args.expectedRevision + 1;
+    if (view) await ctx.db.patch(view._id, { orderedIds, revision });
+    else await ctx.db.insert("taskCustomViews", { companyId: args.companyId, membershipId: membership._id, taskType: args.taskType, orderedIds, revision });
+    return { orderedIds, revision };
+  },
+});
+
 export const setListSort = mutation({
   args: {
     companyId: v.id("companies"),

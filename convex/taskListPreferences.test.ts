@@ -7,6 +7,27 @@ import { createAuthzFixture } from "./authz.fixture";
 import { defaultRoleCapabilities } from "../src/lib/permissions";
 
 describe("task list preferences", () => {
+  test("custom views persist only the owner's tasks, independently by user and task type", async () => {
+    const f = await createAuthzFixture();
+    const admin = f.asUser("adminA");
+    const own = await admin.mutation(api.tasks.createJd, { companyId: f.companyA, title: "Own", recurrence: "daily", assigneeMembershipIds: [f.adminM] });
+    const another = await admin.mutation(api.tasks.createJd, { companyId: f.companyA, title: "Another", recurrence: "daily", assigneeMembershipIds: [f.adminM] });
+    const managed = await admin.mutation(api.tasks.createJd, { companyId: f.companyA, title: "Not mine", recurrence: "daily", assigneeMembershipIds: [f.employee1M] });
+    const oneTime = await admin.mutation(api.tasks.createOneTime, { companyId: f.companyA, title: "Once", priority: "low", assigneeMembershipIds: [f.adminM] });
+
+    expect(await admin.query(api.tasks.getCustomView, { companyId: f.companyA, taskType: "jd" })).toEqual({ orderedIds: [], revision: 0 });
+    expect(await admin.mutation(api.tasks.saveCustomView, { companyId: f.companyA, taskType: "jd", orderedIds: [another, own], expectedRevision: 0 })).toEqual({ orderedIds: [another, own], revision: 1 });
+    await expect(admin.mutation(api.tasks.saveCustomView, { companyId: f.companyA, taskType: "jd", orderedIds: [managed], expectedRevision: 1 })).rejects.toThrow("Task not found");
+    await expect(admin.mutation(api.tasks.saveCustomView, { companyId: f.companyA, taskType: "jd", orderedIds: [own], expectedRevision: 0 })).rejects.toThrow("was updated");
+    await expect(admin.mutation(api.tasks.saveCustomView, { companyId: f.companyA, taskType: "jd", orderedIds: [oneTime], expectedRevision: 1 })).rejects.toThrow("Task not found");
+    expect(await admin.query(api.tasks.getCustomView, { companyId: f.companyA, taskType: "jd" })).toEqual({ orderedIds: [another, own], revision: 1 });
+    expect(await f.asUser("employeeA1").query(api.tasks.getCustomView, { companyId: f.companyA, taskType: "jd" })).toEqual({ orderedIds: [], revision: 0 });
+    expect(await admin.query(api.tasks.getCustomView, { companyId: f.companyA, taskType: "one_time" })).toEqual({ orderedIds: [], revision: 0 });
+    expect(await admin.mutation(api.tasks.saveCustomView, { companyId: f.companyA, taskType: "one_time", orderedIds: [oneTime], expectedRevision: 0 })).toEqual({ orderedIds: [oneTime], revision: 1 });
+    expect(await admin.query(api.tasks.getCustomView, { companyId: f.companyA, taskType: "jd" })).toEqual({ orderedIds: [another, own], revision: 1 });
+    expect(await f.asUser("adminB").query(api.tasks.getCustomView, { companyId: f.companyB, taskType: "jd" })).toEqual({ orderedIds: [], revision: 0 });
+    expect(await admin.query(api.tasks.getListPreference, { companyId: f.companyA, taskType: "jd" })).toMatchObject({ sort: { mode: "default" }, customOrder: null });
+  });
   test("converts legacy keys even from field sorting and prevents an old client from overwriting the vector", async () => {
     const f = await createAuthzFixture();
     const admin = f.asUser("adminA");

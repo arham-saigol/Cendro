@@ -1660,7 +1660,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   );
   const customViewResult = useQuery(api.tasks.getCustomView, activeCompanyId ? { companyId: activeCompanyId, taskType } : "skip");
   const subscribedCustomView = useMemo<ListPreference<TaskListSort> | undefined>(() => customViewResult && ({
-    sort: { mode: "custom" }, customOrder: customViewResult.orderedIds, revision: customViewResult.revision,
+    sort: { mode: "custom" }, customOrder: customViewResult.orderedIds, orderFormat: "vector", revision: customViewResult.revision,
   }), [customViewResult]);
   const subscribedPreference = useMemo<ListPreference<TaskListSort> | undefined>(() => {
     if (!preferenceResult) return undefined;
@@ -1691,7 +1691,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [customViewController] = useState(() => new ListPreferenceController<TaskListSort>(async (command) => {
     if (!activeCompanyId || !command.orderedIds) throw new Error("No custom order to save.");
     const saved = await saveCustomView({ companyId: activeCompanyId, taskType, orderedIds: command.orderedIds, expectedRevision: command.expectedRevision });
-    return { sort: { mode: "custom" }, customOrder: saved.orderedIds, revision: saved.revision };
+    return { sort: { mode: "custom" }, customOrder: saved.orderedIds, orderFormat: "vector", revision: saved.revision };
   }, taskListPreferenceMessages));
   const customViewState = useSyncExternalStore(customViewController.subscribe, customViewController.getSnapshot, customViewController.getSnapshot);
   const [preferenceController] = useState(() => new ListPreferenceController<TaskListSort>(async (command) => {
@@ -1816,13 +1816,13 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     wrapperRef: taskDragWrapperRef,
     bodyRef: taskDragBodyRef,
     onDrop(sourceId, insertion) {
-      const visible = filteredTasks.map((task) => task._id);
+      const visible = filteredTasks.filter((task) => !isPendingTask(task)).map((task) => task._id);
       const nextVisible = insertListItem(visible, sourceId, insertion);
       if (sameListOrder(visible, nextVisible)) return;
       if (isCustomView) {
         customViewController.saveOrder(nextVisible);
       } else {
-        const baseline = restoreTaskListCustomOrder(allTasks, taskType, activePreference?.customOrder, taskOrderKeys).map((task) => task._id);
+        const baseline = restoreTaskListCustomOrder(allTasks.filter((task) => !isPendingTask(task)), taskType, activePreference?.customOrder, taskOrderKeys).map((task) => task._id);
         preferenceController.saveOrder(mergeFilteredListOrder(baseline, visible, nextVisible));
       }
     },

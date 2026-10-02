@@ -142,7 +142,7 @@ export function useListDrag(options: Options) {
   const latest = useRef(options);
   const [layout, setLayout] = useState<Layout>({ rows: [], headerHeight: 36, tableLeft: 56, tableWidth: 0 });
   const [active, setActive] = useState(false);
-  const [settled, setSettled] = useState<"drop" | "cancel" | "revealed" | null>(null);
+  const [settled, setSettled] = useState<"drop" | "glide" | "cancel" | "revealed" | null>(null);
   const [sourceId, setSourceId] = useState<string | null>(null);
   const [offsets, setOffsets] = useState(new Map<string, number>());
   const [overlay, setOverlay] = useState<HTMLTableElement | null>(null);
@@ -318,9 +318,12 @@ export function useListDrag(options: Options) {
     // The order write publishes through the preference store, which re-renders synchronously.
     // Without flushing first, that commit lands ahead of the state updates above and rows
     // paint with stale preview transforms on their new slots for a few frames. Flushing
-    // makes the transform clear and the reorder a single paint.
+    // makes the transform clear and the reorder a single paint. A released-but-unchanged
+    // drop still counts as dropped for dnd-kit: the clone glides back to the unchanged
+    // slot, so it needs the same hidden-until-reveal window as a reorder. Only a canceled
+    // operation skips the glide entirely.
     flushSync(() => {
-      setSettled(valid && changed ? "drop" : "cancel");
+      setSettled(event.canceled ? "cancel" : valid && changed ? "drop" : "glide");
       setActive(false);
       setOffsets(new Map());
       if (valid && changed) latest.current.onDrop(current.sourceId, insertion!);
@@ -334,6 +337,7 @@ export function useListDrag(options: Options) {
     // instantly is seamless. Canceled sessions keep the transition: shifted rows slide
     // back to their unchanged slots.
     if (!active) return settled === "drop" ? SETTLED_STYLE : undefined;
+    // "glide" deliberately keeps the transition: shifted rows slide back to unchanged slots.
     const shift = offsets.get(id);
     return shift ? { transform: `translateY(${shift}px)` } : undefined;
   }, [active, settled, offsets]);
@@ -344,7 +348,7 @@ export function useListDrag(options: Options) {
   const revealed = settled === "cancel" || settled === "revealed";
   // Same gate for the rail row: while the clone glides, hide the source's rail strip too —
   // its committed position would otherwise pop the grip/checkbox into the slot early.
-  const settling = settled === "drop" ? sourceId : null;
+  const settling = settled === "drop" || settled === "glide" ? sourceId : null;
 
   const dropAnimation = useCallback<DropAnimationFunction>(({ source, feedbackElement, translate }) => {
     const reveal = () => {

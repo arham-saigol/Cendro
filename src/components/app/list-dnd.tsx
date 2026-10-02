@@ -14,6 +14,7 @@ import { SortableKeyboardPlugin } from "@dnd-kit/dom/sortable";
 import { getWindow, parseTranslate, prefersReducedMotion } from "@dnd-kit/dom/utilities";
 import { Grip } from "lucide-react";
 import { useCallback, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { flushSync } from "react-dom";
 import {
   insertListItem, resolveListInsertion, listMovePoint, listPreviewOffsets, listReleasePoint,
   type Point, type ListInsertion, type ListRowBounds,
@@ -43,6 +44,7 @@ type Options = {
 
 // Only the keyboard sorting plugin is needed; React owns both the table and rail.
 const plugins = [SortableKeyboardPlugin];
+const SETTLED_STYLE: CSSProperties = { transition: "none" };
 
 // Rows carry a preview transform while dragging, and getBoundingClientRect() reports that transformed
 // box — including for the frames where the transform is being animated away. The rail places each row
@@ -140,6 +142,8 @@ export function useListDrag(options: Options) {
   const latest = useRef(options);
   const [layout, setLayout] = useState<Layout>({ rows: [], headerHeight: 36, tableLeft: 56, tableWidth: 0 });
   const [active, setActive] = useState(false);
+  const [settled, setSettled] = useState<"drop" | "cancel" | "revealed" | null>(null);
+  const [sourceId, setSourceId] = useState<string | null>(null);
   const [offsets, setOffsets] = useState(new Map<string, number>());
   const [overlay, setOverlay] = useState<HTMLTableElement | null>(null);
   const idsKey = JSON.stringify(options.ids);
@@ -155,6 +159,7 @@ export function useListDrag(options: Options) {
       if (handle instanceof HTMLElement && document.activeElement === handle) handle.blur();
     }
     session.current = null;
+    setSettled("cancel");
     setActive(false);
     setOffsets(new Map());
     // Keep the feedback content until dnd-kit finishes its drop animation.
@@ -266,6 +271,8 @@ export function useListDrag(options: Options) {
       sourceId, key: latest.current.sessionKey, keyboard: event.operation.activatorEvent?.type === "keydown",
       layout: measured, insertion: null, pointer: event.operation.position.current, overlay: feedback,
     };
+    setSettled(null);
+    setSourceId(sourceId);
     setLayout(measured);
     setOverlay(feedback);
     setActive(true);
@@ -307,23 +314,73 @@ export function useListDrag(options: Options) {
       if (handle instanceof HTMLElement && document.activeElement === handle) handle.blur();
     }
     session.current = null;
-    setActive(false);
-    setOffsets(new Map());
-    if (valid && insertion && !sameListOrder(ids, insertListItem(ids, current.sourceId, insertion))) {
-      latest.current.onDrop(current.sourceId, insertion);
-    }
+    const changed = Boolean(insertion && !sameListOrder(ids, insertListItem(ids, current.sourceId, insertion)));
+    // The order write publishes through the preference store, which re-renders synchronously.
+    // Without flushing first, that commit lands ahead of the state updates above and rows
+    // paint with stale preview transforms on their new slots for a few frames. Flushing
+    // makes the transform clear and the reorder a single paint.
+    flushSync(() => {
+      setSettled(valid && changed ? "drop" : "cancel");
+      setActive(false);
+      setOffsets(new Map());
+      if (valid && changed) latest.current.onDrop(current.sourceId, insertion!);
+    });
   }, [wrapperRef]);
 
   const rowStyle = useCallback((id: string): CSSProperties | undefined => {
+    // On a committed drop the transform clear and the reorder land in one commit; with the
+    // CSS transition still armed each shifted row would animate shift→0 from its new slot.
+    // Preview offsets already place rows at their final tops, so removing transforms
+    // instantly is seamless. Canceled sessions keep the transition: shifted rows slide
+    // back to their unchanged slots.
+    if (!active) return settled === "drop" ? SETTLED_STYLE : undefined;
     const shift = offsets.get(id);
     return shift ? { transform: `translateY(${shift}px)` } : undefined;
-  }, [offsets]);
+  }, [active, settled, offsets]);
+
+  // The source stays hidden while its clone glides to the committed slot; the animation reveals
+  // it in the same task dnd-kit tears the clone down, so the handoff never shows a gap or a
+  // sliver of doubled content. Canceled sessions reveal immediately — there is no glide.
+  const revealed = settled === "cancel" || settled === "revealed";
+  // Same gate for the rail row: while the clone glides, hide the source's rail strip too —
+  // its committed position would otherwise pop the grip/checkbox into the slot early.
+  const settling = settled === "drop" ? sourceId : null;
+
+  const dropAnimation = useCallback<DropAnimationFunction>(({ source, feedbackElement, translate }) => {
+    const reveal = () => {
+      feedbackElement.removeAttribute(DROPPING_ATTRIBUTE);
+      // Resolving lets dnd-kit's cleanup hide the clone synchronously, so the row must
+      // already paint inside this same task or the slot re-opens for a few frames.
+      flushSync(() => setSettled("revealed"));
+    };
+    const row = document.querySelector<HTMLTableRowElement>(`tr[data-list-item-id="${CSS.escape(String(source.id))}"]`);
+    if (!row) {
+      reveal();
+      return;
+    }
+    const from = feedbackElement.getBoundingClientRect();
+    const to = row.getBoundingClientRect();
+    const current = parseTranslate(getComputedStyle(feedbackElement).translate) ?? translate;
+    feedbackElement.setAttribute(DROPPING_ATTRIBUTE, "");
+    return feedbackElement.animate(
+      {
+        translate: [
+          `${current.x}px ${current.y}px`,
+          `${current.x + to.left - from.left}px ${current.y + to.top - from.top}px`,
+        ],
+      },
+      {
+        duration: prefersReducedMotion(getWindow(feedbackElement)) ? 0 : DROP_ANIMATION_DURATION,
+        easing: DROP_ANIMATION_EASING,
+      },
+    ).finished.then(reveal, reveal);
+  }, []);
 
   // Stable identity between drags so memoized rows only re-render when the
   // preview actually shifts.
   return useMemo(
-    () => ({ active, layout, overlay, register, attach, rowStyle, onBeforeDragStart, onDragMove, onDragOver, onDragEnd }),
-    [active, layout, overlay, register, attach, rowStyle, onBeforeDragStart, onDragMove, onDragOver, onDragEnd],
+    () => ({ active, layout, overlay, revealed, settling, rowStyle, dropAnimation, register, attach, onBeforeDragStart, onDragMove, onDragOver, onDragEnd }),
+    [active, layout, overlay, revealed, settling, rowStyle, dropAnimation, register, attach, onBeforeDragStart, onDragMove, onDragOver, onDragEnd],
   );
 }
 
@@ -344,7 +401,11 @@ export function ListSortableRow({
     register(id, { handleRef, targetRef });
     return () => register(id, null);
   }, [id, register, handleRef, targetRef]);
-  return <tr {...props} ref={ref} data-list-item-id={id} data-dragging={isDragSource ? "true" : undefined} style={drag.rowStyle(id)}>{children}</tr>;
+  // dnd-kit keeps the source marked while its overlay settles, so the row would stay hidden
+  // for several paints after the drop commit. The committed order already puts it at the
+  // clone's target slot — reveal it exactly when the clone tears down, not before, or a
+  // sliver of the row would peek out from behind the still-gliding clone.
+  return <tr {...props} ref={ref} data-list-item-id={id} data-dragging={isDragSource ? "true" : undefined} style={{ visibility: isDragSource && drag.revealed ? "visible" : undefined, ...drag.rowStyle(id) }}>{children}</tr>;
 }
 
 export function ListDragRailRow({
@@ -364,7 +425,7 @@ export function ListDragRailRow({
       }} />
       <div className="task-list-rail-row pointer-events-auto absolute left-0 flex w-14 items-center justify-end gap-1 pr-2"
         data-active={checked ? "true" : undefined}
-        style={{ top: row?.top ?? 0, height: row?.height ?? 0, visibility: row ? undefined : "hidden", ...drag.rowStyle(id) }}>
+        style={{ top: row?.top ?? 0, height: row?.height ?? 0, visibility: row && drag.settling !== id ? undefined : "hidden", ...drag.rowStyle(id) }}>
         <button type="button" ref={handleRef} className="task-list-rail-control task-list-drag-handle"
           disabled={disabled} aria-label={label} title={disabledReason ?? label}>
           <Grip className="h-4 w-4" />
@@ -384,34 +445,11 @@ const DROPPING_ATTRIBUTE = "data-dnd-dropping";
 // This list keeps no dnd-kit placeholder, so the default animation falls back to the source row as
 // its target. Settle the clone on that row's committed position explicitly instead, measured after
 // React has reordered the list, and release the !important translate rule the overlay is pinned by.
-const animateOverlayToSource: DropAnimationFunction = ({ source, feedbackElement, translate }) => {
-  const row = document.querySelector<HTMLTableRowElement>(`tr[data-list-item-id="${CSS.escape(String(source.id))}"]`);
-  if (!row) return;
-  const from = feedbackElement.getBoundingClientRect();
-  const to = row.getBoundingClientRect();
-  const current = parseTranslate(getComputedStyle(feedbackElement).translate) ?? translate;
-  feedbackElement.setAttribute(DROPPING_ATTRIBUTE, "");
-  return feedbackElement.animate(
-    {
-      translate: [
-        `${current.x}px ${current.y}px`,
-        `${current.x + to.left - from.left}px ${current.y + to.top - from.top}px`,
-      ],
-    },
-    {
-      duration: prefersReducedMotion(getWindow(feedbackElement)) ? 0 : DROP_ANIMATION_DURATION,
-      easing: DROP_ANIMATION_EASING,
-    },
-  ).finished.then(() => {
-    feedbackElement.removeAttribute(DROPPING_ATTRIBUTE);
-  });
-};
-
-export function ListDragOverlay({ table }: { table: HTMLTableElement | null }) {
+export function ListDragOverlay({ table, dropAnimation }: { table: HTMLTableElement | null; dropAnimation: DropAnimationFunction }) {
   const ref = useCallback((node: HTMLDivElement | null) => {
     if (node && table) node.replaceChildren(table);
   }, [table]);
-  return <DragOverlay className="task-drag-overlay" dropAnimation={animateOverlayToSource}>
+  return <DragOverlay className="task-drag-overlay" dropAnimation={dropAnimation}>
     <div ref={ref} aria-hidden="true" />
   </DragOverlay>;
 }

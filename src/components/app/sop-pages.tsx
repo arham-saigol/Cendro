@@ -1488,7 +1488,7 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
             })}
           </div>
         )}
-        <ListDragOverlay table={drag.overlay} />
+        <ListDragOverlay table={drag.overlay} dropAnimation={drag.dropAnimation} />
         </DragDropProvider>
         </div>
         <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center py-2" aria-live="polite">

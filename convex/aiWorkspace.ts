@@ -46,7 +46,7 @@ export const context = query({
       visiblePeopleLimit: scoped.size,
       isTruncated,
       isComplete: !isTruncated,
-      unsupportedActions: ["delete", "remove", "role-change", "permission-change", "bulk-update"],
+      unsupportedActions: ["role-change", "permission-change", "company-settings", "member-management", "bulk-operations"],
     };
   },
 });

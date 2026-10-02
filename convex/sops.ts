@@ -1,7 +1,6 @@
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
-import { internal } from "./_generated/api";
-import { action, internalAction, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { Capability } from "../src/lib/permissions";
 import { sopListOrderLimit, sopListOrderMaxSerializedBytes } from "../src/lib/sop-list-sort";
@@ -109,13 +108,6 @@ async function canDeleteSopTargets(
 }
 const sopViewValidator = v.union(v.literal("all"), v.literal("my"));
 const sopScopeFilterValidator = v.union(v.literal("all"), v.literal("company"), v.literal("branch"), v.literal("department"), v.literal("user"));
-async function deleteEmbeddings(ctx: any, sopId: Id<"sops">) {
-  while (true) {
-    const rows = await ctx.db.query("sopEmbeddings").withIndex("by_sop", (q: any) => q.eq("sopId", sopId)).take(100);
-    if (!rows.length) break;
-    for (const row of rows) await ctx.db.delete(row._id);
-  }
-}
 async function deleteScopeRows(ctx: any, sopId: Id<"sops">) {
   while (true) {
     const rows = await ctx.db.query("sopBranchScopes").withIndex("by_sopId_and_branchId", (q: any) => q.eq("sopId", sopId)).take(500);
@@ -245,7 +237,7 @@ async function filteredSopRows(ctx: QueryCtx, args: { companyId: Id<"companies">
   // A short result after an exhausted index is legitimate; only a scan cut off
   // by the ceiling is an incomplete result worth failing loudly on.
   if (!exhausted && kept.length < args.limit) {
-    throw new ConvexError("Too many SOPs to scan — narrow the filters or use the paginated list endpoint.");
+    throw new ConvexError("Too many SOPs to scan. Narrow the filters or use the paginated list endpoint.");
   }
   return await Promise.all(kept.map((sop) => withScopes(ctx, sop, membership, company?.name, caps, auth)));
 }
@@ -626,7 +618,6 @@ export const create = mutation({
     const reference = await nextReference(ctx, args.companyId, "sop");
     const id = await ctx.db.insert("sops", { companyId: args.companyId, reference, title, content, scopeType: args.scopeType, creatorMembershipId: membership._id, updatedByMembershipId: membership._id, createdAt: now, updatedAt: now });
     await insertScopeRows(ctx, args.companyId, id, args);
-    await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: id });
     return id;
   },
 });
@@ -676,10 +667,6 @@ export const update = mutation({
 
     if (args.title !== undefined) patch.title = nonEmpty(args.title, "Title");
     if (args.content !== undefined) patch.content = args.content.trim();
-    // Embedding only depends on title + content, so scope-only edits and no-op
-    // saves should not pay for a re-index pass.
-    const indexedFieldsChanged = (patch.title !== undefined && patch.title !== sop.title) || (patch.content !== undefined && patch.content !== sop.content);
-
     if (args.scopeType !== undefined) {
       await requireCapability(ctx, args.companyId, sopManageCapability(args.scopeType));
       const scopeArgs = { scopeType: args.scopeType, branchIds: args.branchIds ?? [], departmentIds: args.departmentIds ?? [], userMembershipIds: args.userMembershipIds ?? [] };
@@ -692,7 +679,6 @@ export const update = mutation({
     }
 
     await ctx.db.patch(args.sopId, patch);
-    if (indexedFieldsChanged) await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: args.sopId });
     return null;
   },
 });
@@ -726,7 +712,6 @@ async function purgeSop(ctx: MutationCtx, companyId: Id<"companies">, sopId: Id<
   await requireCapability(ctx, companyId, sopDeleteCapability(sop.scopeType));
   const currentTargets = await currentSopTargets(ctx, sopId);
   await assertManagedTargets(ctx, companyId, membership, currentTargets);
-  await deleteEmbeddings(ctx, sopId);
   await deleteScopeRows(ctx, sopId);
   await ctx.db.delete(sopId);
   await ctx.db.insert("auditEvents", { companyId, actorUserId: user._id, action: "sop.delete", targetType: "sop", targetId: sopId, createdAt: Date.now() });
@@ -746,100 +731,13 @@ export const removeBulk = mutation({
   },
 });
 
-// Content matches come from the full-text index. Title/reference matching is
-// substring-based, which FTS cannot express, so it pages the company index
-// until it has enough candidates for the (≤8-row) result or hits the ceiling.
-const TITLE_MATCH_TARGET = 40;
-const TITLE_SCAN_CEILING = 500;
-// The search result keeps at most 8 rows, but inaccessible hits must not
-// starve the content window, so the FTS scan collects more than 8.
-const SEARCH_CONTENT_TARGET = 24;
-const SEARCH_CONTENT_SCAN_BUDGET = 200;
-
-async function visibleSopSearchCandidates(ctx: any, args: { companyId: Id<"companies">; query: string }) {
-  const { membership } = await requireMembership(ctx, args.companyId);
-  const needle = args.query.trim();
-  if (!needle) return { membership, sops: [] as Doc<"sops">[] };
-  const caps = await membershipCapabilities(ctx, membership);
-  const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
-  const lower = needle.toLowerCase();
-  const titleScan = async () => {
-    const matched: Doc<"sops">[] = [];
-    let cursor: string | null = null;
-    let scanned = 0;
-    while (matched.length < TITLE_MATCH_TARGET && scanned < TITLE_SCAN_CEILING) {
-      const page: { page: Doc<"sops">[]; isDone: boolean; continueCursor: string } = await ctx.db.query("sops").withIndex("by_company", (q: any) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: Math.min(100, TITLE_SCAN_CEILING - scanned) });
-      scanned += page.page.length;
-      // Only visible matches count toward the target — a page of inaccessible
-      // title hits must not stop the scan before real matches are found.
-      const titleMatches = (page.page as Doc<"sops">[]).filter((sop) => sop.reference.toLowerCase().includes(lower) || sop.title.toLowerCase().includes(lower));
-      const visibleFlags = await Promise.all(titleMatches.map((sop) => visibleSop(ctx, args.companyId, membership, sop, visibility, caps)));
-      for (let index = 0; index < titleMatches.length; index += 1) {
-        if (visibleFlags[index]) matched.push(titleMatches[index]);
-      }
-      if (page.isDone) break;
-      cursor = page.continueCursor;
-    }
-    return matched;
-  };
-  const [contentResult, scanRows] = await Promise.all([
-    visibleContentMatches(ctx, args.companyId, needle, membership, caps, visibility, SEARCH_CONTENT_TARGET, SEARCH_CONTENT_SCAN_BUDGET),
-    titleScan(),
-  ]);
-  const candidates = new Map<string, Doc<"sops">>();
-  for (const sop of scanRows) candidates.set(sop._id, sop);
-  for (const sop of contentResult.sops) candidates.set(sop._id, sop);
-  const all = [...candidates.values()];
-  const flags = await Promise.all(all.map((sop: Doc<"sops">) => visibleSop(ctx, args.companyId, membership, sop, visibility, caps)));
-  return { membership, sops: all.filter((_: Doc<"sops">, index: number) => flags[index]) };
-}
-
-async function textSearch(ctx: any, args: { companyId: Id<"companies">; query: string }) {
-  const { sops } = await visibleSopSearchCandidates(ctx, args);
-  return sops.slice(0, 8).map((sop) => ({ id: sop._id, title: sop.title, excerpt: sop.content.slice(0, 500), scopeType: sop.scopeType }));
-}
-
-export const searchAccessible = query({ args: { companyId: v.id("companies"), query: v.string() }, handler: textSearch });
-
-export const visibleSearchRows = internalQuery({ args: { companyId: v.id("companies"), embeddingIds: v.array(v.id("sopEmbeddings")) }, handler: async (ctx, args) => { const { membership } = await requireMembership(ctx, args.companyId); const caps = await membershipCapabilities(ctx, membership); const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps); const embeddings = (await Promise.all(args.embeddingIds.map((embeddingId) => ctx.db.get(embeddingId)))).filter((embedding) => embedding && embedding.companyId === args.companyId); const sops = (await Promise.all(embeddings.map((embedding) => ctx.db.get(embedding!.sopId)))).filter(Boolean) as Doc<"sops">[]; const flags = await Promise.all(sops.map((sop) => visibleSop(ctx, args.companyId, membership, sop, visibility, caps))); const out = []; for (let index = 0; index < sops.length; index += 1) { if (!flags[index]) continue; const sop = sops[index]; const embedding = embeddings.find((e) => e!.sopId === sop._id); out.push({ id: sop._id, title: sop.title, excerpt: (embedding?.chunk ?? sop.content).slice(0, 500), scopeType: sop.scopeType }); } return out; } });
-
-export const authorizeSearch = internalQuery({ args: { companyId: v.id("companies") }, handler: async (ctx, args) => { await requireMembership(ctx, args.companyId); return null; } });
-
-export const semanticSearchAccessible = action({
-  args: { companyId: v.id("companies"), query: v.string() },
-  handler: async (ctx, args): Promise<{ id: Id<"sops">; title: string; excerpt: string; scopeType: Doc<"sops">["scopeType"] }[]> => {
-    const query = args.query.trim();
-    if (!query) return [];
-    await ctx.runQuery(internal.sops.authorizeSearch, { companyId: args.companyId });
-    const apiKey = process.env.VOYAGE_API_KEY;
-    if (!apiKey) return await ctx.runQuery(internal.sops.searchFallback, args);
-    const vector = await embed(apiKey, query);
-    if (!vector) return await ctx.runQuery(internal.sops.searchFallback, args);
-    const results = await ctx.vectorSearch("sopEmbeddings", "by_embedding", { vector, limit: 16, filter: (q) => q.eq("companyId", args.companyId) });
-    if (!results.length) return await ctx.runQuery(internal.sops.searchFallback, args);
-    const rows = await ctx.runQuery(internal.sops.visibleSearchRows, { companyId: args.companyId, embeddingIds: results.map((r) => r._id) });
-    return rows.slice(0, 8);
-  },
-});
-
-export const searchFallback = internalQuery({ args: { companyId: v.id("companies"), query: v.string() }, handler: textSearch });
-
-export const getForIndexing = internalQuery({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args): Promise<Doc<"sops"> | null> => { const sop = await ctx.db.get(args.sopId); return sop && sop.companyId === args.companyId ? sop : null; } });
-export const storeEmbedding = internalMutation({ args: { companyId: v.id("companies"), sopId: v.id("sops"), expectedUpdatedAt: v.number(), chunk: v.string(), embedding: v.array(v.number()) }, handler: async (ctx, args) => { const sop = await ctx.db.get(args.sopId); if (!sop || sop.companyId !== args.companyId) throw new ConvexError("SOP not found."); if (sop.updatedAt !== args.expectedUpdatedAt) return null; if (args.embedding.length !== 1024) throw new ConvexError("SOP embedding dimensions did not match voyage-4."); await deleteEmbeddings(ctx, args.sopId); return await ctx.db.insert("sopEmbeddings", { companyId: args.companyId, sopId: args.sopId, chunk: args.chunk, embedding: args.embedding, metadata: { title: sop.title, scopeType: sop.scopeType }, updatedAt: Date.now() }); } });
-
-async function embed(apiKey: string, input: string) {
-  const res = await fetch("https://api.voyageai.com/v1/embeddings", { method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: process.env.VOYAGE_EMBEDDING_MODEL || "voyage-4", input: [input], output_dimension: 1024 }) });
-  if (!res.ok) return null;
-  const json = await res.json() as { data?: { embedding: number[] }[] };
-  const embedding = json.data?.[0]?.embedding;
-  return embedding?.length === 1024 ? embedding : null;
-}
-
-export const aiSearch = query({
-  args: { companyId: v.id("companies"), query: v.string() },
+export const aiListSops = query({
+  args: { companyId: v.id("companies"), query: v.optional(v.string()), scope: v.optional(sopScopeFilterValidator), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
-    const { sops } = await visibleSopSearchCandidates(ctx, args);
-    return sops.slice(0, 8).map((sop) => ({ id: sop._id, title: sop.title, excerpt: sop.content.slice(0, 700), scopeType: sop.scopeType }));
+    const limit = Math.min(Math.max(Math.floor(args.limit ?? 12), 1), 25);
+    const scope = args.scope === "all" ? undefined : args.scope;
+    const rows = await filteredSopRows(ctx, { companyId: args.companyId, search: args.query, view: "all", scope, limit });
+    return rows.map((row) => ({ id: row._id, reference: row.reference, title: row.title, excerpt: row.content.slice(0, 700), scopeType: row.scopeType, scopeTargetName: row.scopeTargetName, canUpdate: row.canUpdate, canDelete: row.canDelete }));
   },
 });
 
@@ -849,23 +747,8 @@ export const aiGet = query({
     const { membership } = await requireMembership(ctx, args.companyId);
     const sop = await ctx.db.get(args.sopId);
     if (!sop || sop.companyId !== args.companyId || !(await visibleSop(ctx, args.companyId, membership, sop))) throw new ConvexError("SOP not found.");
-    return { id: sop._id, title: sop.title, content: sop.content.slice(0, 8000), scopeType: sop.scopeType };
+    const company = await ctx.db.get(args.companyId);
+    const row = await withScopes(ctx, sop, membership, company?.name);
+    return { id: sop._id, reference: sop.reference, title: sop.title, content: sop.content.slice(0, 8000), scopeType: sop.scopeType, scopeTargetName: row.scopeTargetName, canUpdate: row.canUpdate, canDelete: row.canDelete };
   },
 });
-
-export const aiCreate = mutation({
-  args: { companyId: v.id("companies"), title: v.string(), content: v.optional(v.string()) },
-  handler: async (ctx, args) => {
-    const { membership } = await requireCapability(ctx, args.companyId, "sops:create");
-    await requireCapability(ctx, args.companyId, "sops:manage:company");
-    const title = nonEmpty(args.title, "Title");
-    const content = args.content?.trim() ?? "";
-    const now = Date.now();
-    const reference = await nextReference(ctx, args.companyId, "sop");
-    const id = await ctx.db.insert("sops", { companyId: args.companyId, reference, title, content, scopeType: "company", creatorMembershipId: membership._id, updatedByMembershipId: membership._id, createdAt: now, updatedAt: now });
-    await ctx.scheduler.runAfter(0, internal.sops.indexSop, { companyId: args.companyId, sopId: id });
-    return { id, title, content: content.slice(0, 8000), scopeType: "company" as const };
-  },
-});
-
-export const indexSop = internalAction({ args: { companyId: v.id("companies"), sopId: v.id("sops") }, handler: async (ctx, args): Promise<{ skipped: boolean }> => { const sop: Doc<"sops"> | null = await ctx.runQuery(internal.sops.getForIndexing, args); if (!sop) return { skipped: true }; const apiKey = process.env.VOYAGE_API_KEY; if (!apiKey) return { skipped: true }; const input = sop.title + "\n\n" + sop.content; const embedding = await embed(apiKey, input); if (!embedding) return { skipped: true }; const stored: Id<"sopEmbeddings"> | null = await ctx.runMutation(internal.sops.storeEmbedding, { companyId: args.companyId, sopId: args.sopId, expectedUpdatedAt: sop.updatedAt, chunk: input, embedding }); return { skipped: !stored }; } });

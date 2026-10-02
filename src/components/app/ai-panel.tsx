@@ -151,7 +151,7 @@ function hostnameOf(value: unknown) {
 
 function activityDetailOfPart(part: any, toolName: string) {
   const input = part?.input;
-  if (toolName === "web_search" || toolName === "search_sops") return compactActivityText(input?.query);
+  if (toolName === "web_search" || toolName === "list_sops" || toolName === "list_tasks") return compactActivityText(input?.query);
   if (toolName === "web_fetch") return hostnameOf(input?.url) ?? compactActivityText(input?.url);
   return undefined;
 }

@@ -43,14 +43,14 @@ describe("AI message persistence helpers", () => {
 });
 
 describe("Cendro AI system prompt", () => {
-  test("is concise and permission-aware", () => {
+  test("is concise, permission-aware, and free of em dashes", () => {
     expect(CENDRO_AI_SYSTEM_PROMPT.length).toBeLessThan(5000);
-    expect(CENDRO_AI_SYSTEM_PROMPT).toContain("Admins may receive company-wide");
-    expect(CENDRO_AI_SYSTEM_PROMPT).toContain("Managers may receive only their managed scope");
-    expect(CENDRO_AI_SYSTEM_PROMPT).toContain("Employees may receive only their own visible work");
+    expect(CENDRO_AI_SYSTEM_PROMPT).not.toMatch(/[—–]/);
+    expect(CENDRO_AI_SYSTEM_PROMPT).toContain("Never use em dashes");
+    expect(CENDRO_AI_SYSTEM_PROMPT).toContain("signed-in user's");
+    expect(CENDRO_AI_SYSTEM_PROMPT).toContain("concise");
+    expect(CENDRO_AI_SYSTEM_PROMPT).toContain("normal prose");
     expect(CENDRO_AI_SYSTEM_PROMPT).toContain("Do not stop after reasoning, a preamble, or tool results");
     expect(CENDRO_AI_SYSTEM_PROMPT).toContain("Never infer or reveal hidden records");
-    expect(CENDRO_AI_SYSTEM_PROMPT).toContain("Minimize em dashes");
-    expect(CENDRO_AI_SYSTEM_PROMPT).toContain("Avoid markdown tables when more than 2 columns would be required");
   });
 });

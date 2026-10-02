@@ -111,6 +111,93 @@ describe("command palette search", () => {
     expect(byCode.sops.map((row) => row._id)).toContain(companySopId);
   });
 
+  test("Punctuation-only needles match nothing while partial padded codes still match", async () => {
+    const f = await createAuthzFixture();
+
+    const jdTaskId = await f.asUser("adminA").mutation(api.tasks.createJd, {
+      companyId: f.companyA,
+      title: "Polish glassware",
+      recurrence: "daily",
+      assigneeMembershipIds: [f.adminM],
+    });
+    await f.asUser("adminA").mutation(api.sops.create, {
+      companyId: f.companyA,
+      title: "Glassware guide",
+      content: "Polish gently",
+      scopeType: "company",
+      branchIds: [],
+      departmentIds: [],
+      userMembershipIds: [],
+    });
+
+    // A key-less needle must not degenerate into a match-everything.
+    const punctuation = await f.asUser("adminA").query(api.tasks.search, { companyId: f.companyA, query: "--" });
+    expect(punctuation.jdTasks).toHaveLength(0);
+    expect(punctuation.oneTimeTasks).toHaveLength(0);
+    const sopPunctuation = await f.asUser("adminA").query(api.sops.search, { companyId: f.companyA, query: "--" });
+    expect(sopPunctuation.sops).toHaveLength(0);
+
+    // A prefix of the stored spelling matches like the old substring check did.
+    const partial = await f.asUser("adminA").query(api.tasks.search, { companyId: f.companyA, query: "jd-00" });
+    expect(partial.jdTasks.map((row) => row._id)).toContain(jdTaskId);
+  });
+
+  test("Normalized code probes reach rows beyond the scan ceiling", async () => {
+    const f = await createAuthzFixture();
+
+    const oldTaskId = await f.asUser("adminA").mutation(api.tasks.createJd, {
+      companyId: f.companyA,
+      title: "Legacy checklist",
+      recurrence: "daily",
+      assigneeMembershipIds: [f.adminM],
+    });
+    const oldSopId = await f.asUser("adminA").mutation(api.sops.create, {
+      companyId: f.companyA,
+      title: "Legacy SOP",
+      content: "Old guidance",
+      scopeType: "company",
+      branchIds: [],
+      departmentIds: [],
+      userMembershipIds: [],
+    });
+
+    // 1,100 newer rows push both records past the 1,000-row scan ceiling.
+    await f.t.run(async (ctx) => {
+      const now = Date.now();
+      for (let index = 0; index < 1_100; index += 1) {
+        await ctx.db.insert("jdTasks", {
+          companyId: f.companyA,
+          reference: `JD-${1001 + index}`,
+          title: "Filler task",
+          recurrence: "daily",
+          cycleStartedAt: now,
+          status: "due",
+          assigneeMembershipIds: [f.adminM],
+          createdByMembershipId: f.adminM,
+          createdAt: now + index,
+          updatedAt: now + index,
+        });
+        await ctx.db.insert("sops", {
+          companyId: f.companyA,
+          reference: `SOP-${2000 + index}`,
+          title: "Filler SOP",
+          content: "filler",
+          scopeType: "company",
+          creatorMembershipId: f.adminM,
+          updatedByMembershipId: f.adminM,
+          createdAt: now + index,
+          updatedAt: now + index,
+        });
+      }
+    });
+
+    const tasks = await f.asUser("adminA").query(api.tasks.search, { companyId: f.companyA, query: "jd1" });
+    expect(tasks.jdTasks.map((row) => row._id)).toContain(oldTaskId);
+
+    const sops = await f.asUser("adminA").query(api.sops.search, { companyId: f.companyA, query: "sop1" });
+    expect(sops.sops.map((row) => row._id)).toContain(oldSopId);
+  });
+
   test("Result limit reports truncation instead of silently dropping matches", async () => {
     const f = await createAuthzFixture();
 

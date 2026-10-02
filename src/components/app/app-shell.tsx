@@ -204,6 +204,7 @@ function SearchCommandDialog({
   companies,
   activeCompanyId,
   setActiveCompanyId,
+  canSearchEntities,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -211,16 +212,17 @@ function SearchCommandDialog({
   companies: CompanyAccess[];
   activeCompanyId: CompanyAccess["company"]["_id"] | null;
   setActiveCompanyId: (id: CompanyAccess["company"]["_id"]) => void;
+  canSearchEntities: boolean;
 }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [activeKey, setActiveKey] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const normalized = query.trim().toLowerCase();
   const debounced = useDebouncedValue(query);
   const needle = debounced.trim().toLowerCase();
 
-  const entityArgs = activeCompanyId && needle.length >= PALETTE_MIN_QUERY ? { companyId: activeCompanyId, query: needle } : ("skip" as const);
+  const entityArgs = activeCompanyId && canSearchEntities && needle.length >= PALETTE_MIN_QUERY ? { companyId: activeCompanyId, query: needle } : ("skip" as const);
   const taskResults = useQuery(api.tasks.search, entityArgs);
   const sopResults = useQuery(api.sops.search, entityArgs);
   // Results always correspond to the debounced term; while the input is ahead
@@ -312,34 +314,36 @@ function SearchCommandDialog({
   }
 
   const flatRows = sections.flatMap((section) => section.rows);
-  const clampedIndex = flatRows.length === 0 ? 0 : Math.min(activeIndex, flatRows.length - 1);
+  // Selection is tracked by row key, not position, so async results arriving
+  // above the highlighted row can't silently move the Enter target.
+  const activeRowIndex = Math.max(0, flatRows.findIndex((row) => row.key === activeKey));
   const truncated = Boolean(entityResults?.tasks.truncated || entityResults?.sops.truncated);
 
   useEffect(() => {
     if (!open) {
       setQuery("");
-      setActiveIndex(0);
+      setActiveKey(null);
     }
   }, [open]);
 
   useEffect(() => {
-    setActiveIndex(0);
+    setActiveKey(null);
   }, [normalized]);
 
   useEffect(() => {
-    listRef.current?.querySelector(`[data-index="${clampedIndex}"]`)?.scrollIntoView({ block: "nearest" });
-  }, [clampedIndex]);
+    listRef.current?.querySelector(`[data-index="${activeRowIndex}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [activeRowIndex]);
 
   function onInputKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      if (flatRows.length) setActiveIndex((index) => (index + 1) % flatRows.length);
+      if (flatRows.length) setActiveKey(flatRows[(activeRowIndex + 1) % flatRows.length].key);
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
-      if (flatRows.length) setActiveIndex((index) => (index - 1 + flatRows.length) % flatRows.length);
+      if (flatRows.length) setActiveKey(flatRows[(activeRowIndex - 1 + flatRows.length) % flatRows.length].key);
     } else if (event.key === "Enter") {
       event.preventDefault();
-      flatRows[clampedIndex]?.onSelect();
+      flatRows[activeRowIndex]?.onSelect();
     }
   }
 
@@ -359,17 +363,22 @@ function SearchCommandDialog({
               onKeyDown={onInputKeyDown}
               placeholder="Search pages, tasks, SOPs, workspaces..."
               className="h-9 border-0 bg-transparent px-0 focus:border-0"
-              aria-activedescendant={flatRows.length ? `palette-row-${clampedIndex}` : undefined}
+              role="combobox"
+              aria-expanded="true"
+              aria-haspopup="listbox"
+              aria-autocomplete="list"
+              aria-controls="palette-results"
+              aria-activedescendant={flatRows.length ? `palette-row-${activeRowIndex}` : undefined}
             />
           </div>
-          <div ref={listRef} className="max-h-[360px] overflow-auto px-2 pb-2" role="listbox" aria-label="Search results">
+          <div ref={listRef} id="palette-results" className="max-h-[360px] overflow-auto px-2 pb-2" role="listbox" aria-label="Search results">
             {sections.map((section) => (
               <div key={section.title}>
                 <div className="px-2 py-1 text-xs font-medium text-[var(--ink-faint)] first:pt-1">{section.title}</div>
                 {section.rows.map((row) => {
                   const index = rowIndex++;
                   const Icon = row.icon;
-                  const isActive = index === clampedIndex;
+                  const isActive = row.key === flatRows[activeRowIndex]?.key;
                   return (
                     <button
                       key={row.key}
@@ -381,7 +390,7 @@ function SearchCommandDialog({
                         "flex h-9 w-full items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--ink-secondary)]",
                         isActive ? "bg-[var(--surface-hover)] text-[var(--ink)]" : "hover:bg-[var(--surface-hover)]",
                       )}
-                      onMouseEnter={() => setActiveIndex(index)}
+                      onMouseEnter={() => setActiveKey(row.key)}
                       onClick={row.onSelect}
                     >
                       {Icon ? (
@@ -788,7 +797,15 @@ function ShellSearch({ children }: { children: React.ReactNode }) {
   return (
     <SearchPaletteContext.Provider value={setOpen}>
       {children}
-      <SearchCommandDialog open={open} onOpenChange={setOpen} items={items} companies={companies} activeCompanyId={activeCompanyId} setActiveCompanyId={setActiveCompanyId} />
+      <SearchCommandDialog
+        open={open}
+        onOpenChange={setOpen}
+        items={items}
+        companies={companies}
+        activeCompanyId={activeCompanyId}
+        setActiveCompanyId={setActiveCompanyId}
+        canSearchEntities={Boolean(active?.membership.active)}
+      />
     </SearchPaletteContext.Provider>
   );
 }

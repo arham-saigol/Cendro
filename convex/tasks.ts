@@ -8,6 +8,7 @@ import { activeCompanyMembershipIds, assertCanAssign, assertCanDeleteTask, asser
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
 import { DEFAULT_QUERY_LIMIT, takeWithOverflow } from "./queryLimits";
+import { referenceSearchKey } from "./searchText";
 import { ASSIGNEE_SEARCH_MAX_LENGTH } from "../src/lib/assignee-search";
 import { nextReference } from "./references";
 import {
@@ -290,7 +291,7 @@ async function enrichedOneTime(ctx: Ctx, task: Doc<"oneTimeTasks">, canUpdate?: 
 function matchesSearch(task: { title: string; reference: string }, search?: string) {
   const needle = search?.trim().toLowerCase();
   if (!needle) return true;
-  return task.title.toLowerCase().includes(needle) || task.reference.toLowerCase().includes(needle);
+  return task.title.toLowerCase().includes(needle) || referenceSearchKey(task.reference).includes(referenceSearchKey(needle));
 }
 
 async function filterAssignableUsersBySearch(
@@ -634,6 +635,120 @@ export const listOneTimeRows = query({
       ...(orderKeys?.get(task._id) ? { customOrderKey: orderKeys.get(task._id) } : {}),
     }));
     return { ...page, page: rows };
+  },
+});
+
+// Palette search scans the company index newest-first until enough matches
+// collect or the ceiling ends the scan — the same bounded pattern as
+// filteredSopRows, so sparse matches late in the index are not silently
+// dropped while a single-transaction query stays under Convex read limits.
+const TASK_SEARCH_RESULT_LIMIT = 8;
+const TASK_SEARCH_SCAN_PAGE = 200;
+const TASK_SEARCH_SCAN_CEILING = 1_000;
+
+function taskSearchPage(ctx: QueryCtx, kind: TaskKind, companyId: Id<"companies">) {
+  return (cursor: string | null, numItems: number): Promise<{
+    page: (Doc<"jdTasks"> | Doc<"oneTimeTasks">)[];
+    isDone: boolean;
+    continueCursor: string;
+  }> =>
+    kind === "jd"
+      ? ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).order("desc").paginate({ cursor, numItems })
+      : ctx.db
+          .query("oneTimeTasks")
+          .withIndex("by_company", (q) => q.eq("companyId", companyId))
+          .order("desc")
+          .paginate({ cursor, numItems });
+}
+
+async function searchTasksOfKind(
+  ctx: QueryCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  auth: TaskVisibilityAuth,
+  kind: "jd",
+  needle: string,
+): Promise<{ rows: Doc<"jdTasks">[]; truncated: boolean }>;
+async function searchTasksOfKind(
+  ctx: QueryCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  auth: TaskVisibilityAuth,
+  kind: "one_time",
+  needle: string,
+): Promise<{ rows: Doc<"oneTimeTasks">[]; truncated: boolean }>;
+async function searchTasksOfKind(
+  ctx: QueryCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  auth: TaskVisibilityAuth,
+  kind: TaskKind,
+  needle: string,
+) {
+  const kept: (Doc<"jdTasks"> | Doc<"oneTimeTasks">)[] = [];
+
+  // An exact reference hits its own index — the cheapest possible match.
+  const exact = await (kind === "jd"
+    ? ctx.db
+        .query("jdTasks")
+        .withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).eq("reference", needle.toUpperCase()))
+        .unique()
+    : ctx.db
+        .query("oneTimeTasks")
+        .withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).eq("reference", needle.toUpperCase()))
+        .unique());
+  if (exact && (await visible(ctx, companyId, membership, exact, kind, auth))) kept.push(exact);
+
+  let cursor: string | null = null;
+  let scanned = 0;
+  let exhausted = false;
+  while (kept.length < TASK_SEARCH_RESULT_LIMIT && scanned < TASK_SEARCH_SCAN_CEILING) {
+    const page = await taskSearchPage(ctx, kind, companyId)(cursor, Math.min(TASK_SEARCH_SCAN_PAGE, TASK_SEARCH_SCAN_CEILING - scanned));
+    scanned += page.page.length;
+    const candidates = page.page.filter((task) => task._id !== exact?._id && matchesSearch(task, needle));
+    const flags = await Promise.all(candidates.map((task) => visible(ctx, companyId, membership, task, kind, auth)));
+    for (let index = 0; index < candidates.length && kept.length < TASK_SEARCH_RESULT_LIMIT; index += 1) {
+      if (flags[index]) kept.push(candidates[index]);
+    }
+    if (page.isDone) {
+      exhausted = true;
+      break;
+    }
+    cursor = page.continueCursor;
+  }
+  // Reaching the result cap means unshown matches may remain; hitting the scan
+  // ceiling means unvisited rows may hold more. Report both so the UI is honest.
+  return { rows: kept, truncated: kept.length === TASK_SEARCH_RESULT_LIMIT || !exhausted };
+}
+
+export const search = query({
+  args: { companyId: v.id("companies"), query: v.string() },
+  handler: async (ctx, args) => {
+    const needle = args.query.trim();
+    if (!needle) return { jdTasks: [], oneTimeTasks: [], truncated: false };
+    const { membership, company } = await requireMembership(ctx, args.companyId);
+    const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
+    const timeZone = company.timeZone ?? defaultTimeZone;
+    const [jd, oneTime] = await Promise.all([
+      searchTasksOfKind(ctx, args.companyId, membership, auth, "jd", needle),
+      searchTasksOfKind(ctx, args.companyId, membership, auth, "one_time", needle),
+    ]);
+    const now = Date.now();
+    const jdTasks = await Promise.all(
+      jd.rows.map(async (task) => ({
+        _id: task._id,
+        reference: task.reference,
+        title: task.title,
+        status: (await jdState(ctx, task, now, timeZone)).status,
+      })),
+    );
+    const oneTimeTasks = oneTime.rows.map((task) => ({
+      _id: task._id,
+      reference: task.reference,
+      title: task.title,
+      status: oneState(task).status,
+    }));
+    return { jdTasks, oneTimeTasks, truncated: jd.truncated || oneTime.truncated };
   },
 });
 

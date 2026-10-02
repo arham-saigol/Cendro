@@ -22,7 +22,7 @@ import {
   X,
 } from "lucide-react";
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import { CompanyProvider, useCompany, type CompanyAccess } from "./company-context";
 import { useTheme } from "./theme";
@@ -48,6 +48,24 @@ const nav = [
 
 const dropdownItemClass =
   "flex min-h-9 cursor-default select-none items-center gap-2 rounded-md px-2 py-1.5 text-sm text-[var(--ink-secondary)] outline-none data-[highlighted]:bg-[var(--surface-hover)] data-[highlighted]:text-[var(--ink)]";
+
+function navForCapabilities(active: CompanyAccess | null | undefined) {
+  const canManage = canAccessCompanyManagement(active?.capabilities);
+  const canDash = canViewDashboard(active?.capabilities);
+  return nav.filter((item) => (!item.requiresCompanyManagement || canManage) && (!item.requiresDashboard || canDash));
+}
+
+/** Lets any part of the shell open the single palette instance mounted by ShellSearch. */
+const SearchPaletteContext = createContext<(open: boolean) => void>(() => {});
+
+function useDebouncedValue(value: string, delay = 200) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebounced(value), delay);
+    return () => window.clearTimeout(timeout);
+  }, [value, delay]);
+  return debounced;
+}
 
 function ShellCard({ children }: { children: React.ReactNode }) {
   return (
@@ -160,6 +178,25 @@ function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
   );
 }
 
+const paletteScopeLabels: Record<string, string> = {
+  company: "Company",
+  branch: "Branch",
+  department: "Department",
+  user: "User",
+};
+
+type PaletteRow = {
+  key: string;
+  icon: React.ComponentType<{ className?: string }> | null;
+  letter?: string;
+  label: string;
+  meta?: string;
+  trailing?: React.ReactNode;
+  onSelect: () => void;
+};
+
+const PALETTE_MIN_QUERY = 2;
+
 function SearchCommandDialog({
   open,
   onOpenChange,
@@ -175,15 +212,138 @@ function SearchCommandDialog({
   activeCompanyId: CompanyAccess["company"]["_id"] | null;
   setActiveCompanyId: (id: CompanyAccess["company"]["_id"]) => void;
 }) {
+  const router = useRouter();
   const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
+  const listRef = useRef<HTMLDivElement>(null);
   const normalized = query.trim().toLowerCase();
-  const filteredItems = items.filter((item) => item.label.toLowerCase().includes(normalized));
-  const filteredCompanies = companies.filter((company) => company.company.name.toLowerCase().includes(normalized));
+  const debounced = useDebouncedValue(query);
+  const needle = debounced.trim().toLowerCase();
+
+  const entityArgs = activeCompanyId && needle.length >= PALETTE_MIN_QUERY ? { companyId: activeCompanyId, query: needle } : ("skip" as const);
+  const taskResults = useQuery(api.tasks.search, entityArgs);
+  const sopResults = useQuery(api.sops.search, entityArgs);
+  // Results always correspond to the debounced term; while the input is ahead
+  // of the debounce, show a searching state rather than stale matches.
+  const entityResults =
+    entityArgs !== "skip" && needle === normalized && taskResults && sopResults ? { tasks: taskResults, sops: sopResults } : null;
+  const searching = entityArgs !== "skip" && entityResults === null;
+
+  const sections: { title: string; rows: PaletteRow[] }[] = [];
+  {
+    const close = () => onOpenChange(false);
+    const filteredItems = items.filter((item) => item.label.toLowerCase().includes(normalized));
+    if (filteredItems.length > 0) {
+      sections.push({
+        title: "Pages",
+        rows: filteredItems.map((item) => ({
+          key: `page:${item.href}`,
+          icon: item.icon,
+          label: item.label,
+          onSelect: () => {
+            close();
+            router.push(item.href);
+          },
+        })),
+      });
+    }
+    if (entityResults && entityResults.tasks.jdTasks.length > 0) {
+      sections.push({
+        title: "Job Description tasks",
+        rows: entityResults.tasks.jdTasks.map((task) => ({
+          key: `jd:${task._id}`,
+          icon: Repeat,
+          label: task.title,
+          meta: `${task.reference} · ${task.status}`,
+          onSelect: () => {
+            close();
+            router.push(`/jd-tasks/${task._id}`);
+          },
+        })),
+      });
+    }
+    if (entityResults && entityResults.tasks.oneTimeTasks.length > 0) {
+      sections.push({
+        title: "One-time tasks",
+        rows: entityResults.tasks.oneTimeTasks.map((task) => ({
+          key: `one:${task._id}`,
+          icon: SquareCheck,
+          label: task.title,
+          meta: `${task.reference} · ${task.status}`,
+          onSelect: () => {
+            close();
+            router.push(`/one-time-tasks/${task._id}`);
+          },
+        })),
+      });
+    }
+    if (entityResults && entityResults.sops.sops.length > 0) {
+      sections.push({
+        title: "SOPs",
+        rows: entityResults.sops.sops.map((sop) => ({
+          key: `sop:${sop._id}`,
+          icon: FileText,
+          label: sop.title,
+          meta: `${sop.reference} · ${paletteScopeLabels[sop.scopeType] ?? sop.scopeType}`,
+          onSelect: () => {
+            close();
+            router.push(`/sops/${sop._id}`);
+          },
+        })),
+      });
+    }
+    const filteredCompanies = companies.filter((company) => company.company.name.toLowerCase().includes(normalized));
+    if (filteredCompanies.length > 0) {
+      sections.push({
+        title: "Workspaces",
+        rows: filteredCompanies.map((company) => ({
+          key: `company:${company.company._id}`,
+          icon: null,
+          letter: company.company.name?.[0]?.toUpperCase() ?? "C",
+          label: company.company.name,
+          trailing: company.company._id === activeCompanyId ? <Check className="h-4 w-4 text-[var(--ink)]" /> : undefined,
+          onSelect: () => {
+            setActiveCompanyId(company.company._id);
+            close();
+          },
+        })),
+      });
+    }
+  }
+
+  const flatRows = sections.flatMap((section) => section.rows);
+  const clampedIndex = flatRows.length === 0 ? 0 : Math.min(activeIndex, flatRows.length - 1);
+  const truncated = Boolean(entityResults?.tasks.truncated || entityResults?.sops.truncated);
 
   useEffect(() => {
-    if (!open) setQuery("");
+    if (!open) {
+      setQuery("");
+      setActiveIndex(0);
+    }
   }, [open]);
 
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [normalized]);
+
+  useEffect(() => {
+    listRef.current?.querySelector(`[data-index="${clampedIndex}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [clampedIndex]);
+
+  function onInputKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (flatRows.length) setActiveIndex((index) => (index + 1) % flatRows.length);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (flatRows.length) setActiveIndex((index) => (index - 1 + flatRows.length) % flatRows.length);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      flatRows[clampedIndex]?.onSelect();
+    }
+  }
+
+  let rowIndex = 0;
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -192,40 +352,54 @@ function SearchCommandDialog({
           <Dialog.Title className="sr-only">Search Cendro</Dialog.Title>
           <div className="flex h-11 items-center gap-2 px-3">
             <Search className="h-4 w-4 text-[var(--ink-faint)]" />
-            <Input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search pages and workspaces..." className="h-9 border-0 bg-transparent px-0 focus:border-0" />
+            <Input
+              autoFocus
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={onInputKeyDown}
+              placeholder="Search pages, tasks, SOPs, workspaces..."
+              className="h-9 border-0 bg-transparent px-0 focus:border-0"
+              aria-activedescendant={flatRows.length ? `palette-row-${clampedIndex}` : undefined}
+            />
           </div>
-          <div className="max-h-[360px] overflow-auto px-2 pb-2">
-            {filteredItems.length > 0 && <div className="px-2 py-1 text-xs font-medium text-[var(--ink-faint)]">Pages</div>}
-            {filteredItems.map((item) => {
-              const Icon = item.icon;
-              return (
-                <Dialog.Close asChild key={item.href}>
-                  <Link href={item.href} className="flex h-9 items-center gap-2 rounded-md px-2 text-sm text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)]">
-                    <Icon className="h-4 w-4 text-[var(--ink-muted)]" />
-                    {item.label}
-                  </Link>
-                </Dialog.Close>
-              );
-            })}
-            {filteredCompanies.length > 0 && <div className="mt-2 px-2 py-1 text-xs font-medium text-[var(--ink-faint)]">Workspaces</div>}
-            {filteredCompanies.map((company) => {
-              const isActive = company.company._id === activeCompanyId;
-              return (
-                <button
-                  key={company.company._id}
-                  className="flex h-9 w-full items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--ink-secondary)] hover:bg-[var(--surface-hover)]"
-                  onClick={() => {
-                    setActiveCompanyId(company.company._id);
-                    onOpenChange(false);
-                  }}
-                >
-                  <span className="grid h-5 w-5 place-items-center rounded bg-[var(--surface-muted)] text-xs text-[var(--ink-muted)]">{company.company.name?.[0]?.toUpperCase() ?? "C"}</span>
-                  <span className="min-w-0 flex-1 truncate">{company.company.name}</span>
-                  {isActive && <Check className="h-4 w-4 text-[var(--ink)]" />}
-                </button>
-              );
-            })}
-            {filteredItems.length === 0 && filteredCompanies.length === 0 && <div className="px-2 py-8 text-center text-sm text-[var(--ink-muted)]">No results found.</div>}
+          <div ref={listRef} className="max-h-[360px] overflow-auto px-2 pb-2" role="listbox" aria-label="Search results">
+            {sections.map((section) => (
+              <div key={section.title}>
+                <div className="px-2 py-1 text-xs font-medium text-[var(--ink-faint)] first:pt-1">{section.title}</div>
+                {section.rows.map((row) => {
+                  const index = rowIndex++;
+                  const Icon = row.icon;
+                  const isActive = index === clampedIndex;
+                  return (
+                    <button
+                      key={row.key}
+                      id={`palette-row-${index}`}
+                      data-index={index}
+                      role="option"
+                      aria-selected={isActive}
+                      className={cn(
+                        "flex h-9 w-full items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--ink-secondary)]",
+                        isActive ? "bg-[var(--surface-hover)] text-[var(--ink)]" : "hover:bg-[var(--surface-hover)]",
+                      )}
+                      onMouseEnter={() => setActiveIndex(index)}
+                      onClick={row.onSelect}
+                    >
+                      {Icon ? (
+                        <Icon className="h-4 w-4 shrink-0 text-[var(--ink-muted)]" />
+                      ) : (
+                        <span className="grid h-5 w-5 shrink-0 place-items-center rounded bg-[var(--surface-muted)] text-xs text-[var(--ink-muted)]">{row.letter}</span>
+                      )}
+                      <span className="min-w-0 flex-1 truncate">{row.label}</span>
+                      {row.meta && <span className="shrink-0 truncate text-xs text-[var(--ink-faint)]">{row.meta}</span>}
+                      {row.trailing}
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+            {flatRows.length === 0 && !searching && <div className="px-2 py-8 text-center text-sm text-[var(--ink-muted)]">No results found.</div>}
+            {searching && <div className="px-2 py-3 text-center text-xs text-[var(--ink-muted)]">Searching tasks and SOPs…</div>}
+            {truncated && !searching && <div className="border-t border-[var(--hairline)] px-2 py-2 text-center text-xs text-[var(--ink-faint)]">Showing top matches — keep typing to refine</div>}
           </div>
         </Dialog.Content>
       </Dialog.Portal>
@@ -233,13 +407,13 @@ function SearchCommandDialog({
   );
 }
 
-function AccountCompanyMenu({ searchItems = nav }: { searchItems?: typeof nav }) {
+function AccountCompanyMenu() {
   const { user } = useUser();
   const { signOut } = useClerk();
   const { companies, activeCompanyId, setActiveCompanyId, active } = useCompany();
+  const setSearchOpen = useContext(SearchPaletteContext);
   const profile = useQuery(api.users.me);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
   const profileName = profile ? [profile.firstName, profile.secondName].filter(Boolean).join(" ").trim() : "";
   const displayName = active?.displayName || profileName || user?.fullName || profile?.email || user?.primaryEmailAddress?.emailAddress || "User";
   const displayImage = profile?.imageUrl || user?.imageUrl;
@@ -297,12 +471,11 @@ function AccountCompanyMenu({ searchItems = nav }: { searchItems?: typeof nav })
           </DropdownMenu.Content>
         </DropdownMenu.Portal>
         </DropdownMenu.Root>
-        <button className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]" aria-label="Open search" onClick={() => setSearchOpen(true)}>
+        <button className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]" aria-label="Open search" aria-keyshortcuts="Control+K Meta+K" title="Search (Ctrl+K)" onClick={() => setSearchOpen(true)}>
           <Search className="h-3.5 w-3.5" />
         </button>
       </div>
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
-      <SearchCommandDialog open={searchOpen} onOpenChange={setSearchOpen} items={searchItems} companies={companies} activeCompanyId={activeCompanyId} setActiveCompanyId={setActiveCompanyId} />
     </>
   );
 }
@@ -424,9 +597,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
     if (accessStatus === "signedOut") router.replace(`/sign-in?redirect_url=${encodeURIComponent(path)}`);
   }, [accessStatus, path, router]);
 
-  const canOpenCompanyManagement = canAccessCompanyManagement(active?.capabilities);
-  const canViewActiveDashboard = canViewDashboard(active?.capabilities);
-  const visibleNav = useMemo(() => nav.filter((item) => (!item.requiresCompanyManagement || canOpenCompanyManagement) && (!item.requiresDashboard || canViewActiveDashboard)), [canOpenCompanyManagement, canViewActiveDashboard]);
+  const visibleNav = useMemo(() => navForCapabilities(active), [active]);
 
   if (accessStatus === "loading") {
     if (stalled) {
@@ -522,7 +693,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
   return (
     <div className={cn("flex h-dvh overflow-hidden bg-[var(--chrome)] pb-[max(0.5rem,env(safe-area-inset-bottom))] pl-[max(0.375rem,env(safe-area-inset-left))] pt-[max(0.5rem,env(safe-area-inset-top))] text-[var(--ink)]", aiOpen ? "pr-[max(0.375rem,env(safe-area-inset-right))]" : "pr-[max(0.625rem,env(safe-area-inset-right))]")}>
       <aside className="hidden w-[246px] shrink-0 flex-col bg-[var(--chrome-translucent)] px-2 pb-2 pt-1 backdrop-blur-sm md:flex">
-        <AccountCompanyMenu searchItems={visibleNav} />
+        <AccountCompanyMenu />
         <nav className="mt-4 space-y-0.5">
           {visibleNav.map((item) => {
             const Icon = item.icon;
@@ -551,7 +722,7 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <header className="shrink-0 bg-[var(--chrome-translucent)] px-2 pb-2 pt-1 backdrop-blur-sm md:hidden">
-          <AccountCompanyMenu searchItems={visibleNav} />
+          <AccountCompanyMenu />
           <nav className="scrollbar-hidden mt-2 flex gap-1 overflow-x-auto pb-1">
             {visibleNav.map((item) => {
               const Icon = item.icon;
@@ -593,10 +764,41 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
   );
 }
 
+/**
+ * Owns the single command-palette instance and its global Ctrl/Cmd+K shortcut.
+ * Both shell layouts mount an AccountCompanyMenu, so the dialog lives here to
+ * avoid stacked duplicates.
+ */
+function ShellSearch({ children }: { children: React.ReactNode }) {
+  const { companies, activeCompanyId, setActiveCompanyId, active } = useCompany();
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setOpen((current) => !current);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const items = useMemo(() => navForCapabilities(active), [active]);
+  return (
+    <SearchPaletteContext.Provider value={setOpen}>
+      {children}
+      <SearchCommandDialog open={open} onOpenChange={setOpen} items={items} companies={companies} activeCompanyId={activeCompanyId} setActiveCompanyId={setActiveCompanyId} />
+    </SearchPaletteContext.Provider>
+  );
+}
+
 export function AppShell({ children, isPlatformAdmin }: { children: React.ReactNode; isPlatformAdmin: boolean }) {
   return (
     <CompanyProvider>
-      <ShellInner isPlatformAdmin={isPlatformAdmin}>{children}</ShellInner>
+      <ShellSearch>
+        <ShellInner isPlatformAdmin={isPlatformAdmin}>{children}</ShellInner>
+      </ShellSearch>
     </CompanyProvider>
   );
 }

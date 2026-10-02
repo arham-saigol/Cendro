@@ -731,13 +731,64 @@ export const removeBulk = mutation({
   },
 });
 
+// Agent SOP search uses the FTS index for content and a bounded substring scan
+// for title/reference (which FTS cannot express). Both paths stop at best-effort
+// targets rather than throwing, so a large workspace still returns its
+// reachable matches instead of failing on the filtered-scan ceiling.
+const AI_SOP_TITLE_TARGET = 24;
+const AI_SOP_TITLE_SCAN_BUDGET = 500;
+const AI_SOP_CONTENT_TARGET = 24;
+const AI_SOP_CONTENT_SCAN_BUDGET = 200;
+
+function aiSopListRow(row: { _id: Id<"sops">; reference: string; title: string; content: string; scopeType: Doc<"sops">["scopeType"]; scopeTargetName: string | null; canUpdate: boolean; canDelete: boolean }) {
+  return { id: row._id, reference: row.reference, title: row.title, excerpt: row.content.slice(0, 700), scopeType: row.scopeType, scopeTargetName: row.scopeTargetName, canUpdate: row.canUpdate, canDelete: row.canDelete };
+}
+
 export const aiListSops = query({
   args: { companyId: v.id("companies"), query: v.optional(v.string()), scope: v.optional(sopScopeFilterValidator), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
     const limit = Math.min(Math.max(Math.floor(args.limit ?? 12), 1), 25);
     const scope = args.scope === "all" ? undefined : args.scope;
-    const rows = await filteredSopRows(ctx, { companyId: args.companyId, search: args.query, view: "all", scope, limit });
-    return rows.map((row) => ({ id: row._id, reference: row.reference, title: row.title, excerpt: row.content.slice(0, 700), scopeType: row.scopeType, scopeTargetName: row.scopeTargetName, canUpdate: row.canUpdate, canDelete: row.canDelete }));
+    const needle = args.query?.trim();
+    if (!needle) {
+      const rows = await filteredSopRows(ctx, { companyId: args.companyId, view: "all", scope, limit });
+      return rows.map(aiSopListRow);
+    }
+    const { membership } = await requireMembership(ctx, args.companyId);
+    const company = await ctx.db.get(args.companyId);
+    const caps = await membershipCapabilities(ctx, membership);
+    const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
+    const auth = sopListAuth(ctx, args.companyId, membership, caps);
+    const lower = needle.toLowerCase();
+    const inScope = (sop: Doc<"sops">) => scope === undefined || sop.scopeType === scope;
+    const titleScan = async () => {
+      const matched: Doc<"sops">[] = [];
+      let cursor: string | null = null;
+      let scanned = 0;
+      while (matched.length < AI_SOP_TITLE_TARGET && scanned < AI_SOP_TITLE_SCAN_BUDGET) {
+        const page = await ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: Math.min(100, AI_SOP_TITLE_SCAN_BUDGET - scanned) });
+        scanned += page.page.length;
+        const hits = page.page.filter((sop) => inScope(sop) && (sop.reference.toLowerCase().includes(lower) || sop.title.toLowerCase().includes(lower)));
+        const flags = await Promise.all(hits.map((sop) => visibleSop(ctx, args.companyId, membership, sop, visibility, caps, undefined, auth)));
+        for (let index = 0; index < hits.length; index += 1) {
+          if (flags[index]) matched.push(hits[index]);
+        }
+        if (page.isDone) break;
+        cursor = page.continueCursor;
+      }
+      return matched;
+    };
+    const [contentResult, titleRows] = await Promise.all([
+      visibleContentMatches(ctx, args.companyId, needle, membership, caps, visibility, AI_SOP_CONTENT_TARGET, AI_SOP_CONTENT_SCAN_BUDGET, auth),
+      titleScan(),
+    ]);
+    const candidates = new Map<string, Doc<"sops">>();
+    for (const sop of titleRows) candidates.set(sop._id, sop);
+    for (const sop of contentResult.sops) {
+      if (inScope(sop)) candidates.set(sop._id, sop);
+    }
+    const rows = await Promise.all([...candidates.values()].slice(0, limit).map((sop) => withScopes(ctx, sop, membership, company?.name, caps, auth)));
+    return rows.map(aiSopListRow);
   },
 });
 

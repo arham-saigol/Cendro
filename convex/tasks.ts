@@ -1946,6 +1946,7 @@ export const aiSetStatus = mutation({
     const { membership } = await requireMembership(ctx, args.companyId);
     const { normalized } = await getVisibleTask(ctx, args.companyId, membership, args.kind, args.taskId);
     if (args.kind === "jd") {
+      if (args.note !== undefined && args.status !== "completed") throw new ConvexError("Status notes are only saved when completing a task.");
       await setJdStatus(ctx, args.companyId, normalized as Id<"jdTasks">, args.status, args.note);
       const updated = await ctx.db.get(normalized as Id<"jdTasks">);
       if (!updated) throw new ConvexError("Task not found.");

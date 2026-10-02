@@ -107,6 +107,17 @@ function safeError(error: unknown) {
   return "The requested action could not be completed.";
 }
 
+// A committed write can land outside the actor's own visibility (an SOP scoped
+// to someone else, a task assigned away): the follow-up read failing must not
+// read as a failed write, or a retry would create duplicates.
+async function readBack<T>(promise: Promise<T>): Promise<T | null> {
+  try {
+    return await promise;
+  } catch {
+    return null;
+  }
+}
+
 function taskOut(ctx: CendroAiToolContext, row: any) {
   const kind = row.kind === "jd" ? "jd" : "one_time";
   return {
@@ -230,7 +241,8 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
         if (input.recurrence !== undefined) throw new AiToolInputError("One-time tasks do not take a recurrence; use a due date instead.");
         taskId = await ctx.client.mutation(api.tasks.createOneTime, { companyId: ctx.companyId, title: input.title, description: input.description, notes: input.notes, dueDate: input.dueDateMs, time: input.time, quantity: input.quantity, assigneeMembershipIds, priority: input.priority ?? "medium" });
       }
-      const row = await ctx.client.query(api.tasks.aiGetDetail, { companyId: ctx.companyId, kind: input.kind, taskId });
+      const row = await readBack(ctx.client.query(api.tasks.aiGetDetail, { companyId: ctx.companyId, kind: input.kind, taskId }));
+      if (!row) return { ok: true, taskRef: refFor(ctx, "task", `${input.kind}:${taskId}`), message: "Task saved, but it is not visible to you, so its details cannot be confirmed." };
       return { ok: true, task: taskOut(ctx, row) };
     },
   },
@@ -252,7 +264,8 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
         if (input.recurrence !== undefined) throw new AiToolInputError("One-time tasks do not have a recurrence; update the due date instead.");
         await ctx.client.mutation(api.tasks.updateOneTimeFields, { companyId: ctx.companyId, taskId: id as Id<"oneTimeTasks">, title: input.title, description: input.description, notes: input.notes, dueDate: input.clearDueDate ? null : input.dueDateMs, time: input.time, quantity: input.clearQuantity ? null : input.quantity, assigneeMembershipIds, priority: input.priority });
       }
-      const row = await ctx.client.query(api.tasks.aiGetDetail, { companyId: ctx.companyId, kind, taskId: id });
+      const row = await readBack(ctx.client.query(api.tasks.aiGetDetail, { companyId: ctx.companyId, kind, taskId: id }));
+      if (!row) return { ok: true, taskRef: input.taskRef, message: "Changes saved, but the task is no longer visible to you, so its details cannot be confirmed." };
       return { ok: true, task: taskOut(ctx, row) };
     },
   },
@@ -344,7 +357,8 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
     execute: async (input, ctx) => {
       const targets = sopScopeTargets(ctx, input.scopeType, input.targetRef);
       const sopId = await ctx.client.mutation(api.sops.create, { companyId: ctx.companyId, title: input.title, content: input.content, scopeType: input.scopeType, ...targets });
-      const row = await ctx.client.query(api.sops.aiGet, { companyId: ctx.companyId, sopId });
+      const row = await readBack(ctx.client.query(api.sops.aiGet, { companyId: ctx.companyId, sopId }));
+      if (!row) return { ok: true, sopRef: refFor(ctx, "sop", sopId), message: "SOP saved, but it is not visible to you, so its details cannot be confirmed." };
       return { ok: true, sop: sopOut(ctx, row, true) };
     },
   },
@@ -365,7 +379,8 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
         content: input.content,
         ...(input.scopeType === undefined ? {} : { scopeType: input.scopeType, ...sopScopeTargets(ctx, input.scopeType, input.targetRef) }),
       });
-      const row = await ctx.client.query(api.sops.aiGet, { companyId: ctx.companyId, sopId: ref.id as Id<"sops"> });
+      const row = await readBack(ctx.client.query(api.sops.aiGet, { companyId: ctx.companyId, sopId: ref.id as Id<"sops"> }));
+      if (!row) return { ok: true, sopRef: input.sopRef, message: "Changes saved, but the SOP is no longer visible to you, so its details cannot be confirmed." };
       return { ok: true, sop: sopOut(ctx, row, true) };
     },
   },

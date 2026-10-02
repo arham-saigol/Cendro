@@ -52,6 +52,7 @@ export const capabilities = [
   "sops:delete:department",
   "sops:delete:user",
   "company:manage_settings",
+  "company:manage_calendar",
   "company:manage_branches",
   "company:manage_departments",
   "company:invite_users",
@@ -71,6 +72,7 @@ export function isKnownCapability(val: string): val is Capability {
 
 export const companyManagementCapabilities: Capability[] = [
   "company:manage_settings",
+  "company:manage_calendar",
   "company:manage_branches",
   "company:manage_departments",
   "company:invite_users",
@@ -232,6 +234,7 @@ export const capabilityLabels: Record<Capability, string> = {
   "sops:delete:department": "Delete department SOPs",
   "sops:delete:user": "Delete user SOPs",
   "company:manage_settings": "Manage company settings",
+  "company:manage_calendar": "Manage work calendar",
   "company:manage_branches": "Manage branches",
   "company:manage_departments": "Manage departments",
   "company:invite_users": "Invite users",
@@ -320,6 +323,7 @@ export const capabilityGroups: { title: string; capabilities: Capability[] }[] =
     title: "Company",
     capabilities: [
       "company:manage_settings",
+      "company:manage_calendar",
       "company:manage_branches",
       "company:manage_departments",
       "company:invite_users",

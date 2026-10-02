@@ -59,6 +59,16 @@ function localDayIndex(parts: { year: number; month: number; day: number }) {
   return floorDiv(Date.UTC(parts.year, parts.month - 1, parts.day), dayMs);
 }
 
+/** Calendar-date index of the instant's local date (UTC-indexed day count). */
+export function localDayIndexAt(ms: number, timeZone?: string | null) {
+  return localDayIndex(localParts(ms, timeZoneOrDefault(timeZone)));
+}
+
+/** UTC instant of local midnight starting `dayIndex` in the given time zone. */
+export function localDayBoundaryUtc(dayIndex: number, timeZone?: string | null) {
+  return boundaryUtc(timeZoneOrDefault(timeZone), localDateFromDayIndex(dayIndex));
+}
+
 function localDateAdd(parts: { year: number; month: number; day: number }, days: number) {
   return localDateFromDayIndex(localDayIndex(parts) + days);
 }
@@ -171,43 +181,4 @@ export function previousJdCycle(recurrence: JdRecurrence, now = Date.now(), time
   return { start, end: current.start };
 }
 
-export function elapsedJdCyclesSince(recurrence: JdRecurrence, activeAt: number, now = Date.now(), maxCycles = 200, timeZone?: string | null): { cycles: JdCycle[]; nextActiveAt: number } {
-  const current = currentJdCycle(recurrence, now, timeZone);
-  let start = currentJdCycle(recurrence, activeAt, timeZone).start;
-  const cycles: JdCycle[] = [];
-  while (start < current.start && cycles.length < maxCycles) {
-    const end = nextJdCycleStart(start, recurrence, timeZone);
-    if (end <= now) cycles.push({ start, end });
-    start = end;
-  }
-  return { cycles, nextActiveAt: start };
-}
 
-/**
- * Elapsed cycles whose deadlines fall inside [rangeStart, rangeEnd], walked
- * back from the current cycle so a lagging `activeAt` can never push recent
- * deadlines past `maxCycles`. Cycles that end after rangeEnd are skipped
- * without consuming the cap; the walk stops once deadlines fall below
- * rangeStart or before the cycle containing `activeAt`.
- */
-export function elapsedJdCyclesDueBetween(recurrence: JdRecurrence, activeAt: number, now: number, rangeStart: number, rangeEnd: number, maxCycles = 200, timeZone?: string | null): { cycles: JdCycle[]; truncated: boolean } {
-  const current = currentJdCycle(recurrence, now, timeZone);
-  const floor = currentJdCycle(recurrence, activeAt, timeZone).start;
-  const cycles: JdCycle[] = [];
-  let truncated = false;
-  let end = current.start;
-  while (end > floor) {
-    const start = previousJdCycleStart(end, recurrence, timeZone);
-    if (start < floor) break;
-    if (end - 1 < rangeStart) break;
-    if (end - 1 <= rangeEnd) {
-      if (cycles.length >= maxCycles) {
-        truncated = true;
-        break;
-      }
-      cycles.push({ start, end });
-    }
-    end = start;
-  }
-  return { cycles, truncated };
-}

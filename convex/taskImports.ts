@@ -3,7 +3,8 @@ import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/s
 import type { Doc, Id } from "./_generated/dataModel";
 import { getManagedMembershipIds, hasAllManagedMemberships, isManagedMembership, membershipCapabilities, requireCapability } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
-import { currentJdCycle, nextJdCycleStart } from "./taskCycles";
+import { nextJdCycleStart } from "./taskCycles";
+import { effectiveCurrentJdCycle, loadWorkCalendar, occurrenceDeadline } from "./workCalendar";
 import { recordMissedJdCycles } from "./tasks";
 import { syncReferenceCounter } from "./references";
 import { normalizeEmail, nonEmpty } from "./validation";
@@ -431,6 +432,7 @@ export const commitTaskImportBatch = mutation({
       includedRows.map((row) => row.selectedAssigneeMembershipIds)
     );
     const auth = await buildImportAuth(ctx, args.companyId, membership, args.kind, emails, membershipIds);
+    const calendar = await loadWorkCalendar(ctx, args.companyId);
     const prepared = [];
     for (const row of includedRows) prepared.push(await validateCommitRow(ctx, args.companyId, args.kind, auth, row));
     let created = 0;
@@ -443,9 +445,9 @@ export const commitTaskImportBatch = mutation({
         if (args.kind === "jd") {
           const task = item.task as Doc<"jdTasks">;
           const recurrence = hasField(item.draft, "recurrence") && item.draft.recurrence ? item.draft.recurrence : task.recurrence;
-          const currentCycle = currentJdCycle(recurrence, now, company.timeZone);
+          const currentCycle = effectiveCurrentJdCycle(calendar, recurrence, now, company.timeZone);
           const nextCycleStart = recurrence !== task.recurrence ? currentCycle.start : undefined;
-          await recordMissedJdCycles(ctx, task, now, company.timeZone);
+          await recordMissedJdCycles(ctx, task, now, company.timeZone, calendar);
           const rolled = await ctx.db.get(task._id);
           if (!rolled) fail("One or more import rows became unavailable. Re-preview and try again.");
           const activeCycleStart = nextCycleStart ?? currentCycle.start;
@@ -455,7 +457,8 @@ export const commitTaskImportBatch = mutation({
           if (targetStatus) {
             const currentDone = previousDone;
             if (targetStatus === "completed" && !currentDone) {
-              await ctx.db.insert("jdTaskCompletions", { companyId: args.companyId, jdTaskId: task._id, cycleStart: activeCycleStart, cycleEnd: nextJdCycleStart(activeCycleStart, recurrence, company.timeZone), completedByMembershipId: membership._id, completedAt: now });
+              const cycleEnd = nextJdCycleStart(activeCycleStart, recurrence, company.timeZone);
+              await ctx.db.insert("jdTaskCompletions", { companyId: args.companyId, jdTaskId: task._id, cycleStart: activeCycleStart, cycleEnd: occurrenceDeadline(calendar, recurrence, cycleEnd, company.timeZone) ?? cycleEnd, completedByMembershipId: membership._id, completedAt: now });
             } else if (targetStatus !== "completed" && currentDone) {
               await ctx.db.delete(currentDone._id);
             }
@@ -553,11 +556,11 @@ export const commitTaskImportBatch = mutation({
       } else {
         const reference = item.reference;
         if (args.kind === "jd") {
-          const cycle = currentJdCycle(item.draft.recurrence!, now, company.timeZone);
+          const cycle = effectiveCurrentJdCycle(calendar, item.draft.recurrence!, now, company.timeZone);
           const initialStatus = hasField(item.draft, "status") && item.draft.status ? item.draft.status : "due";
           const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title: nonEmpty(item.draft.title ?? "", "Task title"), description: cleanText(item.draft.description), notes: cleanText(item.draft.notes), time: cleanText(item.draft.time), quantity: item.draft.quantity ?? undefined, recurrence: item.draft.recurrence!, cycleStartedAt: now, status: initialStatus, statusCycleStart: cycle.start, assigneeMembershipIds: item.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
           if (initialStatus === "completed") {
-            await ctx.db.insert("jdTaskCompletions", { companyId: args.companyId, jdTaskId: id, cycleStart: cycle.start, cycleEnd: cycle.end, completedByMembershipId: membership._id, completedAt: now });
+            await ctx.db.insert("jdTaskCompletions", { companyId: args.companyId, jdTaskId: id, cycleStart: cycle.start, cycleEnd: occurrenceDeadline(calendar, item.draft.recurrence!, cycle.end, company.timeZone) ?? cycle.end, completedByMembershipId: membership._id, completedAt: now });
           }
           await ctx.db.insert("taskActivityLogs", { companyId: args.companyId, taskType: "jd", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
         } else {

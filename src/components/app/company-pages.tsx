@@ -100,7 +100,7 @@ const TABS: { value: TabValue; label: string; icon: LucideIcon }[] = [
 ];
 
 function canViewCompanyTab(tab: TabValue, capabilities: readonly string[] | null | undefined) {
-  if (tab === "general") return Boolean(capabilities?.includes("company:manage_settings"));
+  if (tab === "general") return Boolean(capabilities?.some((capability) => capability === "company:manage_settings" || capability === "company:manage_calendar"));
   if (tab === "structure") return Boolean(capabilities?.some((capability) => capability === "company:manage_branches" || capability === "company:manage_departments"));
   if (tab === "people") return Boolean(capabilities?.some((capability) => capability === "company:manage_users" || capability === "company:invite_users" || capability === "company:manage_roles"));
   return Boolean(capabilities?.includes("company:manage_roles"));
@@ -374,6 +374,11 @@ function GeneralTab({
   savingName,
   onSaveName,
   onSaveTimeZone,
+  calendar,
+  canManageCalendar,
+  onSetWorkingDays,
+  onAddHoliday,
+  onRemoveHoliday,
 }: {
   data: Overview;
   companyName: string;
@@ -386,6 +391,11 @@ function GeneralTab({
   savingName: boolean;
   onSaveName: () => Promise<void> | void;
   onSaveTimeZone: (timeZone: string) => Promise<void> | void;
+  calendar?: WorkCalendarData;
+  canManageCalendar: boolean;
+  onSetWorkingDays: (workingDays: number[]) => Promise<void> | void;
+  onAddHoliday: (name: string, startDate: string, endDate: string) => Promise<void> | void;
+  onRemoveHoliday: (holidayId: Id<"companyHolidays">) => Promise<void> | void;
 }) {
   const options = timeZoneOptions(timeZone);
   const savedTimeZone = data.company?.timeZone ?? DEFAULT_TIME_ZONE;
@@ -452,7 +462,171 @@ function GeneralTab({
           </div>
         </div>
       </section>
+      {calendar && (
+        <WorkCalendarSection
+          calendar={calendar}
+          canManageCalendar={canManageCalendar}
+          onSetWorkingDays={onSetWorkingDays}
+          onAddHoliday={onAddHoliday}
+          onRemoveHoliday={onRemoveHoliday}
+        />
+      )}
     </div>
+  );
+}
+
+type CalendarHoliday = { _id: Id<"companyHolidays">; name: string; startDate: string; endDate: string };
+type WorkCalendarData = { workingDays: number[]; holidays: CalendarHoliday[] };
+
+const WEEKDAY_OPTIONS = [
+  { value: 1, label: "Monday" },
+  { value: 2, label: "Tuesday" },
+  { value: 3, label: "Wednesday" },
+  { value: 4, label: "Thursday" },
+  { value: 5, label: "Friday" },
+  { value: 6, label: "Saturday" },
+  { value: 0, label: "Sunday" },
+];
+
+function holidayRangeLabel(holiday: CalendarHoliday) {
+  return holiday.startDate === holiday.endDate
+    ? formatDate(holiday.startDate)
+    : `${formatDate(holiday.startDate)} – ${formatDate(holiday.endDate)}`;
+}
+
+function WorkCalendarSection({
+  calendar,
+  canManageCalendar,
+  onSetWorkingDays,
+  onAddHoliday,
+  onRemoveHoliday,
+}: {
+  calendar: WorkCalendarData;
+  canManageCalendar: boolean;
+  onSetWorkingDays: (workingDays: number[]) => Promise<void> | void;
+  onAddHoliday: (name: string, startDate: string, endDate: string) => Promise<void> | void;
+  onRemoveHoliday: (holidayId: Id<"companyHolidays">) => Promise<void> | void;
+}) {
+  const [holidayName, setHolidayName] = useState("");
+  const [holidayStart, setHolidayStart] = useState("");
+  const [holidayEnd, setHolidayEnd] = useState("");
+  const workingDays = new Set(calendar.workingDays);
+
+  const setWorkingDay = (day: number, on: boolean) => {
+    const next = new Set(workingDays);
+    if (on) next.add(day);
+    else {
+      // Keep at least one working day; the backend rejects an empty list.
+      if (next.size === 1) return;
+      next.delete(day);
+    }
+    void onSetWorkingDays([...next].sort((a, b) => a - b));
+  };
+
+  const submitHoliday = async () => {
+    const name = holidayName.trim();
+    if (!name || !holidayStart) return;
+    await onAddHoliday(name, holidayStart, holidayEnd || holidayStart);
+    setHolidayName("");
+    setHolidayStart("");
+    setHolidayEnd("");
+  };
+
+  return (
+    <section className="company-settings-section">
+      <h2 className="company-tab-section-title">Work calendar</h2>
+      <div className="company-settings-list">
+        <div className="company-settings-row">
+          <div className="min-w-0">
+            <div className="company-settings-label">Working days</div>
+            <p className="company-settings-help">
+              Daily and every-other-day tasks skip non-working days; other frequencies move their due date to the next working day.
+            </p>
+          </div>
+          <div className="company-settings-control">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              {WEEKDAY_OPTIONS.map((day) => (
+                <label key={day.value} className="flex items-center gap-1.5 text-[13px] text-[var(--ink)]">
+                  <Checkbox
+                    checked={workingDays.has(day.value)}
+                    onCheckedChange={(next) => setWorkingDay(day.value, next)}
+                    disabled={!canManageCalendar}
+                    aria-label={day.label}
+                  />
+                  {day.label.slice(0, 3)}
+                </label>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="company-settings-row">
+          <div className="min-w-0">
+            <div className="company-settings-label">Holidays</div>
+            <p className="company-settings-help">Named days off, as single dates or ranges. Holidays count as non-working days.</p>
+          </div>
+          <div className="company-settings-control w-full sm:w-auto sm:min-w-[320px]">
+            <div className="flex w-full flex-col gap-2">
+              {calendar.holidays.length === 0 && <p className="text-[12px] text-[var(--ink-muted)]">No holidays yet.</p>}
+              {calendar.holidays.map((holiday) => (
+                <div key={holiday._id} className="flex items-center justify-between gap-2 rounded-md border border-[var(--hairline)] px-2.5 py-1.5">
+                  <div className="min-w-0">
+                    <div className="truncate text-[13px] text-[var(--ink)]">{holiday.name}</div>
+                    <div className="text-[12px] text-[var(--ink-muted)]">{holidayRangeLabel(holiday)}</div>
+                  </div>
+                  {canManageCalendar && (
+                    <button
+                      type="button"
+                      className="shrink-0 rounded p-1 text-[var(--ink-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--ink)]"
+                      onClick={() => void onRemoveHoliday(holiday._id)}
+                      aria-label={`Remove ${holiday.name}`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+              ))}
+              {canManageCalendar && (
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <Input
+                    value={holidayName}
+                    onChange={(event) => setHolidayName(event.target.value)}
+                    placeholder="Holiday name"
+                    aria-label="Holiday name"
+                    className="min-w-[140px] flex-1"
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && holidayName.trim() && holidayStart) void submitHoliday();
+                    }}
+                  />
+                  <Input
+                    type="date"
+                    value={holidayStart}
+                    onChange={(event) => setHolidayStart(event.target.value)}
+                    aria-label="Holiday start date"
+                    className="w-auto"
+                  />
+                  <Input
+                    type="date"
+                    value={holidayEnd}
+                    onChange={(event) => setHolidayEnd(event.target.value)}
+                    aria-label="Holiday end date"
+                    className="w-auto"
+                    placeholder="End"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={!holidayName.trim() || !holidayStart}
+                    onClick={() => void submitHoliday()}
+                  >
+                    <Plus className="h-3.5 w-3.5" /> Add
+                  </Button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -2244,6 +2418,36 @@ export default function Company() {
       });
     }
   });
+  const workCalendar = useQuery(
+    api.workCalendar.get,
+    activeCompanyId && canAccessCompanyManagement(active?.capabilities) ? { companyId: activeCompanyId } : "skip"
+  ) as WorkCalendarData | undefined;
+  const setWorkingDays = useMutation(api.workCalendar.setWorkingDays).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.workCalendar.get, { companyId: args.companyId }) as WorkCalendarData | undefined;
+    if (current) {
+      localStore.setQuery(api.workCalendar.get, { companyId: args.companyId }, { ...current, workingDays: args.workingDays } as any);
+    }
+  });
+  const addHoliday = useMutation(api.workCalendar.addHoliday).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.workCalendar.get, { companyId: args.companyId }) as WorkCalendarData | undefined;
+    if (current) {
+      const startDate = args.startDate <= args.endDate ? args.startDate : args.endDate;
+      const endDate = args.startDate <= args.endDate ? args.endDate : args.startDate;
+      localStore.setQuery(api.workCalendar.get, { companyId: args.companyId }, {
+        ...current,
+        holidays: [...current.holidays, { _id: `pending-${args.name}-${startDate}` as Id<"companyHolidays">, name: args.name.trim(), startDate, endDate }],
+      } as any);
+    }
+  });
+  const removeHoliday = useMutation(api.workCalendar.removeHoliday).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.workCalendar.get, { companyId: args.companyId }) as WorkCalendarData | undefined;
+    if (current) {
+      localStore.setQuery(api.workCalendar.get, { companyId: args.companyId }, {
+        ...current,
+        holidays: current.holidays.filter((holiday) => holiday._id !== args.holidayId),
+      } as any);
+    }
+  });
   const createBranch = useMutation(api.companyManagement.createBranch);
   const createDepartment = useMutation(api.companyManagement.createDepartment);
   const deleteBranch = useMutation(api.companyManagement.deleteBranch);
@@ -2406,6 +2610,7 @@ export default function Company() {
   const currentCompany = data.company ?? active?.company;
   const nameDirty = companyName.trim() !== (currentCompany?.name ?? "") && companyName.trim() !== "";
   const canManageSettings = active?.capabilities.includes("company:manage_settings") ?? false;
+  const canManageCalendar = active?.capabilities.includes("company:manage_calendar") ?? false;
   const canManageBranches = active?.capabilities.includes("company:manage_branches") ?? false;
   const canManageDepartments = active?.capabilities.includes("company:manage_departments") ?? false;
   const canManageUsers = active?.capabilities.includes("company:manage_users") ?? false;
@@ -2566,6 +2771,11 @@ export default function Company() {
                 canManageSettings={canManageSettings}
                 onSaveName={saveCompanyName}
                 onSaveTimeZone={saveCompanyTimeZone}
+                calendar={workCalendar}
+                canManageCalendar={canManageCalendar}
+                onSetWorkingDays={(workingDays) => { if (activeCompanyId) void run(async () => setWorkingDays({ companyId: activeCompanyId, workingDays }), "Could not update working days."); }}
+                onAddHoliday={(name, startDate, endDate) => { if (activeCompanyId) void run(async () => addHoliday({ companyId: activeCompanyId, name, startDate, endDate }), "Could not add holiday."); }}
+                onRemoveHoliday={(holidayId) => { if (activeCompanyId) void run(async () => removeHoliday({ companyId: activeCompanyId, holidayId }), "Could not remove holiday."); }}
               />
             )}
             {activeTab === "structure" && (

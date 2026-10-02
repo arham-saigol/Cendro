@@ -12,6 +12,7 @@ function mockContext(overrides: Partial<CendroAiToolContext> = {}): CendroAiTool
     sessionId: "session-1" as Id<"aiChatSessions">,
     membershipId: "member-1" as Id<"companyMemberships">,
     role: "Admin",
+    timeZone: "UTC",
     capabilities: new Set(["tasks:one_time:create", "tasks:jd:create", "tasks:comment", "sops:create"] as const),
     refs: new Map(),
     counters: { task: 0, sop: 0, member: 0, branch: 0, department: 0 },
@@ -33,22 +34,25 @@ describe("AI tool registry", () => {
       title: "Clean kitchen",
       notes: "Do not use bleach",
       priority: "critical",
+      assigneeRefs: ["member_1"],
     });
 
     const ctx = mockContext();
+    ctx.refs.set("member_1", { kind: "member", id: "member-1" });
     (ctx.client.mutation as any).mockResolvedValueOnce("task-1");
     (ctx.client.query as any).mockResolvedValueOnce({ kind: "one_time", id: "task-1", title: "Clean kitchen", notes: "Do not use bleach", status: "due", priority: "critical", assignees: [], comments: [] });
 
     const res = await def.execute(parsed, ctx);
     expect(res).toMatchObject({ ok: true, task: { title: "Clean kitchen", notes: "Do not use bleach", priority: "critical" } });
-    expect(ctx.client.mutation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ notes: "Do not use bleach", priority: "critical" }));
+    expect(ctx.client.mutation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ notes: "Do not use bleach", priority: "critical", assigneeMembershipIds: ["member-1"] }));
     expect(ctx.client.query).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ kind: "one_time", taskId: "task-1" }));
   });
 
   test("create_task requires a capability matching its kind", async () => {
     const def = defOf("create_task");
-    const parsed: any = def.inputSchema.parse({ kind: "one_time", title: "Nope" });
+    const parsed: any = def.inputSchema.parse({ kind: "one_time", title: "Nope", assigneeRefs: ["member_1"] });
     const ctx = mockContext({ capabilities: new Set() });
+    ctx.refs.set("member_1", { kind: "member", id: "member-1" });
     const tools = buildCendroAiTools(ctx);
     const res = await (tools.create_task.execute as any)(parsed);
     expect(res).toMatchObject({ ok: false });
@@ -57,13 +61,19 @@ describe("AI tool registry", () => {
 
   test("create_task rejects a jd task without recurrence", async () => {
     const def = defOf("create_task");
-    const parsed: any = def.inputSchema.parse({ kind: "jd", title: "Inspection" });
+    const parsed: any = def.inputSchema.parse({ kind: "jd", title: "Inspection", assigneeRefs: ["member_1"] });
     const ctx = mockContext();
+    ctx.refs.set("member_1", { kind: "member", id: "member-1" });
     const tools = buildCendroAiTools(ctx);
     const res = await (tools.create_task.execute as any)(parsed);
     expect(res).toMatchObject({ ok: false });
     expect((res as any).message).toMatch(/recurrence/i);
     expect(ctx.client.mutation).not.toHaveBeenCalled();
+  });
+
+  test("create_task requires at least one assignee", () => {
+    const def = defOf("create_task");
+    expect(() => def.inputSchema.parse({ kind: "one_time", title: "Unassigned" })).toThrow();
   });
 
   test("list_tasks passes query and kind filters and carries notes through taskOut", async () => {

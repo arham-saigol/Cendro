@@ -40,6 +40,7 @@ export const context = query({
     const scope = hasCompanyScope ? "company" : hasManagedScope ? "managed" : "self";
     return {
       companyName: company.name,
+      timeZone: company.timeZone ?? null,
       role: membership.role,
       capabilities: Array.from(capabilities),
       scope,

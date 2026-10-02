@@ -1883,29 +1883,23 @@ export const aiListVisible = query({
     const matches = (status: string) => args.status === "all" || (args.status === "overdue" ? status === "Overdue" : args.status === "done" ? status === "Completed" : status !== "Completed" && status !== "Overdue");
     const now = Date.now();
     const timeZone = await companyTimeZone(ctx, args.companyId);
-    // Keep paging source rows until the requested count is filled or the scan
-    // budget runs out; `exhausted` reports whether matching rows may remain.
-    // Enrichment is deferred: candidates are only visibility- and
-    // state-checked here, and assignees load in one batch across all matches
-    // so the scan budget also bounds total reads below transaction limits.
+    // Convex allows only one .paginate() call per function and this handler
+    // scans two tables, so each scan is a single bounded take() of the newest
+    // rows; `exhausted` reports whether matching rows may remain. Enrichment is
+    // deferred: candidates are only visibility- and state-checked here, and
+    // assignees load in one batch across all matches so the scan budget also
+    // bounds total reads below transaction limits.
     const collect = async (kind: TaskKind, table: "jdTasks" | "oneTimeTasks") => {
+      const page = await ctx.db.query(table).withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(AI_LIST_TASK_SCAN_LIMIT);
+      const exhausted = page.length < AI_LIST_TASK_SCAN_LIMIT;
       const matched: { task: Doc<"jdTasks"> | Doc<"oneTimeTasks">; state: { status: string; dueAt: number | null } }[] = [];
-      let cursor: string | null = null;
-      let scanned = 0;
-      let exhausted = false;
-      while (matched.length < limit && scanned < AI_LIST_TASK_SCAN_LIMIT) {
-        const page = await ctx.db.query(table).withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate({ cursor, numItems: Math.min(100, AI_LIST_TASK_SCAN_LIMIT - scanned) });
-        scanned += page.page.length;
-        const evaluated = await Promise.all(page.page.map(async (task) => {
-          if (!(await visible(ctx, args.companyId, membership, task, kind, auth))) return null;
-          if (!matchesSearch(task, needle)) return null;
-          const state = kind === "jd" ? await jdState(ctx, task as Doc<"jdTasks">, now, timeZone) : oneState(task as Doc<"oneTimeTasks">);
-          return matches(state.status) ? { task, state } : null;
-        }));
-        for (const item of evaluated) if (item && matched.length < limit) matched.push(item);
-        if (page.isDone) { exhausted = true; break; }
-        cursor = page.continueCursor;
-      }
+      const evaluated = await Promise.all(page.map(async (task) => {
+        if (!(await visible(ctx, args.companyId, membership, task, kind, auth))) return null;
+        if (!matchesSearch(task, needle)) return null;
+        const state = kind === "jd" ? await jdState(ctx, task as Doc<"jdTasks">, now, timeZone) : oneState(task as Doc<"oneTimeTasks">);
+        return matches(state.status) ? { task, state } : null;
+      }));
+      for (const item of evaluated) if (item && matched.length < limit) matched.push(item);
       return { matched, exhausted };
     };
     const [jdScan, oneScan] = await Promise.all([

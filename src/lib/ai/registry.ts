@@ -21,6 +21,7 @@ export type CendroAiToolContext = {
   sessionId: Id<"aiChatSessions">;
   membershipId: Id<"companyMemberships">;
   role: string;
+  timeZone: string | null;
   capabilities: Set<Capability>;
   refs: Map<string, RefValue>;
   counters: Record<RefKind, number>;
@@ -159,6 +160,7 @@ export async function createCendroAiContext(input: { client: ConvexHttpClient; c
     sessionId: input.sessionId,
     membershipId: authz.membershipId,
     role: authz.role,
+    timeZone: authz.timeZone ?? null,
     capabilities: new Set(authz.capabilities as Capability[]),
     refs: new Map(),
     counters: { task: 0, sop: 0, member: 0, branch: 0, department: 0 },
@@ -223,8 +225,8 @@ export const cendroAiToolDefinitions: CendroAiToolDefinition[] = [
   },
   {
     name: "create_task",
-    description: "Create a task after the user explicitly asks for one. kind jd is a recurring task and needs recurrence; kind one_time is a one-off and may take dueDateMs and priority. Assignees are member refs from list_assignable_users or list_people.",
-    inputSchema: z.object({ kind: taskKind, title: z.string().min(1).max(160), description: z.string().max(2000).optional(), notes: z.string().max(2000).optional(), recurrence: recurrence.optional(), dueDateMs: z.number().int().positive().optional(), time: z.string().max(20).optional(), quantity: z.number().int().positive().optional(), assigneeRefs: z.array(memberRef).max(10).default([]), priority: priority.optional() }),
+    description: "Create a task after the user explicitly asks for one. kind jd is a recurring task and needs recurrence; kind one_time is a one-off and may take dueDateMs and priority. At least one assignee is required: resolve member refs from list_assignable_users or list_people, or ask the user who owns it.",
+    inputSchema: z.object({ kind: taskKind, title: z.string().min(1).max(160), description: z.string().max(2000).optional(), notes: z.string().max(2000).optional(), recurrence: recurrence.optional(), dueDateMs: z.number().int().positive().optional(), time: z.string().max(20).optional(), quantity: z.number().int().positive().optional(), assigneeRefs: z.array(memberRef).min(1).max(10), priority: priority.optional() }),
     activityLabel: cendroAiActivityLabels.create_task,
     permission: "member",
     risk: "write",

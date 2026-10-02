@@ -101,9 +101,11 @@ export async function POST(req: Request) {
     }
 
     const fireworks = createFireworks({ apiKey: env.data.FIREWORKS_API_KEY });
+    const timeZone = agentContext.timeZone ?? "UTC";
+    const today = new Date().toLocaleDateString("en-CA", { timeZone });
     const result = streamText({
       model: fireworks(CENDRO_AI_MODEL_ID),
-      system: CENDRO_AI_SYSTEM_PROMPT,
+      system: `${CENDRO_AI_SYSTEM_PROMPT}\n\nToday's date: ${today} (${timeZone}). Resolve relative dates like "tomorrow" or "next Friday" against it.`,
       messages: await convertToModelMessages(modelMessages as any),
       stopWhen: stepCountIs(MAX_AGENT_STEPS),
       prepareStep: ({ stepNumber }) => stepNumber >= FINAL_ANSWER_STEP ? { activeTools: [], toolChoice: "none" as const } : undefined,

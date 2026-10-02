@@ -394,7 +394,7 @@ function GeneralTab({
   calendar?: WorkCalendarData;
   canManageCalendar: boolean;
   onSetWorkingDays: (workingDays: number[]) => Promise<void> | void;
-  onAddHoliday: (name: string, startDate: string, endDate: string) => Promise<void> | void;
+  onAddHoliday: (name: string, startDate: string, endDate: string) => Promise<boolean> | boolean;
   onRemoveHoliday: (holidayId: Id<"companyHolidays">) => Promise<void> | void;
 }) {
   const options = timeZoneOptions(timeZone);
@@ -513,7 +513,7 @@ function WorkCalendarSection({
   calendar: WorkCalendarData;
   canManageCalendar: boolean;
   onSetWorkingDays: (workingDays: number[]) => Promise<void> | void;
-  onAddHoliday: (name: string, startDate: string, endDate: string) => Promise<void> | void;
+  onAddHoliday: (name: string, startDate: string, endDate: string) => Promise<boolean> | boolean;
   onRemoveHoliday: (holidayId: Id<"companyHolidays">) => Promise<void> | void;
 }) {
   const [holidayName, setHolidayName] = useState("");
@@ -535,10 +535,12 @@ function WorkCalendarSection({
   const submitHoliday = async () => {
     const name = holidayName.trim();
     if (!name || !holidayStart) return;
-    await onAddHoliday(name, holidayStart, holidayEnd || holidayStart);
-    setHolidayName("");
-    setHolidayStart("");
-    setHolidayEnd("");
+    // Keep the form filled when the save fails so the entry isn't lost.
+    if (await onAddHoliday(name, holidayStart, holidayEnd || holidayStart)) {
+      setHolidayName("");
+      setHolidayStart("");
+      setHolidayEnd("");
+    }
   };
 
   return (
@@ -2631,8 +2633,10 @@ export default function Company() {
     setError(null);
     try {
       await action();
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : message);
+      return false;
     }
   }
 
@@ -2783,7 +2787,7 @@ export default function Company() {
                 calendar={workCalendar}
                 canManageCalendar={canManageCalendar}
                 onSetWorkingDays={(workingDays) => { if (activeCompanyId) void run(async () => setWorkingDays({ companyId: activeCompanyId, workingDays }), "Could not update working days."); }}
-                onAddHoliday={(name, startDate, endDate) => { if (activeCompanyId) void run(async () => addHoliday({ companyId: activeCompanyId, name, startDate, endDate }), "Could not add holiday."); }}
+                onAddHoliday={async (name, startDate, endDate) => activeCompanyId ? await run(async () => addHoliday({ companyId: activeCompanyId, name, startDate, endDate }), "Could not add holiday.") : false}
                 onRemoveHoliday={(holidayId) => { if (activeCompanyId) void run(async () => removeHoliday({ companyId: activeCompanyId, holidayId }), "Could not remove holiday."); }}
               />
             )}
@@ -2824,13 +2828,13 @@ export default function Company() {
               <PeopleTab
                 data={data}
                 onInvite={() => setInviteOpen(true)}
-                onUpdateName={(user, firstName, secondName) => run(() => changeUserName(user, firstName, secondName), "Could not update user name.")}
-                onRoleChange={(user, role) => run(() => changeUserRole(user, role), "Could not update role.")}
-                onBulkRoleChange={(membershipIds, role) => run(() => changeUsersRole(membershipIds, role), "Could not assign role.")}
+                onUpdateName={async (user, firstName, secondName) => { await run(() => changeUserName(user, firstName, secondName), "Could not update user name."); }}
+                onRoleChange={async (user, role) => { await run(() => changeUserRole(user, role), "Could not update role."); }}
+                onBulkRoleChange={async (membershipIds, role) => { await run(() => changeUsersRole(membershipIds, role), "Could not assign role."); }}
                 onManageAccess={(user) => setAccessMembershipId(user.membership._id)}
-                onBranchChange={(user, branchId) => run(() => changeUserBranch(user, branchId), "Could not update branch.")}
-                onDepartmentChange={(user, departmentId) => run(() => changeUserDepartment(user, departmentId), "Could not update department.")}
-                onStatusChange={(user, active) => run(() => changeUserStatus(user, active), "Could not update status.")}
+                onBranchChange={async (user, branchId) => { await run(() => changeUserBranch(user, branchId), "Could not update branch."); }}
+                onDepartmentChange={async (user, departmentId) => { await run(() => changeUserDepartment(user, departmentId), "Could not update department."); }}
+                onStatusChange={async (user, active) => { await run(() => changeUserStatus(user, active), "Could not update status."); }}
                 onRemoveUsers={removeSelectedUsers}
                 canManageUsers={canManageUsers}
                 canManageRoles={canManageRoles}

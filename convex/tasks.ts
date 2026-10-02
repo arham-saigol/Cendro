@@ -242,8 +242,14 @@ async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">,
  * as `schedule` so the deferred run reconstructs the old grid — by the time it
  * executes, the task document already carries the new recurrence.
  */
-function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, schedule?: { recurrence: JdRecurrence; cycleStartedAt: number }) {
-  if (task.cycleStartedAt < currentCycleStart) {
+function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, schedule?: { recurrence: JdRecurrence; cycleStartedAt: number }, timeZone?: string) {
+  // The snapshot path re-walks the old grid from the cycle containing the
+  // floor: anything between it and that grid's current cycle — elapsed or
+  // still pending on a shifted deadline — needs the check.
+  const needsCatchUp = schedule
+    ? currentJdCycle(schedule.recurrence, task.cycleStartedAt, timeZone).start < currentJdCycle(schedule.recurrence, Date.now(), timeZone).start
+    : task.cycleStartedAt < currentCycleStart;
+  if (needsCatchUp) {
     return ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, { taskId: task._id, schedule });
   }
 }
@@ -973,7 +979,7 @@ export const updateJd = mutation({
     // preservation/catch-up checks must use the old recurrence's current cycle.
     const oldCycleStart = effectiveCurrentJdCycle(calendar, task.recurrence, now, timeZone).start;
     await preserveJdCompletionStamp(ctx, task, oldCycleStart, timeZone, calendar);
-    await scheduleMissedJdCycleCatchUp(ctx, task, oldCycleStart, args.recurrence !== task.recurrence ? { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt } : undefined);
+    await scheduleMissedJdCycleCatchUp(ctx, task, oldCycleStart, args.recurrence !== task.recurrence ? { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt } : undefined, timeZone);
     const nextCycleStart = args.recurrence !== task.recurrence ? effectiveCurrentJdCycle(calendar, args.recurrence, now, timeZone).start : oldCycleStart;
     const nextTask = { ...task };
     nextTask.title = nonEmpty(args.title, "Task title");
@@ -1058,7 +1064,7 @@ export const updateJdFields = mutation({
     const calendar = await loadWorkCalendar(ctx, args.companyId);
     const currentCycleStart = effectiveCurrentJdCycle(calendar, task.recurrence, now, timeZone).start;
     await preserveJdCompletionStamp(ctx, task, currentCycleStart, timeZone, calendar);
-    await scheduleMissedJdCycleCatchUp(ctx, task, currentCycleStart);
+    await scheduleMissedJdCycleCatchUp(ctx, task, currentCycleStart, args.recurrence !== undefined && args.recurrence !== task.recurrence ? { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt } : undefined, timeZone);
     const nextCycleStart = args.recurrence !== undefined ? effectiveCurrentJdCycle(calendar, args.recurrence, now, timeZone).start : undefined;
     const nextTask = { ...task };
     if (args.title !== undefined) nextTask.title = nonEmpty(args.title, "Task title");
@@ -1174,6 +1180,17 @@ export const catchUpMissedJdCycles = internalMutation({
           taskId: args.taskId,
           schedule: { recurrence: args.schedule.recurrence, cycleStartedAt: nextActiveAt },
         });
+      } else if (nextActiveAt < currentJdCycle(args.schedule.recurrence, now, timeZone).start) {
+        // The walk stopped at an old-grid occurrence whose shifted deadline is
+        // still pending. The task's new-grid floor will never revisit it, so
+        // schedule the one re-check that records it if it goes undone.
+        const deadline = occurrenceDeadline(calendar, args.schedule.recurrence, nextJdCycleStart(nextActiveAt, args.schedule.recurrence, timeZone), timeZone);
+        if (deadline !== null && deadline > now) {
+          await ctx.scheduler.runAfter(deadline - now, internal.tasks.catchUpMissedJdCycles, {
+            taskId: args.taskId,
+            schedule: { recurrence: args.schedule.recurrence, cycleStartedAt: nextActiveAt },
+          });
+        }
       }
       return null;
     }

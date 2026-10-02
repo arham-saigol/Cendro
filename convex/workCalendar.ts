@@ -73,8 +73,7 @@ export function buildWorkCalendar(workingDays: readonly number[] | null | undefi
   return { workingDays: days, holidayRanges: merged };
 }
 
-export function isWorkingDayIndex(calendar: WorkCalendar, dayIndex: number) {
-  if (!calendar.workingDays.has(weekdayOf(dayIndex))) return false;
+function holidayRangeAt(calendar: WorkCalendar, dayIndex: number) {
   let lo = 0;
   let hi = calendar.holidayRanges.length - 1;
   while (lo <= hi) {
@@ -82,19 +81,35 @@ export function isWorkingDayIndex(calendar: WorkCalendar, dayIndex: number) {
     const range = calendar.holidayRanges[mid];
     if (dayIndex < range.start) hi = mid - 1;
     else if (dayIndex > range.end) lo = mid + 1;
-    else return false;
+    else return range;
   }
-  return true;
+  return null;
+}
+
+export function isWorkingDayIndex(calendar: WorkCalendar, dayIndex: number) {
+  return calendar.workingDays.has(weekdayOf(dayIndex)) && holidayRangeAt(calendar, dayIndex) === null;
 }
 
 /** First working day index strictly after `dayIndex`. */
 export function nextWorkingDayIndex(calendar: WorkCalendar, dayIndex: number) {
   let index = dayIndex + 1;
+  // Jumping past the merged range containing a probe keeps multi-year
+  // closures cheap; the cap only guards a non-working weekday set.
   for (let i = 0; i < WORKING_DAY_SCAN_LIMIT; i++) {
-    if (isWorkingDayIndex(calendar, index)) return index;
-    index += 1;
+    if (!calendar.workingDays.has(weekdayOf(index))) { index += 1; continue; }
+    const covering = holidayRangeAt(calendar, index);
+    if (covering === null) return index;
+    index = covering.end + 1;
   }
   return index;
+}
+
+/**
+ * Longest contiguous holiday span in days. Bounds how far a shifted deadline
+ * can land past its grid end, which the analytics completion lookback needs.
+ */
+export function maxHolidaySpanDays(calendar: WorkCalendar) {
+  return calendar.holidayRanges.reduce((max, range) => Math.max(max, range.end - range.start + 1), 0);
 }
 
 /** Local calendar date a cycle's deadline instant falls on. */
@@ -118,13 +133,22 @@ export function occurrenceDeadline(calendar: WorkCalendar, recurrence: JdRecurre
 }
 
 /**
- * The grid cycle containing `now`, advanced past skipped occurrences. Only
- * daily and every-other-day cycles can be skipped, so for other recurrences
- * this is the plain grid cycle. Completing on a skipped day therefore counts
- * toward the next working day's occurrence.
+ * The occurrence currently open for work. That is usually the grid cycle
+ * containing `now`, with two adjustments: the previous cycle stays open while
+ * its shifted deadline is still pending (a Sunday-due weekly shifted to
+ * Monday is completable all of Monday), and daily/every-other-day cycles
+ * skip ahead past non-working due dates — completing on a skipped day counts
+ * toward the next working occurrence.
  */
 export function effectiveCurrentJdCycle(calendar: WorkCalendar, recurrence: JdRecurrence, now = Date.now(), timeZone?: string | null) {
   const cycle = currentJdCycle(recurrence, now, timeZone);
+  // The previous cycle's end is this cycle's start; a shifted deadline beyond
+  // `now` means that occurrence — not the grid cycle — is the open one.
+  // Skipped (null) and on-time (<= now) predecessors always yield to the grid.
+  const prevDeadline = occurrenceDeadline(calendar, recurrence, cycle.start, timeZone);
+  if (prevDeadline !== null && prevDeadline > now) {
+    return { start: previousJdCycleStart(cycle.start, recurrence, timeZone), end: cycle.start };
+  }
   if (occurrenceDeadline(calendar, recurrence, cycle.end, timeZone) !== null) return cycle;
   let start = cycle.start;
   for (let i = 0; i < WORKING_DAY_SCAN_LIMIT; i++) {

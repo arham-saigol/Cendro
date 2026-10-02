@@ -2,7 +2,7 @@ import { ConvexError, v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
 import { analyticsScopedMembershipIds, assertAnalyticsViewAccess, buildSopVisibilityContext, membershipCapabilities, requireMembership, sopListScopeAuth, taskHasVisibleAssignee, visibleAssigneeMembershipIds, visibleSop } from "./permissions";
 import { currentJdCycle, localDateField, nextJdCycleStart } from "./taskCycles";
-import { jdOccurrencesDueBetween, loadWorkCalendar, occurrenceDeadline } from "./workCalendar";
+import { jdOccurrencesDueBetween, loadWorkCalendar, maxHolidaySpanDays, occurrenceDeadline } from "./workCalendar";
 import { bucketIndexFor, buildDashboardBuckets, dashboardRangeValidator, resolveDashboardRange } from "./dashboardTime";
 import type { Doc, Id } from "./_generated/dataModel";
 import { takeWithOverflow } from "./queryLimits";
@@ -25,8 +25,9 @@ const dashboardTakeLimit = 500;
 const dashboardReadBudget = 24_000;
 
 // Any JD cycle whose deadline lands inside a dashboard range started at most
-// ~366 days earlier (the longest recurrence is annual), plus slack.
-const jdCompletionLookbackMs = 368 * 86_400_000;
+// ~366 days earlier (the longest recurrence is annual), plus slack, plus the
+// longest contiguous holiday span a deadline could have shifted through.
+const jdCompletionLookbackDays = 368 + 7;
 
 type QueryCompleteness = { isTruncated: boolean; truncatedReads: number; remaining: number };
 
@@ -346,6 +347,7 @@ export const dashboard = query({
     const range = resolveDashboardRange(args.range, now, timeZone);
     const buckets = buildDashboardBuckets(range, timeZone);
     const calendar = await loadWorkCalendar(ctx, args.companyId);
+    const jdCompletionLookbackMs = (jdCompletionLookbackDays + maxHolidaySpanDays(calendar)) * 86_400_000;
 
     const items: WorkItem[] = [];
 

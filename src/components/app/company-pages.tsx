@@ -488,10 +488,19 @@ const WEEKDAY_OPTIONS = [
   { value: 0, label: "Sunday" },
 ];
 
+// Stored holiday dates are calendar dates ("YYYY-MM-DD"), not instants:
+// formatting in UTC keeps the label on the stored day regardless of the
+// viewer's timezone.
+function formatCalendarDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(date);
+}
+
 function holidayRangeLabel(holiday: CalendarHoliday) {
   return holiday.startDate === holiday.endDate
-    ? formatDate(holiday.startDate)
-    : `${formatDate(holiday.startDate)} – ${formatDate(holiday.endDate)}`;
+    ? formatCalendarDate(holiday.startDate)
+    : `${formatCalendarDate(holiday.startDate)} – ${formatCalendarDate(holiday.endDate)}`;
 }
 
 function WorkCalendarSection({

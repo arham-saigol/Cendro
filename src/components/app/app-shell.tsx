@@ -223,12 +223,15 @@ function SearchCommandDialog({
   const needle = debounced.trim().toLowerCase();
 
   const entityArgs = activeCompanyId && canSearchEntities && needle.length >= PALETTE_MIN_QUERY ? { companyId: activeCompanyId, query: needle } : ("skip" as const);
-  const taskResults = useQuery(api.tasks.search, entityArgs);
+  const jdResults = useQuery(api.tasks.searchJd, entityArgs);
+  const oneTimeResults = useQuery(api.tasks.searchOneTime, entityArgs);
   const sopResults = useQuery(api.sops.search, entityArgs);
   // Results always correspond to the debounced term; while the input is ahead
   // of the debounce, show a searching state rather than stale matches.
   const entityResults =
-    entityArgs !== "skip" && needle === normalized && taskResults && sopResults ? { tasks: taskResults, sops: sopResults } : null;
+    entityArgs !== "skip" && needle === normalized && jdResults && oneTimeResults && sopResults
+      ? { jd: jdResults, oneTime: oneTimeResults, sops: sopResults }
+      : null;
   const searching = entityArgs !== "skip" && entityResults === null;
 
   const sections: { title: string; rows: PaletteRow[] }[] = [];
@@ -249,10 +252,10 @@ function SearchCommandDialog({
         })),
       });
     }
-    if (entityResults && entityResults.tasks.jdTasks.length > 0) {
+    if (entityResults && entityResults.jd.tasks.length > 0) {
       sections.push({
         title: "Job Description tasks",
-        rows: entityResults.tasks.jdTasks.map((task) => ({
+        rows: entityResults.jd.tasks.map((task) => ({
           key: `jd:${task._id}`,
           icon: Repeat,
           label: task.title,
@@ -264,10 +267,10 @@ function SearchCommandDialog({
         })),
       });
     }
-    if (entityResults && entityResults.tasks.oneTimeTasks.length > 0) {
+    if (entityResults && entityResults.oneTime.tasks.length > 0) {
       sections.push({
         title: "One-time tasks",
-        rows: entityResults.tasks.oneTimeTasks.map((task) => ({
+        rows: entityResults.oneTime.tasks.map((task) => ({
           key: `one:${task._id}`,
           icon: SquareCheck,
           label: task.title,
@@ -317,7 +320,7 @@ function SearchCommandDialog({
   // Selection is tracked by row key, not position, so async results arriving
   // above the highlighted row can't silently move the Enter target.
   const activeRowIndex = Math.max(0, flatRows.findIndex((row) => row.key === activeKey));
-  const truncated = Boolean(entityResults?.tasks.truncated || entityResults?.sops.truncated);
+  const truncated = Boolean(entityResults?.jd.truncated || entityResults?.oneTime.truncated || entityResults?.sops.truncated);
 
   useEffect(() => {
     if (!open) {

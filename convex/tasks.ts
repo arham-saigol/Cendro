@@ -742,35 +742,40 @@ async function searchTasksOfKind(
   return { rows: kept, truncated: kept.length === TASK_SEARCH_RESULT_LIMIT || !exhausted };
 }
 
-export const search = query({
-  args: { companyId: v.id("companies"), query: v.string() },
-  handler: async (ctx, args) => {
-    const needle = args.query.trim();
-    if (!needle) return { jdTasks: [], oneTimeTasks: [], truncated: false };
-    const { membership, company } = await requireMembership(ctx, args.companyId);
-    const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
-    const timeZone = company.timeZone ?? defaultTimeZone;
-    const [jd, oneTime] = await Promise.all([
-      searchTasksOfKind(ctx, args.companyId, membership, auth, "jd", needle),
-      searchTasksOfKind(ctx, args.companyId, membership, auth, "one_time", needle),
-    ]);
-    const now = Date.now();
-    const jdTasks = await Promise.all(
-      jd.rows.map(async (task) => ({
-        _id: task._id,
-        reference: task.reference,
-        title: task.title,
-        status: (await jdState(ctx, task, now, timeZone)).status,
-      })),
-    );
-    const oneTimeTasks = oneTime.rows.map((task) => ({
+// One paginate per function is all Convex allows, so each kind gets its own
+// query export; the palette fires both plus api.sops.search.
+const paletteSearchArgs = { companyId: v.id("companies"), query: v.string() };
+
+async function paletteSearch(ctx: QueryCtx, args: { companyId: Id<"companies">; query: string }, kind: TaskKind) {
+  const needle = args.query.trim();
+  if (!needle) return { tasks: [], truncated: false };
+  const { membership, company } = await requireMembership(ctx, args.companyId);
+  const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
+  const timeZone = company.timeZone ?? defaultTimeZone;
+  const { rows, truncated } =
+    kind === "jd"
+      ? await searchTasksOfKind(ctx, args.companyId, membership, auth, "jd", needle)
+      : await searchTasksOfKind(ctx, args.companyId, membership, auth, "one_time", needle);
+  const now = Date.now();
+  const tasks = await Promise.all(
+    rows.map(async (task) => ({
       _id: task._id,
       reference: task.reference,
       title: task.title,
-      status: oneState(task).status,
-    }));
-    return { jdTasks, oneTimeTasks, truncated: jd.truncated || oneTime.truncated };
-  },
+      status: "recurrence" in task ? (await jdState(ctx, task, now, timeZone)).status : oneState(task).status,
+    })),
+  );
+  return { tasks, truncated };
+}
+
+export const searchJd = query({
+  args: paletteSearchArgs,
+  handler: async (ctx, args) => await paletteSearch(ctx, args, "jd"),
+});
+
+export const searchOneTime = query({
+  args: paletteSearchArgs,
+  handler: async (ctx, args) => await paletteSearch(ctx, args, "one_time"),
 });
 
 export const getListPreference = query({

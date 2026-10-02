@@ -39,20 +39,21 @@ describe("command palette search", () => {
     expect(jdRef).toBe("JD-001");
     expect(oneTimeRef).toBe("TSK-001");
 
-    const byTitle = await f.asUser("adminA").query(api.tasks.search, { companyId: f.companyA, query: "deep clean" });
-    expect(byTitle.jdTasks.map((row) => row._id)).toEqual([jdTaskId]);
-    expect(byTitle.oneTimeTasks).toHaveLength(0);
+    const byTitle = await f.asUser("adminA").query(api.tasks.searchJd, { companyId: f.companyA, query: "deep clean" });
+    expect(byTitle.tasks.map((row) => row._id)).toEqual([jdTaskId]);
+    const oneTimeByTitle = await f.asUser("adminA").query(api.tasks.searchOneTime, { companyId: f.companyA, query: "deep clean" });
+    expect(oneTimeByTitle.tasks).toHaveLength(0);
 
     // Lowercase, missing separators, and stripped padding zeros all match.
-    const byCode = await f.asUser("adminA").query(api.tasks.search, { companyId: f.companyA, query: "jd-1" });
-    expect(byCode.jdTasks.map((row) => row._id)).toContain(jdTaskId);
+    const byCode = await f.asUser("adminA").query(api.tasks.searchJd, { companyId: f.companyA, query: "jd-1" });
+    expect(byCode.tasks.map((row) => row._id)).toContain(jdTaskId);
 
-    const byCode2 = await f.asUser("adminA").query(api.tasks.search, { companyId: f.companyA, query: "TSK1" });
-    expect(byCode2.oneTimeTasks.map((row) => row._id)).toContain(oneTimeTaskId);
+    const byCode2 = await f.asUser("adminA").query(api.tasks.searchOneTime, { companyId: f.companyA, query: "TSK1" });
+    expect(byCode2.tasks.map((row) => row._id)).toContain(oneTimeTaskId);
 
     // The exact reference hits the index path directly.
-    const exact = await f.asUser("adminA").query(api.tasks.search, { companyId: f.companyA, query: "JD-001" });
-    expect(exact.jdTasks.map((row) => row._id)).toContain(jdTaskId);
+    const exact = await f.asUser("adminA").query(api.tasks.searchJd, { companyId: f.companyA, query: "JD-001" });
+    expect(exact.tasks.map((row) => row._id)).toContain(jdTaskId);
   });
 
   test("Employee search only returns tasks visible to them", async () => {
@@ -71,8 +72,8 @@ describe("command palette search", () => {
       assigneeMembershipIds: [f.employee2M],
     });
 
-    const result = await f.asUser("employeeA1").query(api.tasks.search, { companyId: f.companyA, query: "stock" });
-    const ids = result.jdTasks.map((row) => row._id);
+    const result = await f.asUser("employeeA1").query(api.tasks.searchJd, { companyId: f.companyA, query: "stock" });
+    const ids = result.tasks.map((row) => row._id);
     expect(ids).toContain(mine);
     expect(ids).not.toContain(notMine);
   });
@@ -131,15 +132,16 @@ describe("command palette search", () => {
     });
 
     // A key-less needle must not degenerate into a match-everything.
-    const punctuation = await f.asUser("adminA").query(api.tasks.search, { companyId: f.companyA, query: "--" });
-    expect(punctuation.jdTasks).toHaveLength(0);
-    expect(punctuation.oneTimeTasks).toHaveLength(0);
+    const punctuation = await f.asUser("adminA").query(api.tasks.searchJd, { companyId: f.companyA, query: "--" });
+    expect(punctuation.tasks).toHaveLength(0);
+    const oneTimePunctuation = await f.asUser("adminA").query(api.tasks.searchOneTime, { companyId: f.companyA, query: "--" });
+    expect(oneTimePunctuation.tasks).toHaveLength(0);
     const sopPunctuation = await f.asUser("adminA").query(api.sops.search, { companyId: f.companyA, query: "--" });
     expect(sopPunctuation.sops).toHaveLength(0);
 
     // A prefix of the stored spelling matches like the old substring check did.
-    const partial = await f.asUser("adminA").query(api.tasks.search, { companyId: f.companyA, query: "jd-00" });
-    expect(partial.jdTasks.map((row) => row._id)).toContain(jdTaskId);
+    const partial = await f.asUser("adminA").query(api.tasks.searchJd, { companyId: f.companyA, query: "jd-00" });
+    expect(partial.tasks.map((row) => row._id)).toContain(jdTaskId);
   });
 
   test("Normalized code probes reach rows beyond the scan ceiling", async () => {
@@ -191,8 +193,8 @@ describe("command palette search", () => {
       }
     });
 
-    const tasks = await f.asUser("adminA").query(api.tasks.search, { companyId: f.companyA, query: "jd1" });
-    expect(tasks.jdTasks.map((row) => row._id)).toContain(oldTaskId);
+    const tasks = await f.asUser("adminA").query(api.tasks.searchJd, { companyId: f.companyA, query: "jd1" });
+    expect(tasks.tasks.map((row) => row._id)).toContain(oldTaskId);
 
     const sops = await f.asUser("adminA").query(api.sops.search, { companyId: f.companyA, query: "sop1" });
     expect(sops.sops.map((row) => row._id)).toContain(oldSopId);
@@ -210,8 +212,8 @@ describe("command palette search", () => {
       });
     }
 
-    const result = await f.asUser("adminA").query(api.tasks.search, { companyId: f.companyA, query: "repeat" });
-    expect(result.jdTasks).toHaveLength(8);
+    const result = await f.asUser("adminA").query(api.tasks.searchJd, { companyId: f.companyA, query: "repeat" });
+    expect(result.tasks).toHaveLength(8);
     expect(result.truncated).toBe(true);
   });
 });

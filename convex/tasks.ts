@@ -245,12 +245,15 @@ async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">,
 function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, schedule?: { recurrence: JdRecurrence; cycleStartedAt: number }, timeZone?: string) {
   // The snapshot path re-walks the old grid from the cycle containing the
   // floor: anything between it and that grid's current cycle — elapsed or
-  // still pending on a shifted deadline — needs the check.
+  // still pending on a shifted deadline — needs the check. `through` pins the
+  // walk's bound at the change instant so delayed runs never evaluate cycles
+  // the old schedule never covered.
   const needsCatchUp = schedule
     ? currentJdCycle(schedule.recurrence, task.cycleStartedAt, timeZone).start < currentJdCycle(schedule.recurrence, Date.now(), timeZone).start
     : task.cycleStartedAt < currentCycleStart;
   if (needsCatchUp) {
-    return ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, { taskId: task._id, schedule });
+    const snapshot = schedule ? { ...schedule, through: currentJdCycle(schedule.recurrence, Date.now(), timeZone).start } : undefined;
+    return ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, { taskId: task._id, schedule: snapshot });
   }
 }
 
@@ -1151,7 +1154,7 @@ export const listJdCycleRecords = query({
 
 /** Deferred per-task catch-up scheduled by interactive mutations. Idempotent. */
 export const catchUpMissedJdCycles = internalMutation({
-  args: { taskId: v.id("jdTasks"), schedule: v.optional(v.object({ recurrence: recurrenceValidator, cycleStartedAt: v.number() })) },
+  args: { taskId: v.id("jdTasks"), schedule: v.optional(v.object({ recurrence: recurrenceValidator, cycleStartedAt: v.number(), through: v.optional(v.number()) })) },
   handler: async (ctx, args) => {
     const task = await ctx.db.get(args.taskId);
     if (!task) return null;
@@ -1163,7 +1166,11 @@ export const catchUpMissedJdCycles = internalMutation({
       const timeZone = await companyTimeZone(ctx, task.companyId);
       const calendar = await loadWorkCalendar(ctx, task.companyId);
       const now = Date.now();
-      const { occurrences, nextActiveAt } = elapsedJdOccurrences(calendar, args.schedule.recurrence, args.schedule.cycleStartedAt, now, 200, timeZone);
+      // `through` freezes the walk's bound at the grid position where the old
+      // schedule stopped — cycles after the recurrence change are not the old
+      // schedule's to record.
+      const throughStart = args.schedule.through ?? currentJdCycle(args.schedule.recurrence, now, timeZone).start;
+      const { occurrences, nextActiveAt } = elapsedJdOccurrences(calendar, args.schedule.recurrence, args.schedule.cycleStartedAt, now, 200, timeZone, throughStart);
       for (const cycle of occurrences) {
         const [done, recorded] = await Promise.all([
           currentJdCompletion(ctx, task._id, cycle.start),
@@ -1178,17 +1185,18 @@ export const catchUpMissedJdCycles = internalMutation({
       if (occurrences.length === 200) {
         await ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, {
           taskId: args.taskId,
-          schedule: { recurrence: args.schedule.recurrence, cycleStartedAt: nextActiveAt },
+          schedule: { recurrence: args.schedule.recurrence, cycleStartedAt: nextActiveAt, through: args.schedule.through },
         });
-      } else if (nextActiveAt < currentJdCycle(args.schedule.recurrence, now, timeZone).start) {
+      } else if (nextActiveAt < throughStart) {
         // The walk stopped at an old-grid occurrence whose shifted deadline is
         // still pending. The task's new-grid floor will never revisit it, so
-        // schedule the one re-check that records it if it goes undone.
+        // schedule the one re-check that records it if it goes undone — still
+        // bounded by the same change instant.
         const deadline = occurrenceDeadline(calendar, args.schedule.recurrence, nextJdCycleStart(nextActiveAt, args.schedule.recurrence, timeZone), timeZone);
         if (deadline !== null && deadline > now) {
           await ctx.scheduler.runAfter(deadline - now, internal.tasks.catchUpMissedJdCycles, {
             taskId: args.taskId,
-            schedule: { recurrence: args.schedule.recurrence, cycleStartedAt: nextActiveAt },
+            schedule: { recurrence: args.schedule.recurrence, cycleStartedAt: nextActiveAt, through: throughStart },
           });
         }
       }

@@ -175,6 +175,27 @@ describe("JD tasks on a work calendar", () => {
     expect(await missedCycleStarts(t, taskId)).toEqual([]);
   });
 
+  test("completing during a closure that spans several cycles credits the earliest open occurrence", async () => {
+    // A 3-week holiday makes four consecutive weekly due dates shift to the
+    // same next working day: all four occurrences stay open until the shared
+    // deadline, and a completion settles the earliest open one first.
+    vi.setSystemTime(utc(2026, 1, 22, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Weekly review", description: "", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
+    await t.withIdentity(identity("admin")).mutation(api.workCalendar.addHoliday, { companyId, name: "Shutdown", startDate: "2026-01-26", endDate: "2026-02-15" });
+
+    vi.setSystemTime(utc(2026, 2, 16, 12));
+    const detail = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
+    expect(detail.task.state.currentCycleStart).toBe(utc(2026, 1, 19));
+    expect(detail.task.state.dueAt).toBe(utc(2026, 2, 17));
+
+    await t.withIdentity(identity("admin")).mutation(api.tasks.completeJd, { companyId, taskId });
+    const completions = await t.run(async (ctx) =>
+      await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect()
+    );
+    expect(completions).toMatchObject([{ cycleStart: utc(2026, 1, 19), cycleEnd: utc(2026, 2, 17) }]);
+  });
+
   test("an occurrence pending when the recurrence changes is still recorded", async () => {
     // On the shifted Monday the old weekly deadline is still pending; a
     // recurrence change moves the task to a new grid, so the pending
@@ -193,6 +214,33 @@ describe("JD tasks on a work calendar", () => {
       await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect()
     );
     expect(records).toMatchObject([{ cycleStart: utc(2026, 1, 19), cycleEnd: utc(2026, 1, 27), status: "missed" }]);
+  });
+
+  test("a recurrence change during a multi-cycle pending window stops the old schedule at the change", async () => {
+    // Same 3-week shutdown: the weekly schedule's pending occurrences share a
+    // deadline after the recurrence change. The re-check records every
+    // pre-change occurrence that went undone but never evaluates cycles that
+    // only existed after the switch.
+    vi.setSystemTime(utc(2026, 1, 22, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Weekly review", description: "", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
+    await t.withIdentity(identity("admin")).mutation(api.workCalendar.addHoliday, { companyId, name: "Shutdown", startDate: "2026-01-26", endDate: "2026-02-15" });
+
+    vi.setSystemTime(utc(2026, 2, 16, 12));
+    await t.withIdentity(identity("admin")).mutation(api.tasks.updateJdFields, { companyId, taskId, recurrence: "monthly" });
+
+    vi.setSystemTime(utc(2026, 2, 18, 12));
+    await t.mutation(internal.tasks.recordMissedJdCyclesBatch, {});
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    const records = await t.run(async (ctx) =>
+      await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect()
+    );
+    // The monthly [Jan 1→Feb 1) occurrence was itself pending at the switch
+    // (its Jan 31 due date sat inside the closure), so the new schedule owes
+    // it too; the weekly records cover exactly the four pre-change
+    // occurrences and no cycle that only existed afterwards.
+    expect(records.map((record) => record.cycleStart)).toEqual([utc(2026, 1, 1), utc(2026, 1, 19), utc(2026, 1, 26), utc(2026, 2, 2), utc(2026, 2, 9)]);
+    expect(records.every((record) => record.cycleEnd === utc(2026, 2, 17))).toBe(true);
   });
 
   test("a merged holiday closure longer than the scan cap still finds the next working day", async () => {

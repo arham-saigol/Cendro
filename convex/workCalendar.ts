@@ -134,23 +134,26 @@ export function occurrenceDeadline(calendar: WorkCalendar, recurrence: JdRecurre
 
 /**
  * The occurrence currently open for work. That is usually the grid cycle
- * containing `now`, with two adjustments: the previous cycle stays open while
- * its shifted deadline is still pending (a Sunday-due weekly shifted to
- * Monday is completable all of Monday), and daily/every-other-day cycles
- * skip ahead past non-working due dates — completing on a skipped day counts
- * toward the next working occurrence.
+ * containing `now`, with two adjustments: cycles whose shifted deadline is
+ * still pending stay open until the deadline passes — a closure covering
+ * several due dates can leave several pending at once, and work credits the
+ * earliest open one — and daily/every-other-day cycles skip ahead past
+ * non-working due dates, so completing on a skipped day counts toward the
+ * next working occurrence.
  */
 export function effectiveCurrentJdCycle(calendar: WorkCalendar, recurrence: JdRecurrence, now = Date.now(), timeZone?: string | null) {
   const cycle = currentJdCycle(recurrence, now, timeZone);
-  // The previous cycle's end is this cycle's start; a shifted deadline beyond
-  // `now` means that occurrence — not the grid cycle — is the open one.
-  // Skipped (null) and on-time (<= now) predecessors always yield to the grid.
-  const prevDeadline = occurrenceDeadline(calendar, recurrence, cycle.start, timeZone);
-  if (prevDeadline !== null && prevDeadline > now) {
-    return { start: previousJdCycleStart(cycle.start, recurrence, timeZone), end: cycle.start };
-  }
-  if (occurrenceDeadline(calendar, recurrence, cycle.end, timeZone) !== null) return cycle;
+  // A cycle ends where the next begins, so the deadline of the occurrence
+  // ending at `start` decides whether that predecessor is still open. Skipped
+  // (null) and on-time (<= now) predecessors always yield to a later one.
   let start = cycle.start;
+  for (let i = 0; i < WORKING_DAY_SCAN_LIMIT; i++) {
+    const prevDeadline = occurrenceDeadline(calendar, recurrence, start, timeZone);
+    if (prevDeadline === null || prevDeadline <= now) break;
+    start = previousJdCycleStart(start, recurrence, timeZone);
+  }
+  if (start !== cycle.start) return { start, end: nextJdCycleStart(start, recurrence, timeZone) };
+  if (occurrenceDeadline(calendar, recurrence, cycle.end, timeZone) !== null) return cycle;
   for (let i = 0; i < WORKING_DAY_SCAN_LIMIT; i++) {
     start = nextJdCycleStart(start, recurrence, timeZone);
     const end = nextJdCycleStart(start, recurrence, timeZone);
@@ -168,11 +171,14 @@ export type JdOccurrence = { start: number; end: number; deadline: number };
  * longer needs to revisit — it stops at a pending shifted deadline so that
  * cycle is re-evaluated on the next run rather than silently dropped.
  */
-export function elapsedJdOccurrences(calendar: WorkCalendar, recurrence: JdRecurrence, activeAt: number, now = Date.now(), maxCycles = 200, timeZone?: string | null): { occurrences: JdOccurrence[]; nextActiveAt: number } {
-  const current = currentJdCycle(recurrence, now, timeZone);
+export function elapsedJdOccurrences(calendar: WorkCalendar, recurrence: JdRecurrence, activeAt: number, now = Date.now(), maxCycles = 200, timeZone?: string | null, throughStart?: number): { occurrences: JdOccurrence[]; nextActiveAt: number } {
+  // `throughStart` bounds the walk to cycles that started before it; callers
+  // replaying a past schedule pass the grid position where that schedule
+  // stopped so cycles it never covered are not re-evaluated.
+  const currentStart = throughStart ?? currentJdCycle(recurrence, now, timeZone).start;
   let start = currentJdCycle(recurrence, activeAt, timeZone).start;
   const occurrences: JdOccurrence[] = [];
-  while (start < current.start && occurrences.length < maxCycles) {
+  while (start < currentStart && occurrences.length < maxCycles) {
     const end = nextJdCycleStart(start, recurrence, timeZone);
     if (end <= now) {
       const deadline = occurrenceDeadline(calendar, recurrence, end, timeZone);

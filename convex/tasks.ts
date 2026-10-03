@@ -8,7 +8,7 @@ import { effectiveCurrentJdCycle, elapsedJdOccurrences, loadWorkCalendar, occurr
 import { activeCompanyMembershipIds, assertCanAssign, assertCanDeleteTask, assertCanUpdateTask, canViewTask, getManagedMembershipIds, hasAllManagedMemberships, hasAnyManagedMembership, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scanManagedMembershipIds, scopedMembershipIds } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
-import { DEFAULT_QUERY_LIMIT, takeWithOverflow } from "./queryLimits";
+import { DEFAULT_QUERY_LIMIT, scanUntil, takeWithOverflow } from "./queryLimits";
 import { referenceCodeCandidate, referenceSearchKey } from "./searchText";
 import { ASSIGNEE_SEARCH_MAX_LENGTH } from "../src/lib/assignee-search";
 import { nextReference } from "./references";
@@ -665,12 +665,11 @@ export const listOneTimeRows = query({
   },
 });
 
-// Palette search scans the company index newest-first until enough matches
+// Palette search streams the company index newest-first until enough matches
 // collect or the ceiling ends the scan — the same bounded pattern as
 // filteredSopRows, so sparse matches late in the index are not silently
 // dropped while a single-transaction query stays under Convex read limits.
 const TASK_SEARCH_RESULT_LIMIT = 8;
-const TASK_SEARCH_SCAN_PAGE = 200;
 const TASK_SEARCH_SCAN_CEILING = 1_000;
 
 function taskByReference(ctx: QueryCtx, kind: TaskKind, companyId: Id<"companies">, reference: string) {
@@ -683,21 +682,6 @@ function taskByReference(ctx: QueryCtx, kind: TaskKind, companyId: Id<"companies
         .query("oneTimeTasks")
         .withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).eq("reference", reference))
         .unique();
-}
-
-function taskSearchPage(ctx: QueryCtx, kind: TaskKind, companyId: Id<"companies">) {
-  return (cursor: string | null, numItems: number): Promise<{
-    page: (Doc<"jdTasks"> | Doc<"oneTimeTasks">)[];
-    isDone: boolean;
-    continueCursor: string;
-  }> =>
-    kind === "jd"
-      ? ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).order("desc").paginate({ cursor, numItems })
-      : ctx.db
-          .query("oneTimeTasks")
-          .withIndex("by_company", (q) => q.eq("companyId", companyId))
-          .order("desc")
-          .paginate({ cursor, numItems });
 }
 
 async function searchTasksOfKind(
@@ -742,30 +726,24 @@ async function searchTasksOfKind(
     }
   }
 
-  let cursor: string | null = null;
-  let scanned = 0;
-  let exhausted = false;
-  while (kept.length < TASK_SEARCH_RESULT_LIMIT && scanned < TASK_SEARCH_SCAN_CEILING) {
-    const page = await taskSearchPage(ctx, kind, companyId)(cursor, Math.min(TASK_SEARCH_SCAN_PAGE, TASK_SEARCH_SCAN_CEILING - scanned));
-    scanned += page.page.length;
-    const candidates = page.page.filter((task) => !keptIds.has(task._id) && matchesSearch(task, needle));
-    const flags = await Promise.all(candidates.map((task) => visible(ctx, companyId, membership, task, kind, auth)));
-    for (let index = 0; index < candidates.length && kept.length < TASK_SEARCH_RESULT_LIMIT; index += 1) {
-      if (flags[index]) kept.push(candidates[index]);
-    }
-    if (page.isDone) {
-      exhausted = true;
-      break;
-    }
-    cursor = page.continueCursor;
-  }
+  const docs: AsyncIterable<Doc<"jdTasks"> | Doc<"oneTimeTasks">> =
+    kind === "jd"
+      ? ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).order("desc")
+      : ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).order("desc");
+  const { kept: scannedRows, exhausted } = await scanUntil(docs, TASK_SEARCH_SCAN_CEILING, TASK_SEARCH_RESULT_LIMIT - kept.length, async (task) => {
+    if (keptIds.has(task._id) || !matchesSearch(task, needle)) return false;
+    if (!(await visible(ctx, companyId, membership, task, kind, auth))) return false;
+    keptIds.add(task._id);
+    return true;
+  });
+  kept.push(...scannedRows);
   // Reaching the result cap means unshown matches may remain; hitting the scan
   // ceiling means unvisited rows may hold more. Report both so the UI is honest.
   return { rows: kept, truncated: kept.length === TASK_SEARCH_RESULT_LIMIT || !exhausted };
 }
 
-// One paginate per function is all Convex allows, so each kind gets its own
-// query export; the palette fires both plus api.sops.search.
+// Each kind scans its own table, so each gets its own query export; the
+// palette fires both plus api.sops.search.
 const paletteSearchArgs = { companyId: v.id("companies"), query: v.string() };
 
 async function paletteSearch(ctx: QueryCtx, args: { companyId: Id<"companies">; query: string }, kind: TaskKind) {

@@ -127,7 +127,7 @@ export const overview = query({
         ? takeWithOverflow((limit) => ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
         : skipped,
       canReadInvitations
-        ? takeWithOverflow((limit) => ctx.db.query("invitations").withIndex("by_companyId_and_status", (q) => q.eq("companyId", args.companyId).eq("status", "pending")).order("desc").take(limit), 100)
+        ? takeWithOverflow((limit) => ctx.db.query("invitations").withIndex("by_companyId_and_status_and_targetMembershipId", (q) => q.eq("companyId", args.companyId).eq("status", "pending")).order("desc").take(limit), 100)
         : skipped,
       canReadStructure
         ? takeWithOverflow((limit) => ctx.db.query("roles").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
@@ -176,6 +176,9 @@ export const overview = query({
     }
     const roleDocs = roleResult.rows;
     roleDocs.sort((a, b) => a.name.localeCompare(b.name));
+    // Inside the (companyId, "pending") range the index orders by targetMembershipId,
+    // so targeted invites would surface first; re-sort to keep newest-first.
+    invitationResult.rows.sort((a, b) => b.createdAt - a.createdAt || b._creationTime - a._creationTime);
     const truncated = {
       branches: branchResult.isTruncated,
       departments: departmentResult.isTruncated,

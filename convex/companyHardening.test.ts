@@ -373,13 +373,28 @@ describe("company management & invitation hardening", () => {
     const f = await createAuthzFixture();
     const now = Date.now();
 
+    // An older targeted invite (carries targetMembershipId while pending) must
+    // not jump ahead of the newer general one in the invited list.
+    const targeted = await f.t.run(async (ctx) =>
+      ctx.db.insert("invitations", {
+        companyId: f.companyA,
+        email: "targeted-old@example.com",
+        role: "Employee",
+        token: "targeted-old-token",
+        status: "pending",
+        expiresAt: now + 86400000,
+        createdAt: now - 1,
+        targetMembershipId: f.inactiveM,
+      })
+    );
+
     const pending = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
       companyId: f.companyA,
       email: "still-pending@example.com",
       role: "Employee",
     });
 
-    // Seed newer accepted/revoked rows that would crowd the pending invite out
+    // Seed newer accepted/revoked rows that would crowd the pending invites out
     // of a company-wide scan capped at the first ~100 rows.
     await f.t.run(async (ctx) => {
       for (let i = 0; i < 110; i++) {
@@ -396,8 +411,7 @@ describe("company management & invitation hardening", () => {
     });
 
     const overview = await f.asUser("adminA").query(api.companyManagement.overview, { companyId: f.companyA });
-    expect(overview.invitations).toHaveLength(1);
-    expect(overview.invitations[0]._id).toBe(pending.id);
+    expect(overview.invitations.map((i) => i._id)).toEqual([pending.id, targeted]);
     expect(overview.truncated.invitations).toBe(false);
   });
 

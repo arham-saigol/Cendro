@@ -304,5 +304,69 @@ describe("company management & invitation hardening", () => {
     });
     expect(countAfter).toBe(0);
   });
+
+  test("Overview lists only pending invitations; an accepted invite moves to Members", async () => {
+    const f = await createAuthzFixture();
+
+    const invite = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "joinme@example.com",
+      role: "Employee",
+    });
+
+    const before = await f.asUser("adminA").query(api.companyManagement.overview, { companyId: f.companyA });
+    expect(before.invitations.map((row) => row.email)).toContain("joinme@example.com");
+
+    await f.t.withIdentity(identity("joinme", "joinme@example.com", true)).mutation(api.invitations.accept, {
+      token: invite.token,
+    });
+
+    const after = await f.asUser("adminA").query(api.companyManagement.overview, { companyId: f.companyA });
+    expect(after.invitations.map((row) => row.email)).not.toContain("joinme@example.com");
+    expect(after.invitations.every((row) => row.status === "pending")).toBe(true);
+    expect(after.users.map((row) => row.user.email)).toContain("joinme@example.com");
+  });
+
+  test("cancelInvitation revokes a pending invitation and requires invite_users", async () => {
+    const f = await createAuthzFixture();
+
+    const invite = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "cancelme@example.com",
+      role: "Employee",
+    });
+
+    // Employee lacks company:invite_users and cannot cancel
+    await expect(
+      f.asUser("employeeA1").mutation(api.companyManagement.cancelInvitation, {
+        companyId: f.companyA,
+        invitationId: invite.id,
+      })
+    ).rejects.toThrow("You do not have access to do that.");
+
+    await f.asUser("adminA").mutation(api.companyManagement.cancelInvitation, {
+      companyId: f.companyA,
+      invitationId: invite.id,
+    });
+
+    // The cancelled link can no longer be used to join
+    await expect(
+      f.t.withIdentity(identity("cancelme", "cancelme@example.com", true)).mutation(api.invitations.accept, {
+        token: invite.token,
+      })
+    ).rejects.toThrow("Invitation not found.");
+
+    // And it disappears from the invited list
+    const overview = await f.asUser("adminA").query(api.companyManagement.overview, { companyId: f.companyA });
+    expect(overview.invitations.map((row) => row._id)).not.toContain(invite.id);
+
+    // Cancelling a second time is rejected
+    await expect(
+      f.asUser("adminA").mutation(api.companyManagement.cancelInvitation, {
+        companyId: f.companyA,
+        invitationId: invite.id,
+      })
+    ).rejects.toThrow("This invitation is no longer pending.");
+  });
 });
 

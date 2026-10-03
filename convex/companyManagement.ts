@@ -127,7 +127,7 @@ export const overview = query({
         ? takeWithOverflow((limit) => ctx.db.query("companyMemberships").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
         : skipped,
       canReadInvitations
-        ? takeWithOverflow((limit) => ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(limit), 100)
+        ? takeWithOverflow((limit) => ctx.db.query("invitations").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").filter((q) => q.eq(q.field("status"), "pending")).take(limit), 100)
         : skipped,
       canReadStructure
         ? takeWithOverflow((limit) => ctx.db.query("roles").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit), overviewListLimit)
@@ -566,5 +566,27 @@ export const inviteUser = action({
     const invite = await ctx.runMutation(internal.companyManagement.createInvitationRecord, args);
     await ctx.runAction(internal.email.sendInvitation, { companyId: args.companyId, invitationId: invite.id, email: args.email, role: args.role, token: invite.token });
     return { ok: true };
+  },
+});
+
+export const cancelInvitation = mutation({
+  args: { companyId: v.id("companies"), invitationId: v.id("invitations") },
+  handler: async (ctx, args) => {
+    const { user } = await requireCapability(ctx, args.companyId, "company:invite_users");
+    const invitation = await ctx.db.get(args.invitationId);
+    if (!invitation || invitation.companyId !== args.companyId) throw new ConvexError("Invitation not found.");
+    if (invitation.status !== "pending") throw new ConvexError("This invitation is no longer pending.");
+    const now = Date.now();
+    await ctx.db.patch(invitation._id, { status: "revoked" });
+    await ctx.db.insert("auditEvents", {
+      companyId: args.companyId,
+      actorUserId: user._id,
+      action: "invitation.revoke",
+      targetType: "invitation",
+      targetId: invitation._id,
+      metadata: { email: invitation.email },
+      createdAt: now,
+    });
+    return null;
   },
 });

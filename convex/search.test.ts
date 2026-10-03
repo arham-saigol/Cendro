@@ -199,6 +199,19 @@ describe("command palette search", () => {
 
     const sops = await f.asUser("adminA").query(api.sops.search, { companyId: f.companyA, query: "sop1" });
     expect(sops.sops.map((row) => row._id)).toContain(oldSopId);
+
+    // A sparse title match must remain cheap even after 1,100 unrelated rows.
+    const measured = await f.asUser("adminA").query(async (ctx) => {
+      const tasks = await ctx.runQuery(api.tasks.searchJd, { companyId: f.companyA, query: "legacy check" });
+      const sops = await ctx.runQuery(api.sops.search, { companyId: f.companyA, query: "legacy" });
+      const metrics = await ctx.meta.getTransactionMetrics();
+      return { tasks, sops, reads: metrics.documentsRead.used, bytes: metrics.bytesRead.used };
+    });
+    expect(measured.tasks.tasks.map((row) => row._id)).toEqual([oldTaskId]);
+    expect(measured.sops.sops.map((row) => row._id)).toEqual([oldSopId]);
+    expect(measured.reads).toBeLessThan(50);
+    expect(measured.bytes).toBeLessThan(64 * 1024);
+    await expect(f.asUser("adminB").query(api.tasks.searchJd, { companyId: f.companyA, query: "legacy" })).rejects.toThrow("You do not have access");
   });
 
   test("Result limit reports truncation instead of silently dropping matches", async () => {
@@ -216,6 +229,30 @@ describe("command palette search", () => {
     const result = await f.asUser("adminA").query(api.tasks.searchJd, { companyId: f.companyA, query: "repeat" });
     expect(result.tasks).toHaveLength(8);
     expect(result.truncated).toBe(true);
+  });
+
+  test("many inaccessible title matches remain bounded and disclose truncation", async () => {
+    const f = await createAuthzFixture();
+    const mine = await f.asUser("adminA").mutation(api.tasks.createJd, {
+      companyId: f.companyA, title: "Restock pantry", recurrence: "daily", assigneeMembershipIds: [f.employee1M],
+    });
+    await f.t.run(async (ctx) => {
+      const now = Date.now();
+      for (let index = 0; index < 160; index += 1) {
+        await ctx.db.insert("jdTasks", {
+          companyId: f.companyA, reference: `JD-${1000 + index}`, title: "Restock pantry", recurrence: "daily",
+          cycleStartedAt: now, status: "due", assigneeMembershipIds: [f.employee2M], createdByMembershipId: f.adminM,
+          createdAt: now + index, updatedAt: now + index,
+        });
+      }
+    });
+    const measured = await f.asUser("employeeA1").query(async (ctx) => {
+      const result = await ctx.runQuery(api.tasks.searchJd, { companyId: f.companyA, query: "restock" });
+      return { result, reads: (await ctx.meta.getTransactionMetrics()).documentsRead.used };
+    });
+    expect(measured.result.tasks.every((task) => task._id === mine)).toBe(true);
+    expect(measured.result.truncated).toBe(true);
+    expect(measured.reads).toBeLessThan(150);
   });
 });
 

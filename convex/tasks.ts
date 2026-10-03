@@ -9,7 +9,7 @@ import { activeCompanyMembershipIds, assertCanAssign, assertCanDeleteTask, asser
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
 import { DEFAULT_QUERY_LIMIT, scanUntil, takeWithOverflow } from "./queryLimits";
-import { referenceCodeCandidate, referenceSearchKey } from "./searchText";
+import { paletteSearchInput, PALETTE_CANDIDATE_LIMIT, PALETTE_RESULT_LIMIT, referenceSearchKey } from "./searchText";
 import { ASSIGNEE_SEARCH_MAX_LENGTH } from "../src/lib/assignee-search";
 import { nextReference } from "./references";
 import {
@@ -668,12 +668,7 @@ export const listOneTimeRows = query({
   },
 });
 
-// Palette search streams the company index newest-first until enough matches
-// collect or the ceiling ends the scan — the same bounded pattern as
-// filteredSopRows, so sparse matches late in the index are not silently
-// dropped while a single-transaction query stays under Convex read limits.
-const TASK_SEARCH_RESULT_LIMIT = 8;
-const TASK_SEARCH_SCAN_CEILING = 1_000;
+// Palette search reads only indexed title matches or a reference-code range.
 
 function taskByReference(ctx: QueryCtx, kind: TaskKind, companyId: Id<"companies">, reference: string) {
   return kind === "jd"
@@ -711,38 +706,25 @@ async function searchTasksOfKind(
   kind: TaskKind,
   needle: string,
 ) {
-  const kept: (Doc<"jdTasks"> | Doc<"oneTimeTasks">)[] = [];
-  const keptIds = new Set<string>();
-
-  // Exact reference probes hit their own index — the cheapest possible match,
-  // and the only path that can reach rows beyond the scan ceiling. Probe the
-  // raw spelling and, when the query parses as a code, its normalized form
-  // ("jd1" → "JD-001").
-  const refSpellings = new Set([needle.toUpperCase()]);
-  const codeCandidate = referenceCodeCandidate(needle);
-  if (codeCandidate) refSpellings.add(codeCandidate);
-  for (const ref of refSpellings) {
-    const exact = await taskByReference(ctx, kind, companyId, ref);
-    if (exact && (await visible(ctx, companyId, membership, exact, kind, auth))) {
-      kept.push(exact);
-      keptIds.add(exact._id);
+  const input = paletteSearchInput(needle);
+  if (!input) return { rows: [], truncated: false };
+  if (input.kind === "reference" && input.exact) {
+    const exact = await taskByReference(ctx, kind, companyId, input.exact);
+    if (exact) {
+      return { rows: await visible(ctx, companyId, membership, exact, kind, auth) ? [exact] : [], truncated: false };
     }
   }
-
-  const docs: AsyncIterable<Doc<"jdTasks"> | Doc<"oneTimeTasks">> =
-    kind === "jd"
-      ? ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).order("desc")
-      : ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).order("desc");
-  const { kept: scannedRows, exhausted } = await scanUntil(docs, TASK_SEARCH_SCAN_CEILING, TASK_SEARCH_RESULT_LIMIT - kept.length, async (task) => {
-    if (keptIds.has(task._id) || !matchesSearch(task, needle)) return false;
-    if (!(await visible(ctx, companyId, membership, task, kind, auth))) return false;
-    keptIds.add(task._id);
-    return true;
-  });
-  kept.push(...scannedRows);
-  // Reaching the result cap means unshown matches may remain; hitting the scan
-  // ceiling means unvisited rows may hold more. Report both so the UI is honest.
-  return { rows: kept, truncated: kept.length === TASK_SEARCH_RESULT_LIMIT || !exhausted };
+  const docs: AsyncIterable<Doc<"jdTasks"> | Doc<"oneTimeTasks">> = input.kind === "reference"
+    ? kind === "jd"
+      ? ctx.db.query("jdTasks").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).gte("reference", input.prefix).lt("reference", `${input.prefix}\uffff`))
+      : ctx.db.query("oneTimeTasks").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).gte("reference", input.prefix).lt("reference", `${input.prefix}\uffff`))
+    : kind === "jd"
+      ? ctx.db.query("jdTasks").withSearchIndex("search_title", (q) => q.search("title", input.query).eq("companyId", companyId))
+      : ctx.db.query("oneTimeTasks").withSearchIndex("search_title", (q) => q.search("title", input.query).eq("companyId", companyId));
+  const { kept, exhausted } = await scanUntil(docs, PALETTE_CANDIDATE_LIMIT, PALETTE_RESULT_LIMIT, async (task) =>
+    await visible(ctx, companyId, membership, task, kind, auth),
+  );
+  return { rows: kept, truncated: !exhausted };
 }
 
 // Each kind scans its own table, so each gets its own query export; the
@@ -751,33 +733,45 @@ const paletteSearchArgs = { companyId: v.id("companies"), query: v.string() };
 
 async function paletteSearch(ctx: QueryCtx, args: { companyId: Id<"companies">; query: string }, kind: TaskKind) {
   const needle = args.query.trim();
-  if (!needle) return { tasks: [], truncated: false };
+  if (!paletteSearchInput(needle)) return { tasks: [], truncated: false };
   const { membership, company } = await requireMembership(ctx, args.companyId);
   const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
+  const capabilityPrefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
+  if (!["any", "managed", "self"].some((scope) => auth.caps.has(`${capabilityPrefix}:view:${scope}` as Capability))) {
+    return { tasks: [], truncated: false };
+  }
   const timeZone = company.timeZone ?? defaultTimeZone;
   const { rows, truncated } =
     kind === "jd"
       ? await searchTasksOfKind(ctx, args.companyId, membership, auth, "jd", needle)
       : await searchTasksOfKind(ctx, args.companyId, membership, auth, "one_time", needle);
   const now = Date.now();
+  const calendar = kind === "jd" && rows.length ? await loadWorkCalendar(ctx, args.companyId) : undefined;
   const tasks = await Promise.all(
     rows.map(async (task) => ({
       _id: task._id,
       reference: task.reference,
       title: task.title,
-      status: "recurrence" in task ? (await jdState(ctx, task, now, timeZone)).status : oneState(task).status,
+      status: "recurrence" in task ? (await jdState(ctx, task, now, timeZone, calendar)).status : oneState(task).status,
     })),
   );
   return { tasks, truncated };
 }
 
+const paletteTaskResultValidator = v.object({
+  tasks: v.array(v.object({ _id: v.union(v.id("jdTasks"), v.id("oneTimeTasks")), reference: v.string(), title: v.string(), status: v.string() })),
+  truncated: v.boolean(),
+});
+
 export const searchJd = query({
   args: paletteSearchArgs,
+  returns: paletteTaskResultValidator,
   handler: async (ctx, args) => await paletteSearch(ctx, args, "jd"),
 });
 
 export const searchOneTime = query({
   args: paletteSearchArgs,
+  returns: paletteTaskResultValidator,
   handler: async (ctx, args) => await paletteSearch(ctx, args, "one_time"),
 });
 

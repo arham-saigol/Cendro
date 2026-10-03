@@ -3,7 +3,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useClerk, useUser } from "@clerk/nextjs";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation, useQueries, useQuery } from "convex/react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -195,6 +195,9 @@ type PaletteRow = {
   onSelect: () => void;
 };
 
+type PaletteTaskResult = { tasks: { _id: string; reference: string; title: string; status: string }[]; truncated: boolean };
+type PaletteSopResult = { sops: { _id: string; reference: string; title: string; scopeType: string }[]; truncated: boolean };
+
 const PALETTE_MIN_QUERY = 2;
 
 function SearchCommandDialog({
@@ -223,16 +226,29 @@ function SearchCommandDialog({
   const needle = debounced.trim().toLowerCase();
 
   const entityArgs = activeCompanyId && canSearchEntities && needle.length >= PALETTE_MIN_QUERY ? { companyId: activeCompanyId, query: needle } : ("skip" as const);
-  const jdResults = useQuery(api.tasks.searchJd, entityArgs);
-  const oneTimeResults = useQuery(api.tasks.searchOneTime, entityArgs);
-  const sopResults = useQuery(api.sops.search, entityArgs);
+  // useQueries returns an Error value per failed query instead of throwing
+  // through render — a backend failure surfaces as a palette error row rather
+  // than crashing the shell into the global error page.
+  const entityQueries = useQueries(
+    entityArgs === "skip"
+      ? {}
+      : {
+          jd: { query: api.tasks.searchJd, args: entityArgs },
+          oneTime: { query: api.tasks.searchOneTime, args: entityArgs },
+          sops: { query: api.sops.search, args: entityArgs },
+        },
+  ) as { jd?: PaletteTaskResult | Error; oneTime?: PaletteTaskResult | Error; sops?: PaletteSopResult | Error };
+  const entityFailed = entityArgs !== "skip" && [entityQueries.jd, entityQueries.oneTime, entityQueries.sops].some((result) => result instanceof Error);
+  const jdResults = entityQueries.jd instanceof Error ? undefined : entityQueries.jd;
+  const oneTimeResults = entityQueries.oneTime instanceof Error ? undefined : entityQueries.oneTime;
+  const sopResults = entityQueries.sops instanceof Error ? undefined : entityQueries.sops;
   // Results always correspond to the debounced term; while the input is ahead
   // of the debounce, show a searching state rather than stale matches.
   const entityResults =
-    entityArgs !== "skip" && needle === normalized && jdResults && oneTimeResults && sopResults
+    entityArgs !== "skip" && !entityFailed && needle === normalized && jdResults && oneTimeResults && sopResults
       ? { jd: jdResults, oneTime: oneTimeResults, sops: sopResults }
       : null;
-  const searching = entityArgs !== "skip" && entityResults === null;
+  const searching = entityArgs !== "skip" && !entityFailed && entityResults === null;
 
   const sections: { title: string; rows: PaletteRow[] }[] = [];
   {
@@ -409,8 +425,9 @@ function SearchCommandDialog({
                 })}
               </div>
             ))}
-            {flatRows.length === 0 && !searching && <div className="px-2 py-8 text-center text-sm text-[var(--ink-muted)]">No results found.</div>}
+            {flatRows.length === 0 && !searching && !entityFailed && <div className="px-2 py-8 text-center text-sm text-[var(--ink-muted)]">No results found.</div>}
             {searching && <div className="px-2 py-3 text-center text-xs text-[var(--ink-muted)]">Searching tasks and SOPs…</div>}
+            {entityFailed && <div className="px-2 py-3 text-center text-xs text-[var(--ink-muted)]">Couldn&apos;t search tasks and SOPs — keep typing to retry.</div>}
             {truncated && !searching && <div className="border-t border-[var(--hairline)] px-2 py-2 text-center text-xs text-[var(--ink-faint)]">Showing top matches — keep typing to refine</div>}
           </div>
         </Dialog.Content>

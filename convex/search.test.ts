@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
 import { createAuthzFixture } from "./authz.fixture";
@@ -216,4 +217,46 @@ describe("command palette search", () => {
     expect(result.tasks).toHaveLength(8);
     expect(result.truncated).toBe(true);
   });
+});
+
+describe("search scan helpers stream instead of paginating", () => {
+  // Convex allows only one `.paginate()` call per function execution; a second
+  // call — sequential or parallel — throws at runtime. convex-test does not
+  // enforce that rule, so the helpers that scan until they fill a result limit
+  // are pinned here to the `scanUntil` streaming path: reintroducing
+  // `.paginate()` in any of these bodies crashes on a real deployment while
+  // still passing every convex-test case above.
+  // Slices the source from each occurrence of `marker` to the next top-level
+  // declaration (a keyword at column 0). Function bodies are indented, so this
+  // needs no string or brace parsing. The last slice for a name is its
+  // implementation — overload signatures slice to the next signature.
+  const slicesOf = (file: string, marker: string): string[] => {
+    const source = readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
+    const nextDecl = /\n(?:export |async function |function |const |interface |type |\/\/|\/\*)/;
+    const slices: string[] = [];
+    for (let at = source.indexOf(marker); at !== -1; at = source.indexOf(marker, at + marker.length)) {
+      const rest = source.slice(at);
+      const bound = rest.slice(marker.length).search(nextDecl);
+      slices.push(rest.slice(0, bound === -1 ? undefined : bound + marker.length));
+    }
+    return slices;
+  };
+
+  const sites: [file: string, marker: string][] = [
+    ["tasks.ts", "async function searchTasksOfKind("],
+    ["sops.ts", "async function filteredSopRows("],
+    ["sops.ts", "async function visibleContentMatches("],
+    ["sops.ts", "export const search = query("],
+    ["sops.ts", "export const aiListSops = query("],
+  ];
+
+  for (const [file, marker] of sites) {
+    test(`${marker} in ${file} uses scanUntil and never .paginate()`, () => {
+      const slices = slicesOf(file, marker);
+      expect(slices.length).toBeGreaterThan(0);
+      const body = slices.at(-1)!;
+      expect(body).toContain("scanUntil(");
+      expect(body).not.toContain(".paginate(");
+    });
+  }
 });

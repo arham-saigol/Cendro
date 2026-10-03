@@ -2,100 +2,7 @@ import { describe, expect, test, vi, afterEach } from "vitest";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { isMobileUserAgent, PwaAgent } from "./pwa-agent";
-
-// Minimal DOM scaffold so react-dom can mount PwaAgent in edge-runtime —
-// same approach as task-rail-scroll.test.ts.
-class MockNode {}
-class MockElement extends MockNode {}
-class MockHTMLElement extends MockElement {}
-class MockHTMLIFrameElement extends MockHTMLElement {}
-class MockHTMLInputElement extends MockHTMLElement {}
-
-(globalThis as any).Node = MockNode;
-(globalThis as any).Element = MockElement;
-(globalThis as any).HTMLElement = MockHTMLElement;
-(globalThis as any).HTMLIFrameElement = MockHTMLIFrameElement;
-(globalThis as any).HTMLInputElement = MockHTMLInputElement;
-(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-
-function createMockElement(tag = "div"): any {
-  const el = new MockHTMLElement() as any;
-  const children: any[] = [];
-  const attributes = new Map<string, string>();
-  const listeners = new Map<string, ((...args: any[]) => void)[]>();
-
-  el.nodeType = 1;
-  el.tagName = tag.toUpperCase();
-  el.nodeName = tag.toUpperCase();
-  el.children = children;
-  el.childNodes = children;
-  el.style = {};
-  el.dataset = {};
-  el.ownerDocument = (globalThis as any).document;
-
-  el.appendChild = (child: any) => {
-    child.parentNode = el;
-    children.push(child);
-    return child;
-  };
-  el.insertBefore = (child: any, before: any) => {
-    child.parentNode = el;
-    const index = children.indexOf(before);
-    if (index !== -1) children.splice(index, 0, child);
-    else children.push(child);
-    return child;
-  };
-  el.removeChild = (child: any) => {
-    const index = children.indexOf(child);
-    if (index !== -1) children.splice(index, 1);
-    child.parentNode = null;
-    return child;
-  };
-  el.setAttribute = (name: string, value: string) => attributes.set(name, value);
-  el.getAttribute = (name: string) => attributes.get(name) ?? null;
-  el.removeAttribute = (name: string) => attributes.delete(name);
-  el.addEventListener = (event: string, fn: (...args: any[]) => void) => {
-    if (!listeners.has(event)) listeners.set(event, []);
-    listeners.get(event)!.push(fn);
-  };
-  el.removeEventListener = (event: string, fn: (...args: any[]) => void) => {
-    const arr = listeners.get(event);
-    if (arr) {
-      const idx = arr.indexOf(fn);
-      if (idx !== -1) arr.splice(idx, 1);
-    }
-  };
-  el.querySelector = () => null;
-  el.getBoundingClientRect = () => ({ left: 0, right: 0, top: 0, bottom: 0 });
-  return el;
-}
-
-const mockDoc: any = new MockNode();
-mockDoc.nodeType = 9;
-mockDoc.createElement = createMockElement;
-mockDoc.createElementNS = (_ns: string, tag: string) => createMockElement(tag);
-mockDoc.createTextNode = (text: string) => {
-  const node: any = new MockNode();
-  node.nodeType = 3;
-  node.nodeValue = text;
-  node.parentNode = null;
-  return node;
-};
-mockDoc.createComment = () => {
-  const node: any = new MockNode();
-  node.nodeType = 8;
-  node.parentNode = null;
-  return node;
-};
-mockDoc.documentElement = createMockElement("html");
-mockDoc.head = createMockElement("head");
-mockDoc.body = createMockElement("body");
-mockDoc.activeElement = null;
-mockDoc.addEventListener = () => {};
-mockDoc.removeEventListener = () => {};
-
-(globalThis as any).document = mockDoc;
-(globalThis as any).window = globalThis;
+import { createMockElement } from "./test-dom";
 
 // Own window event registry so tests can fire browser events deterministically.
 const windowListeners = new Map<string, ((event: any) => void)[]>();
@@ -174,6 +81,8 @@ afterEach(() => {
   storage.clear();
   windowListeners.clear();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  vi.useRealTimers();
 });
 
 describe("isMobileUserAgent", () => {
@@ -261,6 +170,27 @@ describe("PwaAgent install prompt", () => {
     const { container, root } = await renderAgent();
 
     expect(pageText(container)).toContain("Add to Home Screen");
+    await act(async () => root.unmount());
+  });
+});
+
+describe("PwaAgent service worker", () => {
+  test("registers the worker and keeps checking for updates without a prompt", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.useFakeTimers();
+    const update = vi.fn();
+    const register = vi.fn().mockResolvedValue({ update });
+    stubNavigator({ serviceWorker: { register, addEventListener: () => {}, removeEventListener: () => {} } });
+    const { container, root } = await renderAgent();
+    await act(async () => {}); // let register() resolve so the interval is armed
+
+    expect(register).toHaveBeenCalledWith("/sw.js");
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    expect(update).toHaveBeenCalledTimes(1);
+
+    // The update path never renders a card.
+    expect(pageText(container)).not.toContain("Update available");
+    expect(pageText(container)).not.toContain("Reload");
     await act(async () => root.unmount());
   });
 });

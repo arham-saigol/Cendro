@@ -251,12 +251,12 @@ function SearchCommandDialog({
   const oneTimeResults = entityQueries.oneTime instanceof Error ? undefined : entityQueries.oneTime;
   const sopResults = entityQueries.sops instanceof Error ? undefined : entityQueries.sops;
   // Results always correspond to the debounced term; while the input is ahead
-  // of the debounce, show a searching state rather than stale matches.
-  const entityResults =
-    entityArgs !== "skip" && !entityFailed && needle === normalized && jdResults && oneTimeResults && sopResults
-      ? { jd: jdResults, oneTime: oneTimeResults, sops: sopResults }
-      : null;
-  const searching = entityArgs !== "skip" && !entityFailed && entityResults === null;
+  // of the debounce, show a searching state rather than stale matches. Each
+  // resolved query renders its own section — one failing discloses itself in
+  // the footer instead of hiding the others' results.
+  const entityPending = entityArgs !== "skip" && [entityQueries.jd, entityQueries.oneTime, entityQueries.sops].some((result) => result === undefined);
+  const entityResults = entityArgs !== "skip" && needle === normalized ? { jd: jdResults, oneTime: oneTimeResults, sops: sopResults } : null;
+  const searching = entityArgs !== "skip" && (needle !== normalized || entityPending);
 
   const sections: { title: string; rows: PaletteRow[] }[] = [];
   {
@@ -276,7 +276,7 @@ function SearchCommandDialog({
         })),
       });
     }
-    if (entityResults && entityResults.jd.tasks.length > 0) {
+    if (entityResults?.jd && entityResults.jd.tasks.length > 0) {
       sections.push({
         title: "Job Description tasks",
         rows: entityResults.jd.tasks.map((task) => ({
@@ -291,7 +291,7 @@ function SearchCommandDialog({
         })),
       });
     }
-    if (entityResults && entityResults.oneTime.tasks.length > 0) {
+    if (entityResults?.oneTime && entityResults.oneTime.tasks.length > 0) {
       sections.push({
         title: "One-time tasks",
         rows: entityResults.oneTime.tasks.map((task) => ({
@@ -306,7 +306,7 @@ function SearchCommandDialog({
         })),
       });
     }
-    if (entityResults && entityResults.sops.sops.length > 0) {
+    if (entityResults?.sops && entityResults.sops.sops.length > 0) {
       sections.push({
         title: "SOPs",
         rows: entityResults.sops.sops.map((sop) => ({
@@ -344,7 +344,7 @@ function SearchCommandDialog({
   // Selection is tracked by row key, not position, so async results arriving
   // above the highlighted row can't silently move the Enter target.
   const activeRowIndex = Math.max(0, flatRows.findIndex((row) => row.key === activeKey));
-  const truncated = Boolean(entityResults?.jd.truncated || entityResults?.oneTime.truncated || entityResults?.sops.truncated);
+  const truncated = Boolean(entityResults?.jd?.truncated || entityResults?.oneTime?.truncated || entityResults?.sops?.truncated);
 
   useEffect(() => {
     if (!open) {

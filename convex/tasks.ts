@@ -730,7 +730,7 @@ async function searchTasksOfKind(
     kind === "jd"
       ? ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).order("desc")
       : ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).order("desc");
-  const { kept: scannedRows, exhausted } = await scanUntil(docs, TASK_SEARCH_SCAN_CEILING, TASK_SEARCH_RESULT_LIMIT, async (task) => {
+  const { kept: scannedRows, exhausted } = await scanUntil(docs, TASK_SEARCH_SCAN_CEILING, TASK_SEARCH_RESULT_LIMIT - kept.length, async (task) => {
     if (keptIds.has(task._id) || !matchesSearch(task, needle)) return false;
     if (!(await visible(ctx, companyId, membership, task, kind, auth))) return false;
     keptIds.add(task._id);

@@ -410,7 +410,7 @@ export const search = query({
     const { kept: scannedSops, exhausted } = await scanUntil(
       ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc"),
       SOP_SEARCH_SCAN_CEILING,
-      SOP_SEARCH_RESULT_LIMIT,
+      SOP_SEARCH_RESULT_LIMIT - kept.length,
       async (sop) => {
         if (keptIds.has(sop._id)) return false;
         if (

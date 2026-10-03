@@ -549,7 +549,7 @@ const AssistantMessageView = memo(function AssistantMessageView({
   const assistantText = blocks.flatMap((block) => block.kind === "text" ? [block.text.trim()] : []).filter(Boolean).join("\n\n");
   if (isLive && blocks.length === 0) return <PendingThinkingIndicator />;
   return (
-    <div className="group relative -mb-8 mr-7 px-1 pb-8 pt-1">
+    <div className="group relative mr-7 px-1 pb-8 pt-1">
       {blocks.map((block) => {
         if (block.kind !== "activity") return <AssistantMarkdown key={block.id} text={block.text.trim()} />;
         const preference = activityPanelPreferences[block.segment.id];
@@ -1032,7 +1032,7 @@ export function AiPanel({ companyId, onClose }: { companyId: Id<"companies">; on
           const sentAt = userMessageSentAt(message);
           if (!text && files.length === 0) return null;
           return (
-            <div key={message.id} className="group relative -mb-8 w-full pb-8">
+            <div key={message.id} className="group relative w-full pb-8">
               <div className="ml-auto w-fit max-w-[82%] space-y-2">
                 {imageFiles.length > 0 && (
                   <div className="flex justify-end gap-1.5">

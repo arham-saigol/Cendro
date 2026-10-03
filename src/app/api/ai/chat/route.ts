@@ -107,10 +107,11 @@ export async function POST(req: Request) {
       model: fireworks(CENDRO_AI_MODEL_ID),
       system: `${CENDRO_AI_SYSTEM_PROMPT}\n\nToday's date: ${today} (${timeZone}). Resolve relative dates like "tomorrow" or "next Friday" against it.`,
       messages: await convertToModelMessages(modelMessages as any),
+      reasoning: "high",
       stopWhen: stepCountIs(MAX_AGENT_STEPS),
       prepareStep: ({ stepNumber }) => stepNumber >= FINAL_ANSWER_STEP ? { activeTools: [], toolChoice: "none" as const } : undefined,
       tools: buildCendroAiTools(agentContext) as any,
-      maxOutputTokens: 8192,
+      maxOutputTokens: 16384,
       maxRetries: 1,
       abortSignal: req.signal,
     });

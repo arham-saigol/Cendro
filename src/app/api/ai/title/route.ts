@@ -119,7 +119,8 @@ Title: Session Title Generation
 User: can you debug why convex auth fails on deploy?
 Title: Convex Auth Debugging`,
         prompt: `User message:\n${first.slice(0, 1200)}\n\nTitle:`,
-        maxOutputTokens: 20,
+        reasoning: "low",
+        maxOutputTokens: 256,
         temperature: 0,
         maxRetries: 0,
       });

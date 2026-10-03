@@ -19,16 +19,19 @@ const MAX_HOLIDAY_SPAN_DAYS = 366;
 // "no shift" instead of looping forever.
 const WORKING_DAY_SCAN_LIMIT = MAX_HOLIDAY_SPAN_DAYS + 14;
 
-export type HolidayRange = { startDate: string; endDate: string };
+export type HolidayRange = { startDate: string; endDate: string; recursYearly?: boolean };
 
 export type WorkCalendar = {
   /** Weekday numbers that count as working days (0 = Sunday … 6 = Saturday). */
   workingDays: ReadonlySet<number>;
-  /** Merged, sorted holiday ranges as UTC-indexed calendar dates. */
+  /** Merged, sorted one-time holiday ranges as UTC-indexed calendar dates. */
   holidayRanges: { start: number; end: number }[];
+  /** Repeating ranges as month*100+day (Dec 24 → 1224); a start past the end
+   *  wraps the year boundary (Dec 24 – Jan 6). */
+  yearlyRanges: { startMonthDay: number; endMonthDay: number }[];
 };
 
-export const allWorkingCalendar: WorkCalendar = { workingDays: new Set([0, 1, 2, 3, 4, 5, 6]), holidayRanges: [] };
+export const allWorkingCalendar: WorkCalendar = { workingDays: new Set([0, 1, 2, 3, 4, 5, 6]), holidayRanges: [], yearlyRanges: [] };
 
 function dayIndexOfParts(year: number, month: number, day: number) {
   return Math.floor(Date.UTC(year, month - 1, day) / dayMs);
@@ -54,23 +57,44 @@ function weekdayOf(dayIndex: number) {
   return new Date(dayIndex * dayMs).getUTCDay();
 }
 
+function mergedRanges(ranges: { start: number; end: number }[]) {
+  const merged: { start: number; end: number }[] = [];
+  for (const range of [...ranges].sort((a, b) => a.start - b.start)) {
+    const last = merged[merged.length - 1];
+    if (last && range.start <= last.end + 1) last.end = Math.max(last.end, range.end);
+    else merged.push({ ...range });
+  }
+  return merged;
+}
+
+/** Month-day of a UTC day index as month*100+day (Dec 24 → 1224). */
+function monthDayOf(dayIndex: number) {
+  const date = new Date(dayIndex * dayMs);
+  return (date.getUTCMonth() + 1) * 100 + date.getUTCDate();
+}
+
+/** UTC day index of a month-day in `year`, clamping Feb 29 to Feb 28 off leap years. */
+function yearlyDayIndex(year: number, monthDay: number) {
+  const month = Math.floor(monthDay / 100);
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return dayIndexOfParts(year, month, Math.min(monthDay % 100, daysInMonth));
+}
+
 export function buildWorkCalendar(workingDays: readonly number[] | null | undefined, holidays: readonly HolidayRange[]): WorkCalendar {
   const valid = (workingDays ?? []).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6);
   // An empty weekday list would make no day working, which breaks every shift
   // lookup; fall back to the default instead of carrying a unusable calendar.
   const days = new Set(valid.length ? valid : DEFAULT_WORKING_DAYS);
-  const ranges = holidays
-    .map((holiday) => ({ start: parseCalendarDate(holiday.startDate), end: parseCalendarDate(holiday.endDate) }))
-    .filter((range): range is { start: number; end: number } => range.start !== null && range.end !== null)
-    .map((range) => (range.start <= range.end ? range : { start: range.end, end: range.start }))
-    .sort((a, b) => a.start - b.start);
-  const merged: { start: number; end: number }[] = [];
-  for (const range of ranges) {
-    const last = merged[merged.length - 1];
-    if (last && range.start <= last.end + 1) last.end = Math.max(last.end, range.end);
-    else merged.push({ ...range });
-  }
-  return { workingDays: days, holidayRanges: merged };
+  const parsed = holidays
+    .map((holiday) => ({ start: parseCalendarDate(holiday.startDate), end: parseCalendarDate(holiday.endDate), yearly: holiday.recursYearly === true }))
+    .filter((range): range is { start: number; end: number; yearly: boolean } => range.start !== null && range.end !== null);
+  // Repeating ranges keep their entered month-day order: a start after the
+  // end wraps the year boundary; one-time ranges normalize to start <= end.
+  const yearlyRanges = parsed
+    .filter((range) => range.yearly)
+    .map((range) => ({ startMonthDay: monthDayOf(range.start), endMonthDay: monthDayOf(range.end) }));
+  const merged = mergedRanges(parsed.filter((range) => !range.yearly).map((range) => (range.start <= range.end ? { start: range.start, end: range.end } : { start: range.end, end: range.start })));
+  return { workingDays: days, holidayRanges: merged, yearlyRanges };
 }
 
 function holidayRangeAt(calendar: WorkCalendar, dayIndex: number) {
@@ -86,8 +110,24 @@ function holidayRangeAt(calendar: WorkCalendar, dayIndex: number) {
   return null;
 }
 
+function yearlyRangeAt(calendar: WorkCalendar, dayIndex: number) {
+  const monthDay = monthDayOf(dayIndex);
+  return calendar.yearlyRanges.find((range) =>
+    range.startMonthDay <= range.endMonthDay
+      ? monthDay >= range.startMonthDay && monthDay <= range.endMonthDay
+      : monthDay >= range.startMonthDay || monthDay <= range.endMonthDay
+  ) ?? null;
+}
+
+/** UTC day index where the repeating range covering `dayIndex` ends. */
+function yearlyRangeEndIndex(range: { startMonthDay: number; endMonthDay: number }, dayIndex: number) {
+  const year = new Date(dayIndex * dayMs).getUTCFullYear();
+  const endYear = range.startMonthDay <= range.endMonthDay || monthDayOf(dayIndex) <= range.endMonthDay ? year : year + 1;
+  return yearlyDayIndex(endYear, range.endMonthDay);
+}
+
 export function isWorkingDayIndex(calendar: WorkCalendar, dayIndex: number) {
-  return calendar.workingDays.has(weekdayOf(dayIndex)) && holidayRangeAt(calendar, dayIndex) === null;
+  return calendar.workingDays.has(weekdayOf(dayIndex)) && holidayRangeAt(calendar, dayIndex) === null && yearlyRangeAt(calendar, dayIndex) === null;
 }
 
 /** First working day index strictly after `dayIndex`. */
@@ -98,8 +138,10 @@ export function nextWorkingDayIndex(calendar: WorkCalendar, dayIndex: number) {
   for (let i = 0; i < WORKING_DAY_SCAN_LIMIT; i++) {
     if (!calendar.workingDays.has(weekdayOf(index))) { index += 1; continue; }
     const covering = holidayRangeAt(calendar, index);
-    if (covering === null) return index;
-    index = covering.end + 1;
+    if (covering !== null) { index = covering.end + 1; continue; }
+    const yearly = yearlyRangeAt(calendar, index);
+    if (yearly === null) return index;
+    index = yearlyRangeEndIndex(yearly, index) + 1;
   }
   return index;
 }
@@ -109,7 +151,15 @@ export function nextWorkingDayIndex(calendar: WorkCalendar, dayIndex: number) {
  * can land past its grid end, which the analytics completion lookback needs.
  */
 export function maxHolidaySpanDays(calendar: WorkCalendar) {
-  return calendar.holidayRanges.reduce((max, range) => Math.max(max, range.end - range.start + 1), 0);
+  const maxSpan = (ranges: { start: number; end: number }[]) => ranges.reduce((max, range) => Math.max(max, range.end - range.start + 1), 0);
+  // Materialize repeating ranges in a leap year (wrapping ones end in the
+  // next). A one-time range can extend a repeating closure at either edge, so
+  // the safe bound on any single contiguous closure adds both spans.
+  const yearly = mergedRanges(calendar.yearlyRanges.map((range) => {
+    const endYear = range.startMonthDay <= range.endMonthDay ? 2024 : 2025;
+    return { start: yearlyDayIndex(2024, range.startMonthDay), end: yearlyDayIndex(endYear, range.endMonthDay) };
+  }));
+  return maxSpan(calendar.holidayRanges) + maxSpan(yearly);
 }
 
 /** Local calendar date a cycle's deadline instant falls on. */
@@ -245,7 +295,7 @@ export const get = query({
     const { doc, holidays } = await loadCalendarRows(ctx, args.companyId);
     return {
       workingDays: doc?.workingDays ?? [...DEFAULT_WORKING_DAYS],
-      holidays: holidays.map(({ _id, name, startDate, endDate }) => ({ _id, name, startDate, endDate })),
+      holidays: holidays.map(({ _id, name, startDate, endDate, recursYearly }) => ({ _id, name, startDate, endDate, recursYearly: recursYearly === true })),
     };
   },
 });
@@ -268,21 +318,26 @@ export const setWorkingDays = mutation({
 });
 
 export const addHoliday = mutation({
-  args: { companyId: v.id("companies"), name: v.string(), startDate: v.string(), endDate: v.string() },
+  args: { companyId: v.id("companies"), name: v.string(), startDate: v.string(), endDate: v.string(), recursYearly: v.optional(v.boolean()) },
   handler: async (ctx, args) => {
     const { membership, user } = await requireCapability(ctx, args.companyId, "company:manage_calendar");
     const name = nonEmpty(args.name, "Holiday name");
     const start = parseCalendarDate(args.startDate);
     const end = parseCalendarDate(args.endDate);
     if (start === null || end === null) throw new ConvexError("Holiday dates must be real calendar dates.");
-    const first = Math.min(start, end);
-    const last = Math.max(start, end);
-    if (last - first > MAX_HOLIDAY_SPAN_DAYS) throw new ConvexError("A holiday range can span at most one year.");
+    const recursYearly = args.recursYearly === true;
+    // Repeating ranges keep their entered order — a start after the end wraps
+    // the year boundary. One-time ranges normalize to chronological order.
+    const first = recursYearly ? start : Math.min(start, end);
+    const last = recursYearly ? end : Math.max(start, end);
+    if (!recursYearly && last - first > MAX_HOLIDAY_SPAN_DAYS) throw new ConvexError("A holiday range can span at most one year.");
     const existing = await ctx.db.query("companyHolidays").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(MAX_HOLIDAYS + 1);
     if (existing.length >= MAX_HOLIDAYS) throw new ConvexError("Holiday limit reached.");
     const now = Date.now();
-    const id = await ctx.db.insert("companyHolidays", { companyId: args.companyId, name, startDate: calendarDateString(first), endDate: calendarDateString(last), createdByMembershipId: membership._id, createdAt: now });
-    await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "work_calendar.add_holiday", targetType: "companyHoliday", targetId: id, metadata: { name, startDate: calendarDateString(first), endDate: calendarDateString(last) }, createdAt: now });
+    const startDate = calendarDateString(first);
+    const endDate = calendarDateString(last);
+    const id = await ctx.db.insert("companyHolidays", { companyId: args.companyId, name, startDate, endDate, recursYearly, createdByMembershipId: membership._id, createdAt: now });
+    await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "work_calendar.add_holiday", targetType: "companyHoliday", targetId: id, metadata: { name, startDate, endDate, recursYearly }, createdAt: now });
     return id;
   },
 });

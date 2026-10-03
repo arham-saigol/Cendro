@@ -394,7 +394,7 @@ function GeneralTab({
   calendar?: WorkCalendarData;
   canManageCalendar: boolean;
   onSetWorkingDays: (workingDays: number[]) => Promise<void> | void;
-  onAddHoliday: (name: string, startDate: string, endDate: string) => Promise<boolean> | boolean;
+  onAddHoliday: (name: string, startDate: string, endDate: string, recursYearly: boolean) => Promise<boolean> | boolean;
   onRemoveHoliday: (holidayId: Id<"companyHolidays">) => Promise<void> | void;
 }) {
   const options = timeZoneOptions(timeZone);
@@ -475,7 +475,7 @@ function GeneralTab({
   );
 }
 
-type CalendarHoliday = { _id: Id<"companyHolidays">; name: string; startDate: string; endDate: string };
+type CalendarHoliday = { _id: Id<"companyHolidays">; name: string; startDate: string; endDate: string; recursYearly: boolean };
 type WorkCalendarData = { workingDays: number[]; holidays: CalendarHoliday[] };
 
 const WEEKDAY_OPTIONS = [
@@ -497,7 +497,19 @@ function formatCalendarDate(value: string) {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(date);
 }
 
+function formatMonthDay(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", timeZone: "UTC" }).format(date);
+}
+
 function holidayRangeLabel(holiday: CalendarHoliday) {
+  if (holiday.recursYearly) {
+    const dates = holiday.startDate === holiday.endDate
+      ? formatMonthDay(holiday.startDate)
+      : `${formatMonthDay(holiday.startDate)} – ${formatMonthDay(holiday.endDate)}`;
+    return `Every year · ${dates}`;
+  }
   return holiday.startDate === holiday.endDate
     ? formatCalendarDate(holiday.startDate)
     : `${formatCalendarDate(holiday.startDate)} – ${formatCalendarDate(holiday.endDate)}`;
@@ -513,12 +525,13 @@ function WorkCalendarSection({
   calendar: WorkCalendarData;
   canManageCalendar: boolean;
   onSetWorkingDays: (workingDays: number[]) => Promise<void> | void;
-  onAddHoliday: (name: string, startDate: string, endDate: string) => Promise<boolean> | boolean;
+  onAddHoliday: (name: string, startDate: string, endDate: string, recursYearly: boolean) => Promise<boolean> | boolean;
   onRemoveHoliday: (holidayId: Id<"companyHolidays">) => Promise<void> | void;
 }) {
   const [holidayName, setHolidayName] = useState("");
   const [holidayStart, setHolidayStart] = useState("");
   const [holidayEnd, setHolidayEnd] = useState("");
+  const [holidayYearly, setHolidayYearly] = useState(false);
   const workingDays = new Set(calendar.workingDays);
 
   const setWorkingDay = (day: number, on: boolean) => {
@@ -536,10 +549,11 @@ function WorkCalendarSection({
     const name = holidayName.trim();
     if (!name || !holidayStart) return;
     // Keep the form filled when the save fails so the entry isn't lost.
-    if (await onAddHoliday(name, holidayStart, holidayEnd || holidayStart)) {
+    if (await onAddHoliday(name, holidayStart, holidayEnd || holidayStart, holidayYearly)) {
       setHolidayName("");
       setHolidayStart("");
       setHolidayEnd("");
+      setHolidayYearly(false);
     }
   };
 
@@ -573,7 +587,7 @@ function WorkCalendarSection({
         <div className="company-settings-row">
           <div className="min-w-0">
             <div className="company-settings-label">Holidays</div>
-            <p className="company-settings-help">Named days off, as single dates or ranges. Holidays count as non-working days.</p>
+            <p className="company-settings-help">Named days off, as single dates or ranges. Holidays count as non-working days; check Every year for fixed dates that repeat annually.</p>
           </div>
           <div className="company-settings-control w-full sm:w-auto sm:min-w-[320px]">
             <div className="flex w-full flex-col gap-2">
@@ -623,6 +637,14 @@ function WorkCalendarSection({
                     className="w-auto"
                     placeholder="End"
                   />
+                  <label className="flex items-center gap-1.5 text-[13px] text-[var(--ink)]">
+                    <Checkbox
+                      checked={holidayYearly}
+                      onCheckedChange={setHolidayYearly}
+                      aria-label="Repeat holiday every year"
+                    />
+                    Every year
+                  </label>
                   <Button
                     type="button"
                     size="sm"
@@ -2442,11 +2464,13 @@ export default function Company() {
   const addHoliday = useMutation(api.workCalendar.addHoliday).withOptimisticUpdate((localStore, args) => {
     const current = localStore.getQuery(api.workCalendar.get, { companyId: args.companyId }) as WorkCalendarData | undefined;
     if (current) {
-      const startDate = args.startDate <= args.endDate ? args.startDate : args.endDate;
-      const endDate = args.startDate <= args.endDate ? args.endDate : args.startDate;
+      // Repeating ranges keep their entered order; one-time ranges normalize.
+      const swap = args.recursYearly !== true && args.startDate > args.endDate;
+      const startDate = swap ? args.endDate : args.startDate;
+      const endDate = swap ? args.startDate : args.endDate;
       localStore.setQuery(api.workCalendar.get, { companyId: args.companyId }, {
         ...current,
-        holidays: [...current.holidays, { _id: `pending-${args.name}-${startDate}` as Id<"companyHolidays">, name: args.name.trim(), startDate, endDate }],
+        holidays: [...current.holidays, { _id: `pending-${args.name}-${startDate}` as Id<"companyHolidays">, name: args.name.trim(), startDate, endDate, recursYearly: args.recursYearly === true }],
       } as any);
     }
   });
@@ -2787,7 +2811,7 @@ export default function Company() {
                 calendar={workCalendar}
                 canManageCalendar={canManageCalendar}
                 onSetWorkingDays={(workingDays) => { if (activeCompanyId) void run(async () => setWorkingDays({ companyId: activeCompanyId, workingDays }), "Could not update working days."); }}
-                onAddHoliday={async (name, startDate, endDate) => activeCompanyId ? await run(async () => addHoliday({ companyId: activeCompanyId, name, startDate, endDate }), "Could not add holiday.") : false}
+                onAddHoliday={async (name, startDate, endDate, recursYearly) => activeCompanyId ? await run(async () => addHoliday({ companyId: activeCompanyId, name, startDate, endDate, recursYearly }), "Could not add holiday.") : false}
                 onRemoveHoliday={(holidayId) => { if (activeCompanyId) void run(async () => removeHoliday({ companyId: activeCompanyId, holidayId }), "Could not remove holiday."); }}
               />
             )}

@@ -61,7 +61,7 @@ describe("work calendar settings", () => {
 
     const calendar = await t.withIdentity(identity("admin")).query(api.workCalendar.get, { companyId });
     expect(calendar.workingDays).toEqual([0, 1, 2, 3, 4, 5]);
-    expect(calendar.holidays).toEqual([{ _id: holidayId, name: "Office closed", startDate: "2026-12-24", endDate: "2026-12-31" }]);
+    expect(calendar.holidays).toEqual([{ _id: holidayId, name: "Office closed", startDate: "2026-12-24", endDate: "2026-12-31", recursYearly: false }]);
 
     await t.withIdentity(identity("admin")).mutation(api.workCalendar.removeHoliday, { companyId, holidayId });
     expect((await t.withIdentity(identity("admin")).query(api.workCalendar.get, { companyId })).holidays).toEqual([]);
@@ -255,6 +255,48 @@ describe("JD tasks on a work calendar", () => {
 
     const detail = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
     expect(detail.task.state.dueAt).toBe(utc(2028, 1, 29));
+  });
+
+  test("a yearly holiday moves due dates in every year without being re-added", async () => {
+    // Monthly cycles [1st→1st) are due on the month's last day. A yearly
+    // shutdown covering Jan 31 – Feb 2 pushes the January due date to the
+    // first working day after it — in 2026 and again in 2027.
+    vi.setSystemTime(utc(2026, 1, 15, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Month-end close", description: "", recurrence: "monthly", assigneeMembershipIds: [adminMembershipId] });
+    await t.withIdentity(identity("admin")).mutation(api.workCalendar.addHoliday, { companyId, name: "Annual shutdown", startDate: "2026-01-31", endDate: "2026-02-02", recursYearly: true });
+
+    // Jan 31 + Feb 1-2 are non-working (Feb 1 is also a Sunday) → due end of
+    // Tuesday Feb 3.
+    const first = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
+    expect(first.task.state.dueAt).toBe(utc(2026, 2, 4));
+
+    // A year later with no second entry: Jan 31 2027 is a Sunday, Feb 1-2 are
+    // yearly holidays → due end of Wednesday Feb 3 2027.
+    vi.setSystemTime(utc(2027, 1, 15, 12));
+    const next = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
+    expect(next.task.state.dueAt).toBe(utc(2027, 2, 4));
+  });
+
+  test("a yearly range wrapping the year boundary recurs as one range", async () => {
+    // A Dec 24 – Jan 6 shutdown repeats yearly: a weekly cycle due Sunday
+    // Dec 27 2026 lands inside it and shifts past Jan 6 2027, and a cycle due
+    // Sunday Jan 2 2028 shifts past Jan 6 2028 the same way.
+    vi.setSystemTime(utc(2026, 12, 22, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Weekly review", description: "", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
+    await t.withIdentity(identity("admin")).mutation(api.workCalendar.addHoliday, { companyId, name: "Holiday shutdown", startDate: "2026-12-24", endDate: "2027-01-06", recursYearly: true });
+
+    // Cycle [Mon Dec 21 → Mon Dec 28) due Sunday Dec 27 → covered through
+    // Wednesday Jan 6 2027 → due end of Thursday Jan 7.
+    const first = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
+    expect(first.task.state.dueAt).toBe(utc(2027, 1, 8));
+
+    // [Mon Dec 27 2027 → Mon Jan 3 2028) due Sunday Jan 2 → covered through
+    // Thursday Jan 6 2028 → due end of Friday Jan 7.
+    vi.setSystemTime(utc(2027, 12, 29, 12));
+    const next = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
+    expect(next.task.state.dueAt).toBe(utc(2028, 1, 8));
   });
 
   test("completing a daily task on Sunday counts toward Monday's occurrence", async () => {

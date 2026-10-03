@@ -210,7 +210,7 @@ function SearchCommandDialog({
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const normalized = normalizePaletteQuery(query);
-  const { results: entityResults, failed: entityFailed, searching } = usePaletteSearch({
+  const { results: entityResults, failed: entityFailed, searching, inputError } = usePaletteSearch({
     open, query, companyId: activeCompanyId, canSearch: canSearchEntities,
   });
 
@@ -239,7 +239,7 @@ function SearchCommandDialog({
           key: `jd:${task._id}`,
           icon: Repeat,
           label: task.title,
-          meta: `${task.reference} · ${task.status}`,
+          meta: task.reference,
           onSelect: () => {
             close();
             router.push(`/jd-tasks/${task._id}`);
@@ -254,7 +254,7 @@ function SearchCommandDialog({
           key: `one:${task._id}`,
           icon: SquareCheck,
           label: task.title,
-          meta: `${task.reference} · ${task.status}`,
+          meta: task.reference,
           onSelect: () => {
             close();
             router.push(`/one-time-tasks/${task._id}`);
@@ -390,7 +390,8 @@ function SearchCommandDialog({
                 })}
               </div>
             ))}
-            {flatRows.length === 0 && !searching && !entityFailed && <div className="px-2 py-8 text-center text-sm text-[var(--ink-muted)]">No results found.</div>}
+            {flatRows.length === 0 && !searching && !entityFailed && !inputError && <div className="px-2 py-8 text-center text-sm text-[var(--ink-muted)]">No results found.</div>}
+            {inputError && <div role="status" className="px-2 py-3 text-center text-xs text-[var(--ink-muted)]">{inputError}</div>}
             {searching && <div className="px-2 py-3 text-center text-xs text-[var(--ink-muted)]">Searching tasks and SOPs…</div>}
             {entityFailed && <div className="px-2 py-3 text-center text-xs text-[var(--ink-muted)]">Couldn&apos;t search tasks and SOPs — keep typing to retry.</div>}
             {truncated && !searching && <div className="border-t border-[var(--hairline)] px-2 py-2 text-center text-xs text-[var(--ink-faint)]">Showing top matches — keep typing to refine</div>}

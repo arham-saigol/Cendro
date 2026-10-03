@@ -78,6 +78,37 @@ describe("palette search requests through the installed Convex client", () => {
     expect(modifications("Add")).toHaveLength(3);
   });
 
+  test("restoring a term, switching company, and regaining permission each wait before subscribing", async () => {
+    await render({ open: true, query: "freezer" });
+    await advance(300);
+    expect(modifications("Add")).toHaveLength(3);
+    await render({ query: "freezers" });
+    await advance(50);
+    await render({ query: "freezer" });
+    await advance(299);
+    expect(modifications("Add")).toHaveLength(3);
+    await advance(1);
+    expect(modifications("Add")).toHaveLength(6);
+    await render({ companyId: "company-b" as Id<"companies"> });
+    await advance(299);
+    expect(modifications("Add")).toHaveLength(6);
+    await advance(1);
+    expect(modifications("Add")).toHaveLength(9);
+    await render({ canSearch: false });
+    expect(modifications("Remove")).toHaveLength(9);
+    await render({ canSearch: true });
+    await advance(299);
+    expect(modifications("Add")).toHaveLength(9);
+    await advance(1);
+    expect(modifications("Add")).toHaveLength(12);
+  });
+
+  test("overlong searches send no requests", async () => {
+    await render({ open: true, query: "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen" });
+    await advance(1_000);
+    expect(modifications("Add")).toHaveLength(0);
+  });
+
   test("closed, empty, short, and unauthorized searches send no requests", async () => {
     await render({ query: "freezer" });
     await advance(1_000);

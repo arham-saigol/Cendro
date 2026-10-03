@@ -5,7 +5,7 @@ import { useQueries, type RequestForQueries } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
-import { normalizePaletteQuery, PALETTE_MIN_QUERY_LENGTH, PALETTE_SEARCH_DELAY_MS } from "@/lib/palette-search";
+import { normalizePaletteQuery, paletteQueryError, PALETTE_MIN_QUERY_LENGTH, PALETTE_SEARCH_DELAY_MS } from "@/lib/palette-search";
 
 type EntityQueries = {
   jd?: FunctionReturnType<typeof api.tasks.searchJd> | Error;
@@ -20,22 +20,21 @@ export function usePaletteSearch({ open, query, companyId, canSearch }: {
   canSearch: boolean;
 }) {
   const normalized = normalizePaletteQuery(query);
-  const eligible = open && canSearch && companyId !== null && normalized.length >= PALETTE_MIN_QUERY_LENGTH;
-  const [settled, setSettled] = useState("");
+  const inputError = paletteQueryError(normalized);
+  const eligible = open && canSearch && companyId !== null && !inputError && normalized.length >= PALETTE_MIN_QUERY_LENGTH;
+  const [settled, setSettled] = useState<{ query: string; companyId: Id<"companies"> | null } | null>(null);
 
   useEffect(() => {
-    if (!eligible) {
-      setSettled("");
-      return;
-    }
-    const timeout = window.setTimeout(() => setSettled(normalized), PALETTE_SEARCH_DELAY_MS);
+    setSettled(null);
+    if (!eligible) return;
+    const timeout = window.setTimeout(() => setSettled({ query: normalized, companyId }), PALETTE_SEARCH_DELAY_MS);
     return () => window.clearTimeout(timeout);
   }, [eligible, normalized, companyId]);
 
   // Drop subscriptions immediately on close, clear, or further typing.
   // Keeping the spec memoized also prevents useQueries render loops.
   const querySpec = useMemo((): RequestForQueries => {
-    if (!eligible || !companyId || settled !== normalized) return {};
+    if (!eligible || !companyId || settled?.query !== normalized || settled.companyId !== companyId) return {};
     const args = { companyId, query: normalized };
     return {
       jd: { query: api.tasks.searchJd, args },
@@ -47,6 +46,7 @@ export function usePaletteSearch({ open, query, companyId, canSearch }: {
   const subscribed = Object.keys(querySpec).length > 0;
   const values = [queries.jd, queries.oneTime, queries.sops];
   return {
+    inputError,
     failed: subscribed && values.some((value) => value instanceof Error),
     searching: eligible && (!subscribed || values.some((value) => value === undefined)),
     results: subscribed ? {

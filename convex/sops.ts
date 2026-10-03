@@ -10,7 +10,7 @@ import { buildSopVisibilityContext, getManagedMembershipIds, memberFirstName, me
 import { nonEmpty } from "./validation";
 import { nextReference } from "./references";
 import { scanUntil } from "./queryLimits";
-import { paletteSearchInput, PALETTE_CANDIDATE_LIMIT, PALETTE_RESULT_LIMIT } from "./searchText";
+import { paletteSearchInput, searchPaletteRows } from "./searchText";
 
 
 async function assertTargets(ctx: any, companyId: Id<"companies">, args: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
@@ -395,17 +395,14 @@ export const search = query({
     const auth = sopListAuth(ctx, args.companyId, membership, caps);
     const isVisible = async (sop: Doc<"sops">) => await visibleSop(ctx, args.companyId, membership, sop, visibility, caps, undefined, auth);
     const toRow = (sop: Doc<"sops">) => ({ _id: sop._id, reference: sop.reference, title: sop.title, scopeType: sop.scopeType });
-    if (input.kind === "reference" && input.exact) {
-      const exact = await ctx.db.query("sops")
-        .withIndex("by_companyId_and_reference", (q) => q.eq("companyId", args.companyId).eq("reference", input.exact!))
-        .unique();
-      if (exact) return { sops: await isVisible(exact) ? [toRow(exact)] : [], truncated: false };
-    }
-    const docs = input.kind === "reference"
-      ? ctx.db.query("sops").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", args.companyId).gte("reference", input.prefix).lt("reference", `${input.prefix}\uffff`))
-      : ctx.db.query("sops").withSearchIndex("search_title", (q) => q.search("title", input.query).eq("companyId", args.companyId));
-    const { kept, exhausted } = await scanUntil(docs, PALETTE_CANDIDATE_LIMIT, PALETTE_RESULT_LIMIT, isVisible);
-    return { sops: kept.map(toRow), truncated: !exhausted };
+    const { rows, truncated } = await searchPaletteRows(ctx, {
+      input,
+      prefixes: ["SOP"],
+      byReference: (prefix) => ctx.db.query("sops").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", args.companyId).gte("reference", prefix).lt("reference", `${prefix}\uffff`)),
+      byTitle: (title) => ctx.db.query("sops").withSearchIndex("search_title", (q) => q.search("title", title).eq("companyId", args.companyId)),
+      isVisible,
+    });
+    return { sops: rows.map(toRow), truncated };
   },
 });
 

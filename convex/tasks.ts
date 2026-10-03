@@ -8,8 +8,8 @@ import { effectiveCurrentJdCycle, elapsedJdOccurrences, loadWorkCalendar, occurr
 import { activeCompanyMembershipIds, assertCanAssign, assertCanDeleteTask, assertCanUpdateTask, canViewTask, getManagedMembershipIds, hasAllManagedMemberships, hasAnyManagedMembership, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scanManagedMembershipIds, scopedMembershipIds } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
-import { DEFAULT_QUERY_LIMIT, scanUntil, takeWithOverflow } from "./queryLimits";
-import { paletteSearchInput, PALETTE_CANDIDATE_LIMIT, PALETTE_RESULT_LIMIT, referenceSearchKey } from "./searchText";
+import { DEFAULT_QUERY_LIMIT, takeWithOverflow } from "./queryLimits";
+import { paletteSearchInput, searchPaletteRows, referenceSearchKey } from "./searchText";
 import { ASSIGNEE_SEARCH_MAX_LENGTH } from "../src/lib/assignee-search";
 import { nextReference } from "./references";
 import {
@@ -670,18 +670,6 @@ export const listOneTimeRows = query({
 
 // Palette search reads only indexed title matches or a reference-code range.
 
-function taskByReference(ctx: QueryCtx, kind: TaskKind, companyId: Id<"companies">, reference: string) {
-  return kind === "jd"
-    ? ctx.db
-        .query("jdTasks")
-        .withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).eq("reference", reference))
-        .unique()
-    : ctx.db
-        .query("oneTimeTasks")
-        .withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).eq("reference", reference))
-        .unique();
-}
-
 async function searchTasksOfKind(
   ctx: QueryCtx,
   companyId: Id<"companies">,
@@ -708,58 +696,42 @@ async function searchTasksOfKind(
 ) {
   const input = paletteSearchInput(needle);
   if (!input) return { rows: [], truncated: false };
-  if (input.kind === "reference" && input.exact) {
-    const exact = await taskByReference(ctx, kind, companyId, input.exact);
-    if (exact) {
-      return { rows: await visible(ctx, companyId, membership, exact, kind, auth) ? [exact] : [], truncated: false };
-    }
-  }
-  const docs: AsyncIterable<Doc<"jdTasks"> | Doc<"oneTimeTasks">> = input.kind === "reference"
-    ? kind === "jd"
-      ? ctx.db.query("jdTasks").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).gte("reference", input.prefix).lt("reference", `${input.prefix}\uffff`))
-      : ctx.db.query("oneTimeTasks").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).gte("reference", input.prefix).lt("reference", `${input.prefix}\uffff`))
-    : kind === "jd"
-      ? ctx.db.query("jdTasks").withSearchIndex("search_title", (q) => q.search("title", input.query).eq("companyId", companyId))
-      : ctx.db.query("oneTimeTasks").withSearchIndex("search_title", (q) => q.search("title", input.query).eq("companyId", companyId));
-  const { kept, exhausted } = await scanUntil(docs, PALETTE_CANDIDATE_LIMIT, PALETTE_RESULT_LIMIT, async (task) =>
-    await visible(ctx, companyId, membership, task, kind, auth),
-  );
-  return { rows: kept, truncated: !exhausted };
+  return await searchPaletteRows<Doc<"jdTasks"> | Doc<"oneTimeTasks">>(ctx, {
+    input,
+    prefixes: kind === "jd" ? ["JD"] : ["TSK", "OT"],
+    byReference: (prefix) => kind === "jd"
+      ? ctx.db.query("jdTasks").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).gte("reference", prefix).lt("reference", `${prefix}\uffff`))
+      : ctx.db.query("oneTimeTasks").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).gte("reference", prefix).lt("reference", `${prefix}\uffff`)),
+    byTitle: (title) => kind === "jd"
+      ? ctx.db.query("jdTasks").withSearchIndex("search_title", (q) => q.search("title", title).eq("companyId", companyId))
+      : ctx.db.query("oneTimeTasks").withSearchIndex("search_title", (q) => q.search("title", title).eq("companyId", companyId)),
+    isVisible: async (task) => await visible(ctx, companyId, membership, task, kind, auth),
+  });
 }
 
-// Each kind scans its own table, so each gets its own query export; the
+// Each kind searches its own table, so each gets its own query export; the
 // palette fires both plus api.sops.search.
 const paletteSearchArgs = { companyId: v.id("companies"), query: v.string() };
 
 async function paletteSearch(ctx: QueryCtx, args: { companyId: Id<"companies">; query: string }, kind: TaskKind) {
   const needle = args.query.trim();
   if (!paletteSearchInput(needle)) return { tasks: [], truncated: false };
-  const { membership, company } = await requireMembership(ctx, args.companyId);
+  const { membership } = await requireMembership(ctx, args.companyId);
   const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
   const capabilityPrefix = kind === "jd" ? "tasks:jd" : "tasks:one_time";
   if (!["any", "managed", "self"].some((scope) => auth.caps.has(`${capabilityPrefix}:view:${scope}` as Capability))) {
     return { tasks: [], truncated: false };
   }
-  const timeZone = company.timeZone ?? defaultTimeZone;
   const { rows, truncated } =
     kind === "jd"
       ? await searchTasksOfKind(ctx, args.companyId, membership, auth, "jd", needle)
       : await searchTasksOfKind(ctx, args.companyId, membership, auth, "one_time", needle);
-  const now = Date.now();
-  const calendar = kind === "jd" && rows.length ? await loadWorkCalendar(ctx, args.companyId) : undefined;
-  const tasks = await Promise.all(
-    rows.map(async (task) => ({
-      _id: task._id,
-      reference: task.reference,
-      title: task.title,
-      status: "recurrence" in task ? (await jdState(ctx, task, now, timeZone, calendar)).status : oneState(task).status,
-    })),
-  );
+  const tasks = rows.map(({ _id, reference, title }) => ({ _id, reference, title }));
   return { tasks, truncated };
 }
 
 const paletteTaskResultValidator = v.object({
-  tasks: v.array(v.object({ _id: v.union(v.id("jdTasks"), v.id("oneTimeTasks")), reference: v.string(), title: v.string(), status: v.string() })),
+  tasks: v.array(v.object({ _id: v.union(v.id("jdTasks"), v.id("oneTimeTasks")), reference: v.string(), title: v.string() })),
   truncated: v.boolean(),
 });
 

@@ -1868,6 +1868,7 @@ async function aiTaskRow(ctx: Ctx, kind: TaskKind, task: Doc<"jdTasks"> | Doc<"o
 // Source rows scanned per kind before giving up; enough that a sparse status
 // or scoped-viewer match usually surfaces instead of silently coming back empty.
 const AI_LIST_TASK_SCAN_LIMIT = 400;
+const AI_LIST_TASK_EVAL_CHUNK = 32;
 
 export const aiListVisible = query({
   args: { companyId: v.id("companies"), status: v.union(v.literal("all"), v.literal("due"), v.literal("overdue"), v.literal("done")), limit: v.number(), search: v.optional(v.string()), kind: v.optional(v.union(v.literal("jd"), v.literal("one_time"))) },
@@ -1885,21 +1886,28 @@ export const aiListVisible = query({
     const timeZone = await companyTimeZone(ctx, args.companyId);
     // Convex allows only one .paginate() call per function and this handler
     // scans two tables, so each scan is a single bounded take() of the newest
-    // rows; `exhausted` reports whether matching rows may remain. Enrichment is
-    // deferred: candidates are only visibility- and state-checked here, and
-    // assignees load in one batch across all matches so the scan budget also
-    // bounds total reads below transaction limits.
+    // rows; `exhausted` reports whether matching rows may remain. Rows are
+    // evaluated newest-first in small batches and the scan stops as soon as
+    // the requested count fills. Enrichment is deferred: candidates are only
+    // visibility- and state-checked here, and assignees load in one batch
+    // across all matches so the scan budget also bounds total reads below
+    // transaction limits.
     const collect = async (kind: TaskKind, table: "jdTasks" | "oneTimeTasks") => {
       const page = await ctx.db.query(table).withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(AI_LIST_TASK_SCAN_LIMIT);
-      const exhausted = page.length < AI_LIST_TASK_SCAN_LIMIT;
       const matched: { task: Doc<"jdTasks"> | Doc<"oneTimeTasks">; state: { status: string; dueAt: number | null } }[] = [];
-      const evaluated = await Promise.all(page.map(async (task) => {
-        if (!(await visible(ctx, args.companyId, membership, task, kind, auth))) return null;
-        if (!matchesSearch(task, needle)) return null;
-        const state = kind === "jd" ? await jdState(ctx, task as Doc<"jdTasks">, now, timeZone) : oneState(task as Doc<"oneTimeTasks">);
-        return matches(state.status) ? { task, state } : null;
-      }));
-      for (const item of evaluated) if (item && matched.length < limit) matched.push(item);
+      let offset = 0;
+      while (offset < page.length && matched.length < limit) {
+        const batch = page.slice(offset, offset + AI_LIST_TASK_EVAL_CHUNK);
+        const evaluated = await Promise.all(batch.map(async (task) => {
+          if (!(await visible(ctx, args.companyId, membership, task, kind, auth))) return null;
+          if (!matchesSearch(task, needle)) return null;
+          const state = kind === "jd" ? await jdState(ctx, task as Doc<"jdTasks">, now, timeZone) : oneState(task as Doc<"oneTimeTasks">);
+          return matches(state.status) ? { task, state } : null;
+        }));
+        for (const item of evaluated) if (item && matched.length < limit) matched.push(item);
+        offset += batch.length;
+      }
+      const exhausted = offset >= page.length && page.length < AI_LIST_TASK_SCAN_LIMIT;
       return { matched, exhausted };
     };
     const [jdScan, oneScan] = await Promise.all([

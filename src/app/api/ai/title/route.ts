@@ -1,3 +1,4 @@
+import { createFireworks } from "@ai-sdk/fireworks";
 import { gateway } from "@ai-sdk/gateway";
 import { auth } from "@clerk/nextjs/server";
 import { generateText } from "ai";
@@ -5,6 +6,7 @@ import { ConvexHttpClient } from "convex/browser";
 import { z } from "zod";
 import { api } from "../../../../../convex/_generated/api";
 import type { Id, TableNames } from "../../../../../convex/_generated/dataModel";
+import { CENDRO_AI_MODEL_ID } from "@/lib/ai/model";
 import { consumeAiRateLimit } from "@/lib/ai/rate-limit";
 import { readJsonRequest } from "@/lib/ai/request-body";
 import { safeAiChatServerEnv } from "@/lib/env";
@@ -97,10 +99,13 @@ export async function POST(req: Request) {
   const fallback = cleanTitle(fallbackTitle(first));
   let title = fallback;
 
-  if (process.env.AI_GATEWAY_API_KEY && first.trim()) {
+  if (first.trim()) {
     try {
+      const model = process.env.AI_GATEWAY_API_KEY
+        ? gateway(titleModel)
+        : createFireworks({ apiKey: env.data.FIREWORKS_API_KEY })(CENDRO_AI_MODEL_ID);
       const result = await generateText({
-        model: gateway(titleModel),
+        model,
         system: `You are a chat title generator.
 Return only the final title.
 Rules:
@@ -118,7 +123,8 @@ Title: Session Title Generation
 User: can you debug why convex auth fails on deploy?
 Title: Convex Auth Debugging`,
         prompt: `User message:\n${first.slice(0, 1200)}\n\nTitle:`,
-        maxOutputTokens: 20,
+        reasoning: "low",
+        maxOutputTokens: 256,
         temperature: 0,
         maxRetries: 0,
       });

@@ -1138,6 +1138,10 @@ export const updateJd = mutation({
     nextTask.recurrence = args.recurrence;
     nextTask.assigneeMembershipIds = args.assigneeMembershipIds;
     if (args.recurrence !== task.recurrence) {
+      // A completion recorded under the old grid can coincide with the new
+      // cycle's start; clear it so the reset actually shows as due.
+      const coincidentDone = await currentJdCompletion(ctx, task._id, nextCycleStart);
+      if (coincidentDone) await ctx.db.delete(coincidentDone._id);
       nextTask.cycleStartedAt = nextCycleStart;
       nextTask.status = "due";
       nextTask.statusCycleStart = nextCycleStart;

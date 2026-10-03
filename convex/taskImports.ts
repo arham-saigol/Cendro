@@ -465,6 +465,9 @@ export const commitTaskImportBatch = mutation({
           if (hasField(item.draft, "recurrence") && item.draft.recurrence) nextTask.recurrence = item.draft.recurrence;
           if (item.assigneePatchRequested) nextTask.assigneeMembershipIds = item.assigneeMembershipIds;
           if (nextCycleStart !== undefined) {
+            // A completion recorded under the old grid can coincide with the
+            // new cycle's start; clear it so the reset actually shows as due.
+            if (previousDone) await ctx.db.delete(previousDone._id);
             nextTask.cycleStartedAt = nextCycleStart;
             nextTask.status = "due";
             nextTask.statusCycleStart = nextCycleStart;

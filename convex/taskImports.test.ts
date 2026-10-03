@@ -400,7 +400,7 @@ describe("task import backend", () => {
 
     // 1. Create JD and One-time tasks with description and notes
     const jdId = await admin.mutation(api.tasks.createJd, { companyId, title: "JD with notes", description: "Initial JD description", notes: "Initial JD note", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
-    await admin.mutation(api.tasks.createOneTime, { companyId, title: "OT with notes", description: "Initial OT description", notes: "Initial OT note", priority: "high", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [adminMembershipId] });
+    const otId = await admin.mutation(api.tasks.createOneTime, { companyId, title: "OT with notes", description: "Initial OT description", notes: "Initial OT note", priority: "high", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [adminMembershipId] });
 
     // 2. Verify exportRows includes description and notes for both kinds
     const jdExport = await admin.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts: { cursor: null, numItems: 50 } });
@@ -453,6 +453,64 @@ describe("task import backend", () => {
     const updatedJd = await admin.query(api.tasks.getJd, { companyId, taskId: jdId });
     expect(updatedJd.task.description).toBe("Updated JD description via import");
     expect(updatedJd.task.notes).toBe("Updated JD note via import");
+
+    // 5. One-time create and update via import also apply description
+    const otCreateRes = await admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "one_time", importKey: "import-ot-desc-create", batchKey: "batch-1", source: "cendro",
+      rows: [{
+        include: true,
+        selectedAssigneeMembershipIds: [adminMembershipId],
+        draft: { ...draft(), rowKey: "One-Time Tasks:2", sourceSheet: "One-Time Tasks", kind: "one_time" as const, reference: "TSK-010", title: "Imported OT Task", description: "OT created description", recurrence: null, dueDate: Date.now() + 86_400_000, priority: "medium" as const, presentFields: ["reference", "title", "description", "dueDate", "priority", "assignees"] as ("reference" | "title" | "description" | "dueDate" | "priority" | "assignees")[] },
+      }],
+    });
+    expect(otCreateRes.created).toBe(1);
+    const createdOt = await admin.query(api.tasks.listOneTimeRows, { companyId, search: "Imported OT Task", paginationOpts: { numItems: 10, cursor: null } });
+    expect(createdOt.page[0].description).toBe("OT created description");
+
+    const existingOt = await admin.query(api.tasks.getOneTime, { companyId, taskId: otId });
+    await admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "one_time", importKey: "import-ot-desc-update", batchKey: "batch-1", source: "cendro",
+      rows: [{
+        include: true,
+        expectedUpdatedAt: existingOt.task.updatedAt,
+        selectedAssigneeMembershipIds: null,
+        draft: { ...draft(), rowKey: "One-Time Tasks:3", sourceSheet: "One-Time Tasks", kind: "one_time" as const, reference: existingOt.task.reference, title: existingOt.task.title, description: "Updated OT description via import", recurrence: null, dueDate: null, priority: null, presentFields: ["reference", "description"] as ("reference" | "description")[], rawAssigneeText: "", assigneeEmails: [] },
+      }],
+    });
+    const updatedOt = await admin.query(api.tasks.getOneTime, { companyId, taskId: otId });
+    expect(updatedOt.task.description).toBe("Updated OT description via import");
+  });
+
+  test("a recurrence-changing import clears a completion coinciding with the new cycle start", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+    const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Coincident", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    const task = await admin.query(api.tasks.getJd, { companyId, taskId });
+    const newCycleStart = currentJdCycle("weekly", Date.now(), defaultTimeZone).start;
+    await t.run(async (ctx) => {
+      await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId: taskId, cycleStart: newCycleStart, completedAt: Date.now() });
+    });
+
+    await admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-recurrence-coincident", batchKey: "batch-1", source: "cendro",
+      rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: draft({ reference: task.task.reference, recurrence: "weekly", presentFields: ["reference", "recurrence"], rawAssigneeText: "", assigneeEmails: [] }) }],
+    });
+
+    const updated = await admin.query(api.tasks.getJd, { companyId, taskId });
+    expect(updated.task.recurrence).toBe("weekly");
+    expect(updated.task.status).toBe("due");
+    expect(updated.task.state.rawStatus).toBe("due");
+    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect());
+    expect(completions).toHaveLength(0);
+
+    // The manual edit path resets the cycle the same way.
+    const manualTaskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Manual coincident", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    await t.run(async (ctx) => {
+      await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId: manualTaskId, cycleStart: newCycleStart, completedAt: Date.now() });
+    });
+    await admin.mutation(api.tasks.updateJd, { companyId, taskId: manualTaskId, title: "Manual coincident", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
+    const manualUpdated = await admin.query(api.tasks.getJd, { companyId, taskId: manualTaskId });
+    expect(manualUpdated.task.state.rawStatus).toBe("due");
   });
 
   test("creates new task using imported task code if it does not exist and syncs counter", async () => {

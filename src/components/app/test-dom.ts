@@ -65,6 +65,8 @@ export function createMockElement(tag = "div"): any {
 const mockDoc: any = new MockNode();
 mockDoc.nodeType = 9;
 mockDoc.createElement = createMockElement;
+// React resolves non-HTML namespaces (svg) through createElementNS.
+mockDoc.createElementNS = (_ns: string, tag: string) => createMockElement(tag);
 mockDoc.createTextNode = (text: string) => {
   const node: any = new MockNode();
   node.nodeType = 3;

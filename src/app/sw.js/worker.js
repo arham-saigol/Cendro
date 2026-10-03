@@ -54,9 +54,8 @@ self.addEventListener("activate", (event) => {
   );
 });
 
-self.addEventListener("message", (event) => {
-  if (event.data && event.data.type === "SKIP_WAITING") self.skipWaiting();
-});
+// No SKIP_WAITING message channel: a new worker activates only after every
+// controlled tab closes, so updates arrive on the user's own reload or relaunch.
 
 self.addEventListener("fetch", (event) => {
   const request = event.request;

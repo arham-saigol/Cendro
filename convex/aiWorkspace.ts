@@ -40,13 +40,14 @@ export const context = query({
     const scope = hasCompanyScope ? "company" : hasManagedScope ? "managed" : "self";
     return {
       companyName: company.name,
+      timeZone: company.timeZone ?? null,
       role: membership.role,
       capabilities: Array.from(capabilities),
       scope,
       visiblePeopleLimit: scoped.size,
       isTruncated,
       isComplete: !isTruncated,
-      unsupportedActions: ["delete", "remove", "role-change", "permission-change", "bulk-update"],
+      unsupportedActions: ["role-change", "permission-change", "company-settings", "member-management", "bulk-operations"],
     };
   },
 });

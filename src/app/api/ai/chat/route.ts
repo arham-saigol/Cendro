@@ -6,6 +6,7 @@ import { z } from "zod";
 import { api } from "../../../../../convex/_generated/api";
 import type { Id, TableNames } from "../../../../../convex/_generated/dataModel";
 import { AI_CHAT_MAX_REQUEST_BYTES, validateAiChatAttachments } from "@/lib/ai/attachments";
+import { CENDRO_AI_MODEL_ID } from "@/lib/ai/model";
 import { buildCendroAiTools, createCendroAiContext } from "@/lib/ai/registry";
 import { consumeAiRateLimit } from "@/lib/ai/rate-limit";
 import { readJsonRequest } from "@/lib/ai/request-body";
@@ -100,14 +101,17 @@ export async function POST(req: Request) {
     }
 
     const fireworks = createFireworks({ apiKey: env.data.FIREWORKS_API_KEY });
+    const timeZone = agentContext.timeZone ?? "UTC";
+    const today = new Date().toLocaleDateString("en-CA", { timeZone });
     const result = streamText({
-      model: fireworks(env.data.AI_MODEL as any),
-      system: CENDRO_AI_SYSTEM_PROMPT,
+      model: fireworks(CENDRO_AI_MODEL_ID),
+      system: `${CENDRO_AI_SYSTEM_PROMPT}\n\nToday's date: ${today} (${timeZone}). Resolve relative dates like "tomorrow" or "next Friday" against it.`,
       messages: await convertToModelMessages(modelMessages as any),
+      reasoning: "high",
       stopWhen: stepCountIs(MAX_AGENT_STEPS),
       prepareStep: ({ stepNumber }) => stepNumber >= FINAL_ANSWER_STEP ? { activeTools: [], toolChoice: "none" as const } : undefined,
       tools: buildCendroAiTools(agentContext) as any,
-      maxOutputTokens: 8192,
+      maxOutputTokens: 16384,
       maxRetries: 1,
       abortSignal: req.signal,
     });

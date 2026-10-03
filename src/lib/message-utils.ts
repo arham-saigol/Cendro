@@ -25,7 +25,7 @@ function toolNameOfPart(part: any) {
 
 function safeToolInput(part: any, toolName: string) {
   const input = part?.input;
-  if (toolName === "web_search" || toolName === "search_sops") return { query: compactText(input?.query, 300) ?? "" };
+  if (toolName === "web_search" || toolName === "list_sops" || toolName === "list_tasks") return { query: compactText(input?.query, 300) ?? "" };
   if (toolName === "web_fetch") return { url: compactText(input?.url, 1000) ?? "" };
   return undefined;
 }

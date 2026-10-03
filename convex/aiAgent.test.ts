@@ -58,8 +58,49 @@ describe("AI agent Convex boundaries", () => {
     const tasks = await t.withIdentity(identity("employee")).query(api.tasks.aiListVisible, { companyId, status: "all", limit: 10 });
     expect(tasks.rows.map((task) => task.title)).toEqual(["Visible task"]);
     expect(tasks.truncated).toBe(false);
-    const sops = await t.withIdentity(identity("employee")).query(api.sops.aiSearch, { companyId, query: "procedure" });
+    const sops = await t.withIdentity(identity("employee")).query(api.sops.aiListSops, { companyId, query: "procedure" });
     expect(sops.map((sop) => sop.title)).toEqual(["Visible SOP"]);
+  });
+
+  test("AI SOP search reaches content matches beyond the scan ceiling", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const now = Date.now();
+    await t.run(async (ctx) => {
+      await ctx.db.insert("sops", { companyId, reference: "SOP-OLD", title: "Legacy guide", content: "unique-needle-phrase", scopeType: "company", creatorMembershipId: adminMembershipId, updatedByMembershipId: adminMembershipId, createdAt: now, updatedAt: now });
+    });
+    for (let batch = 0; batch < 5; batch += 1) {
+      await t.run(async (ctx) => {
+        for (let i = 0; i < 220; i += 1) {
+          const seq = batch * 220 + i;
+          await ctx.db.insert("sops", { companyId, reference: `SOP-${seq}`, title: `Filler ${seq}`, content: "routine filler text", scopeType: "company", creatorMembershipId: adminMembershipId, updatedByMembershipId: adminMembershipId, createdAt: now + seq, updatedAt: now + seq });
+        }
+      });
+    }
+
+    const sops = await t.withIdentity(identity("admin")).query(api.sops.aiListSops, { companyId, query: "unique-needle-phrase" });
+    expect(sops.map((sop) => sop.reference)).toEqual(["SOP-OLD"]);
+  });
+
+  test("AI status changes follow the assignee rule and deny others", async () => {
+    const { t, companyId, employeeMembershipId } = await seed();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, { companyId, title: "Owned task", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [employeeMembershipId], priority: "medium" });
+
+    const updated = await t.withIdentity(identity("employee")).mutation(api.tasks.aiSetStatus, { companyId, kind: "one_time", taskId, status: "completed" });
+    expect(updated.status).toBe("Completed");
+
+    await expect(t.withIdentity(identity("employee2")).mutation(api.tasks.aiSetStatus, { companyId, kind: "one_time", taskId, status: "due" })).rejects.toThrow();
+  });
+
+  test("AI SOP updates and deletes follow scope permissions", async () => {
+    const { t, companyId } = await seed();
+    const sopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Company SOP", content: "Body", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
+    const detail = await t.withIdentity(identity("employee")).query(api.sops.aiGet, { companyId, sopId });
+    expect(detail.title).toBe("Company SOP");
+    expect(detail.canUpdate).toBe(false);
+    expect(detail.canDelete).toBe(false);
+
+    await expect(t.withIdentity(identity("employee")).mutation(api.sops.update, { companyId, sopId, title: "Renamed" })).rejects.toThrow();
+    await expect(t.withIdentity(identity("employee")).mutation(api.sops.remove, { companyId, sopId })).rejects.toThrow();
   });
 
   test("cross-company AI sessions and unauthorized writes fail", async () => {
@@ -67,8 +108,8 @@ describe("AI agent Convex boundaries", () => {
     const sessionId = await t.withIdentity(identity("admin")).mutation(api.aiChat.createSession, { companyId });
 
     await expect(t.withIdentity(identity("admin")).query(api.aiChat.authorizeSessionForAgent, { companyId: otherCompanyId, sessionId })).rejects.toThrow("Chat session not found");
-    await expect(t.withIdentity(identity("employee")).mutation(api.tasks.aiCreateOneTime, { companyId, title: "Nope", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [employeeMembershipId], priority: "medium" })).rejects.toThrow("access");
-    await expect(t.withIdentity(identity("employee")).mutation(api.sops.aiCreate, { companyId, title: "Nope", content: "Body" })).rejects.toThrow("access");
+    await expect(t.withIdentity(identity("employee")).mutation(api.tasks.createOneTime, { companyId, title: "Nope", description: "", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [employeeMembershipId], priority: "medium" })).rejects.toThrow();
+    await expect(t.withIdentity(identity("employee")).mutation(api.sops.create, { companyId, title: "Nope", content: "Body", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] })).rejects.toThrow();
   });
 
   test("AI session list excludes drafts until they have messages", async () => {

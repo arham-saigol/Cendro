@@ -17,12 +17,12 @@ const aiRateLimitConfigs = {
 } as const;
 
 async function assertSession(ctx: QueryCtx | MutationCtx, companyId: Id<"companies">, sessionId: Id<"aiChatSessions">) {
-  const { membership, user } = await requireMembership(ctx, companyId);
+  const { membership, user, company } = await requireMembership(ctx, companyId);
   const caps = await membershipCapabilities(ctx, membership);
   if (!caps.has("ai:use")) throw new ConvexError("You do not have permission to use AI.");
   const session = await ctx.db.get(sessionId);
   if (!session || session.companyId !== companyId || session.membershipId !== membership._id) throw new ConvexError("Chat session not found.");
-  return { session, membership, user, caps };
+  return { session, membership, user, company, caps };
 }
 
 const DELETE_MESSAGE_BATCH_SIZE = 100;
@@ -111,8 +111,8 @@ export const getOrCreateSession = mutation({
 export const authorizeSessionForAgent = query({
   args: { companyId: v.id("companies"), sessionId: v.id("aiChatSessions") },
   handler: async (ctx, args) => {
-    const { membership, caps } = await assertSession(ctx, args.companyId, args.sessionId);
-    return { membershipId: membership._id, role: membership.role, capabilities: Array.from(caps) };
+    const { membership, caps, company } = await assertSession(ctx, args.companyId, args.sessionId);
+    return { membershipId: membership._id, role: membership.role, capabilities: Array.from(caps), timeZone: company.timeZone ?? null };
   },
 });
 

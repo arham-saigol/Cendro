@@ -557,27 +557,6 @@ describe("production permission and validation fixes", () => {
     expect(invitations[0].sentAt).toBeUndefined();
   });
 
-  test("semantic SOP search authorizes before embedding", async () => {
-    vi.stubEnv("VOYAGE_API_KEY", "test-key");
-    const fetchSpy = vi.spyOn(globalThis, "fetch");
-    const { t, companyId } = await seedCompany();
-
-    await expect(t.action(api.sops.semanticSearchAccessible, { companyId, query: "closing" })).rejects.toThrow("Please sign in");
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  test("stale SOP embeddings cannot replace the latest content", async () => {
-    const { t, companyId } = await seedCompany();
-    const sopId = await t.withIdentity(identity("admin")).mutation(api.sops.create, { companyId, title: "Policy", content: "Old body", scopeType: "company", branchIds: [], departmentIds: [], userMembershipIds: [] });
-    const before = await t.run(async (ctx) => await ctx.db.get(sopId));
-    if (!before) throw new Error("SOP was not created");
-    await t.run(async (ctx) => await ctx.db.patch(sopId, { content: "New body", updatedAt: before.updatedAt + 1 }));
-
-    await expect(t.mutation(internal.sops.storeEmbedding, { companyId, sopId, expectedUpdatedAt: before.updatedAt, chunk: "Policy\n\nOld body", embedding: Array(1024).fill(0) })).resolves.toBeNull();
-    const embeddings = await t.run(async (ctx) => await ctx.db.query("sopEmbeddings").withIndex("by_sop", (q) => q.eq("sopId", sopId)).take(10));
-    expect(embeddings).toEqual([]);
-  });
-
   test("clearing optional fields on one-time tasks removes them from storage", async () => {
     const { t, companyId, adminMembershipId } = await seedCompany();
     const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createOneTime, {

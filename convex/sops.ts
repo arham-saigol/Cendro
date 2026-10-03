@@ -10,7 +10,7 @@ import { buildSopVisibilityContext, getManagedMembershipIds, memberFirstName, me
 import { nonEmpty } from "./validation";
 import { nextReference } from "./references";
 import { scanUntil } from "./queryLimits";
-import { referenceCodeCandidate, referenceSearchKey } from "./searchText";
+import { paletteSearchInput, searchPaletteRows } from "./searchText";
 
 
 async function assertTargets(ctx: any, companyId: Id<"companies">, args: { branchIds: Id<"branches">[]; departmentIds: Id<"departments">[]; userMembershipIds: Id<"companyMemberships">[] }) {
@@ -207,8 +207,6 @@ async function sopVisibleForView(ctx: QueryCtx, companyId: Id<"companies">, memb
 // keeps the single-transaction query under Convex read limits — hitting it
 // fails loudly rather than silently returning partial results.
 const FILTERED_SOP_SCAN_CEILING = 1000;
-const SOP_SEARCH_RESULT_LIMIT = 8;
-const SOP_SEARCH_SCAN_CEILING = 1000;
 
 async function filteredSopRows(ctx: QueryCtx, args: { companyId: Id<"companies">; search?: string; view?: "all" | "my"; scope?: "all" | Doc<"sops">["scopeType"]; branchId?: Id<"branches">; userMembershipId?: Id<"companyMemberships">; limit: number }) {
   const { membership } = await requireMembership(ctx, args.companyId);
@@ -378,60 +376,33 @@ export const contentSearchIds = query({
   },
 });
 
-// Command-palette search: same scan-until-filled pattern as filteredSopRows —
-// visibleSop enforces the viewer's company/managed/self level per candidate.
+// Only indexed title matches or the requested reference range are considered.
 export const search = query({
   args: { companyId: v.id("companies"), query: v.string() },
+  returns: v.object({
+    sops: v.array(v.object({ _id: v.id("sops"), reference: v.string(), title: v.string(), scopeType: v.string() })),
+    truncated: v.boolean(),
+  }),
   handler: async (ctx, args) => {
-    const needle = args.query.trim().toLowerCase();
-    if (!needle) return { sops: [], truncated: false };
-    const needleKey = referenceSearchKey(needle);
+    const input = paletteSearchInput(args.query);
+    if (!input) return { sops: [], truncated: false };
     const { membership } = await requireMembership(ctx, args.companyId);
     const caps = await membershipCapabilities(ctx, membership);
+    if (!["sops:view:company", "sops:view:managed", "sops:view:self"].some((capability) => caps.has(capability as Capability))) {
+      return { sops: [], truncated: false };
+    }
     const visibility = await buildSopVisibilityContext(ctx, args.companyId, membership, caps);
     const auth = sopListAuth(ctx, args.companyId, membership, caps);
-    const kept: Doc<"sops">[] = [];
-    const keptIds = new Set<string>();
-    // Exact reference probes hit their index — the only path that reaches rows
-    // beyond the scan ceiling ("sop1" → "SOP-001").
-    const refSpellings = new Set([needle.toUpperCase()]);
-    const codeCandidate = referenceCodeCandidate(needle);
-    if (codeCandidate) refSpellings.add(codeCandidate);
-    for (const ref of refSpellings) {
-      const exact = await ctx.db
-        .query("sops")
-        .withIndex("by_companyId_and_reference", (q) => q.eq("companyId", args.companyId).eq("reference", ref))
-        .unique();
-      if (exact && (await visibleSop(ctx, args.companyId, membership, exact, visibility, caps, undefined, auth))) {
-        kept.push(exact);
-        keptIds.add(exact._id);
-      }
-    }
-    const { kept: scannedSops, exhausted } = await scanUntil(
-      ctx.db.query("sops").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc"),
-      SOP_SEARCH_SCAN_CEILING,
-      SOP_SEARCH_RESULT_LIMIT - kept.length,
-      async (sop) => {
-        if (keptIds.has(sop._id)) return false;
-        if (
-          !sop.title.toLowerCase().includes(needle) &&
-          !sop.reference.toLowerCase().includes(needle) &&
-          !(needleKey !== "" && referenceSearchKey(sop.reference).includes(needleKey))
-        ) {
-          return false;
-        }
-        if (!(await visibleSop(ctx, args.companyId, membership, sop, visibility, caps, undefined, auth))) return false;
-        keptIds.add(sop._id);
-        return true;
-      },
-    );
-    kept.push(...scannedSops);
-    // Reaching the result cap or the scan ceiling means more matches may
-    // remain; report both so the palette can say so.
-    return {
-      sops: kept.map((sop) => ({ _id: sop._id, reference: sop.reference, title: sop.title, scopeType: sop.scopeType })),
-      truncated: kept.length === SOP_SEARCH_RESULT_LIMIT || !exhausted,
-    };
+    const isVisible = async (sop: Doc<"sops">) => await visibleSop(ctx, args.companyId, membership, sop, visibility, caps, undefined, auth);
+    const toRow = (sop: Doc<"sops">) => ({ _id: sop._id, reference: sop.reference, title: sop.title, scopeType: sop.scopeType });
+    const { rows, truncated } = await searchPaletteRows(ctx, {
+      input,
+      prefixes: ["SOP"],
+      byReference: (prefix) => ctx.db.query("sops").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", args.companyId).gte("reference", prefix).lt("reference", `${prefix}\uffff`)),
+      byTitle: (title) => ctx.db.query("sops").withSearchIndex("search_title", (q) => q.search("title", title).eq("companyId", args.companyId)),
+      isVisible,
+    });
+    return { sops: rows.map(toRow), truncated };
   },
 });
 

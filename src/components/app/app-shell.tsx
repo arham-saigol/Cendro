@@ -3,7 +3,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useClerk, useUser } from "@clerk/nextjs";
-import { useMutation, useQueries, useQuery, type RequestForQueries } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -32,6 +32,8 @@ import { canAccessCompanyManagement, canViewDashboard } from "@/lib/permissions"
 import { shellStageLabel, type ShellConnection, type ShellLoadingStage } from "@/lib/shell-access";
 import type { AuthDiagnostic } from "@/lib/auth-diagnostics";
 import { useShellStall } from "./shell-stall";
+import { usePaletteSearch } from "./use-palette-search";
+import { normalizePaletteQuery, PALETTE_MAX_QUERY_LENGTH } from "@/lib/palette-search";
 import { cn, initials } from "@/lib/utils";
 
 // The assistant panel is heavy (AI SDK, markdown rendering) and rarely opened;
@@ -57,15 +59,6 @@ function navForCapabilities(active: CompanyAccess | null | undefined) {
 
 /** Lets any part of the shell open the single palette instance mounted by ShellSearch. */
 const SearchPaletteContext = createContext<(open: boolean) => void>(() => {});
-
-function useDebouncedValue(value: string, delay = 200) {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const timeout = window.setTimeout(() => setDebounced(value), delay);
-    return () => window.clearTimeout(timeout);
-  }, [value, delay]);
-  return debounced;
-}
 
 function ShellCard({ children }: { children: React.ReactNode }) {
   return (
@@ -195,11 +188,6 @@ type PaletteRow = {
   onSelect: () => void;
 };
 
-type PaletteTaskResult = { tasks: { _id: string; reference: string; title: string; status: string }[]; truncated: boolean };
-type PaletteSopResult = { sops: { _id: string; reference: string; title: string; scopeType: string }[]; truncated: boolean };
-
-const PALETTE_MIN_QUERY = 2;
-
 function SearchCommandDialog({
   open,
   onOpenChange,
@@ -221,42 +209,10 @@ function SearchCommandDialog({
   const [query, setQuery] = useState("");
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const normalized = query.trim().toLowerCase();
-  const debounced = useDebouncedValue(query);
-  const needle = debounced.trim().toLowerCase();
-
-  const entityArgs = useMemo(
-    () => (activeCompanyId && canSearchEntities && needle.length >= PALETTE_MIN_QUERY ? { companyId: activeCompanyId, query: needle } : ("skip" as const)),
-    [activeCompanyId, canSearchEntities, needle],
-  );
-  // useQueries keys its subscription on the queries object's identity, so a
-  // fresh literal every render loops setState during render ("Too many
-  // re-renders"). It also returns an Error value per failed query instead of
-  // throwing through render — a backend failure surfaces as a palette error
-  // row rather than crashing the shell into the global error page.
-  const entityQuerySpec = useMemo(
-    (): RequestForQueries =>
-      entityArgs === "skip"
-        ? {}
-        : {
-            jd: { query: api.tasks.searchJd, args: entityArgs },
-            oneTime: { query: api.tasks.searchOneTime, args: entityArgs },
-            sops: { query: api.sops.search, args: entityArgs },
-          },
-    [entityArgs],
-  );
-  const entityQueries = useQueries(entityQuerySpec) as { jd?: PaletteTaskResult | Error; oneTime?: PaletteTaskResult | Error; sops?: PaletteSopResult | Error };
-  const entityFailed = entityArgs !== "skip" && [entityQueries.jd, entityQueries.oneTime, entityQueries.sops].some((result) => result instanceof Error);
-  const jdResults = entityQueries.jd instanceof Error ? undefined : entityQueries.jd;
-  const oneTimeResults = entityQueries.oneTime instanceof Error ? undefined : entityQueries.oneTime;
-  const sopResults = entityQueries.sops instanceof Error ? undefined : entityQueries.sops;
-  // Results always correspond to the debounced term; while the input is ahead
-  // of the debounce, show a searching state rather than stale matches. Each
-  // resolved query renders its own section — one failing discloses itself in
-  // the footer instead of hiding the others' results.
-  const entityPending = entityArgs !== "skip" && [entityQueries.jd, entityQueries.oneTime, entityQueries.sops].some((result) => result === undefined);
-  const entityResults = entityArgs !== "skip" && needle === normalized ? { jd: jdResults, oneTime: oneTimeResults, sops: sopResults } : null;
-  const searching = entityArgs !== "skip" && (needle !== normalized || entityPending);
+  const normalized = normalizePaletteQuery(query);
+  const { results: entityResults, failed: entityFailed, searching, inputError } = usePaletteSearch({
+    open, query, companyId: activeCompanyId, canSearch: canSearchEntities,
+  });
 
   const sections: { title: string; rows: PaletteRow[] }[] = [];
   {
@@ -283,7 +239,7 @@ function SearchCommandDialog({
           key: `jd:${task._id}`,
           icon: Repeat,
           label: task.title,
-          meta: `${task.reference} · ${task.status}`,
+          meta: task.reference,
           onSelect: () => {
             close();
             router.push(`/jd-tasks/${task._id}`);
@@ -298,7 +254,7 @@ function SearchCommandDialog({
           key: `one:${task._id}`,
           icon: SquareCheck,
           label: task.title,
-          meta: `${task.reference} · ${task.status}`,
+          meta: task.reference,
           onSelect: () => {
             close();
             router.push(`/one-time-tasks/${task._id}`);
@@ -386,6 +342,7 @@ function SearchCommandDialog({
             <Input
               autoFocus
               value={query}
+              maxLength={PALETTE_MAX_QUERY_LENGTH}
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={onInputKeyDown}
               placeholder="Search pages, tasks, SOPs, workspaces..."
@@ -433,7 +390,8 @@ function SearchCommandDialog({
                 })}
               </div>
             ))}
-            {flatRows.length === 0 && !searching && !entityFailed && <div className="px-2 py-8 text-center text-sm text-[var(--ink-muted)]">No results found.</div>}
+            {flatRows.length === 0 && !searching && !entityFailed && !inputError && <div className="px-2 py-8 text-center text-sm text-[var(--ink-muted)]">No results found.</div>}
+            {inputError && <div role="status" className="px-2 py-3 text-center text-xs text-[var(--ink-muted)]">{inputError}</div>}
             {searching && <div className="px-2 py-3 text-center text-xs text-[var(--ink-muted)]">Searching tasks and SOPs…</div>}
             {entityFailed && <div className="px-2 py-3 text-center text-xs text-[var(--ink-muted)]">Couldn&apos;t search tasks and SOPs — keep typing to retry.</div>}
             {truncated && !searching && <div className="border-t border-[var(--hairline)] px-2 py-2 text-center text-xs text-[var(--ink-faint)]">Showing top matches — keep typing to refine</div>}

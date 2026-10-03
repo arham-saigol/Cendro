@@ -66,8 +66,10 @@ export function PwaAgent() {
     if (installDismissed() || isStandalone()) return;
     const onBeforeInstall = (event: Event) => {
       // Desktop Chromium fires beforeinstallprompt too: leave its built-in
-      // affordance alone and only offer our card on mobile.
-      if (!isMobile()) return;
+      // affordance alone and only offer our card on mobile. Re-check
+      // standalone at event time — the display-mode can lag mount in a
+      // freshly installed PWA window.
+      if (!isMobile() || isStandalone()) return;
       event.preventDefault();
       setInstallEvent(event as BeforeInstallPromptEvent);
     };

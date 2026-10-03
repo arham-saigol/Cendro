@@ -151,6 +151,8 @@ function stubStandalone(standalone: boolean) {
   vi.stubGlobal("matchMedia", () => ({ matches: standalone, addEventListener: () => {}, removeEventListener: () => {} }));
 }
 
+const MOBILE_NAV = { userAgent: ANDROID_UA, platform: "Linux armv8l", maxTouchPoints: 5, userAgentData: { mobile: true } };
+
 async function renderAgent() {
   const container = createMockElement("div");
   const root = createRoot(container);
@@ -206,7 +208,7 @@ describe("PwaAgent install prompt", () => {
   });
 
   test("shows the install card on mobile when the browser offers one", async () => {
-    stubNavigator({ userAgent: ANDROID_UA, platform: "Linux armv8l", maxTouchPoints: 5, userAgentData: { mobile: true } });
+    stubNavigator(MOBILE_NAV);
     const { container, root } = await renderAgent();
 
     fireBeforeInstallPrompt();
@@ -218,7 +220,7 @@ describe("PwaAgent install prompt", () => {
 
   test("stays hidden when running as an installed standalone PWA", async () => {
     stubStandalone(true);
-    stubNavigator({ userAgent: ANDROID_UA, platform: "Linux armv8l", maxTouchPoints: 5, userAgentData: { mobile: true } });
+    stubNavigator(MOBILE_NAV);
     const { container, root } = await renderAgent();
 
     fireBeforeInstallPrompt();
@@ -228,9 +230,23 @@ describe("PwaAgent install prompt", () => {
     await act(async () => root.unmount());
   });
 
+  test("ignores the event when display-mode flips to standalone after mount", async () => {
+    let standalone = false;
+    vi.stubGlobal("matchMedia", () => ({ matches: standalone, addEventListener: () => {}, removeEventListener: () => {} }));
+    stubNavigator(MOBILE_NAV);
+    const { container, root } = await renderAgent();
+
+    standalone = true;
+    fireBeforeInstallPrompt();
+    await act(async () => {});
+
+    expect(pageText(container)).not.toContain("Install Cendro");
+    await act(async () => root.unmount());
+  });
+
   test("stays hidden after the user dismissed it", async () => {
     storage.set("cendro.install-dismissed", "1");
-    stubNavigator({ userAgent: ANDROID_UA, platform: "Linux armv8l", maxTouchPoints: 5, userAgentData: { mobile: true } });
+    stubNavigator(MOBILE_NAV);
     const { container, root } = await renderAgent();
 
     fireBeforeInstallPrompt();

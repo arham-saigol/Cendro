@@ -111,12 +111,17 @@ function holidayRangeAt(calendar: WorkCalendar, dayIndex: number) {
 }
 
 function yearlyRangeAt(calendar: WorkCalendar, dayIndex: number) {
-  const monthDay = monthDayOf(dayIndex);
-  return calendar.yearlyRanges.find((range) =>
-    range.startMonthDay <= range.endMonthDay
-      ? monthDay >= range.startMonthDay && monthDay <= range.endMonthDay
-      : monthDay >= range.startMonthDay || monthDay <= range.endMonthDay
-  ) ?? null;
+  const year = new Date(dayIndex * dayMs).getUTCFullYear();
+  return calendar.yearlyRanges.find((range) => {
+    // Compare materialized dates, not month-days, so a bound clamped off a
+    // leap year (Feb 29 → Feb 28) still covers the day it lands on.
+    if (dayIndex >= yearlyDayIndex(year, range.startMonthDay)) {
+      if (range.startMonthDay <= range.endMonthDay) return dayIndex <= yearlyDayIndex(year, range.endMonthDay);
+      return true; // wrapped range: the probe sits in the Dec–Jan head
+    }
+    // Wrapped range tail (Jan 1 … clamped end of the same year).
+    return range.startMonthDay > range.endMonthDay && dayIndex <= yearlyDayIndex(year, range.endMonthDay);
+  }) ?? null;
 }
 
 /** UTC day index where the repeating range covering `dayIndex` ends. */
@@ -151,15 +156,16 @@ export function nextWorkingDayIndex(calendar: WorkCalendar, dayIndex: number) {
  * can land past its grid end, which the analytics completion lookback needs.
  */
 export function maxHolidaySpanDays(calendar: WorkCalendar) {
-  const maxSpan = (ranges: { start: number; end: number }[]) => ranges.reduce((max, range) => Math.max(max, range.end - range.start + 1), 0);
+  const spanSum = (ranges: { start: number; end: number }[]) => ranges.reduce((sum, range) => sum + (range.end - range.start + 1), 0);
   // Materialize repeating ranges in a leap year (wrapping ones end in the
-  // next). A one-time range can extend a repeating closure at either edge, so
-  // the safe bound on any single contiguous closure adds both spans.
+  // next). One-time ranges can join yearly closures into a longer contiguous
+  // shutdown — and a year-long one can rejoin the same yearly range on its
+  // far side — so the bound counts every yearly span twice.
   const yearly = mergedRanges(calendar.yearlyRanges.map((range) => {
     const endYear = range.startMonthDay <= range.endMonthDay ? 2024 : 2025;
     return { start: yearlyDayIndex(2024, range.startMonthDay), end: yearlyDayIndex(endYear, range.endMonthDay) };
   }));
-  return maxSpan(calendar.holidayRanges) + maxSpan(yearly);
+  return spanSum(calendar.holidayRanges) + 2 * spanSum(yearly);
 }
 
 /** Local calendar date a cycle's deadline instant falls on. */

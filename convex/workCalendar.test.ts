@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
+import { buildWorkCalendar, maxHolidaySpanDays } from "./workCalendar";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -278,6 +279,26 @@ describe("JD tasks on a work calendar", () => {
     expect(next.task.state.dueAt).toBe(utc(2027, 2, 4));
   });
 
+  test("a yearly Feb 29 holiday clamps to Feb 28 in non-leap years", async () => {
+    // Feb 28 2026 is a Saturday — a working day on the default calendar —
+    // but the yearly Feb 29 holiday clamps onto it, so the February monthly
+    // due date moves to the next working day. In leap years it covers Feb 29
+    // itself.
+    vi.setSystemTime(utc(2026, 2, 10, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const taskId = await t.withIdentity(identity("admin")).mutation(api.tasks.createJd, { companyId, title: "Month-end close", description: "", recurrence: "monthly", assigneeMembershipIds: [adminMembershipId] });
+    await t.withIdentity(identity("admin")).mutation(api.workCalendar.addHoliday, { companyId, name: "Leap day", startDate: "2028-02-29", endDate: "2028-02-29", recursYearly: true });
+
+    // Feb 28 (clamped holiday) + Mar 1 (Sunday) → due end of Monday Mar 2.
+    const nonLeap = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
+    expect(nonLeap.task.state.dueAt).toBe(utc(2026, 3, 3));
+
+    // Feb 29 2028 is a Tuesday → due end of Wednesday Mar 1.
+    vi.setSystemTime(utc(2028, 2, 10, 12));
+    const leap = await t.withIdentity(identity("admin")).query(api.tasks.getJd, { companyId, taskId });
+    expect(leap.task.state.dueAt).toBe(utc(2028, 3, 2));
+  });
+
   test("a yearly range wrapping the year boundary recurs as one range", async () => {
     // A Dec 24 – Jan 6 shutdown repeats yearly: a weekly cycle due Sunday
     // Dec 27 2026 lands inside it and shifts past Jan 6 2027, and a cycle due
@@ -320,6 +341,19 @@ describe("JD tasks on a work calendar", () => {
     // Fri and Sat missed, Sun skipped, Mon completed via the off-day click,
     // Tue elapsed untouched — a genuine miss.
     expect(await missedCycleStarts(t, taskId)).toEqual([utc(2026, 1, 2), utc(2026, 1, 3), utc(2026, 1, 6)]);
+  });
+
+  test("the closure bound covers a one-time range joining yearly closures", () => {
+    // Yearly Dec 24 – Jan 6 and Jan 20 – 31 joined by a one-time Jan 6–20
+    // bridge make one contiguous Dec 24 2026 – Jan 31 2027 shutdown (39
+    // days). The analytics lookback bound must cover the whole join, not
+    // just the longest span of each kind.
+    const calendar = buildWorkCalendar([1, 2, 3, 4, 5, 6], [
+      { startDate: "2026-12-24", endDate: "2027-01-06", recursYearly: true },
+      { startDate: "2027-01-06", endDate: "2027-01-20" },
+      { startDate: "2027-01-20", endDate: "2027-01-31", recursYearly: true },
+    ]);
+    expect(maxHolidaySpanDays(calendar)).toBeGreaterThanOrEqual(39);
   });
 
   test("one-time tasks ignore the calendar entirely", async () => {

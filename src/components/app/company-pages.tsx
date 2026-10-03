@@ -532,6 +532,7 @@ function WorkCalendarSection({
   const [holidayStart, setHolidayStart] = useState("");
   const [holidayEnd, setHolidayEnd] = useState("");
   const [holidayYearly, setHolidayYearly] = useState(false);
+  const [holidaySaving, setHolidaySaving] = useState(false);
   const workingDays = new Set(calendar.workingDays);
 
   const setWorkingDay = (day: number, on: boolean) => {
@@ -547,13 +548,18 @@ function WorkCalendarSection({
 
   const submitHoliday = async () => {
     const name = holidayName.trim();
-    if (!name || !holidayStart) return;
-    // Keep the form filled when the save fails so the entry isn't lost.
-    if (await onAddHoliday(name, holidayStart, holidayEnd || holidayStart, holidayYearly)) {
-      setHolidayName("");
-      setHolidayStart("");
-      setHolidayEnd("");
-      setHolidayYearly(false);
+    if (!name || !holidayStart || holidaySaving) return;
+    setHolidaySaving(true);
+    try {
+      // Keep the form filled when the save fails so the entry isn't lost.
+      if (await onAddHoliday(name, holidayStart, holidayEnd || holidayStart, holidayYearly)) {
+        setHolidayName("");
+        setHolidayStart("");
+        setHolidayEnd("");
+        setHolidayYearly(false);
+      }
+    } finally {
+      setHolidaySaving(false);
     }
   };
 
@@ -648,7 +654,7 @@ function WorkCalendarSection({
                   <Button
                     type="button"
                     size="sm"
-                    disabled={!holidayName.trim() || !holidayStart}
+                    disabled={!holidayName.trim() || !holidayStart || holidaySaving}
                     onClick={() => void submitHoliday()}
                   >
                     <Plus className="h-3.5 w-3.5" /> Add

@@ -3,8 +3,7 @@ import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/s
 import type { Doc, Id } from "./_generated/dataModel";
 import { getManagedMembershipIds, hasAllManagedMemberships, isManagedMembership, membershipCapabilities, requireCapability } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
-import { nextJdCycleStart } from "./taskCycles";
-import { effectiveCurrentJdCycle, loadWorkCalendar, occurrenceDeadline } from "./workCalendar";
+import { effectiveCurrentJdCycle, loadWorkCalendar } from "./workCalendar";
 import { recordMissedJdCycles } from "./tasks";
 import { syncReferenceCounter } from "./references";
 import { normalizeEmail, nonEmpty } from "./validation";
@@ -239,7 +238,7 @@ async function taskCanUpdate(ctx: Ctx, companyId: Id<"companies">, auth: ImportA
 }
 
 function validateDraftValues(row: Draft, kind: TaskKind) {
-  const errors = row.warnings.filter((warning) => /^(Quantity must|Numeric due dates|Ambiguous due date|Due date must|Invalid (spreadsheet )?date|Invalid due date|Formula-like text|Frequency is not|Priority is not|Status "|Task code |Code must )/.test(warning));
+  const errors = row.warnings.filter((warning) => /^(Quantity must|Numeric due dates|Ambiguous due date|Due date must|Invalid (spreadsheet )?date|Invalid due date|Formula-like text|Frequency is not|Priority is not|Task code |Code must )/.test(warning));
   if (row.kind !== kind) errors.push("Wrong task kind.");
   if (!row.rowKey.trim() || row.rowKey.length > 200 || !row.sourceSheet.trim() || row.sourceSheet.length > 200 || !Number.isInteger(row.sourceRow) || row.sourceRow < 1 || row.sourceRow > 1_000_000) errors.push("Import row source is invalid.");
   if (row.reference !== null && row.reference.length > 200) errors.push("Reference is too long.");
@@ -249,7 +248,7 @@ function validateDraftValues(row: Draft, kind: TaskKind) {
   if (row.notes !== null && row.notes.length > 20_000) errors.push("Notes is too long.");
   if (row.time !== null && row.time.length > 200) errors.push("Time is too long.");
   if (row.quantity !== null && (!Number.isFinite(row.quantity) || row.quantity <= 0)) errors.push("Quantity must be a positive number.");
-  if (row.presentFields.length > 10 || new Set(row.presentFields).size !== row.presentFields.length) errors.push("Import row contains invalid field markers.");
+  if (row.presentFields.length > 11 || new Set(row.presentFields).size !== row.presentFields.length) errors.push("Import row contains invalid field markers.");
   if (row.reference !== null && !hasField(row, "reference")) errors.push("Reference was not marked as present in the source.");
   if (row.rawAssigneeText.length > 2_000 || row.assigneeEmails.length > 50 || row.assigneeEmails.some((email) => email.length > 320)) errors.push("Assignee data is too large.");
   if (row.warnings.length > 20 || row.warnings.some((warning) => warning.length > 500)) errors.push("Import warnings are too large.");
@@ -259,7 +258,6 @@ function validateDraftValues(row: Draft, kind: TaskKind) {
   if (kind === "one_time" && (row.recurrence !== null || hasField(row, "recurrence"))) errors.push("One-time rows contain a recurrence.");
   if (kind === "jd" && row.recurrence === null && hasField(row, "recurrence")) errors.push("Frequency is required and must be valid.");
   if (kind === "one_time" && row.priority === null && hasField(row, "priority")) errors.push("Priority is required and must be valid.");
-  if (hasField(row, "status") && row.status === null) errors.push("Status is not recognized.");
   if (kind === "one_time" && row.dueDate !== null && !Number.isFinite(row.dueDate)) errors.push("Due date is invalid.");
   return errors;
 }
@@ -329,11 +327,6 @@ export const previewTaskImport = query({
           } else {
             task = candidateTask;
             operation = "update";
-            if (args.kind === "one_time") {
-              const oneTime = task as Doc<"oneTimeTasks">;
-              const isOverdue = Boolean(oneTime.overdueAt) || Boolean(oneTime.dueDate && oneTime.status !== "completed" && oneTime.dueDate < Date.now());
-              if (isOverdue && hasField(draft, "status") && draft.status !== "due") errors.push("Overdue tasks are locked and cannot be changed back.");
-            }
           }
         } else {
           if (!auth.canCreate) {
@@ -387,11 +380,6 @@ async function validateCommitRow(ctx: MutationCtx, companyId: Id<"companies">, k
   }
   const errors = validateDraftValues(draft, kind);
   if (errors.length) fail(errors[0]);
-  if (kind === "one_time" && task && hasField(draft, "status") && draft.status !== "due") {
-    const oneTime = task as Doc<"oneTimeTasks">;
-    const isOverdue = Boolean(oneTime.overdueAt) || Boolean(oneTime.dueDate && oneTime.status !== "completed" && oneTime.dueDate < Date.now());
-    if (isOverdue) fail("Overdue tasks are locked and cannot be changed back.");
-  }
   const resolved = resolveAssignees(auth, draft, row.selectedAssigneeMembershipIds, task);
   if (resolved.errors.length) fail(resolved.errors[0]);
   if (!task && !draft.title?.trim()) fail("New tasks need a title.");
@@ -453,16 +441,6 @@ export const commitTaskImportBatch = mutation({
           const activeCycleStart = nextCycleStart ?? currentCycle.start;
           const previousDone = await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", activeCycleStart)).unique();
           const previousStatus = previousDone || (rolled.statusCycleStart === activeCycleStart && rolled.status === "completed") ? "completed" : rolled.statusCycleStart === activeCycleStart ? rolled.status : "due";
-          const targetStatus = hasField(item.draft, "status") && item.draft.status ? item.draft.status : undefined;
-          if (targetStatus) {
-            const currentDone = previousDone;
-            if (targetStatus === "completed" && !currentDone) {
-              const cycleEnd = nextJdCycleStart(activeCycleStart, recurrence, company.timeZone);
-              await ctx.db.insert("jdTaskCompletions", { companyId: args.companyId, jdTaskId: task._id, cycleStart: activeCycleStart, cycleEnd: occurrenceDeadline(calendar, recurrence, cycleEnd, company.timeZone) ?? cycleEnd, completedByMembershipId: membership._id, completedAt: now });
-            } else if (targetStatus !== "completed" && currentDone) {
-              await ctx.db.delete(currentDone._id);
-            }
-          }
           const nextTask = { ...rolled };
           if (hasField(item.draft, "title")) nextTask.title = nonEmpty(item.draft.title ?? "", "Task title");
           if (hasField(item.draft, "description")) {
@@ -486,16 +464,10 @@ export const commitTaskImportBatch = mutation({
           }
           if (hasField(item.draft, "recurrence") && item.draft.recurrence) nextTask.recurrence = item.draft.recurrence;
           if (item.assigneePatchRequested) nextTask.assigneeMembershipIds = item.assigneeMembershipIds;
-          if (targetStatus) {
-            nextTask.status = targetStatus;
-            nextTask.statusCycleStart = activeCycleStart;
-          }
           if (nextCycleStart !== undefined) {
             nextTask.cycleStartedAt = nextCycleStart;
-            if (!targetStatus) {
-              nextTask.status = "due";
-              nextTask.statusCycleStart = nextCycleStart;
-            }
+            nextTask.status = "due";
+            nextTask.statusCycleStart = nextCycleStart;
           }
           nextTask.updatedAt = now;
           await ctx.db.replace(task._id, nextTask);
@@ -505,8 +477,6 @@ export const commitTaskImportBatch = mutation({
         } else {
           const task = item.task as Doc<"oneTimeTasks">;
           const wasOverdue = Boolean(task.overdueAt) || Boolean(task.dueDate && task.status !== "completed" && task.dueDate < now);
-          const targetStatus = hasField(item.draft, "status") && item.draft.status && !wasOverdue ? item.draft.status : undefined;
-          const previousStatus = task.status;
           const nextTask = { ...task };
           if (hasField(item.draft, "title")) nextTask.title = nonEmpty(item.draft.title ?? "", "Task title");
           if (hasField(item.draft, "description")) {
@@ -534,22 +504,9 @@ export const commitTaskImportBatch = mutation({
             else nextTask.quantity = item.draft.quantity;
           }
           if (item.assigneePatchRequested) nextTask.assigneeMembershipIds = item.assigneeMembershipIds;
-          if (targetStatus) {
-            nextTask.status = targetStatus;
-            if (targetStatus === "completed") {
-              nextTask.completedAt = task.completedAt ?? now;
-              nextTask.completedByMembershipId = task.completedByMembershipId ?? membership._id;
-            } else {
-              delete nextTask.completedAt;
-              delete nextTask.completedByMembershipId;
-            }
-          }
           if (wasOverdue) nextTask.overdueAt = task.overdueAt ?? now;
           nextTask.updatedAt = now;
           await ctx.db.replace(task._id, nextTask);
-          if (targetStatus && previousStatus !== targetStatus) {
-            await ctx.db.insert("taskActivityLogs", { companyId: args.companyId, taskType: "one_time", taskId: task._id, actorMembershipId: membership._id, event: "status_changed", fromStatus: previousStatus, toStatus: targetStatus, createdAt: now });
-          }
         }
         updated += 1;
         taskReferences.push(item.task.reference);
@@ -557,15 +514,10 @@ export const commitTaskImportBatch = mutation({
         const reference = item.reference;
         if (args.kind === "jd") {
           const cycle = effectiveCurrentJdCycle(calendar, item.draft.recurrence!, now, company.timeZone);
-          const initialStatus = hasField(item.draft, "status") && item.draft.status ? item.draft.status : "due";
-          const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title: nonEmpty(item.draft.title ?? "", "Task title"), description: cleanText(item.draft.description), notes: cleanText(item.draft.notes), time: cleanText(item.draft.time), quantity: item.draft.quantity ?? undefined, recurrence: item.draft.recurrence!, cycleStartedAt: now, status: initialStatus, statusCycleStart: cycle.start, assigneeMembershipIds: item.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
-          if (initialStatus === "completed") {
-            await ctx.db.insert("jdTaskCompletions", { companyId: args.companyId, jdTaskId: id, cycleStart: cycle.start, cycleEnd: occurrenceDeadline(calendar, item.draft.recurrence!, cycle.end, company.timeZone) ?? cycle.end, completedByMembershipId: membership._id, completedAt: now });
-          }
+          const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title: nonEmpty(item.draft.title ?? "", "Task title"), description: cleanText(item.draft.description), notes: cleanText(item.draft.notes), time: cleanText(item.draft.time), quantity: item.draft.quantity ?? undefined, recurrence: item.draft.recurrence!, cycleStartedAt: now, status: "due", statusCycleStart: cycle.start, assigneeMembershipIds: item.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
           await ctx.db.insert("taskActivityLogs", { companyId: args.companyId, taskType: "jd", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
         } else {
-          const initialStatus = hasField(item.draft, "status") && item.draft.status ? item.draft.status : "due";
-          const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, reference, title: nonEmpty(item.draft.title ?? "", "Task title"), description: cleanText(item.draft.description), notes: cleanText(item.draft.notes), dueDate: item.draft.dueDate ?? undefined, time: cleanText(item.draft.time), quantity: item.draft.quantity ?? undefined, assigneeMembershipIds: item.assigneeMembershipIds, createdByMembershipId: membership._id, priority: item.draft.priority!, status: initialStatus, completedAt: initialStatus === "completed" ? now : undefined, completedByMembershipId: initialStatus === "completed" ? membership._id : undefined, createdAt: now, updatedAt: now });
+          const id = await ctx.db.insert("oneTimeTasks", { companyId: args.companyId, reference, title: nonEmpty(item.draft.title ?? "", "Task title"), description: cleanText(item.draft.description), notes: cleanText(item.draft.notes), dueDate: item.draft.dueDate ?? undefined, time: cleanText(item.draft.time), quantity: item.draft.quantity ?? undefined, assigneeMembershipIds: item.assigneeMembershipIds, createdByMembershipId: membership._id, priority: item.draft.priority!, status: "due", createdAt: now, updatedAt: now });
           await ctx.db.insert("taskActivityLogs", { companyId: args.companyId, taskType: "one_time", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
         }
         created += 1;

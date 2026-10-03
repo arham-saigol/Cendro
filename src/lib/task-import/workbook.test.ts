@@ -8,7 +8,6 @@ import {
   parseCendroWorkbookSheets,
   normalizeFrequency,
   normalizePriority,
-  normalizeStatus,
   parseStrictDate,
   parseAssigneeEmails,
   protectFormulaText,
@@ -16,7 +15,7 @@ import {
 import { referenceForKind } from "./schema";
 
 describe("task workbook pure helpers", () => {
-  test("normalizes canonical enum aliases and statuses", () => {
+  test("normalizes canonical enum aliases", () => {
     expect(normalizeFrequency("Every other day")).toBe("every_other_day");
     expect(normalizeFrequency("qtr")).toBe("quarterly");
     expect(normalizeFrequency("bi-yearly")).toBe("semiannually");
@@ -24,10 +23,6 @@ describe("task workbook pure helpers", () => {
     expect(normalizePriority("Critical")).toBe("critical");
     expect(normalizePriority("CRIT")).toBe("critical");
     expect(normalizePriority("urgent")).toBeNull();
-    expect(normalizeStatus("Pending")).toBe("due");
-    expect(normalizeStatus("In Progress")).toBe("in_progress");
-    expect(normalizeStatus("Completed")).toBe("completed");
-    expect(normalizeStatus("unknown")).toBeNull();
   });
 
   test("rejects ambiguous dates and accepts unambiguous dates", () => {
@@ -79,28 +74,32 @@ describe("task workbook pure helpers", () => {
     ], "company-1", "jd")).toThrow(/not a valid Cendro task workbook/);
   });
 
-  test("exports and parses a Cendro workbook without task IDs", async () => {
+  test("exports and parses a Cendro workbook without task IDs or a Status column", async () => {
     const workbook = await exportTaskWorkbook("one_time", "company-1", "Acme", [
-      { reference: "TSK-001", title: "=literal text", description: "Body", notes: "Important note", dueDate: Date.UTC(2026, 1, 1, 23, 59, 59), priority: "high", time: "30m", quantity: 2, assigneeEmails: "a@example.com", status: "Pending" },
-      { reference: "TSK-002", title: "Critical task", priority: "critical", status: "Pending" },
+      { reference: "TSK-001", title: "=literal text", description: "Body", notes: "Important note", dueDate: Date.UTC(2026, 1, 1, 23, 59, 59), priority: "high", time: "30m", quantity: 2, assigneeEmails: "a@example.com" },
+      { reference: "TSK-002", title: "Critical task", priority: "critical" },
     ]);
     const sheets = await readXlsxFile(await workbook.toBlob());
+    const taskSheet = sheets.find((sheet) => sheet.sheet === "One-Time Tasks")!;
+    expect(taskSheet.data[0]).toEqual(["Code", "Title", "Description", "Notes", "Due Date", "Priority", "Time", "Quantity", "Assignee Emails"]);
     const parsed = parseCendroWorkbookSheets(sheets, "company-1", "one_time");
     expect(parsed.rows).toHaveLength(2);
-    expect(parsed.rows[0]).toMatchObject({ reference: "TSK-001", title: "=literal text", description: "Body", notes: "Important note", priority: "high", quantity: 2, assigneeEmails: ["a@example.com"], status: "due" });
+    expect(parsed.rows[0]).toMatchObject({ reference: "TSK-001", title: "=literal text", description: "Body", notes: "Important note", priority: "high", quantity: 2, assigneeEmails: ["a@example.com"], status: null });
     expect(parsed.rows[0].dueDate).toBeTypeOf("number");
-    expect(parsed.rows[1]).toMatchObject({ reference: "TSK-002", title: "Critical task", priority: "critical", status: "due" });
+    expect(parsed.rows[1]).toMatchObject({ reference: "TSK-002", title: "Critical task", priority: "critical", status: null });
   });
 
-  test("exports and parses a JD task workbook preserving notes", async () => {
-    const workbook = await exportTaskWorkbook("jd", "company-1", "Acme", [{ reference: "JD-001", title: "Daily maintenance", description: "Inspect equipment", notes: "Check oil level", recurrence: "daily", time: "1h", quantity: 1, assigneeEmails: "admin@example.com", status: "Pending" }]);
+  test("exports and parses a JD task workbook preserving description and notes", async () => {
+    const workbook = await exportTaskWorkbook("jd", "company-1", "Acme", [{ reference: "JD-001", title: "Daily maintenance", description: "Inspect equipment", notes: "Check oil level", recurrence: "daily", time: "1h", quantity: 1, assigneeEmails: "admin@example.com" }]);
     const sheets = await readXlsxFile(await workbook.toBlob());
+    const taskSheet = sheets.find((sheet) => sheet.sheet === "JD Tasks")!;
+    expect(taskSheet.data[0]).toEqual(["Code", "Title", "Description", "Notes", "Frequency", "Time", "Quantity", "Assignee Emails"]);
     const parsed = parseCendroWorkbookSheets(sheets, "company-1", "jd");
     expect(parsed.rows).toHaveLength(1);
-    expect(parsed.rows[0]).toMatchObject({ reference: "JD-001", title: "Daily maintenance", description: "Inspect equipment", notes: "Check oil level", recurrence: "daily", status: "due" });
+    expect(parsed.rows[0]).toMatchObject({ reference: "JD-001", title: "Daily maintenance", description: "Inspect equipment", notes: "Check oil level", recurrence: "daily", status: null });
   });
 
-  test("handles sheets with trailing empty rows like Google Sheets exports", () => {
+  test("handles sheets with trailing empty rows like Google Sheets exports and ignores an old Status column", () => {
     const emptyRows = Array.from({ length: 998 }, () => [null, null, null, null, null, null, null, null, null]);
     const parsed = parseCendroWorkbookSheets([
       { sheet: "Cendro Metadata", data: [["Format identifier", "cendro-task-export"], ["Schema version", 1], ["Task kind", "jd"], ["Source company ID", "company-1"], ["Source company name", "Acme"], ["Export timestamp", "2026-01-01T00:00:00.000Z"], ...emptyRows] },
@@ -109,6 +108,7 @@ describe("task workbook pure helpers", () => {
     expect(parsed.rows).toHaveLength(1);
     expect(parsed.rows[0].title).toBe("Updated Title in Google Sheets");
     expect(parsed.rows[0].reference).toBe("JD-0001");
-    expect(parsed.rows[0].status).toBe("completed");
+    expect(parsed.rows[0].status).toBeNull();
+    expect(parsed.rows[0].presentFields).not.toContain("status");
   });
 });

@@ -56,7 +56,7 @@ describe("task import backend", () => {
     expect(tasks.page).toHaveLength(1);
   });
 
-  test("applies imported JD status to the current cycle after older cycles elapsed", async () => {
+  test("imported status is ignored for JD tasks even after older cycles elapsed", async () => {
     const { t, companyId, adminMembershipId } = await seed();
     const admin = t.withIdentity(identity("admin"));
     const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Daily close", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
@@ -70,15 +70,21 @@ describe("task import backend", () => {
 
     await admin.mutation(api.taskImports.commitTaskImportBatch, {
       companyId, kind: "jd", importKey: "import-current-cycle", batchKey: "batch-1", source: "cendro",
-      rows: [{ include: true, expectedUpdatedAt, selectedAssigneeMembershipIds: null, draft: draft({ reference: task.task.reference, status: "completed", presentFields: ["reference", "status"], rawAssigneeText: "", assigneeEmails: [] }) }],
+      rows: [{ include: true, expectedUpdatedAt, selectedAssigneeMembershipIds: null, draft: draft({ reference: task.task.reference, title: "Renamed", status: "completed", presentFields: ["reference", "title", "status"], rawAssigneeText: "", assigneeEmails: [] }) }],
     });
 
     const updated = await admin.query(api.tasks.getJd, { companyId, taskId });
-    expect(updated.task.state.rawStatus).toBe("completed");
-    expect(updated.task.statusCycleStart).toBe(currentJdCycle("daily", Date.now(), defaultTimeZone).start);
+    expect(updated.task.title).toBe("Renamed");
+    expect(updated.task.status).toBe("due");
+    expect(updated.task.state.rawStatus).toBe("due");
+    expect(updated.task.statusCycleStart).toBe(oldCycleStart);
+    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect());
+    expect(completions).toHaveLength(0);
+    const logs = await t.run(async (ctx) => await ctx.db.query("taskActivityLogs").withIndex("by_task", (q) => q.eq("taskType", "jd").eq("taskId", taskId)).collect());
+    expect(logs.some((l) => l.event === "status_changed")).toBe(false);
   });
 
-  test("status can be imported and blank assignees preserve updates", async () => {
+  test("status in old drafts is ignored and blank assignees preserve updates", async () => {
     const { t, companyId, adminMembershipId } = await seed();
     const admin = t.withIdentity(identity("admin"));
     const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Old", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
@@ -91,11 +97,11 @@ describe("task import backend", () => {
     const updated = await admin.query(api.tasks.getJd, { companyId, taskId });
     expect(updated.task.title).toBe("New");
     expect(updated.task.assigneeMembershipIds).toEqual([adminMembershipId]);
-    expect(updated.task.status).toBe("completed");
+    expect(updated.task.status).toBe("due");
     const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect());
-    expect(completions).toHaveLength(1);
+    expect(completions).toHaveLength(0);
     const logs = await t.run(async (ctx) => await ctx.db.query("taskActivityLogs").withIndex("by_task", (q) => q.eq("taskType", "jd").eq("taskId", taskId)).collect());
-    expect(logs.some((l) => l.event === "status_changed" && l.fromStatus === "due" && l.toStatus === "completed")).toBe(true);
+    expect(logs.some((l) => l.event === "status_changed")).toBe(false);
   });
 
   test("requires the preview version and rejects duplicate update references", async () => {
@@ -156,13 +162,13 @@ describe("task import backend", () => {
     expect(preview.rows[0]).toMatchObject({ operation: "blocked", errors: ["Quantity must be a positive number."] });
   });
 
-  test("unrecognized status is rejected during preview and validation", async () => {
+  test("unrecognized status warnings from old sheets do not block the import", async () => {
     const { t, companyId } = await seed();
     const preview = await t.withIdentity(identity("admin")).query(api.taskImports.previewTaskImport, {
       companyId, kind: "jd", drafts: [draft({ status: null, presentFields: ["reference", "title", "recurrence", "assignees", "status"], warnings: ['Status "Typo" is not recognized (use Pending, In Progress, or Completed).'] })],
     });
-    expect(preview.rows[0].operation).toBe("blocked");
-    expect(preview.rows[0].errors).toContain("Status is not recognized.");
+    expect(preview.rows[0].operation).toBe("create");
+    expect(preview.rows[0].errors).toEqual([]);
   });
 
   test("an employee without create permission cannot call preview, commit, or export", async () => {
@@ -333,7 +339,7 @@ describe("task import backend", () => {
     })).resolves.toMatchObject({ created: 0, updated: 1 });
   });
 
-  test("preserves exported overdue status but rejects changing an overdue one-time task", async () => {
+  test("imports update overdue one-time tasks without changing their status", async () => {
     const { t, companyId, adminMembershipId } = await seed();
     const admin = t.withIdentity(identity("admin"));
     const pastDueDate = Date.now() - 3600_000;
@@ -353,21 +359,27 @@ describe("task import backend", () => {
 
     const unchanged = await admin.query(api.tasks.getOneTime, { companyId, taskId });
     expect(unchanged.task.state.rawStatus).toBe("overdue");
-    const changedStatusDraft = { ...exportedDraft, status: "completed" as const };
+    const changedDraft = { ...exportedDraft, title: "Edited overdue task", priority: "high" as const, status: "completed" as const, presentFields: ["reference", "title", "priority", "status"] as ("reference" | "title" | "priority" | "status")[] };
 
-    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
+    await admin.mutation(api.taskImports.commitTaskImportBatch, {
       companyId, kind: "one_time", importKey: "import-overdue", batchKey: "batch-1", source: "cendro",
-      rows: [{ include: true, expectedUpdatedAt: unchanged.task.updatedAt, selectedAssigneeMembershipIds: null, draft: changedStatusDraft }],
-    })).rejects.toThrow(/Overdue tasks are locked/);
+      rows: [{ include: true, expectedUpdatedAt: unchanged.task.updatedAt, selectedAssigneeMembershipIds: null, draft: changedDraft }],
+    });
+
+    const updated = await admin.query(api.tasks.getOneTime, { companyId, taskId });
+    expect(updated.task.title).toBe("Edited overdue task");
+    expect(updated.task.priority).toBe("high");
+    expect(updated.task.state.rawStatus).toBe("overdue");
+    expect(updated.task.overdueAt).toBeDefined();
   });
 
-  test("records status_changed activity logs for one-time task imports", async () => {
+  test("imports never change one-time task status or log status_changed", async () => {
     const { t, companyId, adminMembershipId } = await seed();
     const admin = t.withIdentity(identity("admin"));
     const futureDueDate = Date.now() + 86_400_000;
     const taskId = await admin.mutation(api.tasks.createOneTime, { companyId, title: "Future Task", dueDate: futureDueDate, priority: "medium", assigneeMembershipIds: [adminMembershipId] });
     const task = await admin.query(api.tasks.getOneTime, { companyId, taskId });
-    const statusDraft = { ...draft(), rowKey: "One-Time Tasks:2", sourceSheet: "One-Time Tasks", kind: "one_time" as const, reference: task.task.reference, title: "Future Task", recurrence: null, dueDate: futureDueDate, priority: "medium" as const, status: "completed" as const, presentFields: ["reference", "status"] as ("reference" | "status")[], rawAssigneeText: "", assigneeEmails: [] };
+    const statusDraft = { ...draft(), rowKey: "One-Time Tasks:2", sourceSheet: "One-Time Tasks", kind: "one_time" as const, reference: task.task.reference, title: "Renamed Task", recurrence: null, dueDate: futureDueDate, priority: "medium" as const, status: "completed" as const, presentFields: ["reference", "title", "status"] as ("reference" | "title" | "status")[], rawAssigneeText: "", assigneeEmails: [] };
 
     await admin.mutation(api.taskImports.commitTaskImportBatch, {
       companyId, kind: "one_time", importKey: "import-ot-status", batchKey: "batch-1", source: "cendro",
@@ -375,27 +387,31 @@ describe("task import backend", () => {
     });
 
     const updated = await admin.query(api.tasks.getOneTime, { companyId, taskId });
-    expect(updated.task.status).toBe("completed");
+    expect(updated.task.title).toBe("Renamed Task");
+    expect(updated.task.status).toBe("due");
+    expect(updated.task.completedAt).toBeUndefined();
     const logs = await t.run(async (ctx) => await ctx.db.query("taskActivityLogs").withIndex("by_task", (q) => q.eq("taskType", "one_time").eq("taskId", taskId)).collect());
-    expect(logs.some((l) => l.event === "status_changed" && l.fromStatus === "due" && l.toStatus === "completed")).toBe(true);
+    expect(logs.some((l) => l.event === "status_changed")).toBe(false);
   });
 
-  test("exportRows includes notes and imports preserve notes across create and update", async () => {
+  test("exportRows includes description and notes, and imports preserve them across create and update", async () => {
     const { t, companyId, adminMembershipId } = await seed();
     const admin = t.withIdentity(identity("admin"));
 
-    // 1. Create JD and One-time tasks with notes
-    const jdId = await admin.mutation(api.tasks.createJd, { companyId, title: "JD with notes", notes: "Initial JD note", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
-    await admin.mutation(api.tasks.createOneTime, { companyId, title: "OT with notes", notes: "Initial OT note", priority: "high", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [adminMembershipId] });
+    // 1. Create JD and One-time tasks with description and notes
+    const jdId = await admin.mutation(api.tasks.createJd, { companyId, title: "JD with notes", description: "Initial JD description", notes: "Initial JD note", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    await admin.mutation(api.tasks.createOneTime, { companyId, title: "OT with notes", description: "Initial OT description", notes: "Initial OT note", priority: "high", dueDate: Date.now() + 86_400_000, assigneeMembershipIds: [adminMembershipId] });
 
-    // 2. Verify exportRows includes notes
+    // 2. Verify exportRows includes description and notes for both kinds
     const jdExport = await admin.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts: { cursor: null, numItems: 50 } });
-    expect(jdExport.page).toContainEqual(expect.objectContaining({ title: "JD with notes", notes: "Initial JD note" }));
+    expect(jdExport.page).toContainEqual(expect.objectContaining({ title: "JD with notes", description: "Initial JD description", notes: "Initial JD note" }));
+    expect(jdExport.page[0]).not.toHaveProperty("status");
 
     const otExport = await admin.query(api.tasks.exportRows, { companyId, kind: "one_time", paginationOpts: { cursor: null, numItems: 50 } });
-    expect(otExport.page).toContainEqual(expect.objectContaining({ title: "OT with notes", notes: "Initial OT note" }));
+    expect(otExport.page).toContainEqual(expect.objectContaining({ title: "OT with notes", description: "Initial OT description", notes: "Initial OT note" }));
+    expect(otExport.page[0]).not.toHaveProperty("status");
 
-    // 3. Create task via import with notes
+    // 3. Create task via import with description and notes
     const importCreateRes = await admin.mutation(api.taskImports.commitTaskImportBatch, {
       companyId, kind: "jd", importKey: "import-notes-create", batchKey: "batch-1", source: "cendro",
       rows: [{
@@ -404,16 +420,18 @@ describe("task import backend", () => {
         draft: draft({
           reference: "JD-010",
           title: "Imported JD Task",
+          description: "Created description via import",
           notes: "Created via import",
-          presentFields: ["reference", "title", "notes", "recurrence", "assignees"],
+          presentFields: ["reference", "title", "description", "notes", "recurrence", "assignees"],
         }),
       }],
     });
     expect(importCreateRes.created).toBe(1);
     const createdTasks = await admin.query(api.tasks.listJdRows, { companyId, search: "Imported JD Task", paginationOpts: { numItems: 10, cursor: null } });
+    expect(createdTasks.page[0].description).toBe("Created description via import");
     expect(createdTasks.page[0].notes).toBe("Created via import");
 
-    // 4. Update existing task notes via import
+    // 4. Update existing task description and notes via import
     const existingJd = await admin.query(api.tasks.getJd, { companyId, taskId: jdId });
     await admin.mutation(api.taskImports.commitTaskImportBatch, {
       companyId, kind: "jd", importKey: "import-notes-update", batchKey: "batch-1", source: "cendro",
@@ -424,14 +442,16 @@ describe("task import backend", () => {
         draft: draft({
           reference: existingJd.task.reference,
           title: existingJd.task.title,
+          description: "Updated JD description via import",
           notes: "Updated JD note via import",
-          presentFields: ["reference", "notes"],
+          presentFields: ["reference", "description", "notes"],
           rawAssigneeText: "",
           assigneeEmails: [],
         }),
       }],
     });
     const updatedJd = await admin.query(api.tasks.getJd, { companyId, taskId: jdId });
+    expect(updatedJd.task.description).toBe("Updated JD description via import");
     expect(updatedJd.task.notes).toBe("Updated JD note via import");
   });
 

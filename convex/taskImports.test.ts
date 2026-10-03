@@ -511,6 +511,15 @@ describe("task import backend", () => {
     await admin.mutation(api.tasks.updateJd, { companyId, taskId: manualTaskId, title: "Manual coincident", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
     const manualUpdated = await admin.query(api.tasks.getJd, { companyId, taskId: manualTaskId });
     expect(manualUpdated.task.state.rawStatus).toBe("due");
+
+    // updateJdFields (inline/detail editors, AI update tool) resets the same way
+    const fieldsTaskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Fields coincident", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    await t.run(async (ctx) => {
+      await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId: fieldsTaskId, cycleStart: newCycleStart, completedAt: Date.now() });
+    });
+    await admin.mutation(api.tasks.updateJdFields, { companyId, taskId: fieldsTaskId, recurrence: "weekly" });
+    const fieldsUpdated = await admin.query(api.tasks.getJd, { companyId, taskId: fieldsTaskId });
+    expect(fieldsUpdated.task.state.rawStatus).toBe("due");
   });
 
   test("creates new task using imported task code if it does not exist and syncs counter", async () => {

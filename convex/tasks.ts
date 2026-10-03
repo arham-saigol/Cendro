@@ -180,6 +180,13 @@ async function currentJdCompletion(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: 
   return await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).unique();
 }
 
+// A completion recorded under a previous grid can coincide with a new cycle's
+// start; clear it so a cycle reset actually shows as due.
+async function clearJdCompletionAtCycle(ctx: MutationCtx, taskId: Id<"jdTasks">, cycleStart: number) {
+  const done = await currentJdCompletion(ctx, taskId, cycleStart);
+  if (done) await ctx.db.delete(done._id);
+}
+
 async function currentJdCycleRecord(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: number) {
   return await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).unique();
 }
@@ -1138,10 +1145,7 @@ export const updateJd = mutation({
     nextTask.recurrence = args.recurrence;
     nextTask.assigneeMembershipIds = args.assigneeMembershipIds;
     if (args.recurrence !== task.recurrence) {
-      // A completion recorded under the old grid can coincide with the new
-      // cycle's start; clear it so the reset actually shows as due.
-      const coincidentDone = await currentJdCompletion(ctx, task._id, nextCycleStart);
-      if (coincidentDone) await ctx.db.delete(coincidentDone._id);
+      await clearJdCompletionAtCycle(ctx, task._id, nextCycleStart);
       nextTask.cycleStartedAt = nextCycleStart;
       nextTask.status = "due";
       nextTask.statusCycleStart = nextCycleStart;
@@ -1235,6 +1239,7 @@ export const updateJdFields = mutation({
     if (args.recurrence !== undefined) {
       nextTask.recurrence = args.recurrence;
       if (args.recurrence !== task.recurrence) {
+        await clearJdCompletionAtCycle(ctx, task._id, nextCycleStart!);
         nextTask.cycleStartedAt = nextCycleStart!;
         nextTask.status = "due";
         nextTask.statusCycleStart = nextCycleStart;

@@ -3,7 +3,8 @@ import { ConvexError, v } from "convex/values";
 import { internalAction, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { currentJdCycle, defaultTimeZone, elapsedJdCyclesSince, nextJdCycleStart, type JdRecurrence } from "./taskCycles";
+import { currentJdCycle, defaultTimeZone, nextJdCycleStart, type JdRecurrence } from "./taskCycles";
+import { effectiveCurrentJdCycle, elapsedJdOccurrences, loadWorkCalendar, occurrenceDeadline, type WorkCalendar } from "./workCalendar";
 import { activeCompanyMembershipIds, assertCanAssign, assertCanDeleteTask, assertCanUpdateTask, canViewTask, getManagedMembershipIds, hasAllManagedMemberships, hasAnyManagedMembership, memberFirstName, memberFullName, membershipCapabilities, requireCapability, requireMembership, scanManagedMembershipIds, scopedMembershipIds } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
@@ -182,9 +183,11 @@ async function currentJdCycleRecord(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart:
   return await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).unique();
 }
 
-export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string) {
-  const { cycles, nextActiveAt } = elapsedJdCyclesSince(task.recurrence, task.cycleStartedAt, now, 200, timeZone ?? await companyTimeZone(ctx, task.companyId));
-  for (const cycle of cycles) {
+export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string, calendar?: WorkCalendar) {
+  const zone = timeZone ?? await companyTimeZone(ctx, task.companyId);
+  const cal = calendar ?? await loadWorkCalendar(ctx, task.companyId);
+  const { occurrences, nextActiveAt } = elapsedJdOccurrences(cal, task.recurrence, task.cycleStartedAt, now, 200, zone);
+  for (const cycle of occurrences) {
     const done = await currentJdCompletion(ctx, task._id, cycle.start);
     // Legacy tasks predate jdTaskCompletions; their only completed-cycle signal
     // is the status pair stamped when the cycle was current.
@@ -197,16 +200,20 @@ export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks"
       // record for the same cycle is wrong history, so remove it rather than
       // leave a completed cycle listed as missed.
       if (recorded) await ctx.db.delete(recorded._id);
-      await ctx.db.insert("jdTaskCompletions", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.end, completedAt: cycle.end });
+      await ctx.db.insert("jdTaskCompletions", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.deadline, completedAt: cycle.end });
     } else if (!recorded) {
-      await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.end, status: "missed", recordedAt: now });
+      // cycleEnd stores the effective deadline: for week-and-longer cycles a
+      // non-working due date was already shifted to the next working day.
+      await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.deadline, status: "missed", recordedAt: now });
     }
   }
-  if (cycles.length > 0) {
+  // The floor also advances past skipped occurrences (non-working days on
+  // daily/alternate schedules), so the cron never re-walks them.
+  if (nextActiveAt !== task.cycleStartedAt) {
     await ctx.db.patch(task._id, { cycleStartedAt: nextActiveAt });
     task.cycleStartedAt = nextActiveAt;
   }
-  return { cycles, nextActiveAt };
+  return { occurrences, nextActiveAt };
 }
 
 /**
@@ -214,7 +221,7 @@ export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks"
  * completion row before the stamp is overwritten, so deferred catch-up cannot
  * record the stamped cycle as missed. Bounded to one stamped cycle.
  */
-async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, timeZone: string) {
+async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, timeZone: string, calendar?: WorkCalendar) {
   if (task.status !== "completed" || task.statusCycleStart === undefined || task.statusCycleStart >= currentCycleStart) return;
   const stampedStart = task.statusCycleStart;
   const [existingCompletion, existingRecord] = await Promise.all([
@@ -224,7 +231,8 @@ async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">,
   if (existingCompletion) return;
   if (existingRecord) await ctx.db.delete(existingRecord._id);
   const stampedEnd = nextJdCycleStart(stampedStart, task.recurrence, timeZone);
-  await ctx.db.insert("jdTaskCompletions", { companyId: task.companyId, jdTaskId: task._id, cycleStart: stampedStart, cycleEnd: stampedEnd, completedAt: stampedEnd });
+  const cal = calendar ?? await loadWorkCalendar(ctx, task.companyId);
+  await ctx.db.insert("jdTaskCompletions", { companyId: task.companyId, jdTaskId: task._id, cycleStart: stampedStart, cycleEnd: occurrenceDeadline(cal, task.recurrence, stampedEnd, timeZone) ?? stampedEnd, completedAt: stampedEnd });
 }
 
 /**
@@ -234,17 +242,29 @@ async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">,
  * as `schedule` so the deferred run reconstructs the old grid — by the time it
  * executes, the task document already carries the new recurrence.
  */
-function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, schedule?: { recurrence: JdRecurrence; cycleStartedAt: number }) {
-  if (task.cycleStartedAt < currentCycleStart) {
-    return ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, { taskId: task._id, schedule });
+function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, schedule?: { recurrence: JdRecurrence; cycleStartedAt: number }, timeZone?: string) {
+  // The snapshot path re-walks the old grid from the cycle containing the
+  // floor: anything between it and that grid's current cycle — elapsed or
+  // still pending on a shifted deadline — needs the check. `through` pins the
+  // walk's bound at the change instant so delayed runs never evaluate cycles
+  // the old schedule never covered.
+  const needsCatchUp = schedule
+    ? currentJdCycle(schedule.recurrence, task.cycleStartedAt, timeZone).start < currentJdCycle(schedule.recurrence, Date.now(), timeZone).start
+    : task.cycleStartedAt < currentCycleStart;
+  if (needsCatchUp) {
+    const snapshot = schedule ? { ...schedule, through: currentJdCycle(schedule.recurrence, Date.now(), timeZone).start } : undefined;
+    return ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, { taskId: task._id, schedule: snapshot });
   }
 }
 
-async function jdState(ctx: Ctx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string) {
-  const c = currentJdCycle(task.recurrence, now, timeZone ?? await companyTimeZone(ctx, task.companyId));
+async function jdState(ctx: Ctx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string, calendar?: WorkCalendar) {
+  const zone = timeZone ?? await companyTimeZone(ctx, task.companyId);
+  const cal = calendar ?? await loadWorkCalendar(ctx, task.companyId);
+  const c = effectiveCurrentJdCycle(cal, task.recurrence, now, zone);
   const currentDone = await currentJdCompletion(ctx, task._id, c.start);
   const status: ManualStatus = currentDone || (task.statusCycleStart === c.start && task.status === "completed") ? "completed" : task.statusCycleStart === c.start ? task.status : "due";
-  return { status: statusLabel(status), rawStatus: status, isOverdue: false, currentCycleStart: c.start, currentCycleEnd: c.end, dueAt: c.end };
+  const dueAt = occurrenceDeadline(cal, task.recurrence, c.end, zone) ?? c.end;
+  return { status: statusLabel(status), rawStatus: status, isOverdue: false, currentCycleStart: c.start, currentCycleEnd: c.end, dueAt };
 }
 
 function oneState(task: Doc<"oneTimeTasks">) {
@@ -265,11 +285,11 @@ async function logTaskActivity(ctx: MutationCtx, args: { companyId: Id<"companie
   await ctx.db.insert("taskActivityLogs", { companyId: args.companyId, taskType: args.taskType, taskId: args.taskId, actorMembershipId: args.actorMembershipId, event: args.event, ...(args.fromStatus ? { fromStatus: args.fromStatus } : {}), ...(args.toStatus ? { toStatus: args.toStatus } : {}), createdAt: args.createdAt ?? Date.now() });
 }
 
-async function enrichedJd(ctx: Ctx, task: Doc<"jdTasks">, timeZone?: string, canUpdate?: boolean, canDelete?: boolean, scopedMembershipIds?: Set<Id<"companyMemberships">>, customOrderKey?: string) {
+async function enrichedJd(ctx: Ctx, task: Doc<"jdTasks">, timeZone?: string, canUpdate?: boolean, canDelete?: boolean, scopedMembershipIds?: Set<Id<"companyMemberships">>, customOrderKey?: string, calendar?: WorkCalendar) {
   const visibleAssigneeIds = scopedMembershipIds ? task.assigneeMembershipIds.filter((id) => scopedMembershipIds.has(id)) : task.assigneeMembershipIds;
   return {
     ...task,
-    state: await jdState(ctx, task, Date.now(), timeZone),
+    state: await jdState(ctx, task, Date.now(), timeZone, calendar),
     assignees: await enrich(ctx, visibleAssigneeIds),
     ...(canUpdate !== undefined ? { canUpdate } : {}),
     ...(canDelete !== undefined ? { canDelete } : {}),
@@ -550,11 +570,12 @@ export const listJdRows = query({
     // batched pass and per-row state reads run concurrently instead of serially.
     const now = Date.now();
     const timeZone = company.timeZone ?? defaultTimeZone;
+    const calendar = await loadWorkCalendar(ctx, args.companyId);
     const includeCustomOrderKeys = preference && preference.orderFormat !== "vector";
     const assigneeRows = await enrich(ctx, visibleTasks.flatMap((task) => task.assigneeMembershipIds.filter((id) => scoped.has(id))));
     const assigneeById = new Map(assigneeRows.map((row) => [row.membership._id, row]));
     const [states, updates, deletes, orderKeys] = await Promise.all([
-      Promise.all(visibleTasks.map((task) => jdState(ctx, task, now, timeZone))),
+      Promise.all(visibleTasks.map((task) => jdState(ctx, task, now, timeZone, calendar))),
       Promise.all(visibleTasks.map((task) => canUpdateTask(ctx, args.companyId, membership, task, "jd", auth))),
       Promise.all(visibleTasks.map((task) => canDeleteTask(ctx, args.companyId, membership, task, "jd", auth))),
       includeCustomOrderKeys ? taskListOrderKeyMap(ctx, args.companyId, membership._id, "jd") : Promise.resolve(null),
@@ -584,9 +605,10 @@ export const exportRows = query({
       const visibleTasks = page.page.filter((_, index) => visibleFlags[index]);
       const now = Date.now();
       const timeZone = company.timeZone ?? defaultTimeZone;
+      const calendar = await loadWorkCalendar(ctx, args.companyId);
       const assigneeRows = await enrich(ctx, visibleTasks.flatMap((task) => task.assigneeMembershipIds.filter((id) => scoped.has(id))));
       const assigneeById = new Map(assigneeRows.map((row) => [row.membership._id, row]));
-      const states = await Promise.all(visibleTasks.map((task) => jdState(ctx, task, now, timeZone)));
+      const states = await Promise.all(visibleTasks.map((task) => jdState(ctx, task, now, timeZone, calendar)));
       const rows = visibleTasks.map((task, index) => ({ reference: task.reference, title: task.title, description: task.description ?? null, notes: task.notes ?? null, recurrence: task.recurrence, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: task.assigneeMembershipIds.filter((id) => scoped.has(id)).map((id) => assigneeById.get(id)?.user.email).filter(Boolean).join("; "), status: states[index].status }));
       return { ...page, page: rows };
     }
@@ -934,7 +956,8 @@ export const createJd = mutation({
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
     const reference = await nextReference(ctx, args.companyId, "jd");
-    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), notes: cleanOptionalText(args.notes), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    const calendar = await loadWorkCalendar(ctx, args.companyId);
+    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), notes: cleanOptionalText(args.notes), time: cleanOptionalText(args.time), quantity: cleanOptionalQuantity(args.quantity), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: effectiveCurrentJdCycle(calendar, args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
     await logTaskActivity(ctx, { companyId: args.companyId, taskType: "jd", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now });
     return id;
@@ -954,12 +977,13 @@ export const updateJd = mutation({
     if (assigneesChanged && args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
     const timeZone = await companyTimeZone(ctx, args.companyId);
+    const calendar = await loadWorkCalendar(ctx, args.companyId);
     // The stamp and cycleStartedAt live on the old recurrence's grid, so the
     // preservation/catch-up checks must use the old recurrence's current cycle.
-    const oldCycleStart = currentJdCycle(task.recurrence, now, timeZone).start;
-    await preserveJdCompletionStamp(ctx, task, oldCycleStart, timeZone);
-    await scheduleMissedJdCycleCatchUp(ctx, task, oldCycleStart, args.recurrence !== task.recurrence ? { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt } : undefined);
-    const nextCycleStart = args.recurrence !== task.recurrence ? currentJdCycle(args.recurrence, now, timeZone).start : oldCycleStart;
+    const oldCycleStart = effectiveCurrentJdCycle(calendar, task.recurrence, now, timeZone).start;
+    await preserveJdCompletionStamp(ctx, task, oldCycleStart, timeZone, calendar);
+    await scheduleMissedJdCycleCatchUp(ctx, task, oldCycleStart, args.recurrence !== task.recurrence ? { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt } : undefined, timeZone);
+    const nextCycleStart = args.recurrence !== task.recurrence ? effectiveCurrentJdCycle(calendar, args.recurrence, now, timeZone).start : oldCycleStart;
     const nextTask = { ...task };
     nextTask.title = nonEmpty(args.title, "Task title");
     const desc = cleanOptionalText(args.description);
@@ -1040,10 +1064,11 @@ export const updateJdFields = mutation({
     }
     const now = Date.now();
     const timeZone = await companyTimeZone(ctx, args.companyId);
-    const currentCycleStart = currentJdCycle(task.recurrence, now, timeZone).start;
-    await preserveJdCompletionStamp(ctx, task, currentCycleStart, timeZone);
-    await scheduleMissedJdCycleCatchUp(ctx, task, currentCycleStart);
-    const nextCycleStart = args.recurrence !== undefined ? currentJdCycle(args.recurrence, now, timeZone).start : undefined;
+    const calendar = await loadWorkCalendar(ctx, args.companyId);
+    const currentCycleStart = effectiveCurrentJdCycle(calendar, task.recurrence, now, timeZone).start;
+    await preserveJdCompletionStamp(ctx, task, currentCycleStart, timeZone, calendar);
+    await scheduleMissedJdCycleCatchUp(ctx, task, currentCycleStart, args.recurrence !== undefined && args.recurrence !== task.recurrence ? { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt } : undefined, timeZone);
+    const nextCycleStart = args.recurrence !== undefined ? effectiveCurrentJdCycle(calendar, args.recurrence, now, timeZone).start : undefined;
     const nextTask = { ...task };
     if (args.title !== undefined) nextTask.title = nonEmpty(args.title, "Task title");
     if (args.description !== undefined) {
@@ -1088,15 +1113,18 @@ async function setJdStatus(ctx: MutationCtx, companyId: Id<"companies">, taskId:
   await assertCanUpdateTaskStatus(ctx, companyId, membership, task, "jd");
   const now = Date.now();
   const timeZone = await companyTimeZone(ctx, companyId);
-  const cycle = currentJdCycle(task.recurrence, now, timeZone);
+  const calendar = await loadWorkCalendar(ctx, companyId);
+  // On a non-working day the "current" cycle is the next working occurrence,
+  // so a completion on an off day counts toward that occurrence.
+  const cycle = effectiveCurrentJdCycle(calendar, task.recurrence, now, timeZone);
   // Keep the click small: preserve the stamped cycle and schedule the full
   // historical catch-up instead of reconstructing up to 200 cycles inline.
-  await preserveJdCompletionStamp(ctx, task, cycle.start, timeZone);
+  await preserveJdCompletionStamp(ctx, task, cycle.start, timeZone, calendar);
   await scheduleMissedJdCycleCatchUp(ctx, task, cycle.start);
   const existing = await currentJdCompletion(ctx, taskId, cycle.start);
   const previousStatus: ManualStatus = existing || (task.statusCycleStart === cycle.start && task.status === "completed") ? "completed" : task.statusCycleStart === cycle.start ? task.status : "due";
   if (status === "completed") {
-    if (!existing) await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId: taskId, cycleStart: cycle.start, cycleEnd: cycle.end, completedByMembershipId: membership._id, completedAt: now, note: cleanOptionalText(note) });
+    if (!existing) await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId: taskId, cycleStart: cycle.start, cycleEnd: occurrenceDeadline(calendar, task.recurrence, cycle.end, timeZone) ?? cycle.end, completedByMembershipId: membership._id, completedAt: now, note: cleanOptionalText(note) });
   } else if (existing) {
     await ctx.db.delete(existing._id);
   }
@@ -1126,7 +1154,7 @@ export const listJdCycleRecords = query({
 
 /** Deferred per-task catch-up scheduled by interactive mutations. Idempotent. */
 export const catchUpMissedJdCycles = internalMutation({
-  args: { taskId: v.id("jdTasks"), schedule: v.optional(v.object({ recurrence: recurrenceValidator, cycleStartedAt: v.number() })) },
+  args: { taskId: v.id("jdTasks"), schedule: v.optional(v.object({ recurrence: recurrenceValidator, cycleStartedAt: v.number(), through: v.optional(v.number()) })) },
   handler: async (ctx, args) => {
     const task = await ctx.db.get(args.taskId);
     if (!task) return null;
@@ -1136,24 +1164,41 @@ export const catchUpMissedJdCycles = internalMutation({
       // legacy completion stamp was preserved synchronously, and the new
       // grid's cycleStartedAt must not move from here.
       const timeZone = await companyTimeZone(ctx, task.companyId);
+      const calendar = await loadWorkCalendar(ctx, task.companyId);
       const now = Date.now();
-      const { cycles, nextActiveAt } = elapsedJdCyclesSince(args.schedule.recurrence, args.schedule.cycleStartedAt, now, 200, timeZone);
-      for (const cycle of cycles) {
+      // `through` freezes the walk's bound at the grid position where the old
+      // schedule stopped — cycles after the recurrence change are not the old
+      // schedule's to record.
+      const throughStart = args.schedule.through ?? currentJdCycle(args.schedule.recurrence, now, timeZone).start;
+      const { occurrences, nextActiveAt } = elapsedJdOccurrences(calendar, args.schedule.recurrence, args.schedule.cycleStartedAt, now, 200, timeZone, throughStart);
+      for (const cycle of occurrences) {
         const [done, recorded] = await Promise.all([
           currentJdCompletion(ctx, task._id, cycle.start),
           currentJdCycleRecord(ctx, task._id, cycle.start),
         ]);
         if (!done && !recorded) {
-          await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.end, status: "missed", recordedAt: now });
+          await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.deadline, status: "missed", recordedAt: now });
         }
       }
       // The batch cap may leave elapsed old-grid cycles unprocessed; continue
       // from the first unprocessed start so the tail of history is not lost.
-      if (cycles.length === 200) {
+      if (occurrences.length === 200) {
         await ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, {
           taskId: args.taskId,
-          schedule: { recurrence: args.schedule.recurrence, cycleStartedAt: nextActiveAt },
+          schedule: { recurrence: args.schedule.recurrence, cycleStartedAt: nextActiveAt, through: args.schedule.through },
         });
+      } else if (nextActiveAt < throughStart) {
+        // The walk stopped at an old-grid occurrence whose shifted deadline is
+        // still pending. The task's new-grid floor will never revisit it, so
+        // schedule the one re-check that records it if it goes undone — still
+        // bounded by the same change instant.
+        const deadline = occurrenceDeadline(calendar, args.schedule.recurrence, nextJdCycleStart(nextActiveAt, args.schedule.recurrence, timeZone), timeZone);
+        if (deadline !== null && deadline > now) {
+          await ctx.scheduler.runAfter(deadline - now, internal.tasks.catchUpMissedJdCycles, {
+            taskId: args.taskId,
+            schedule: { recurrence: args.schedule.recurrence, cycleStartedAt: nextActiveAt, through: throughStart },
+          });
+        }
       }
       return null;
     }
@@ -1167,6 +1212,7 @@ export const recordMissedJdCyclesBatch = internalMutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     const timeZones = new Map<Id<"companies">, Promise<string>>();
+    const calendars = new Map<Id<"companies">, Promise<WorkCalendar>>();
     const page = await ctx.db.query("jdTasks").paginate({ numItems: 10, cursor: args.cursor ?? null });
     for (const task of page.page) {
       // Skip the catch-up entirely when no cycle has elapsed for this task:
@@ -1174,7 +1220,8 @@ export const recordMissedJdCyclesBatch = internalMutation({
       // touch completion/cycle-record reads at all.
       const timeZone = await (timeZones.get(task.companyId) ?? timeZones.set(task.companyId, companyTimeZone(ctx, task.companyId)).get(task.companyId)!);
       if (currentJdCycle(task.recurrence, now, timeZone).start > task.cycleStartedAt) {
-        await recordMissedJdCycles(ctx, task, now, timeZone);
+        const calendar = await (calendars.get(task.companyId) ?? calendars.set(task.companyId, loadWorkCalendar(ctx, task.companyId)).get(task.companyId)!);
+        await recordMissedJdCycles(ctx, task, now, timeZone, calendar);
       }
     }
     if (!page.isDone) await ctx.scheduler.runAfter(0, internal.tasks.recordMissedJdCyclesBatch, { cursor: page.continueCursor });
@@ -1227,9 +1274,11 @@ export const resetJdTaskCyclesBatch = internalMutation({
           .query("jdTasks")
           .paginate({ numItems: 100, cursor: args.cursor ?? null });
 
+    const calendars = new Map<Id<"companies">, Promise<WorkCalendar>>();
     for (const task of page.page) {
       const timeZone = await companyTimeZone(ctx, task.companyId);
-      const current = currentJdCycle(task.recurrence, now, timeZone);
+      const calendar = await (calendars.get(task.companyId) ?? calendars.set(task.companyId, loadWorkCalendar(ctx, task.companyId)).get(task.companyId)!);
+      const current = effectiveCurrentJdCycle(calendar, task.recurrence, now, timeZone);
       await ctx.db.patch(task._id, {
         cycleStartedAt: current.start,
         statusCycleStart: current.start,
@@ -1882,6 +1931,7 @@ export const aiListVisible = query({
     const matches = (status: string) => args.status === "all" || (args.status === "overdue" ? status === "Overdue" : args.status === "done" ? status === "Completed" : status !== "Completed" && status !== "Overdue");
     const now = Date.now();
     const timeZone = await companyTimeZone(ctx, args.companyId);
+    const calendar = await loadWorkCalendar(ctx, args.companyId);
     // Keep paging source rows until the requested count is filled or the scan
     // budget runs out; `exhausted` reports whether matching rows may remain.
     // Enrichment is deferred: candidates are only visibility- and
@@ -1897,7 +1947,7 @@ export const aiListVisible = query({
         scanned += page.page.length;
         const evaluated = await Promise.all(page.page.map(async (task) => {
           if (!(await visible(ctx, args.companyId, membership, task, kind, auth))) return null;
-          const state = kind === "jd" ? await jdState(ctx, task as Doc<"jdTasks">, now, timeZone) : oneState(task as Doc<"oneTimeTasks">);
+          const state = kind === "jd" ? await jdState(ctx, task as Doc<"jdTasks">, now, timeZone, calendar) : oneState(task as Doc<"oneTimeTasks">);
           return matches(state.status) ? { task, state } : null;
         }));
         for (const item of evaluated) if (item && matched.length < limit) matched.push(item);
@@ -1990,7 +2040,8 @@ export const aiCreateJd = mutation({
     await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "jd");
     const now = Date.now();
     const reference = await nextReference(ctx, args.companyId, "jd");
-    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), notes: cleanOptionalText(args.notes), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: currentJdCycle(args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
+    const calendar = await loadWorkCalendar(ctx, args.companyId);
+    const id = await ctx.db.insert("jdTasks", { companyId: args.companyId, reference, title, description: cleanOptionalText(args.description), notes: cleanOptionalText(args.notes), recurrence: args.recurrence, cycleStartedAt: now, status: "due", statusCycleStart: effectiveCurrentJdCycle(calendar, args.recurrence, now, company.timeZone).start, assigneeMembershipIds: args.assigneeMembershipIds, createdByMembershipId: membership._id, createdAt: now, updatedAt: now });
     await logTaskActivity(ctx, { companyId: args.companyId, taskType: "jd", taskId: id, actorMembershipId: membership._id, event: "created", createdAt: now });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "jd_task.create", targetType: "jdTask", targetId: id, createdAt: now });
     const task = await ctx.db.get(id);

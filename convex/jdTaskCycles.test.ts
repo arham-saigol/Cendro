@@ -21,6 +21,9 @@ async function seedCompany(timeZone = "UTC") {
   const ids = await t.run(async (ctx) => {
     const now = Date.now();
     const companyId = await ctx.db.insert("companies", { name: "Acme", timeZone, createdAt: now });
+    // These tests assert the raw recurrence grid; an all-week calendar keeps
+    // the work-calendar overlay out of the picture.
+    await ctx.db.insert("companyCalendars", { companyId, workingDays: [0, 1, 2, 3, 4, 5, 6], updatedAt: now });
     const adminUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin", email: "admin@example.com", firstName: "Admin", secondName: "", createdAt: now, updatedAt: now });
     const adminMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: adminUserId, role: "Admin", active: true, createdAt: now, updatedAt: now });
     return { companyId, adminMembershipId };

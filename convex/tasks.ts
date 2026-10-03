@@ -9,6 +9,7 @@ import { activeCompanyMembershipIds, assertCanAssign, assertCanDeleteTask, asser
 import type { Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
 import { DEFAULT_QUERY_LIMIT, takeWithOverflow } from "./queryLimits";
+import { referenceCodeCandidate, referenceSearchKey } from "./searchText";
 import { ASSIGNEE_SEARCH_MAX_LENGTH } from "../src/lib/assignee-search";
 import { nextReference } from "./references";
 import {
@@ -310,7 +311,12 @@ async function enrichedOneTime(ctx: Ctx, task: Doc<"oneTimeTasks">, canUpdate?: 
 function matchesSearch(task: { title: string; reference: string }, search?: string) {
   const needle = search?.trim().toLowerCase();
   if (!needle) return true;
-  return task.title.toLowerCase().includes(needle) || task.reference.toLowerCase().includes(needle);
+  const needleKey = referenceSearchKey(needle);
+  return (
+    task.title.toLowerCase().includes(needle) ||
+    task.reference.toLowerCase().includes(needle) ||
+    (needleKey !== "" && referenceSearchKey(task.reference).includes(needleKey))
+  );
 }
 
 async function filterAssignableUsersBySearch(
@@ -657,6 +663,141 @@ export const listOneTimeRows = query({
     }));
     return { ...page, page: rows };
   },
+});
+
+// Palette search scans the company index newest-first until enough matches
+// collect or the ceiling ends the scan — the same bounded pattern as
+// filteredSopRows, so sparse matches late in the index are not silently
+// dropped while a single-transaction query stays under Convex read limits.
+const TASK_SEARCH_RESULT_LIMIT = 8;
+const TASK_SEARCH_SCAN_PAGE = 200;
+const TASK_SEARCH_SCAN_CEILING = 1_000;
+
+function taskByReference(ctx: QueryCtx, kind: TaskKind, companyId: Id<"companies">, reference: string) {
+  return kind === "jd"
+    ? ctx.db
+        .query("jdTasks")
+        .withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).eq("reference", reference))
+        .unique()
+    : ctx.db
+        .query("oneTimeTasks")
+        .withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).eq("reference", reference))
+        .unique();
+}
+
+function taskSearchPage(ctx: QueryCtx, kind: TaskKind, companyId: Id<"companies">) {
+  return (cursor: string | null, numItems: number): Promise<{
+    page: (Doc<"jdTasks"> | Doc<"oneTimeTasks">)[];
+    isDone: boolean;
+    continueCursor: string;
+  }> =>
+    kind === "jd"
+      ? ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).order("desc").paginate({ cursor, numItems })
+      : ctx.db
+          .query("oneTimeTasks")
+          .withIndex("by_company", (q) => q.eq("companyId", companyId))
+          .order("desc")
+          .paginate({ cursor, numItems });
+}
+
+async function searchTasksOfKind(
+  ctx: QueryCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  auth: TaskVisibilityAuth,
+  kind: "jd",
+  needle: string,
+): Promise<{ rows: Doc<"jdTasks">[]; truncated: boolean }>;
+async function searchTasksOfKind(
+  ctx: QueryCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  auth: TaskVisibilityAuth,
+  kind: "one_time",
+  needle: string,
+): Promise<{ rows: Doc<"oneTimeTasks">[]; truncated: boolean }>;
+async function searchTasksOfKind(
+  ctx: QueryCtx,
+  companyId: Id<"companies">,
+  membership: Doc<"companyMemberships">,
+  auth: TaskVisibilityAuth,
+  kind: TaskKind,
+  needle: string,
+) {
+  const kept: (Doc<"jdTasks"> | Doc<"oneTimeTasks">)[] = [];
+  const keptIds = new Set<string>();
+
+  // Exact reference probes hit their own index — the cheapest possible match,
+  // and the only path that can reach rows beyond the scan ceiling. Probe the
+  // raw spelling and, when the query parses as a code, its normalized form
+  // ("jd1" → "JD-001").
+  const refSpellings = new Set([needle.toUpperCase()]);
+  const codeCandidate = referenceCodeCandidate(needle);
+  if (codeCandidate) refSpellings.add(codeCandidate);
+  for (const ref of refSpellings) {
+    const exact = await taskByReference(ctx, kind, companyId, ref);
+    if (exact && (await visible(ctx, companyId, membership, exact, kind, auth))) {
+      kept.push(exact);
+      keptIds.add(exact._id);
+    }
+  }
+
+  let cursor: string | null = null;
+  let scanned = 0;
+  let exhausted = false;
+  while (kept.length < TASK_SEARCH_RESULT_LIMIT && scanned < TASK_SEARCH_SCAN_CEILING) {
+    const page = await taskSearchPage(ctx, kind, companyId)(cursor, Math.min(TASK_SEARCH_SCAN_PAGE, TASK_SEARCH_SCAN_CEILING - scanned));
+    scanned += page.page.length;
+    const candidates = page.page.filter((task) => !keptIds.has(task._id) && matchesSearch(task, needle));
+    const flags = await Promise.all(candidates.map((task) => visible(ctx, companyId, membership, task, kind, auth)));
+    for (let index = 0; index < candidates.length && kept.length < TASK_SEARCH_RESULT_LIMIT; index += 1) {
+      if (flags[index]) kept.push(candidates[index]);
+    }
+    if (page.isDone) {
+      exhausted = true;
+      break;
+    }
+    cursor = page.continueCursor;
+  }
+  // Reaching the result cap means unshown matches may remain; hitting the scan
+  // ceiling means unvisited rows may hold more. Report both so the UI is honest.
+  return { rows: kept, truncated: kept.length === TASK_SEARCH_RESULT_LIMIT || !exhausted };
+}
+
+// One paginate per function is all Convex allows, so each kind gets its own
+// query export; the palette fires both plus api.sops.search.
+const paletteSearchArgs = { companyId: v.id("companies"), query: v.string() };
+
+async function paletteSearch(ctx: QueryCtx, args: { companyId: Id<"companies">; query: string }, kind: TaskKind) {
+  const needle = args.query.trim();
+  if (!needle) return { tasks: [], truncated: false };
+  const { membership, company } = await requireMembership(ctx, args.companyId);
+  const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
+  const timeZone = company.timeZone ?? defaultTimeZone;
+  const { rows, truncated } =
+    kind === "jd"
+      ? await searchTasksOfKind(ctx, args.companyId, membership, auth, "jd", needle)
+      : await searchTasksOfKind(ctx, args.companyId, membership, auth, "one_time", needle);
+  const now = Date.now();
+  const tasks = await Promise.all(
+    rows.map(async (task) => ({
+      _id: task._id,
+      reference: task.reference,
+      title: task.title,
+      status: "recurrence" in task ? (await jdState(ctx, task, now, timeZone)).status : oneState(task).status,
+    })),
+  );
+  return { tasks, truncated };
+}
+
+export const searchJd = query({
+  args: paletteSearchArgs,
+  handler: async (ctx, args) => await paletteSearch(ctx, args, "jd"),
+});
+
+export const searchOneTime = query({
+  args: paletteSearchArgs,
+  handler: async (ctx, args) => await paletteSearch(ctx, args, "one_time"),
 });
 
 export const getListPreference = query({

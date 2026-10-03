@@ -1,7 +1,8 @@
 import { ConvexError, v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
 import { analyticsScopedMembershipIds, assertAnalyticsViewAccess, buildSopVisibilityContext, membershipCapabilities, requireMembership, sopListScopeAuth, taskHasVisibleAssignee, visibleAssigneeMembershipIds, visibleSop } from "./permissions";
-import { currentJdCycle, elapsedJdCyclesDueBetween, localDateField, nextJdCycleStart } from "./taskCycles";
+import { currentJdCycle, localDateField, nextJdCycleStart } from "./taskCycles";
+import { jdOccurrencesDueBetween, loadWorkCalendar, maxHolidaySpanDays, occurrenceDeadline } from "./workCalendar";
 import { bucketIndexFor, buildDashboardBuckets, dashboardRangeValidator, resolveDashboardRange } from "./dashboardTime";
 import type { Doc, Id } from "./_generated/dataModel";
 import { takeWithOverflow } from "./queryLimits";
@@ -24,8 +25,9 @@ const dashboardTakeLimit = 500;
 const dashboardReadBudget = 24_000;
 
 // Any JD cycle whose deadline lands inside a dashboard range started at most
-// ~366 days earlier (the longest recurrence is annual), plus slack.
-const jdCompletionLookbackMs = 368 * 86_400_000;
+// ~366 days earlier (the longest recurrence is annual), plus slack, plus the
+// longest contiguous holiday span a deadline could have shifted through.
+const jdCompletionLookbackDays = 368 + 7;
 
 type QueryCompleteness = { isTruncated: boolean; truncatedReads: number; remaining: number };
 
@@ -344,6 +346,8 @@ export const dashboard = query({
 
     const range = resolveDashboardRange(args.range, now, timeZone);
     const buckets = buildDashboardBuckets(range, timeZone);
+    const calendar = await loadWorkCalendar(ctx, args.companyId);
+    const jdCompletionLookbackMs = (jdCompletionLookbackDays + maxHolidaySpanDays(calendar)) * 86_400_000;
 
     const items: WorkItem[] = [];
 
@@ -472,12 +476,16 @@ export const dashboard = query({
 
       for (const record of missed) put(record.cycleStart, record.cycleEnd - 1, false, true);
 
-      const elapsed = elapsedJdCyclesDueBetween(task.recurrence, task.cycleStartedAt, now, range.start, range.end, 200, timeZone);
+      // Skipped occurrences (non-working due dates on daily/alternate cycles)
+      // never enter the ledger; other recurrences report their shifted
+      // deadline, matching what the missed-record writer stores.
+      const elapsed = jdOccurrencesDueBetween(calendar, task.recurrence, task.cycleStartedAt, now, range.start, range.end, 200, timeZone);
       if (elapsed.truncated) completeness.isTruncated = true;
-      for (const cycle of elapsed.cycles) put(cycle.start, cycle.end - 1, false, false);
+      for (const cycle of elapsed.occurrences) put(cycle.start, cycle.deadline - 1, false, false);
 
       const current = currentJdCycle(task.recurrence, now, timeZone);
-      put(current.start, current.end - 1, Boolean(cycles.get(current.start)?.completed), false);
+      const currentDeadline = occurrenceDeadline(calendar, task.recurrence, current.end, timeZone);
+      if (currentDeadline !== null) put(current.start, currentDeadline - 1, Boolean(cycles.get(current.start)?.completed), false);
 
       const taskItems: WorkItem[] = [];
       for (const [start, cycle] of cycles) {

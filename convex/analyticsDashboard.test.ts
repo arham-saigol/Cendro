@@ -27,6 +27,9 @@ async function seedDashboardCompany() {
   const ids = await t.run(async (ctx) => {
     const now = Date.now();
     const companyId = await ctx.db.insert("companies", { name: "Acme", createdAt: now });
+    // These tests assert the raw recurrence grid; an all-week calendar keeps
+    // the work-calendar overlay out of the picture.
+    await ctx.db.insert("companyCalendars", { companyId, workingDays: [0, 1, 2, 3, 4, 5, 6], updatedAt: now });
     const branchAId = await ctx.db.insert("branches", { companyId, name: "North", order: 0, createdAt: now, updatedAt: now });
     const branchBId = await ctx.db.insert("branches", { companyId, name: "South", order: 1, createdAt: now, updatedAt: now });
     const departmentAId = await ctx.db.insert("departments", { companyId, branchId: branchAId, name: "Ops", order: 0, createdAt: now, updatedAt: now });

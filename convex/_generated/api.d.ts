@@ -30,6 +30,7 @@ import type * as taskListPreferences from "../taskListPreferences.js";
 import type * as tasks from "../tasks.js";
 import type * as users from "../users.js";
 import type * as validation from "../validation.js";
+import type * as workCalendar from "../workCalendar.js";
 
 import type {
   ApiFromModules,
@@ -60,6 +61,7 @@ declare const fullApi: ApiFromModules<{
   tasks: typeof tasks;
   users: typeof users;
   validation: typeof validation;
+  workCalendar: typeof workCalendar;
 }>;
 
 /**

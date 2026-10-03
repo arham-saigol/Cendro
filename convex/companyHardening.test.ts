@@ -368,5 +368,62 @@ describe("company management & invitation hardening", () => {
       })
     ).rejects.toThrow("This invitation is no longer pending.");
   });
+
+  test("Overview still finds pending invitations buried under newer non-pending rows", async () => {
+    const f = await createAuthzFixture();
+    const now = Date.now();
+
+    const pending = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "still-pending@example.com",
+      role: "Employee",
+    });
+
+    // Seed newer accepted/revoked rows that would crowd the pending invite out
+    // of a company-wide scan capped at the first ~100 rows.
+    await f.t.run(async (ctx) => {
+      for (let i = 0; i < 110; i++) {
+        await ctx.db.insert("invitations", {
+          companyId: f.companyA,
+          email: `old${i}@example.com`,
+          role: "Employee",
+          token: `old-token-${i}`,
+          status: i % 2 === 0 ? "accepted" : "revoked",
+          expiresAt: now + 86400000,
+          createdAt: now + i,
+        });
+      }
+    });
+
+    const overview = await f.asUser("adminA").query(api.companyManagement.overview, { companyId: f.companyA });
+    expect(overview.invitations).toHaveLength(1);
+    expect(overview.invitations[0]._id).toBe(pending.id);
+    expect(overview.truncated.invitations).toBe(false);
+  });
+
+  test("sendInvitation skips a revoked invitation instead of emailing a dead link", async () => {
+    const f = await createAuthzFixture();
+
+    const invite = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "revoked-before-send@example.com",
+      role: "Employee",
+    });
+
+    await f.asUser("adminA").mutation(api.companyManagement.cancelInvitation, {
+      companyId: f.companyA,
+      invitationId: invite.id,
+    });
+
+    await expect(
+      f.asUser("adminA").action(internal.email.sendInvitation, {
+        companyId: f.companyA,
+        invitationId: invite.id,
+        email: "revoked-before-send@example.com",
+        role: "Employee",
+        token: invite.token,
+      })
+    ).resolves.toMatchObject({ skipped: true });
+  });
 });
 

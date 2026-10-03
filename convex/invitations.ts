@@ -1,5 +1,5 @@
 import { ConvexError, v } from "convex/values";
-import { internalMutation, mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { assertRoleManagerRemains, currentOrCreateUser, ensureDefaultRoles, roleDocByName } from "./permissions";
 
 export const preview = query({
@@ -98,4 +98,9 @@ export const markSent = internalMutation({
   handler: async (ctx, args) => {
     await ctx.db.patch(args.invitationId, { sentAt: Date.now() });
   },
+});
+
+export const statusById = internalQuery({
+  args: { invitationId: v.id("invitations") },
+  handler: async (ctx, args) => (await ctx.db.get(args.invitationId))?.status ?? null,
 });

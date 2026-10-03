@@ -3,7 +3,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useClerk, useUser } from "@clerk/nextjs";
-import { useMutation, useQueries, useQuery } from "convex/react";
+import { useMutation, useQueries, useQuery, type RequestForQueries } from "convex/react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -235,7 +235,7 @@ function SearchCommandDialog({
   // throwing through render — a backend failure surfaces as a palette error
   // row rather than crashing the shell into the global error page.
   const entityQuerySpec = useMemo(
-    () =>
+    (): RequestForQueries =>
       entityArgs === "skip"
         ? {}
         : {

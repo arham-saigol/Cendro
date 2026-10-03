@@ -1,7 +1,7 @@
 "use client";
 
-import { Download, RefreshCw, WifiOff, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Download, WifiOff, X } from "lucide-react";
+import { useEffect, useState } from "react";
 
 // The beforeinstallprompt event is not part of the TS DOM lib.
 type BeforeInstallPromptEvent = Event & {
@@ -21,6 +21,19 @@ function installDismissed(): boolean {
   }
 }
 
+// The install card is a mobile-only affordance. Chromium is the only engine
+// that fires beforeinstallprompt and its userAgentData.mobile flag is the
+// reliable signal; fall back to the UA string where userAgentData is absent.
+export function isMobileUserAgent(userAgent: string, uaDataMobile?: boolean): boolean {
+  if (typeof uaDataMobile === "boolean") return uaDataMobile;
+  return /android|iphone|ipod|mobile/i.test(userAgent);
+}
+
+function isMobile() {
+  const uaData = (navigator as Navigator & { userAgentData?: { mobile?: boolean } }).userAgentData;
+  return isMobileUserAgent(navigator.userAgent, uaData?.mobile);
+}
+
 function isIosSafari() {
   const ua = navigator.userAgent;
   const isIos = /iphone|ipad|ipod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
@@ -36,8 +49,6 @@ export function PwaAgent() {
   const [online, setOnline] = useState(true);
   const [installEvent, setInstallEvent] = useState<BeforeInstallPromptEvent | null>(null);
   const [installHint, setInstallHint] = useState<"ios" | null>(null);
-  const [waitingWorker, setWaitingWorker] = useState<ServiceWorker | null>(null);
-  const reloadingForUpdate = useRef(false);
 
   useEffect(() => {
     setOnline(navigator.onLine);
@@ -52,8 +63,13 @@ export function PwaAgent() {
   }, []);
 
   useEffect(() => {
-    if (installDismissed()) return;
+    if (installDismissed() || isStandalone()) return;
     const onBeforeInstall = (event: Event) => {
+      // Desktop Chromium fires beforeinstallprompt too: leave its built-in
+      // affordance alone and only offer our card on mobile. Re-check
+      // standalone at event time — the display-mode can lag mount in a
+      // freshly installed PWA window.
+      if (!isMobile() || isStandalone()) return;
       event.preventDefault();
       setInstallEvent(event as BeforeInstallPromptEvent);
     };
@@ -64,50 +80,29 @@ export function PwaAgent() {
     window.addEventListener("beforeinstallprompt", onBeforeInstall);
     window.addEventListener("appinstalled", onInstalled);
     // iOS never fires beforeinstallprompt; offer the manual share-menu route once.
-    if (!isStandalone() && isIosSafari()) setInstallHint("ios");
+    if (isIosSafari()) setInstallHint("ios");
     return () => {
       window.removeEventListener("beforeinstallprompt", onBeforeInstall);
       window.removeEventListener("appinstalled", onInstalled);
     };
   }, []);
 
+  // Register the service worker and keep checking for updates. A new worker
+  // waits until every Cendro tab closes, then activates on the next open —
+  // updates land on a natural reload or relaunch, never a forced one.
   useEffect(() => {
     if (process.env.NODE_ENV !== "production" || !("serviceWorker" in navigator)) return;
 
     let interval: number | undefined;
-
-    const watch = (worker: ServiceWorker) => {
-      worker.addEventListener("statechange", () => {
-        if (worker.state === "installed" && navigator.serviceWorker.controller) setWaitingWorker(worker);
-      });
-    };
-
     navigator.serviceWorker
       .register("/sw.js")
       .then((reg) => {
-        if (reg.installing) watch(reg.installing);
-        if (reg.waiting) setWaitingWorker(reg.waiting);
-        reg.addEventListener("updatefound", () => {
-          if (reg.installing) watch(reg.installing);
-        });
         interval = window.setInterval(() => void reg.update(), 60 * 60 * 1000);
       })
       .catch(() => undefined);
 
-    const onControllerChange = () => {
-      if (reloadingForUpdate.current) {
-        window.location.reload();
-      } else {
-        // Another tab applied the update: the worker we offered is already
-        // active, so Reload would post SKIP_WAITING to nothing. Drop the card.
-        setWaitingWorker(null);
-      }
-    };
-    navigator.serviceWorker.addEventListener("controllerchange", onControllerChange);
-
     return () => {
       if (interval !== undefined) window.clearInterval(interval);
-      navigator.serviceWorker.removeEventListener("controllerchange", onControllerChange);
     };
   }, []);
 
@@ -130,52 +125,30 @@ export function PwaAgent() {
         </div>
       )}
 
-      {(installEvent || installHint || waitingWorker) && (
+      {(installEvent || installHint) && (
         <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-[80] w-[min(420px,calc(100vw-24px))] -translate-x-1/2">
           <div className="flex items-center gap-3 rounded-xl border border-[var(--hairline-strong)] bg-[var(--surface)] p-3 shadow-[var(--shadow-elevated)]">
-            {waitingWorker ? (
-              <>
-                <RefreshCw className="h-5 w-5 shrink-0 text-[var(--ink-muted)]" />
-                <div className="min-w-0 flex-1">
-                  <div className="text-[13px] font-semibold text-[var(--ink)]">Update available</div>
-                  <div className="text-[12.5px] text-[var(--ink-muted)]">Reload to use the latest version of Cendro.</div>
-                </div>
-                <button
-                  type="button"
-                  className="h-9 shrink-0 rounded-lg bg-[var(--ink)] px-3.5 text-[13px] font-semibold text-[var(--canvas)]"
-                  onClick={() => {
-                    reloadingForUpdate.current = true;
-                    waitingWorker.postMessage({ type: "SKIP_WAITING" });
-                  }}
-                >
-                  Reload
-                </button>
-              </>
-            ) : (
-              <>
-                <Download className="h-5 w-5 shrink-0 text-[var(--ink-muted)]" />
-                <div className="min-w-0 flex-1">
-                  <div className="text-[13px] font-semibold text-[var(--ink)]">Install Cendro</div>
-                  <div className="text-[12.5px] text-[var(--ink-muted)]">
-                    {installHint === "ios" ? "Open the Share menu and choose “Add to Home Screen”." : "Add Cendro to your home screen for quick access."}
-                  </div>
-                </div>
-                {installEvent && (
-                  <button
-                    type="button"
-                    className="h-9 shrink-0 rounded-lg bg-[var(--ink)] px-3.5 text-[13px] font-semibold text-[var(--canvas)]"
-                    onClick={() => {
-                      void installEvent.prompt().then(() => setInstallEvent(null));
-                    }}
-                  >
-                    Install
-                  </button>
-                )}
-                <button type="button" aria-label="Dismiss install prompt" className="task-icon-btn h-9 w-9 shrink-0" onClick={dismissInstall}>
-                  <X className="h-4 w-4" />
-                </button>
-              </>
+            <Download className="h-5 w-5 shrink-0 text-[var(--ink-muted)]" />
+            <div className="min-w-0 flex-1">
+              <div className="text-[13px] font-semibold text-[var(--ink)]">Install Cendro</div>
+              <div className="text-[12.5px] text-[var(--ink-muted)]">
+                {installHint === "ios" ? "Open the Share menu and choose “Add to Home Screen”." : "Add Cendro to your home screen for quick access."}
+              </div>
+            </div>
+            {installEvent && (
+              <button
+                type="button"
+                className="h-9 shrink-0 rounded-lg bg-[var(--ink)] px-3.5 text-[13px] font-semibold text-[var(--canvas)]"
+                onClick={() => {
+                  void installEvent.prompt().then(() => setInstallEvent(null));
+                }}
+              >
+                Install
+              </button>
             )}
+            <button type="button" aria-label="Dismiss install prompt" className="task-icon-btn h-9 w-9 shrink-0" onClick={dismissInstall}>
+              <X className="h-4 w-4" />
+            </button>
           </div>
         </div>
       )}

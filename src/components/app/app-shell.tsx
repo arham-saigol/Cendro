@@ -225,19 +225,27 @@ function SearchCommandDialog({
   const debounced = useDebouncedValue(query);
   const needle = debounced.trim().toLowerCase();
 
-  const entityArgs = activeCompanyId && canSearchEntities && needle.length >= PALETTE_MIN_QUERY ? { companyId: activeCompanyId, query: needle } : ("skip" as const);
-  // useQueries returns an Error value per failed query instead of throwing
-  // through render — a backend failure surfaces as a palette error row rather
-  // than crashing the shell into the global error page.
-  const entityQueries = useQueries(
-    entityArgs === "skip"
-      ? {}
-      : {
-          jd: { query: api.tasks.searchJd, args: entityArgs },
-          oneTime: { query: api.tasks.searchOneTime, args: entityArgs },
-          sops: { query: api.sops.search, args: entityArgs },
-        },
-  ) as { jd?: PaletteTaskResult | Error; oneTime?: PaletteTaskResult | Error; sops?: PaletteSopResult | Error };
+  const entityArgs = useMemo(
+    () => (activeCompanyId && canSearchEntities && needle.length >= PALETTE_MIN_QUERY ? { companyId: activeCompanyId, query: needle } : ("skip" as const)),
+    [activeCompanyId, canSearchEntities, needle],
+  );
+  // useQueries keys its subscription on the queries object's identity, so a
+  // fresh literal every render loops setState during render ("Too many
+  // re-renders"). It also returns an Error value per failed query instead of
+  // throwing through render — a backend failure surfaces as a palette error
+  // row rather than crashing the shell into the global error page.
+  const entityQuerySpec = useMemo(
+    () =>
+      entityArgs === "skip"
+        ? {}
+        : {
+            jd: { query: api.tasks.searchJd, args: entityArgs },
+            oneTime: { query: api.tasks.searchOneTime, args: entityArgs },
+            sops: { query: api.sops.search, args: entityArgs },
+          },
+    [entityArgs],
+  );
+  const entityQueries = useQueries(entityQuerySpec) as { jd?: PaletteTaskResult | Error; oneTime?: PaletteTaskResult | Error; sops?: PaletteSopResult | Error };
   const entityFailed = entityArgs !== "skip" && [entityQueries.jd, entityQueries.oneTime, entityQueries.sops].some((result) => result instanceof Error);
   const jdResults = entityQueries.jd instanceof Error ? undefined : entityQueries.jd;
   const oneTimeResults = entityQueries.oneTime instanceof Error ? undefined : entityQueries.oneTime;

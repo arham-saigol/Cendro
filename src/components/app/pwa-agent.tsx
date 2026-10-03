@@ -23,9 +23,10 @@ function installDismissed(): boolean {
 
 // The install card is a mobile-only affordance. Chromium is the only engine
 // that fires beforeinstallprompt and its userAgentData.mobile flag is the
-// reliable signal; fall back to the UA string where userAgentData is absent.
+// usual signal — but Android tablets can report mobile:false, so a mobile UA
+// token still counts even when the hint is false or absent.
 export function isMobileUserAgent(userAgent: string, uaDataMobile?: boolean): boolean {
-  if (typeof uaDataMobile === "boolean") return uaDataMobile;
+  if (uaDataMobile === true) return true;
   return /android|iphone|ipod|mobile/i.test(userAgent);
 }
 

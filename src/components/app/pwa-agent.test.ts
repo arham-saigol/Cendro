@@ -93,9 +93,11 @@ describe("isMobileUserAgent", () => {
 
   test("accepts Android phones and tablets", () => {
     expect(isMobileUserAgent(ANDROID_UA, true)).toBe(true);
-    // Android tablets omit the "Mobile" token; userAgentData still flags them.
-    expect(isMobileUserAgent(ANDROID_UA.replace(" Mobile", ""), true)).toBe(true);
-    expect(isMobileUserAgent(ANDROID_UA.replace(" Mobile", ""))).toBe(true);
+    // Android tablets omit the "Mobile" token and can legitimately report
+    // mobile:false — the Android UA still marks them as mobile.
+    const tabletUa = ANDROID_UA.replace(" Mobile", "");
+    expect(isMobileUserAgent(tabletUa, false)).toBe(true);
+    expect(isMobileUserAgent(tabletUa)).toBe(true);
   });
 
   test("falls back to the UA string when userAgentData is absent", () => {

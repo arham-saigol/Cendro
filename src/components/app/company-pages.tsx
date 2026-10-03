@@ -16,6 +16,7 @@ import {
   Layers,
   LucideIcon,
   MailPlus,
+  MailX,
   Network,
   PanelRight,
   Pencil,
@@ -1275,7 +1276,7 @@ function EditMemberNameDialog({
 /*  People tab                                                     */
 /* ============================================================== */
 
-type PeopleView = "members" | "invitations";
+type PeopleView = "members" | "invited";
 
 function PeopleTab({
   data,
@@ -1288,6 +1289,7 @@ function PeopleTab({
   onDepartmentChange,
   onStatusChange,
   onRemoveUsers,
+  onCancelInvitation,
   canManageUsers,
   canManageRoles,
   canInvite,
@@ -1302,6 +1304,7 @@ function PeopleTab({
   onDepartmentChange: (user: UserRow, departmentId: Id<"departments"> | "") => Promise<void>;
   onStatusChange: (user: UserRow, active: boolean) => Promise<void>;
   onRemoveUsers: (membershipIds: Id<"companyMemberships">[]) => Promise<void>;
+  onCancelInvitation: (invitation: InvitationRow) => Promise<void>;
   canManageUsers: boolean;
   canManageRoles: boolean;
   canInvite: boolean;
@@ -1375,11 +1378,11 @@ function PeopleTab({
       <div className="flex flex-col items-stretch gap-2 md:flex-row md:flex-nowrap md:items-center">
         <div className="task-view-toggle min-w-0 flex-1" aria-label="People view">
           <button type="button" className="task-view-button" data-active={view === "members"} onClick={() => setView("members")}><Users className="h-4 w-4" />Members<span className="rounded-full bg-[var(--surface-pressed)] px-1.5 text-[11px] font-medium tabular-nums text-[var(--ink-muted)]">{data.users.length}</span></button>
-          <button type="button" className="task-view-button" data-active={view === "invitations"} onClick={() => setView("invitations")}><MailPlus className="h-4 w-4" />Invitations<span className="rounded-full bg-[var(--surface-pressed)] px-1.5 text-[11px] font-medium tabular-nums text-[var(--ink-muted)]">{data.invitations.length}</span></button>
+          <button type="button" className="task-view-button" data-active={view === "invited"} onClick={() => setView("invited")}><MailPlus className="h-4 w-4" />Invited<span className="rounded-full bg-[var(--surface-pressed)] px-1.5 text-[11px] font-medium tabular-nums text-[var(--ink-muted)]">{data.invitations.length}</span></button>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 shrink-0 md:flex-nowrap md:ml-auto">
           <div className="task-search-control" data-open={searchOpen || query.trim() !== ""}>
-            <Input value={query} onChange={(event) => setQuery(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder={view === "members" ? "Search by name or email" : "Search invitations"} aria-label={view === "members" ? "Search members" : "Search invitations"} tabIndex={searchOpen || query.trim() !== "" ? 0 : -1} />
+            <Input value={query} onChange={(event) => setQuery(event.target.value)} className="task-search-input border-none focus:border-none bg-transparent" placeholder={view === "members" ? "Search by name or email" : "Search invited"} aria-label={view === "members" ? "Search members" : "Search invited"} tabIndex={searchOpen || query.trim() !== "" ? 0 : -1} />
             <button type="button" className="task-search-button" aria-label={query ? "Clear search" : "Search people"} onClick={() => { if (query) setQuery(""); else setSearchOpen((open) => !open); }}>{query ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}</button>
           </div>
           <CompanyFilterMenu roleFilter={roleFilter} roleNames={roleNames} activeCount={filterCount} onRoleChange={setRoleFilter} />
@@ -1459,8 +1462,8 @@ function PeopleTab({
           </div>
         </div>
       ) : (
-        <div className="company-table-wrap"><table className="task-table"><thead><tr><th className="min-w-[220px]"><ColumnHeading icon={MailPlus}>Invitation</ColumnHeading></th><th className="w-28"><ColumnHeading icon={UserCog}>Role</ColumnHeading></th><th className="min-w-[120px]"><ColumnHeading icon={Building2}>Branch</ColumnHeading></th><th className="min-w-[140px]"><ColumnHeading icon={Layers}>Department</ColumnHeading></th><th className="w-28"><ColumnHeading icon={CirclePause}>Status</ColumnHeading></th><th className="w-32"><ColumnHeading icon={CalendarDays}>Invited</ColumnHeading></th></tr></thead><tbody>
-          {isEmpty ? <tr><td colSpan={6} className="!h-auto !border-0 !bg-transparent py-2"><EmptyState icon={MailPlus} title={query || roleFilter !== "all" ? "No matching invitations" : "No pending invitations"} message={query || roleFilter !== "all" ? "Try adjusting your search or filters." : "Invite a person to send them a join link."} action={canInvite && !query && roleFilter === "all" ? <Button size="sm" variant="primary" onClick={onInvite}><MailPlus className="h-3.5 w-3.5" />Invite member</Button> : undefined} /></td></tr> : filteredInvitations.map((invitation) => <tr key={invitation._id} className="group/row"><td><div className="flex items-center gap-2.5"><span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-[var(--surface-muted)] text-[var(--ink-faint)]"><MailPlus className="h-3.5 w-3.5" /></span><div className="min-w-0"><div className="truncate text-[13px] font-medium text-[var(--ink)]">{invitation.email}</div><div className="truncate text-[12px] text-[var(--ink-muted)]">Pending invitation</div></div></div></td><td><Badge tone={roleBadgeTone(invitation.role)}>{invitation.role}</Badge></td><td className="text-[var(--ink-secondary)]"><span className="truncate">{invitation.branchIds.map((id) => branchMap.get(id)).filter(Boolean).join(", ") || "—"}</span></td><td className="text-[var(--ink-secondary)]"><span className="truncate">{invitation.departmentIds.map((id) => departmentMap.get(id)).filter(Boolean).join(", ") || "—"}</span></td><td><Badge tone="yellow" className="capitalize">{invitation.status}</Badge></td><td className="text-[12.5px] text-[var(--ink-secondary)]">{formatDate(invitation.createdAt)}</td></tr>)}
+        <div className="company-table-wrap"><table className="task-table"><thead><tr><th className="min-w-[220px]"><ColumnHeading icon={MailPlus}>Invitation</ColumnHeading></th><th className="w-28"><ColumnHeading icon={UserCog}>Role</ColumnHeading></th><th className="min-w-[120px]"><ColumnHeading icon={Building2}>Branch</ColumnHeading></th><th className="min-w-[140px]"><ColumnHeading icon={Layers}>Department</ColumnHeading></th><th className="w-28"><ColumnHeading icon={CirclePause}>Status</ColumnHeading></th><th className="w-32"><ColumnHeading icon={CalendarDays}>Invited</ColumnHeading></th>{canInvite && <th className="w-16"><span className="sr-only">Actions</span></th>}</tr></thead><tbody>
+          {isEmpty ? <tr><td colSpan={canInvite ? 7 : 6} className="!h-auto !border-0 !bg-transparent py-2"><EmptyState icon={MailPlus} title={query || roleFilter !== "all" ? "No matching invitations" : "No pending invitations"} message={query || roleFilter !== "all" ? "Try adjusting your search or filters." : "Invite a person to send them a join link."} action={canInvite && !query && roleFilter === "all" ? <Button size="sm" variant="primary" onClick={onInvite}><MailPlus className="h-3.5 w-3.5" />Invite member</Button> : undefined} /></td></tr> : filteredInvitations.map((invitation) => <tr key={invitation._id} className="group/row"><td><div className="flex items-center gap-2.5"><span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-[var(--surface-muted)] text-[var(--ink-faint)]"><MailPlus className="h-3.5 w-3.5" /></span><div className="min-w-0"><div className="truncate text-[13px] font-medium text-[var(--ink)]">{invitation.email}</div><div className="truncate text-[12px] text-[var(--ink-muted)]">Pending invitation</div></div></div></td><td><Badge tone={roleBadgeTone(invitation.role)}>{invitation.role}</Badge></td><td className="text-[var(--ink-secondary)]"><span className="truncate">{invitation.branchIds.map((id) => branchMap.get(id)).filter(Boolean).join(", ") || "—"}</span></td><td className="text-[var(--ink-secondary)]"><span className="truncate">{invitation.departmentIds.map((id) => departmentMap.get(id)).filter(Boolean).join(", ") || "—"}</span></td><td><Badge tone="yellow" className="capitalize">{invitation.status}</Badge></td><td className="text-[12.5px] text-[var(--ink-secondary)]">{formatDate(invitation.createdAt)}</td>{canInvite && <td><div className="flex items-center justify-end gap-1"><button type="button" className="task-icon-btn" aria-label={`Cancel invitation to ${invitation.email}`} title="Cancel invitation" onClick={() => { if (!window.confirm(`Cancel the invitation to ${invitation.email}? The invite link will stop working.`)) return; void onCancelInvitation(invitation); }}><MailX className="h-3.5 w-3.5" /></button></div></td>}</tr>)}
         </tbody></table></div>
       )}
 
@@ -2496,6 +2499,14 @@ export default function Company() {
   const reorderBranches = useMutation(api.companyManagement.reorderBranches);
   const moveDepartment = useMutation(api.companyManagement.moveDepartment);
   const invite = useAction(api.companyManagement.inviteUser);
+  const cancelInvitation = useMutation(api.companyManagement.cancelInvitation).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
+    if (!current) return;
+    localStore.setQuery(api.companyManagement.overview, { companyId: args.companyId }, {
+      ...current,
+      invitations: current.invitations.filter((invitation) => invitation._id !== args.invitationId),
+    } as any);
+  });
   const ensureRoles = useMutation(api.roles.ensureDefaults);
   const assignRole = useMutation(api.roles.assign).withOptimisticUpdate((localStore, args) => {
     const current = localStore.getQuery(api.companyManagement.overview, { companyId: args.companyId }) as Overview | undefined;
@@ -2866,6 +2877,7 @@ export default function Company() {
                 onDepartmentChange={async (user, departmentId) => { await run(() => changeUserDepartment(user, departmentId), "Could not update department."); }}
                 onStatusChange={async (user, active) => { await run(() => changeUserStatus(user, active), "Could not update status."); }}
                 onRemoveUsers={removeSelectedUsers}
+                onCancelInvitation={async (invitation) => { if (!activeCompanyId) return; await run(() => cancelInvitation({ companyId: activeCompanyId, invitationId: invitation._id }), "Could not cancel invitation."); }}
                 canManageUsers={canManageUsers}
                 canManageRoles={canManageRoles}
                 canInvite={canInvite}

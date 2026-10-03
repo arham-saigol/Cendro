@@ -304,5 +304,140 @@ describe("company management & invitation hardening", () => {
     });
     expect(countAfter).toBe(0);
   });
+
+  test("Overview lists only pending invitations; an accepted invite moves to Members", async () => {
+    const f = await createAuthzFixture();
+
+    const invite = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "joinme@example.com",
+      role: "Employee",
+    });
+
+    const before = await f.asUser("adminA").query(api.companyManagement.overview, { companyId: f.companyA });
+    expect(before.invitations.map((row) => row.email)).toContain("joinme@example.com");
+
+    await f.t.withIdentity(identity("joinme", "joinme@example.com", true)).mutation(api.invitations.accept, {
+      token: invite.token,
+    });
+
+    const after = await f.asUser("adminA").query(api.companyManagement.overview, { companyId: f.companyA });
+    expect(after.invitations.map((row) => row.email)).not.toContain("joinme@example.com");
+    expect(after.invitations.every((row) => row.status === "pending")).toBe(true);
+    expect(after.users.map((row) => row.user.email)).toContain("joinme@example.com");
+  });
+
+  test("cancelInvitation revokes a pending invitation and requires invite_users", async () => {
+    const f = await createAuthzFixture();
+
+    const invite = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "cancelme@example.com",
+      role: "Employee",
+    });
+
+    // Employee lacks company:invite_users and cannot cancel
+    await expect(
+      f.asUser("employeeA1").mutation(api.companyManagement.cancelInvitation, {
+        companyId: f.companyA,
+        invitationId: invite.id,
+      })
+    ).rejects.toThrow("You do not have access to do that.");
+
+    await f.asUser("adminA").mutation(api.companyManagement.cancelInvitation, {
+      companyId: f.companyA,
+      invitationId: invite.id,
+    });
+
+    // The cancelled link can no longer be used to join
+    await expect(
+      f.t.withIdentity(identity("cancelme", "cancelme@example.com", true)).mutation(api.invitations.accept, {
+        token: invite.token,
+      })
+    ).rejects.toThrow("Invitation not found.");
+
+    // And it disappears from the invited list
+    const overview = await f.asUser("adminA").query(api.companyManagement.overview, { companyId: f.companyA });
+    expect(overview.invitations.map((row) => row._id)).not.toContain(invite.id);
+
+    // Cancelling a second time is rejected
+    await expect(
+      f.asUser("adminA").mutation(api.companyManagement.cancelInvitation, {
+        companyId: f.companyA,
+        invitationId: invite.id,
+      })
+    ).rejects.toThrow("This invitation is no longer pending.");
+  });
+
+  test("Overview still finds pending invitations buried under newer non-pending rows", async () => {
+    const f = await createAuthzFixture();
+    const now = Date.now();
+
+    // An older targeted invite (carries targetMembershipId while pending) must
+    // not jump ahead of the newer general one in the invited list.
+    const targeted = await f.t.run(async (ctx) =>
+      ctx.db.insert("invitations", {
+        companyId: f.companyA,
+        email: "targeted-old@example.com",
+        role: "Employee",
+        token: "targeted-old-token",
+        status: "pending",
+        expiresAt: now + 86400000,
+        createdAt: now - 1,
+        targetMembershipId: f.inactiveM,
+      })
+    );
+
+    const pending = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "still-pending@example.com",
+      role: "Employee",
+    });
+
+    // Seed newer accepted/revoked rows that would crowd the pending invites out
+    // of a company-wide scan capped at the first ~100 rows.
+    await f.t.run(async (ctx) => {
+      for (let i = 0; i < 110; i++) {
+        await ctx.db.insert("invitations", {
+          companyId: f.companyA,
+          email: `old${i}@example.com`,
+          role: "Employee",
+          token: `old-token-${i}`,
+          status: i % 2 === 0 ? "accepted" : "revoked",
+          expiresAt: now + 86400000,
+          createdAt: now + i,
+        });
+      }
+    });
+
+    const overview = await f.asUser("adminA").query(api.companyManagement.overview, { companyId: f.companyA });
+    expect(overview.invitations.map((i) => i._id)).toEqual([pending.id, targeted]);
+    expect(overview.truncated.invitations).toBe(false);
+  });
+
+  test("sendInvitation skips a revoked invitation instead of emailing a dead link", async () => {
+    const f = await createAuthzFixture();
+
+    const invite = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "revoked-before-send@example.com",
+      role: "Employee",
+    });
+
+    await f.asUser("adminA").mutation(api.companyManagement.cancelInvitation, {
+      companyId: f.companyA,
+      invitationId: invite.id,
+    });
+
+    await expect(
+      f.asUser("adminA").action(internal.email.sendInvitation, {
+        companyId: f.companyA,
+        invitationId: invite.id,
+        email: "revoked-before-send@example.com",
+        role: "Employee",
+        token: invite.token,
+      })
+    ).resolves.toMatchObject({ skipped: true });
+  });
 });
 

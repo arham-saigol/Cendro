@@ -12,6 +12,10 @@ function escapeHtml(value: string) {
 export const sendInvitation = internalAction({
   args: { companyId: v.id("companies"), invitationId: v.id("invitations"), email: v.string(), role: v.string(), token: v.string() },
   handler: async (ctx, args) => {
+    // The invitation may have been cancelled between creation and this send.
+    if ((await ctx.runQuery(internal.invitations.statusById, { invitationId: args.invitationId })) !== "pending") {
+      return { skipped: true };
+    }
     const apiKey = process.env.RESEND_API_KEY;
     const from = process.env.RESEND_FROM;
     const appUrl = process.env.APP_URL || "http://localhost:3000";

@@ -1990,7 +1990,6 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
         time: t.time ?? null,
         quantity: t.quantity ?? null,
         assigneeEmails: t.assignees?.map((a: any) => a.user.email).join("; ") ?? "",
-        status: t.state?.status ?? "Pending",
       }));
       const { exportTaskWorkbook, downloadBlob } = await loadWorkbook();
       const workbook = await exportTaskWorkbook(

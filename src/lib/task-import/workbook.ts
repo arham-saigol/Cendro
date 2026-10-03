@@ -8,7 +8,6 @@ import {
   type Priority,
   type TaskImportDraft,
   type TaskImportKind,
-  type TaskImportStatus,
 } from "./schema";
 
 export const TASK_IMPORT_SCHEMA_VERSION = 1;
@@ -37,12 +36,6 @@ export const priorityLabels: Record<Priority, string> = {
   critical: "Critical",
 };
 
-export const statusLabels: Record<TaskImportStatus, string> = {
-  due: "Pending",
-  in_progress: "In Progress",
-  completed: "Completed",
-};
-
 export type WorkbookTaskRow = {
   reference?: string | null;
   title: string;
@@ -54,7 +47,6 @@ export type WorkbookTaskRow = {
   time?: string | null;
   quantity?: number | null;
   assigneeEmails?: string | null;
-  status?: string | null;
 };
 
 export type ExportTask = WorkbookTaskRow & { reference: string };
@@ -72,8 +64,8 @@ export type ParsedWorkbook = {
   rows: TaskImportDraft[];
 };
 
-const jdHeaders = ["Code", "Title", "Description", "Notes", "Frequency", "Time", "Quantity", "Assignee Emails", "Status"] as const;
-const oneTimeHeaders = ["Code", "Title", "Description", "Notes", "Due Date", "Priority", "Time", "Quantity", "Assignee Emails", "Status"] as const;
+const jdHeaders = ["Code", "Title", "Description", "Notes", "Frequency", "Time", "Quantity", "Assignee Emails"] as const;
+const oneTimeHeaders = ["Code", "Title", "Description", "Notes", "Due Date", "Priority", "Time", "Quantity", "Assignee Emails"] as const;
 
 const metadataKeyAliases: Record<string, keyof WorkbookMetadata> = {
   format: "format",
@@ -164,24 +156,6 @@ export function normalizeFrequency(value: unknown): Frequency | null {
 export function normalizePriority(value: unknown): Priority | null {
   const normalized = normalizeEnumToken(value);
   const aliases: Record<string, Priority> = { low: "low", l: "low", medium: "medium", med: "medium", m: "medium", high: "high", h: "high", critical: "critical", crit: "critical", c: "critical" };
-  return aliases[normalized] ?? null;
-}
-
-export function normalizeStatus(value: unknown): TaskImportStatus | null {
-  const normalized = normalizeEnumToken(value);
-  const aliases: Record<string, TaskImportStatus> = {
-    pending: "due",
-    due: "due",
-    todo: "due",
-    inprogress: "in_progress",
-    in_progress: "in_progress",
-    progress: "in_progress",
-    doing: "in_progress",
-    completed: "completed",
-    complete: "completed",
-    done: "completed",
-    overdue: "due",
-  };
   return aliases[normalized] ?? null;
 }
 
@@ -280,16 +254,12 @@ function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number,
   const parsedDate = kind === "one_time" ? parseStrictDate(valueAt(row, 4)) : { value: null };
   const recurrence = kind === "jd" ? normalizeFrequency(valueAt(row, 4)) : null;
   const priority = kind === "one_time" ? normalizePriority(valueAt(row, 5)) : null;
-  const rawStatus = sourceText(valueAt(row, kind === "jd" ? 8 : 9));
-  const parsedStatus = rawStatus ? normalizeStatus(rawStatus) : null;
-  const statusWarning = rawStatus && !parsedStatus ? [`Status "${rawStatus}" is not recognized (use Pending, In Progress, or Completed).`] : [];
   const warnings = [
     ...(referenceResult.error ? [referenceResult.error] : []),
     ...(parsedDate.error ? [parsedDate.error] : []),
     ...(quantityText && (validQuantity === null) ? ["Quantity must be a positive number."] : []),
     ...(kind === "jd" && sourceText(valueAt(row, 4)) && !recurrence ? ["Frequency is not a supported canonical value."] : []),
     ...(kind === "one_time" && sourceText(valueAt(row, 5)) && !priority ? ["Priority is not a supported canonical value."] : []),
-    ...statusWarning,
     ...(isFormulaLikeValue(valueAt(row, 0)) || isFormulaLikeValue(valueAt(row, 1)) ? ["Formula-like text was rejected as an input value."] : []),
   ];
   const presentFields = [
@@ -301,7 +271,6 @@ function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number,
     "time",
     "quantity",
     "assignees",
-    ...(rawStatus ? ["status"] : []),
   ] as TaskImportDraft["presentFields"];
   return taskImportDraftSchema.parse({
     rowKey: `${sourceSheet}:${sourceRow}`,
@@ -320,7 +289,7 @@ function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number,
     quantity: validQuantity,
     rawAssigneeText: assignees.raw,
     assigneeEmails: assignees.emails,
-    status: parsedStatus,
+    status: null,
     presentFields,
     warnings,
   });
@@ -404,8 +373,8 @@ function taskRows(kind: TaskImportKind, tasks: readonly ExportTask[]): WriteShee
   const rows: WriteSheetData = [headers];
   for (const task of tasks) {
     const values: Cell[] = kind === "jd"
-      ? [textCell(task.reference), textCell(task.title), textCell(task.description), textCell(task.notes), textCell(task.recurrence), textCell(task.time), task.quantity == null ? null : { value: task.quantity, type: Number }, textCell(task.assigneeEmails), textCell(task.status)]
-      : [textCell(task.reference), textCell(task.title), textCell(task.description), textCell(task.notes), dateCell(task.dueDate), textCell(task.priority), textCell(task.time), task.quantity == null ? null : { value: task.quantity, type: Number }, textCell(task.assigneeEmails), textCell(task.status)];
+      ? [textCell(task.reference), textCell(task.title), textCell(task.description), textCell(task.notes), textCell(task.recurrence), textCell(task.time), task.quantity == null ? null : { value: task.quantity, type: Number }, textCell(task.assigneeEmails)]
+      : [textCell(task.reference), textCell(task.title), textCell(task.description), textCell(task.notes), dateCell(task.dueDate), textCell(task.priority), textCell(task.time), task.quantity == null ? null : { value: task.quantity, type: Number }, textCell(task.assigneeEmails)];
     rows.push(values);
   }
   return rows;
@@ -420,7 +389,7 @@ function metadataRows(metadata: WorkbookMetadata): WriteSheetData {
     [textCell("Source company name"), textCell(metadata.companyName)],
     [textCell("Export timestamp"), textCell(metadata.exportedAt)],
     [],
-    [textCell("Instructions"), textCell("Edit task fields. Use task code to create or update tasks. If the code exists, the task is updated; if not, a new task is created with that code. Blank assignee cells preserve existing assignees; new tasks need an assignee. Status can be Pending, In Progress, or Completed.")],
+    [textCell("Instructions"), textCell("Edit task fields. Use task code to create or update tasks. If the code exists, the task is updated; if not, a new task is created with that code. Blank assignee cells preserve existing assignees; new tasks need an assignee.")],
     [textCell("Frequency values"), textCell(Object.entries(recurrenceLabels).map(([key, label]) => `${key} = ${label}`).join("; "))],
     [textCell("Priority values"), textCell(Object.entries(priorityLabels).map(([key, label]) => `${key} = ${label}`).join("; "))],
   ];

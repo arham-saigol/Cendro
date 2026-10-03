@@ -180,6 +180,13 @@ async function currentJdCompletion(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: 
   return await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).unique();
 }
 
+// A completion recorded under a previous grid can coincide with a new cycle's
+// start; clear it so a cycle reset actually shows as due.
+async function clearJdCompletionAtCycle(ctx: MutationCtx, taskId: Id<"jdTasks">, cycleStart: number) {
+  const done = await currentJdCompletion(ctx, taskId, cycleStart);
+  if (done) await ctx.db.delete(done._id);
+}
+
 async function currentJdCycleRecord(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: number) {
   return await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).unique();
 }
@@ -602,20 +609,16 @@ export const exportRows = query({
   args: { companyId: v.id("companies"), kind: v.union(v.literal("jd"), v.literal("one_time")), paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
     const capability: Capability = args.kind === "jd" ? "tasks:jd:export" : "tasks:one_time:export";
-    const { membership, company } = await requireCapability(ctx, args.companyId, capability);
+    const { membership } = await requireCapability(ctx, args.companyId, capability);
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
     const scoped = await displayScopedMembershipIds(ctx, args.companyId, auth, args.kind === "jd" ? "tasks:jd:view:any" : "tasks:one_time:view:any");
     if (args.kind === "jd") {
       const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("asc").paginate(args.paginationOpts);
       const visibleFlags = await Promise.all(page.page.map((task) => visible(ctx, args.companyId, membership, task, "jd", auth)));
       const visibleTasks = page.page.filter((_, index) => visibleFlags[index]);
-      const now = Date.now();
-      const timeZone = company.timeZone ?? defaultTimeZone;
-      const calendar = await loadWorkCalendar(ctx, args.companyId);
       const assigneeRows = await enrich(ctx, visibleTasks.flatMap((task) => task.assigneeMembershipIds.filter((id) => scoped.has(id))));
       const assigneeById = new Map(assigneeRows.map((row) => [row.membership._id, row]));
-      const states = await Promise.all(visibleTasks.map((task) => jdState(ctx, task, now, timeZone, calendar)));
-      const rows = visibleTasks.map((task, index) => ({ reference: task.reference, title: task.title, description: task.description ?? null, notes: task.notes ?? null, recurrence: task.recurrence, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: task.assigneeMembershipIds.filter((id) => scoped.has(id)).map((id) => assigneeById.get(id)?.user.email).filter(Boolean).join("; "), status: states[index].status }));
+      const rows = visibleTasks.map((task) => ({ reference: task.reference, title: task.title, description: task.description ?? null, notes: task.notes ?? null, recurrence: task.recurrence, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: task.assigneeMembershipIds.filter((id) => scoped.has(id)).map((id) => assigneeById.get(id)?.user.email).filter(Boolean).join("; ") }));
       return { ...page, page: rows };
     }
     const page = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("asc").paginate(args.paginationOpts);
@@ -623,7 +626,7 @@ export const exportRows = query({
     const visibleTasks = page.page.filter((_, index) => visibleFlags[index]);
     const assigneeRows = await enrich(ctx, visibleTasks.flatMap((task) => task.assigneeMembershipIds.filter((id) => scoped.has(id))));
     const assigneeById = new Map(assigneeRows.map((row) => [row.membership._id, row]));
-    const rows = visibleTasks.map((task) => ({ reference: task.reference, title: task.title, description: task.description ?? null, notes: task.notes ?? null, dueDate: task.dueDate ?? null, priority: task.priority, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: task.assigneeMembershipIds.filter((id) => scoped.has(id)).map((id) => assigneeById.get(id)?.user.email).filter(Boolean).join("; "), status: oneState(task).status }));
+    const rows = visibleTasks.map((task) => ({ reference: task.reference, title: task.title, description: task.description ?? null, notes: task.notes ?? null, dueDate: task.dueDate ?? null, priority: task.priority, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: task.assigneeMembershipIds.filter((id) => scoped.has(id)).map((id) => assigneeById.get(id)?.user.email).filter(Boolean).join("; ") }));
     return { ...page, page: rows };
   },
 });
@@ -1120,6 +1123,7 @@ export const updateJd = mutation({
     nextTask.recurrence = args.recurrence;
     nextTask.assigneeMembershipIds = args.assigneeMembershipIds;
     if (args.recurrence !== task.recurrence) {
+      await clearJdCompletionAtCycle(ctx, task._id, nextCycleStart);
       nextTask.cycleStartedAt = nextCycleStart;
       nextTask.status = "due";
       nextTask.statusCycleStart = nextCycleStart;
@@ -1213,6 +1217,7 @@ export const updateJdFields = mutation({
     if (args.recurrence !== undefined) {
       nextTask.recurrence = args.recurrence;
       if (args.recurrence !== task.recurrence) {
+        await clearJdCompletionAtCycle(ctx, task._id, nextCycleStart!);
         nextTask.cycleStartedAt = nextCycleStart!;
         nextTask.status = "due";
         nextTask.statusCycleStart = nextCycleStart;

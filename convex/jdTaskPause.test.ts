@@ -192,6 +192,21 @@ test("self-scoped lifecycle grants apply to assigned shared tasks but never to o
   await expect(employee.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [outside], paused: true })).rejects.toThrow("Task not found");
 });
 
+test("paused title and reference matches cannot consume the palette candidate budget", async () => {
+  const f = await createAuthzFixture();
+  const admin = f.asUser("adminA"), companyId = f.companyA;
+  const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Restock pantry", recurrence: "daily", assigneeMembershipIds: [f.employee1M] });
+  await f.t.run(async (ctx) => {
+    await ctx.db.patch(taskId, { reference: "JD-999" });
+    for (let index = 0; index < 160; index++) {
+      await ctx.db.insert("jdTasks", { companyId, reference: `JD-${String(index + 1).padStart(3, "0")}`, title: "Restock pantry", recurrence: "daily", pausedAt: utc(1), cycleStartedAt: utc(1), status: "due", assigneeMembershipIds: [f.employee1M], createdByMembershipId: f.adminM, createdAt: utc(1), updatedAt: utc(1) });
+    }
+  });
+  for (const query of ["restock", "JD"]) {
+    expect(await admin.query(api.tasks.searchJd, { companyId, query })).toMatchObject({ tasks: [{ _id: taskId }], truncated: false });
+  }
+});
+
 test("release backfill enables lifecycle defaults only for untouched Admin roles", async () => {
   const f = await createAuthzFixture();
   const previous = defaultRoleCapabilities.Admin.filter((cap) => cap !== "tasks:jd:pause" && cap !== "tasks:jd:resume");

@@ -32,9 +32,9 @@ Paused JD tasks retain their activity, comments, attachments, completions, and m
 
 **Do not deploy the feature revision directly to an established deployment.** Its active indexes are the second phase of rollout.
 
-1. Deploy the schema-only preparation revision [`5472921`](https://github.com/arham-saigol/Cendro/commit/54729213b5e92a5b3554b501a3d005570931ea4c) on branch `feat/jd-task-pause-resume-indexes` to the explicitly chosen deployment. It adds optional `pausedAt` and stages `jdTasks.by_companyId_and_pausedAt` and `taskActivityLogs.by_taskType_and_taskId_and_event_and_createdAt`, while retaining the old functions that do not query either index.
-2. Wait until **both** index backfills are complete in the Convex dashboard. Validate this phase in development/staging first; production deployment requires explicit approval.
-3. Deploy this feature revision. It activates the already-backfilled indexes and enables their callers together. Empty/new deployments can deploy this revision directly.
+1. Deploy the schema-only preparation revision [`2d4c7ab`](https://github.com/arham-saigol/Cendro/commit/2d4c7abc2637d77ceb13772c96cd6b86516f3ed0) on branch `feat/jd-task-pause-resume-indexes` to the explicitly chosen deployment. It adds optional `pausedAt` and stages four indexes: `jdTasks.by_companyId_and_pausedAt`, `jdTasks.by_companyId_and_pausedAt_and_reference`, `jdTasks.search_active_title`, and `taskActivityLogs.by_taskType_and_taskId_and_event_and_createdAt`. It retains the old functions and old title search index; no old caller queries any staged index.
+2. Wait until **all four** index backfills are complete in the Convex dashboard. Validate this phase in development/staging first; production deployment requires explicit approval.
+3. Deploy this feature revision. It activates the already-backfilled indexes and enables their callers together, replacing the old JD title search index. Empty/new deployments can deploy this revision directly.
 4. Run `npx convex run roles:enableJdLifecycleDefaults '{}'` against the explicitly chosen deployment **once during rollout** to upgrade existing untouched default Admin roles.
 
 New default Admin roles include independent `tasks:jd:pause` and `tasks:jd:resume` grants; Manager and Employee defaults do not. Customized roles are left unchanged and can be granted either permission in Roles. Do not rerun the release backfill after administrators deliberately revoke both grants.

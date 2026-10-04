@@ -719,10 +719,10 @@ async function searchTasksOfKind(
     input,
     prefixes: kind === "jd" ? ["JD"] : ["TSK", "OT"],
     byReference: (prefix) => kind === "jd"
-      ? ctx.db.query("jdTasks").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).gte("reference", prefix).lt("reference", `${prefix}\uffff`))
+      ? ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt_and_reference", (q) => q.eq("companyId", companyId).eq("pausedAt", undefined).gte("reference", prefix).lt("reference", `${prefix}\uffff`))
       : ctx.db.query("oneTimeTasks").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).gte("reference", prefix).lt("reference", `${prefix}\uffff`)),
     byTitle: (title) => kind === "jd"
-      ? ctx.db.query("jdTasks").withSearchIndex("search_title", (q) => q.search("title", title).eq("companyId", companyId))
+      ? ctx.db.query("jdTasks").withSearchIndex("search_active_title", (q) => q.search("title", title).eq("companyId", companyId).eq("pausedAt", undefined))
       : ctx.db.query("oneTimeTasks").withSearchIndex("search_title", (q) => q.search("title", title).eq("companyId", companyId)),
     isVisible: async (task) => !("pausedAt" in task && task.pausedAt !== undefined) && await visible(ctx, companyId, membership, task, kind, auth),
   });

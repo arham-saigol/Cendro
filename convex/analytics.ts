@@ -365,6 +365,7 @@ export const dashboard = query({
     // tables. The ledger fan-out below then only reads rows for tasks the
     // viewer can actually see.
     const visibleJdTasks = jdTasks
+      .filter((task) => task.pausedAt === undefined)
       .map((task) => ({ task, assignees: visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds) }))
       .filter((entry) => entry.assignees.length > 0);
 
@@ -485,7 +486,7 @@ export const dashboard = query({
 
       const current = currentJdCycle(task.recurrence, now, timeZone);
       const currentDeadline = occurrenceDeadline(calendar, task.recurrence, current.end, timeZone);
-      if (currentDeadline !== null) put(current.start, currentDeadline - 1, Boolean(cycles.get(current.start)?.completed), false);
+      if (currentDeadline !== null && current.start >= currentJdCycle(task.recurrence, task.cycleStartedAt, timeZone).start) put(current.start, currentDeadline - 1, Boolean(cycles.get(current.start)?.completed), false);
 
       const taskItems: WorkItem[] = [];
       for (const [start, cycle] of cycles) {
@@ -677,7 +678,7 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
       ? ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(8)
       : Promise.resolve([]),
   ]);
-  const visibleJd = jd.filter((task) => taskHasVisibleAssignee(task, scoped));
+  const visibleJd = jd.filter((task) => task.pausedAt === undefined && taskHasVisibleAssignee(task, scoped));
   const visibleOne = one.filter((task) => taskHasVisibleAssignee(task, scoped));
   const overdueOne = visibleOne.filter((t) => t.status !== "completed" && (t.overdueAt || (t.dueDate && t.dueDate < Date.now()))).length;
   const completedOne = visibleOne.filter((t) => t.status === "completed").length;

@@ -2278,7 +2278,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                     {lifecycleAction === "pause" ? "Pause tasks" : "Resume tasks"}
                   </button>
                 </>
-              )
+              )}
               {canExport && (
                 <>
                   <span className="task-selection-pill-divider" aria-hidden="true" />

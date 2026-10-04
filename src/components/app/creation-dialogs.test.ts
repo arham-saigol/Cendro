@@ -51,6 +51,7 @@ vi.mock("@radix-ui/react-dropdown-menu", () => {
   return {
     Root: childrenOnly, Trigger: childrenOnly, Portal: childrenOnly, Content: childrenOnly,
     Sub: childrenOnly, SubTrigger: childrenOnly, SubContent: childrenOnly, Separator: () => null,
+    CheckboxItem: childrenOnly,
     Item: ({ children, onSelect }: { children: ReactNode; onSelect: () => void }) => React.createElement("button", { onClick: onSelect }, children),
   };
 });

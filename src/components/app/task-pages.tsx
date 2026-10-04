@@ -32,7 +32,7 @@ import {
 import { useRouter } from "next/navigation";
 import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { DragDropProvider } from "@dnd-kit/react";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
@@ -49,6 +49,7 @@ import { useIsCoarsePointer } from "@/lib/use-is-coarse-pointer";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { RequiredIndicator } from "@/components/ui/required-indicator";
 import {
   restoreTaskListCustomOrder,
   sortTaskListRows,
@@ -916,12 +917,12 @@ const TaskTableRow = memo(function TaskTableRow({
   );
 });
 
-function SelectPicker<T extends string>({ ariaLabel, value, options, onChange, placeholder = "Select" }: { ariaLabel: string; value: T; options: { value: T; label: string; helper?: string }[]; onChange: (value: T) => void; placeholder?: string }) {
+function SelectPicker<T extends string>({ ariaLabel, value, options, onChange, placeholder = "Select", required = false }: { ariaLabel: string; required?: boolean; value: T; options: { value: T; label: string; helper?: string }[]; onChange: (value: T) => void; placeholder?: string }) {
   const selectedOption = options.find((option) => option.value === value);
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
-        <button type="button" className="task-inline-control" data-interactive="true" onClick={(event) => event.stopPropagation()}>
+        <button type="button" aria-label={`${ariaLabel}${required ? " (required)" : ""}: ${selectedOption?.label ?? placeholder}`} className="task-inline-control" data-interactive="true" onClick={(event) => event.stopPropagation()}>
           <span className={cn("truncate", !selectedOption && "text-[var(--ink-faint)]")}>{selectedOption?.label ?? placeholder}</span>
           <ChevronDown className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
         </button>
@@ -998,7 +999,7 @@ function AssigneePicker({ assignable, selected, onChange, companyId, kind, requi
   if (!assignable.length && !companyId) return <div className="py-2 text-[13px] text-[var(--ink-faint)]">No assignable people.</div>;
   return (
     <div ref={containerRef} className="relative">
-      <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((current) => !current); }} className="task-inline-control" data-interactive="true">
+      <button type="button" aria-label={`Assigned To${required ? " (required)" : ""}: ${selectedAssignee ? (selectedAssignee.user.name || selectedAssignee.user.email) : required ? "Select assignee" : "Unassigned"}`} onClick={(event) => { event.stopPropagation(); setOpen((current) => !current); }} className="task-inline-control" data-interactive="true">
         {selectedAssignee ? <Avatar name={selectedAssignee.user.name} email={selectedAssignee.user.email} imageUrl={selectedAssignee.user.imageUrl} /> : <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><User className="h-3.5 w-3.5" /></span>}
         <span className={cn("min-w-0 flex-1 truncate", !selectedAssignee && "text-[var(--ink-faint)]")}>{selectedAssignee ? (selectedAssignee.user.name || selectedAssignee.user.email) : required ? "Select assignee" : "Unassigned"}</span>
         <ChevronDown className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
@@ -1446,6 +1447,7 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  const titleId = useId();
   const taskAssignees = task?.assignees;
   const dialogAssignable = useMemo(() => {
     if (!taskAssignees || taskAssignees.length === 0) return assignable;
@@ -1539,23 +1541,24 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
 
           <form className="flex min-h-0 flex-1 flex-col" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-              <input aria-label="Task title" className="w-full border-none bg-transparent text-lg font-semibold tracking-[-0.01em] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" value={values.title} onChange={(event) => patch({ title: event.target.value })} placeholder="Title" autoFocus />
+              {mode === "create" && <label htmlFor={titleId} className="mb-1 block text-[13px] text-[var(--ink-muted)]">Title<RequiredIndicator /></label>}
+              <input id={titleId} aria-label="Task title" aria-required={mode === "create" || undefined} className="w-full border-none bg-transparent text-lg font-semibold tracking-[-0.01em] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]" value={values.title} onChange={(event) => patch({ title: event.target.value })} placeholder="Title" autoFocus />
 
               <div className="mt-4 divide-y divide-[var(--hairline)] border-y border-[var(--hairline)]">
                 <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
-                  <span className="text-[13px] text-[var(--ink-muted)]">Assigned To</span>
+                  <span className="text-[13px] text-[var(--ink-muted)]">Assigned To{mode === "create" && <RequiredIndicator />}</span>
                   <div className="min-w-0"><AssigneePicker assignable={dialogAssignable} assignableIsTruncated={assignableIsTruncated} selected={values.assigneeMembershipIds} onChange={(ids) => patch({ assigneeMembershipIds: ids })} companyId={activeCompanyId ?? undefined} kind={kind} required={mode === "create"} /></div>
                 </div>
                 {kind === "jd" ? (
                   <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
-                    <span className="text-[13px] text-[var(--ink-muted)]">Frequency</span>
-                    <div className="min-w-0"><SelectPicker ariaLabel="Frequency" value={values.recurrence} options={frequencies} onChange={(recurrence) => patch({ recurrence })} /></div>
+                    <span className="text-[13px] text-[var(--ink-muted)]">Frequency{mode === "create" && <RequiredIndicator />}</span>
+                    <div className="min-w-0"><SelectPicker ariaLabel="Frequency" required={mode === "create"} value={values.recurrence} options={frequencies} onChange={(recurrence) => patch({ recurrence })} /></div>
                   </div>
                 ) : (
                   <>
                     <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
-                      <span className="text-[13px] text-[var(--ink-muted)]">Priority</span>
-                      <div className="min-w-0"><SelectPicker ariaLabel="Priority" value={values.priority} options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))} onChange={(priority) => patch({ priority })} /></div>
+                      <span className="text-[13px] text-[var(--ink-muted)]">Priority{mode === "create" && <RequiredIndicator />}</span>
+                      <div className="min-w-0"><SelectPicker ariaLabel="Priority" required={mode === "create"} value={values.priority} options={priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))} onChange={(priority) => patch({ priority })} /></div>
                     </div>
                     <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
                       <span className="text-[13px] text-[var(--ink-muted)]">Due Date</span>

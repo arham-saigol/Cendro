@@ -26,7 +26,7 @@ import {
 import { useRouter } from "next/navigation";
 import { useMutation, usePaginatedQuery, useQuery, useQuery_experimental } from "convex/react";
 import { DragDropProvider } from "@dnd-kit/react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
@@ -37,6 +37,7 @@ import { ListSortHeader } from "./list-sort-header";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { RequiredIndicator } from "@/components/ui/required-indicator";
 import { ListPreferenceController, type ListPreference, type ListPreferenceControllerOptions } from "@/lib/list-preference-controller";
 import { insertListItem } from "@/lib/list-drag";
 import { useIsCoarsePointer } from "@/lib/use-is-coarse-pointer";
@@ -136,12 +137,12 @@ function ScopePill({ scopeType, size = "sm" }: { scopeType: ScopeType; size?: "s
   );
 }
 
-function DialogSelectPicker<T extends string>({ ariaLabel, value, options, onChange, placeholder = "Select", disabled = false }: { ariaLabel: string; value: T | ""; options: { value: T; label: string; helper?: string }[]; onChange: (value: T) => void; placeholder?: string; disabled?: boolean }) {
+function DialogSelectPicker<T extends string>({ ariaLabel, value, options, onChange, placeholder = "Select", disabled = false, required = false }: { ariaLabel: string; required?: boolean; value: T | ""; options: { value: T; label: string; helper?: string }[]; onChange: (value: T) => void; placeholder?: string; disabled?: boolean }) {
   const selectedOption = options.find((option) => option.value === value);
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
-        <button type="button" className="task-inline-control" data-interactive="true" disabled={disabled} onClick={(event) => event.stopPropagation()}>
+        <button type="button" aria-label={`${ariaLabel}${required ? " (required)" : ""}: ${selectedOption?.label ?? placeholder}`} className="task-inline-control" data-interactive="true" disabled={disabled} onClick={(event) => event.stopPropagation()}>
           <span className={cn("truncate", !selectedOption && "text-[var(--ink-faint)]")}>{selectedOption?.label ?? placeholder}</span>
           <ChevronDown className="h-4 w-4 shrink-0 text-[var(--ink-faint)]" />
         </button>
@@ -345,6 +346,7 @@ function SopDialog({
   const [userMembershipId, setUserMembershipId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const titleId = useId();
   const titleRef = useRef<HTMLTextAreaElement>(null);
 
   const availableScopes = useMemo<CreateScopeType[]>(() => {
@@ -540,9 +542,12 @@ function SopDialog({
 
           <form className="flex min-h-0 flex-1 flex-col" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+              {mode === "create" && <label htmlFor={titleId} className="mb-1 block text-[13px] text-[var(--ink-muted)]">Title<RequiredIndicator /></label>}
               <textarea
                 ref={titleRef}
+                id={titleId}
                 aria-label="SOP title"
+                aria-required={mode === "create" || undefined}
                 className="w-full resize-none overflow-hidden border-none bg-transparent text-lg font-semibold tracking-[-0.01em] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]"
                 rows={1}
                 value={title}
@@ -554,11 +559,12 @@ function SopDialog({
 
               <div className="mt-4 divide-y divide-[var(--hairline)] border-y border-[var(--hairline)]">
                 <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
-                  <span className="text-[13px] text-[var(--ink-muted)]">Type</span>
+                  <span className="text-[13px] text-[var(--ink-muted)]">Type{mode === "create" && <RequiredIndicator />}</span>
                   {availableScopes.includes(scopeType) ? (
                     <div className="min-w-0">
                       <DialogSelectPicker
                         ariaLabel="SOP type"
+                        required={mode === "create"}
                         value={scopeType}
                         options={availableScopes.map((scope) => ({ value: scope, label: scopeLabels[scope] }))}
                         onChange={(value) => {
@@ -583,11 +589,12 @@ function SopDialog({
                 </div>
                 {scopeType !== "company" && (
                   <div className="grid grid-cols-[120px_1fr] items-center gap-3 py-2">
-                    <span className="text-[13px] text-[var(--ink-muted)]">Assigned to</span>
+                    <span className="text-[13px] text-[var(--ink-muted)]">Assigned to{mode === "create" && <RequiredIndicator />}</span>
                     <div className="min-w-0">
                       {scopeType === "branch" ? (
                         <DialogSelectPicker
                           ariaLabel="Assign SOP to branch"
+                          required={mode === "create"}
                           value={branchId}
                           options={branchPickerOptions}
                           onChange={(value) => { setBranchId(value); setError(null); }}
@@ -597,6 +604,7 @@ function SopDialog({
                       ) : scopeType === "department" ? (
                         <DialogSelectPicker
                           ariaLabel="Assign SOP to department"
+                          required={mode === "create"}
                           value={departmentId}
                           options={departmentPickerOptions}
                           onChange={(value) => { setDepartmentId(value); setError(null); }}
@@ -606,6 +614,7 @@ function SopDialog({
                       ) : (
                         <DialogSelectPicker
                           ariaLabel="Assign SOP to user"
+                          required={mode === "create"}
                           value={userMembershipId}
                           options={userPickerOptions}
                           onChange={(value) => { setUserMembershipId(value); setError(null); }}

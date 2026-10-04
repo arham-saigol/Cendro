@@ -57,6 +57,13 @@ export function createMockElement(tag = "div"): any {
       if (idx !== -1) arr.splice(idx, 1);
     }
   };
+  el.dispatchEvent = (event: any) => {
+    event.target ??= el;
+    for (const listener of listeners.get(event.type) ?? []) listener(event);
+    el.parentNode?.dispatchEvent(event);
+    return true;
+  };
+  el.focus = () => { mockDoc.activeElement = el; };
   el.querySelector = () => null;
   el.getBoundingClientRect = () => ({ left: 0, right: 0 });
   return el;

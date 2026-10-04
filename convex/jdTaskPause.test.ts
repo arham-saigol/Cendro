@@ -110,6 +110,22 @@ test("a pre-pause recurrence snapshot never misses a shifted deadline during sus
   expect(records.map((row) => row.cycleStart)).toEqual([utc(10, 0)]);
 });
 
+test("paused rows cannot consume the active AI scan or dashboard task budget", async () => {
+  const f = await createAuthzFixture();
+  const admin = f.asUser("adminA"), companyId = f.companyA;
+  const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Active check", recurrence: "daily", assigneeMembershipIds: [f.employee1M] });
+  await f.t.run(async (ctx) => {
+    const active = (await ctx.db.get(taskId))!;
+    for (let index = 0; index < 501; index++) {
+      await ctx.db.insert("jdTasks", { companyId, reference: `PAUSED-${index}`, title: "Suspended", recurrence: "daily", assigneeMembershipIds: active.assigneeMembershipIds, createdByMembershipId: f.adminM, createdAt: utc(1), updatedAt: utc(1), pausedAt: utc(1), cycleStartedAt: utc(1), status: "due" });
+    }
+  });
+  const list = await admin.query(api.tasks.aiListVisible, { companyId, kind: "jd", status: "all", limit: 30 });
+  expect(list).toMatchObject({ rows: [{ reference: "JD-001", title: "Active check" }], truncated: false });
+  expect((await admin.query(api.analytics.summary, { companyId })).jdTaskCount).toBe(1);
+  expect((await admin.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts })).page).toMatchObject([{ reference: "JD-001" }]);
+});
+
 test("release backfill enables lifecycle defaults only for untouched Admin roles", async () => {
   const f = await createAuthzFixture();
   const previous = defaultRoleCapabilities.Admin.filter((cap) => cap !== "tasks:jd:pause" && cap !== "tasks:jd:resume");

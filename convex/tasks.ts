@@ -628,7 +628,7 @@ export const exportRows = query({
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
     const scoped = await displayScopedMembershipIds(ctx, args.companyId, auth, args.kind === "jd" ? "tasks:jd:view:any" : "tasks:one_time:view:any");
     if (args.kind === "jd") {
-      const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("asc").paginate(args.paginationOpts);
+      const page = await ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt", (q) => q.eq("companyId", args.companyId).eq("pausedAt", undefined)).order("asc").paginate(args.paginationOpts);
       const visibleFlags = await Promise.all(page.page.map((task) => visible(ctx, args.companyId, membership, task, "jd", auth)));
       const visibleTasks = page.page.filter((task, index) => task.pausedAt === undefined && visibleFlags[index]);
       const assigneeRows = await enrich(ctx, visibleTasks.flatMap((task) => task.assigneeMembershipIds.filter((id) => scoped.has(id))));
@@ -1016,7 +1016,7 @@ export const personalFilterOptions = query({
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     if (args.kind === "jd") {
-      const tasks = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
+      const tasks = await ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt", (q) => q.eq("companyId", args.companyId).eq("pausedAt", undefined)).take(500);
       const values = new Set<string>();
       for (const t of tasks) {
         if (t.pausedAt === undefined && t.assigneeMembershipIds.includes(membership._id)) values.add(t.recurrence);
@@ -2098,7 +2098,9 @@ export const aiListVisible = query({
     // across all matches so the scan budget also bounds total reads below
     // transaction limits.
     const collect = async (kind: TaskKind, table: "jdTasks" | "oneTimeTasks") => {
-      const page = await ctx.db.query(table).withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(AI_LIST_TASK_SCAN_LIMIT);
+      const page = table === "jdTasks"
+        ? await ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt", (q) => q.eq("companyId", args.companyId).eq("pausedAt", undefined)).order("desc").take(AI_LIST_TASK_SCAN_LIMIT)
+        : await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(AI_LIST_TASK_SCAN_LIMIT);
       const matched: { task: Doc<"jdTasks"> | Doc<"oneTimeTasks">; state: { status: string; dueAt: number | null } }[] = [];
       let offset = 0;
       while (offset < page.length && matched.length < limit) {

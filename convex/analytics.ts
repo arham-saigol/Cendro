@@ -354,7 +354,7 @@ export const dashboard = query({
     const [jdTasks, oneTimeTasks] = await Promise.all([
       takeBudgetedRows(
         completeness,
-        (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
+        (limit) => ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt", (q) => q.eq("companyId", args.companyId).eq("pausedAt", undefined)).take(limit),
       ),
       takeBudgetedRows(
         completeness,
@@ -672,7 +672,7 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
   const [jd, one, sops, recentRows] = await Promise.all([
     takeBudgetedRows(
       completeness,
-      (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
+      (limit) => ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt", (q) => q.eq("companyId", args.companyId).eq("pausedAt", undefined)).take(limit),
     ),
     takeBudgetedRows(
       completeness,

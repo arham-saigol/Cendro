@@ -57,6 +57,13 @@ export function createMockElement(tag = "div"): any {
       if (idx !== -1) arr.splice(idx, 1);
     }
   };
+  el.dispatchEvent = (event: Event) => {
+    if (!event.target) Object.defineProperty(event, "target", { value: el });
+    for (const listener of listeners.get(event.type) ?? []) listener(event);
+    if (event.bubbles && !event.cancelBubble) el.parentNode?.dispatchEvent(event);
+    return !event.defaultPrevented;
+  };
+  el.focus = () => { mockDoc.activeElement = el; };
   el.querySelector = () => null;
   el.getBoundingClientRect = () => ({ left: 0, right: 0 });
   return el;

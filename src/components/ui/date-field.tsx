@@ -155,7 +155,9 @@ export function DateField({
       <Popover.Trigger asChild disabled={disabled}>
         <button
           type="button"
-          aria-label={ariaLabel}
+          // A fixed aria-label would hide the picked date from the accessible
+          // name — announce it alongside ("Holiday start date, Dec 24, 2026").
+          aria-label={ariaLabel ? `${ariaLabel}${selected ? `, ${formatDisplay(selected)}` : ""}` : undefined}
           disabled={disabled}
           className={cn(inputClassName, "flex items-center gap-2 text-left disabled:cursor-not-allowed disabled:opacity-60", !value && "text-[var(--ink-faint)]", className)}
         >

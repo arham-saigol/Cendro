@@ -403,14 +403,18 @@ export const dashboard = query({
       }
       const { completions, missed } = ledger;
 
-      const cycles = new Map<number, { dueAt: number; completed: boolean; stored: boolean }>();
-      // Ledger rows (completions, missed records) keep their stored deadlines;
-      // reconstructed cycles only fill starts the ledger never recorded, so a
-      // recurrence or timezone change cannot rewrite history onto the new grid.
-      const put = (start: number, dueAt: number, completed: boolean, stored: boolean) => {
-        const existing = cycles.get(start);
-        cycles.set(start, {
-          dueAt: existing?.stored && !stored ? existing.dueAt : dueAt,
+      const cycles = new Map<string, { start: number; retired: boolean; dueAt: number; completed: boolean; stored: boolean }>();
+      // Group rows by grid lifetime as well as start: retired work must not
+      // complete a reset grid, but its completion and miss still count once.
+      // Completed rows own their stored deadlines; reconstruction or a stale
+      // missed record must not rewrite completed history.
+      const put = (start: number, dueAt: number, completed: boolean, stored: boolean, retiredAt?: number) => {
+        const key = `${start}:${retiredAt ?? "current"}`;
+        const existing = cycles.get(key);
+        cycles.set(key, {
+          start,
+          retired: retiredAt !== undefined,
+          dueAt: existing && ((existing.stored && !stored) || (existing.completed && !completed)) ? existing.dueAt : dueAt,
           completed: (existing?.completed ?? false) || completed,
           stored: (existing?.stored ?? false) || stored,
         });
@@ -433,25 +437,11 @@ export const dashboard = query({
             ? nextJdCycleStart(completion.cycleStart, task.recurrence, timeZone)
             : completion.completedAt + 1
         );
-        if (completion.retiredAt !== undefined) {
-          // Retired grid completions remain history, not evidence that the
-          // current grid's coincident cycle was completed.
-          if (completion.cycleStart <= now && end - 1 >= range.start && end - 1 <= range.end) {
-            taskItems.push({ kind: "jd", at: end - 1, completed: true, overdue: false, assigneeIds: assignees });
-          }
-          continue;
-        }
-        put(completion.cycleStart, end - 1, true, true);
+        put(completion.cycleStart, end - 1, true, true, completion.retiredAt);
       }
 
       for (const record of missed) {
-        if (record.retiredAt !== undefined) {
-          if (record.cycleStart <= now && record.cycleEnd - 1 >= range.start && record.cycleEnd - 1 <= range.end) {
-            taskItems.push({ kind: "jd", at: record.cycleEnd - 1, completed: false, overdue: record.cycleEnd - 1 < now, assigneeIds: assignees });
-          }
-        } else {
-          put(record.cycleStart, record.cycleEnd - 1, false, true);
-        }
+        put(record.cycleStart, record.cycleEnd - 1, false, true, record.retiredAt);
       }
 
       // Skipped occurrences (non-working due dates on daily/alternate cycles)
@@ -463,11 +453,11 @@ export const dashboard = query({
 
       const current = currentJdCycle(task.recurrence, now, timeZone);
       const currentDeadline = occurrenceDeadline(calendar, task.recurrence, current.end, timeZone);
-      if (currentDeadline !== null && current.start >= currentJdCycle(task.recurrence, task.cycleStartedAt, timeZone).start) put(current.start, currentDeadline - 1, Boolean(cycles.get(current.start)?.completed), false);
+      if (currentDeadline !== null && current.start >= currentJdCycle(task.recurrence, task.cycleStartedAt, timeZone).start) put(current.start, currentDeadline - 1, false, false);
 
-      for (const [start, cycle] of cycles) {
-        if (start <= now && cycle.dueAt >= range.start && cycle.dueAt <= range.end) {
-          const completed = cycle.completed || (task.status === "completed" && task.statusCycleStart === start);
+      for (const cycle of cycles.values()) {
+        if (cycle.start <= now && cycle.dueAt >= range.start && cycle.dueAt <= range.end) {
+          const completed = cycle.completed || (!cycle.retired && task.status === "completed" && task.statusCycleStart === cycle.start);
           taskItems.push({ kind: "jd", at: cycle.dueAt, completed, overdue: !completed && cycle.dueAt < now, assigneeIds: assignees });
         }
       }

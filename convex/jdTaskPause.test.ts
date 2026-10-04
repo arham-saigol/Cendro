@@ -155,6 +155,32 @@ test("resuming onto a new grid keeps old misses separate from the new current cy
   expect(await admin.query(api.tasks.listJdCycleRecords, { companyId, taskId })).toHaveLength(3);
 });
 
+test("retired completion and missed rows count as one old cycle without completing the new grid", async () => {
+  const f = await createAuthzFixture();
+  const admin = f.asUser("adminA"), companyId = f.companyA;
+  await f.t.run(async (ctx) => {
+    await ctx.db.patch(companyId, { timeZone: "UTC" });
+    await ctx.db.insert("companyCalendars", { companyId, workingDays: [0, 1, 2, 3, 4, 5, 6], updatedAt: utc(1) });
+  });
+  const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Completed history", recurrence: "weekly", assigneeMembershipIds: [f.employee1M] });
+  await admin.mutation(api.tasks.completeJd, { companyId, taskId });
+  vi.setSystemTime(utc(8));
+  // Legacy data can contain a stale missed record alongside the actual
+  // completion. The edit must retain both rows, but count the work only once.
+  await f.t.run(async (ctx) => {
+    await ctx.db.insert("jdTaskCycleRecords", { companyId, jdTaskId: taskId, cycleStart: utc(1, 0), cycleEnd: utc(8, 0), status: "missed", recordedAt: utc(8) });
+  });
+  await admin.mutation(api.tasks.updateJdFields, { companyId, taskId, recurrence: "monthly" });
+  await f.t.finishAllScheduledFunctions(() => vi.runAllTimers());
+  vi.setSystemTime(utc(30));
+  const dashboard = await admin.query(api.analytics.dashboard, { companyId, now: utc(30), range: { preset: "this_month" } });
+  // One completed weekly cycle and one pending monthly cycle, not three items.
+  expect(dashboard.jd).toMatchObject({ due: 2, completed: 1, overdue: 0 });
+  expect(dashboard.trend.reduce((sum, bucket) => sum + bucket.jdDue, 0)).toBe(2);
+  expect((await admin.query(api.tasks.getJd, { companyId, taskId })).task.state.rawStatus).toBe("due");
+  expect(await admin.query(api.tasks.listJdCycleRecords, { companyId, taskId })).toMatchObject([{ retiredAt: utc(8) }]);
+});
+
 test("preserved paused ledgers cannot exhaust the active dashboard report budget", { timeout: 30_000 }, async () => {
   const f = await createAuthzFixture();
   const admin = f.asUser("adminA"), companyId = f.companyA;

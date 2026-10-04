@@ -84,6 +84,32 @@ test("pause and resume permissions are independent, scoped on every row and atom
   await expect(pause([own, own], false)).rejects.toThrow("unique");
 });
 
+test("a pre-pause recurrence snapshot never misses a shifted deadline during suspension, even after later resumes", async () => {
+  const f = await createAuthzFixture();
+  const admin = f.asUser("adminA"), companyId = f.companyA;
+  await f.t.run(async (ctx) => {
+    await ctx.db.patch(companyId, { timeZone: "UTC" });
+    await ctx.db.insert("companyCalendars", { companyId, workingDays: [1, 2, 3, 4, 5], updatedAt: utc(1) });
+    await ctx.db.insert("companyHolidays", { companyId, name: "Closed Monday", startDate: "2026-06-08", endDate: "2026-06-08", createdAt: utc(1) });
+  });
+  const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Shifted deadline", recurrence: "weekly", assigneeMembershipIds: [f.employee1M] });
+  vi.setSystemTime(utc(8));
+  // Last week's Sunday deadline shifts to the end of Tuesday June 9.
+  await admin.mutation(api.tasks.updateJdFields, { companyId, taskId, recurrence: "daily" });
+  vi.setSystemTime(utc(8, 13));
+  await admin.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [taskId], paused: true });
+  vi.setSystemTime(utc(10));
+  await admin.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [taskId], paused: false });
+  // Delayed jobs may not run until after more lifecycle transitions.
+  vi.setSystemTime(utc(11));
+  await admin.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [taskId], paused: true });
+  vi.setSystemTime(utc(12));
+  await admin.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [taskId], paused: false });
+  await f.t.finishAllScheduledFunctions(() => vi.runAllTimers());
+  const records = await admin.query(api.tasks.listJdCycleRecords, { companyId, taskId });
+  expect(records.map((row) => row.cycleStart)).toEqual([utc(10, 0)]);
+});
+
 test("release backfill enables lifecycle defaults only for untouched Admin roles", async () => {
   const f = await createAuthzFixture();
   const previous = defaultRoleCapabilities.Admin.filter((cap) => cap !== "tasks:jd:pause" && cap !== "tasks:jd:resume");

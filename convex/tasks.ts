@@ -271,7 +271,7 @@ function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, cu
     ? currentJdCycle(schedule.recurrence, task.cycleStartedAt, timeZone).start < currentJdCycle(schedule.recurrence, Date.now(), timeZone).start
     : task.cycleStartedAt < currentCycleStart;
   if (needsCatchUp) {
-    const snapshot = schedule ? { ...schedule, through: currentJdCycle(schedule.recurrence, Date.now(), timeZone).start } : undefined;
+    const snapshot = schedule ? { ...schedule, through: currentJdCycle(schedule.recurrence, Date.now(), timeZone).start, stoppedAt: Date.now() } : undefined;
     return ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, { taskId: task._id, schedule: snapshot });
   }
 }
@@ -1299,7 +1299,7 @@ export const listJdCycleRecords = query({
 
 /** Deferred per-task catch-up scheduled by interactive mutations. Idempotent. */
 export const catchUpMissedJdCycles = internalMutation({
-  args: { taskId: v.id("jdTasks"), schedule: v.optional(v.object({ recurrence: recurrenceValidator, cycleStartedAt: v.number(), through: v.optional(v.number()), deadlineThrough: v.optional(v.number()) })) },
+  args: { taskId: v.id("jdTasks"), schedule: v.optional(v.object({ recurrence: recurrenceValidator, cycleStartedAt: v.number(), through: v.optional(v.number()), stoppedAt: v.optional(v.number()), deadlineThrough: v.optional(v.number()) })) },
   handler: async (ctx, args) => {
     const task = await ctx.db.get(args.taskId);
     if (!task) return null;
@@ -1310,7 +1310,16 @@ export const catchUpMissedJdCycles = internalMutation({
       // grid's cycleStartedAt must not move from here.
       const timeZone = await companyTimeZone(ctx, task.companyId);
       const calendar = await loadWorkCalendar(ctx, task.companyId);
-      const now = Math.min(Date.now(), args.schedule.deadlineThrough ?? Infinity);
+      // An older recurrence snapshot can outlive a pause and resume. The
+      // first subsequent pause permanently caps its deadlines, even after
+      // later resumes or further pauses remove/replace task.pausedAt.
+      const firstPause = args.schedule.deadlineThrough === undefined
+        ? await ctx.db.query("taskActivityLogs")
+          .withIndex("by_taskType_and_taskId_and_event_and_createdAt", (q) => q.eq("taskType", "jd").eq("taskId", task._id).eq("event", "paused").gte("createdAt", args.schedule!.stoppedAt ?? args.schedule!.through ?? task.createdAt))
+          .first()
+        : null;
+      const deadlineThrough = args.schedule.deadlineThrough ?? firstPause?.createdAt;
+      const now = Math.min(Date.now(), deadlineThrough ?? Infinity);
       // `through` freezes the walk's bound at the grid position where the old
       // schedule stopped — cycles after the recurrence change are not the old
       // schedule's to record.
@@ -1330,9 +1339,9 @@ export const catchUpMissedJdCycles = internalMutation({
       if (occurrences.length === 200) {
         await ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, {
           taskId: args.taskId,
-          schedule: { ...args.schedule, cycleStartedAt: nextActiveAt },
+          schedule: { ...args.schedule, cycleStartedAt: nextActiveAt, deadlineThrough },
         });
-      } else if (args.schedule.deadlineThrough === undefined && nextActiveAt < throughStart) {
+      } else if (deadlineThrough === undefined && nextActiveAt < throughStart) {
         // The walk stopped at an old-grid occurrence whose shifted deadline is
         // still pending. The task's new-grid floor will never revisit it, so
         // schedule the one re-check that records it if it goes undone — still
@@ -1341,7 +1350,7 @@ export const catchUpMissedJdCycles = internalMutation({
         if (deadline !== null && deadline > now) {
           await ctx.scheduler.runAfter(deadline - now, internal.tasks.catchUpMissedJdCycles, {
             taskId: args.taskId,
-            schedule: { recurrence: args.schedule.recurrence, cycleStartedAt: nextActiveAt, through: throughStart },
+            schedule: { ...args.schedule, cycleStartedAt: nextActiveAt, through: throughStart },
           });
         }
       }

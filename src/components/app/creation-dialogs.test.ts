@@ -71,7 +71,7 @@ function text(node: any): string { return node.nodeValue ?? node.textContent ?? 
 async function click(label: string) {
   const button = nodes(container).find((node) => node.tagName === "BUTTON" && text(node) === label);
   expect(button, `button ${label}`).toBeDefined();
-  await act(async () => button.dispatchEvent({ type: "click", button: 0, preventDefault() {}, stopPropagation() {} }));
+  await act(async () => button.dispatchEvent(new Event("click", { bubbles: true, cancelable: true })));
 }
 async function mount(element: ReactNode, button: string) {
   container = createMockElement();
@@ -96,6 +96,17 @@ function expectAccessibleIndicators(title: string) {
   expect(input.getAttribute("aria-required")).toBe("true");
   expect(all.find((node) => node.tagName === "LABEL").getAttribute("for")).toBe(input.getAttribute("id"));
 }
+
+test("the shared DOM host stops bubbling cancelled dialog clicks", () => {
+  const parent = createMockElement();
+  const button = createMockElement("button");
+  parent.appendChild(button);
+  const onParentClick = vi.fn();
+  parent.addEventListener("click", onParentClick);
+  button.addEventListener("click", (event: Event) => event.stopPropagation());
+  button.dispatchEvent(new Event("click", { bubbles: true }));
+  expect(onParentClick).not.toHaveBeenCalled();
+});
 
 test.each(["jd", "one"] as const)("%s task creation marks only fields required by its mutation", async (kind) => {
   await mount(React.createElement(TaskList, { kind }), "New task");

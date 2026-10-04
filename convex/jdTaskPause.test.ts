@@ -155,6 +155,30 @@ test("resuming onto a new grid keeps old misses separate from the new current cy
   expect(await admin.query(api.tasks.listJdCycleRecords, { companyId, taskId })).toHaveLength(3);
 });
 
+test("preserved paused ledgers cannot exhaust the active dashboard report budget", { timeout: 30_000 }, async () => {
+  const f = await createAuthzFixture();
+  const admin = f.asUser("adminA"), companyId = f.companyA;
+  await f.t.run(async (ctx) => {
+    await ctx.db.patch(companyId, { timeZone: "UTC" });
+    for (let index = 0; index < 9; index++) {
+      await ctx.db.insert("jdTasks", { companyId, reference: `ACTIVE-${index}`, title: "Active", recurrence: "daily", cycleStartedAt: utc(1), status: "due", assigneeMembershipIds: [f.employee1M], createdByMembershipId: f.adminM, createdAt: utc(1), updatedAt: utc(1) });
+    }
+  });
+  // Forty paused year-old schedules retain genuine history exceeding the
+  // former company-wide scan cap; none belongs to these nine active ledgers.
+  for (let index = 0; index < 40; index++) {
+    await f.t.run(async (ctx) => {
+      const taskId = await ctx.db.insert("jdTasks", { companyId, reference: `PAUSED-${index}`, title: "Paused history", recurrence: "daily", cycleStartedAt: utc(1), status: "due", pausedAt: utc(1), assigneeMembershipIds: [f.employee1M], createdByMembershipId: f.adminM, createdAt: utc(1) - 350 * 86_400_000, updatedAt: utc(1) });
+      for (let day = 1; day <= 350; day++) {
+        const cycleStart = utc(1, 0) - day * 86_400_000;
+        await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId: taskId, cycleStart, cycleEnd: cycleStart + 86_400_000, completedAt: cycleStart + 43_200_000 });
+      }
+    });
+  }
+  const dashboard = await admin.query(api.analytics.dashboard, { companyId, now: utc(1), range: { preset: "this_year" } });
+  expect(dashboard).toMatchObject({ jd: { due: 9, completed: 0, overdue: 0 }, isTruncated: false });
+});
+
 test("release backfill enables lifecycle defaults only for untouched Admin roles", async () => {
   const f = await createAuthzFixture();
   const previous = defaultRoleCapabilities.Admin.filter((cap) => cap !== "tasks:jd:pause" && cap !== "tasks:jd:resume");

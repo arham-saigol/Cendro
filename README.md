@@ -28,6 +28,15 @@ Cendro is a Notion-like internal operations workspace for company-scoped tasks, 
 
 Paused JD tasks retain their activity, comments, attachments, completions, and missed-cycle history. The “Paused tasks” filter replaces the active list in every non-Custom JD view without changing visibility scope. Bulk pause/resume is atomic for up to 100 selected tasks. Resume rejoins the current working-calendar cycle; suspended cycles are not replayed, and same-cycle completions remain completed. There is currently no task reminder sender in this repository.
 
-New default Admin roles include independent `tasks:jd:pause` and `tasks:jd:resume` grants; Manager and Employee defaults do not. After deploying the additive schema/index changes, run `npx convex run roles:enableJdLifecycleDefaults '{}'` against the explicitly chosen deployment **once during rollout** to upgrade existing untouched default Admin roles. Customized roles are left unchanged and can be granted either permission in Roles. Do not rerun this release backfill after administrators deliberately revoke both grants.
+### Two-phase index deployment (existing deployments)
+
+**Do not deploy the feature revision directly to an established deployment.** Its active indexes are the second phase of rollout.
+
+1. Deploy the schema-only preparation revision [`5472921`](https://github.com/arham-saigol/Cendro/commit/54729213b5e92a5b3554b501a3d005570931ea4c) on branch `feat/jd-task-pause-resume-indexes` to the explicitly chosen deployment. It adds optional `pausedAt` and stages `jdTasks.by_companyId_and_pausedAt` and `taskActivityLogs.by_taskType_and_taskId_and_event_and_createdAt`, while retaining the old functions that do not query either index.
+2. Wait until **both** index backfills are complete in the Convex dashboard. Validate this phase in development/staging first; production deployment requires explicit approval.
+3. Deploy this feature revision. It activates the already-backfilled indexes and enables their callers together. Empty/new deployments can deploy this revision directly.
+4. Run `npx convex run roles:enableJdLifecycleDefaults '{}'` against the explicitly chosen deployment **once during rollout** to upgrade existing untouched default Admin roles.
+
+New default Admin roles include independent `tasks:jd:pause` and `tasks:jd:resume` grants; Manager and Employee defaults do not. Customized roles are left unchanged and can be granted either permission in Roles. Do not rerun the release backfill after administrators deliberately revoke both grants.
 
 Company deletion in `/admin` is a soft delete: the company becomes inaccessible and hidden from normal company selection, while child records are retained for audit.

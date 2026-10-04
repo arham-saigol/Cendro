@@ -186,14 +186,14 @@ async function companyTimeZone(ctx: Ctx, companyId: Id<"companies">) {
 }
 
 async function currentJdCompletion(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: number) {
-  return await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).unique();
+  return await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).filter((q) => q.eq(q.field("retiredAt"), undefined)).unique();
 }
 
-// A completion recorded under a previous grid can coincide with a new cycle's
-// start; clear it so a cycle reset actually shows as due.
-async function clearJdCompletionAtCycle(ctx: MutationCtx, taskId: Id<"jdTasks">, cycleStart: number) {
+// A previous grid can share the new cycle's start. Retire its completion
+// from current state while retaining the original work and deadline as history.
+async function retireJdCompletionAtCycle(ctx: MutationCtx, taskId: Id<"jdTasks">, cycleStart: number) {
   const done = await currentJdCompletion(ctx, taskId, cycleStart);
-  if (done) await ctx.db.delete(done._id);
+  if (done) await ctx.db.patch(done._id, { retiredAt: Date.now() });
 }
 
 async function currentJdCycleRecord(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: number) {
@@ -1104,7 +1104,7 @@ export const updateJd = mutation({
     nextTask.recurrence = args.recurrence;
     nextTask.assigneeMembershipIds = args.assigneeMembershipIds;
     if (args.recurrence !== task.recurrence) {
-      if (task.pausedAt === undefined) await clearJdCompletionAtCycle(ctx, task._id, nextCycleStart);
+      await retireJdCompletionAtCycle(ctx, task._id, nextCycleStart);
       nextTask.cycleStartedAt = nextCycleStart;
       nextTask.status = "due";
       nextTask.statusCycleStart = nextCycleStart;
@@ -1198,7 +1198,7 @@ export const updateJdFields = mutation({
     if (args.recurrence !== undefined) {
       nextTask.recurrence = args.recurrence;
       if (args.recurrence !== task.recurrence) {
-        if (task.pausedAt === undefined) await clearJdCompletionAtCycle(ctx, task._id, nextCycleStart!);
+        await retireJdCompletionAtCycle(ctx, task._id, nextCycleStart!);
         nextTask.cycleStartedAt = nextCycleStart!;
         nextTask.status = "due";
         nextTask.statusCycleStart = nextCycleStart;

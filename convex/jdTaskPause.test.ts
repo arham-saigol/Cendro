@@ -101,6 +101,10 @@ test("release backfill enables lifecycle defaults only for untouched Admin roles
 test("same-cycle resume and recurrence edits while paused never erase completions", async () => {
   const f = await createAuthzFixture();
   const admin = f.asUser("adminA"), companyId = f.companyA;
+  await f.t.run(async (ctx) => {
+    await ctx.db.patch(companyId, { timeZone: "UTC" });
+    await ctx.db.insert("companyCalendars", { companyId, workingDays: [0, 1, 2, 3, 4, 5, 6], updatedAt: utc(1) });
+  });
   const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Review", recurrence: "weekly", assigneeMembershipIds: [f.employee1M] });
   await admin.mutation(api.tasks.completeJd, { companyId, taskId });
   await admin.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [taskId], paused: true });
@@ -109,5 +113,15 @@ test("same-cycle resume and recurrence edits while paused never erase completion
   await admin.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [taskId], paused: true });
   await admin.mutation(api.tasks.updateJdFields, { companyId, taskId, recurrence: "monthly" });
   await f.t.finishAllScheduledFunctions(() => vi.runAllTimers());
-  expect(await f.t.run((ctx) => ctx.db.query("jdTaskCompletions").collect())).toHaveLength(1);
+  expect(await f.t.run((ctx) => ctx.db.query("jdTaskCompletions").collect())).toMatchObject([{ retiredAt: expect.any(Number) }]);
+  await admin.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [taskId], paused: false });
+  expect((await admin.query(api.tasks.getJd, { companyId, taskId })).task.state.rawStatus).toBe("due");
+  // A new completion can coexist with the preserved old-grid completion at
+  // the same start, and analytics must not merge the two schedules.
+  vi.setSystemTime(utc(30));
+  const dashboard = await admin.query(api.analytics.dashboard, { companyId, now: utc(30), range: { preset: "custom", startDate: "2026-06-01", endDate: "2026-06-30" } });
+  expect(dashboard.jd).toMatchObject({ completed: 1, due: 2 });
+  await admin.mutation(api.tasks.completeJd, { companyId, taskId });
+  expect((await admin.query(api.tasks.getJd, { companyId, taskId })).task.state.rawStatus).toBe("completed");
+  expect(await f.t.run((ctx) => ctx.db.query("jdTaskCompletions").collect())).toHaveLength(2);
 });

@@ -462,6 +462,7 @@ export const dashboard = query({
       // their own cycleEnd; legacy rows fall back to the current grid.
       // Missed records store their own deadline, so they stay exact across
       // recurrence and timezone changes; match on that deadline directly.
+      const taskItems: WorkItem[] = [];
       for (const completion of completions) {
         // Legacy rows predate cycleEnd. When the stored start no longer sits on
         // the task's grid the recurrence or timezone changed since, so the
@@ -472,6 +473,14 @@ export const dashboard = query({
             ? nextJdCycleStart(completion.cycleStart, task.recurrence, timeZone)
             : completion.completedAt + 1
         );
+        if (completion.retiredAt !== undefined) {
+          // Retired grid completions remain history, not evidence that the
+          // current grid's coincident cycle was completed.
+          if (completion.cycleStart <= now && end - 1 >= range.start && end - 1 <= range.end) {
+            taskItems.push({ kind: "jd", at: end - 1, completed: true, overdue: false, assigneeIds: assignees });
+          }
+          continue;
+        }
         put(completion.cycleStart, end - 1, true, true);
       }
 
@@ -488,7 +497,6 @@ export const dashboard = query({
       const currentDeadline = occurrenceDeadline(calendar, task.recurrence, current.end, timeZone);
       if (currentDeadline !== null && current.start >= currentJdCycle(task.recurrence, task.cycleStartedAt, timeZone).start) put(current.start, currentDeadline - 1, Boolean(cycles.get(current.start)?.completed), false);
 
-      const taskItems: WorkItem[] = [];
       for (const [start, cycle] of cycles) {
         if (start <= now && cycle.dueAt >= range.start && cycle.dueAt <= range.end) {
           const completed = cycle.completed || (task.status === "completed" && task.statusCycleStart === start);

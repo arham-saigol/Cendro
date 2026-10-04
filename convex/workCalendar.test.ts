@@ -217,6 +217,46 @@ describe("JD tasks on a work calendar", () => {
     expect(records).toMatchObject([{ cycleStart: utc(2026, 1, 19), cycleEnd: utc(2026, 1, 27), status: "missed" }]);
   });
 
+  test("a calendar edit cannot turn completed old-grid work into a delayed miss", async () => {
+    vi.setSystemTime(utc(2026, 6, 2, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const admin = t.withIdentity(identity("admin"));
+    const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Completed weekly review", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
+    await admin.mutation(api.tasks.completeJd, { companyId, taskId });
+
+    // Sunday June 7 is off, so the completion stores Monday's deadline.
+    vi.setSystemTime(utc(2026, 6, 8, 12));
+    await admin.mutation(api.tasks.updateJdFields, { companyId, taskId, recurrence: "monthly" });
+    await admin.mutation(api.workCalendar.setWorkingDays, { companyId, workingDays: [0, 1, 2, 3, 4, 5, 6] });
+    vi.setSystemTime(utc(2026, 6, 10, 12));
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    expect(await admin.query(api.tasks.listJdCycleRecords, { companyId, taskId })).toEqual([]);
+    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect());
+    expect(completions).toMatchObject([{ cycleStart: utc(2026, 6, 1), cycleEnd: utc(2026, 6, 9), retiredAt: utc(2026, 6, 8, 12) }]);
+  });
+
+  test("delayed catch-up cannot credit a completion retired before its grid began", async () => {
+    vi.setSystemTime(utc(2026, 6, 2, 12));
+    const { t, companyId, adminMembershipId } = await seedCompany();
+    const admin = t.withIdentity(identity("admin"));
+    const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Repeated weekly grid", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
+    await admin.mutation(api.tasks.completeJd, { companyId, taskId });
+    vi.setSystemTime(utc(2026, 6, 2, 13));
+    await admin.mutation(api.tasks.updateJdFields, { companyId, taskId, recurrence: "monthly" });
+    vi.setSystemTime(utc(2026, 6, 3, 12));
+    await admin.mutation(api.tasks.updateJdFields, { companyId, taskId, recurrence: "weekly" });
+
+    // The second weekly grid shares the first one's start and deadline,
+    // but was never completed. A later replay must not credit that old work.
+    vi.setSystemTime(utc(2026, 6, 9, 12));
+    await admin.mutation(api.tasks.updateJdFields, { companyId, taskId, recurrence: "monthly" });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect(await admin.query(api.tasks.listJdCycleRecords, { companyId, taskId })).toMatchObject([
+      { cycleStart: utc(2026, 6, 1), cycleEnd: utc(2026, 6, 9), status: "missed" },
+    ]);
+  });
+
   test("a recurrence change during a multi-cycle pending window stops the old schedule at the change", async () => {
     // Same 3-week shutdown: the weekly schedule's pending occurrences share a
     // deadline after the recurrence change. The re-check records every

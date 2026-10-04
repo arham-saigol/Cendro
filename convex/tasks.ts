@@ -1329,15 +1329,17 @@ export const catchUpMissedJdCycles = internalMutation({
       // schedule's to record.
       const throughStart = args.schedule.through ?? currentJdCycle(args.schedule.recurrence, now, timeZone).start;
       const { occurrences, nextActiveAt } = elapsedJdOccurrences(calendar, args.schedule.recurrence, args.schedule.cycleStartedAt, now, 200, timeZone, throughStart);
+      const completionThrough = args.schedule.stoppedAt ?? args.schedule.deadlineThrough ?? now;
       for (const cycle of occurrences) {
         const [done, recorded] = await Promise.all([
-          // Old-grid replay still credits retired work on that grid, not a
-          // newer completion at the same start with a different deadline.
+          // Credit work belonging to this grid when it stopped. Deadlines
+          // depend on the mutable calendar, so they are not cycle identity.
+          // Earlier retired grids and work completed after the stop do not count.
           ctx.db.query("jdTaskCompletions")
             .withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", cycle.start))
             .filter((q) => q.and(
-              q.or(q.eq(q.field("cycleEnd"), cycle.deadline), q.eq(q.field("cycleEnd"), undefined)),
-              q.lte(q.field("completedAt"), args.schedule!.stoppedAt ?? args.schedule!.deadlineThrough ?? now),
+              q.or(q.eq(q.field("retiredAt"), undefined), q.gte(q.field("retiredAt"), completionThrough)),
+              q.lte(q.field("completedAt"), completionThrough),
             ))
             .first(),
           ctx.db.query("jdTaskCycleRecords")

@@ -4,7 +4,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { getManagedMembershipIds, hasAllManagedMemberships, isManagedMembership, membershipCapabilities, requireCapability } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { effectiveCurrentJdCycle, loadWorkCalendar } from "./workCalendar";
-import { recordMissedJdCycles } from "./tasks";
+import { recordMissedJdCycles, retireJdHistoryAtCycle } from "./tasks";
 import { syncReferenceCounter } from "./references";
 import { normalizeEmail, nonEmpty } from "./validation";
 
@@ -466,7 +466,7 @@ export const commitTaskImportBatch = mutation({
           if (item.assigneePatchRequested) nextTask.assigneeMembershipIds = item.assigneeMembershipIds;
           if (nextCycleStart !== undefined) {
             // Preserve the old grid's work without completing the reset cycle.
-            if (previousDone) await ctx.db.patch(previousDone._id, { retiredAt: now });
+            await retireJdHistoryAtCycle(ctx, task._id, nextCycleStart, now);
             nextTask.cycleStartedAt = nextCycleStart;
             nextTask.status = "due";
             nextTask.statusCycleStart = nextCycleStart;

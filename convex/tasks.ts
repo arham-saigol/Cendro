@@ -189,15 +189,16 @@ async function currentJdCompletion(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: 
   return await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).filter((q) => q.eq(q.field("retiredAt"), undefined)).unique();
 }
 
-// A previous grid can share the new cycle's start. Retire its completion
-// from current state while retaining the original work and deadline as history.
-async function retireJdCompletionAtCycle(ctx: MutationCtx, taskId: Id<"jdTasks">, cycleStart: number) {
-  const done = await currentJdCompletion(ctx, taskId, cycleStart);
-  if (done) await ctx.db.patch(done._id, { retiredAt: Date.now() });
+// A previous grid can share the new cycle's start. Retire its ledger rows
+// from current state while retaining the original work and deadlines as history.
+export async function retireJdHistoryAtCycle(ctx: MutationCtx, taskId: Id<"jdTasks">, cycleStart: number, now = Date.now()) {
+  const [done, missed] = await Promise.all([currentJdCompletion(ctx, taskId, cycleStart), currentJdCycleRecord(ctx, taskId, cycleStart)]);
+  if (done) await ctx.db.patch(done._id, { retiredAt: now });
+  if (missed) await ctx.db.patch(missed._id, { retiredAt: now });
 }
 
 async function currentJdCycleRecord(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: number) {
-  return await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).unique();
+  return await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).filter((q) => q.eq(q.field("retiredAt"), undefined)).unique();
 }
 
 export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string, calendar?: WorkCalendar) {
@@ -1104,7 +1105,7 @@ export const updateJd = mutation({
     nextTask.recurrence = args.recurrence;
     nextTask.assigneeMembershipIds = args.assigneeMembershipIds;
     if (args.recurrence !== task.recurrence) {
-      await retireJdCompletionAtCycle(ctx, task._id, nextCycleStart);
+      await retireJdHistoryAtCycle(ctx, task._id, nextCycleStart, now);
       nextTask.cycleStartedAt = nextCycleStart;
       nextTask.status = "due";
       nextTask.statusCycleStart = nextCycleStart;
@@ -1198,7 +1199,7 @@ export const updateJdFields = mutation({
     if (args.recurrence !== undefined) {
       nextTask.recurrence = args.recurrence;
       if (args.recurrence !== task.recurrence) {
-        await retireJdCompletionAtCycle(ctx, task._id, nextCycleStart!);
+        await retireJdHistoryAtCycle(ctx, task._id, nextCycleStart!, now);
         nextTask.cycleStartedAt = nextCycleStart!;
         nextTask.status = "due";
         nextTask.statusCycleStart = nextCycleStart;
@@ -1336,7 +1337,10 @@ export const catchUpMissedJdCycles = internalMutation({
               q.lte(q.field("completedAt"), args.schedule!.stoppedAt ?? args.schedule!.deadlineThrough ?? now),
             ))
             .first(),
-          currentJdCycleRecord(ctx, task._id, cycle.start),
+          ctx.db.query("jdTaskCycleRecords")
+            .withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", cycle.start))
+            .filter((q) => q.eq(q.field("cycleEnd"), cycle.deadline))
+            .first(),
         ]);
         if (!done && !recorded) {
           await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.deadline, status: "missed", recordedAt: now });

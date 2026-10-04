@@ -484,7 +484,15 @@ export const dashboard = query({
         put(completion.cycleStart, end - 1, true, true);
       }
 
-      for (const record of missed) put(record.cycleStart, record.cycleEnd - 1, false, true);
+      for (const record of missed) {
+        if (record.retiredAt !== undefined) {
+          if (record.cycleStart <= now && record.cycleEnd - 1 >= range.start && record.cycleEnd - 1 <= range.end) {
+            taskItems.push({ kind: "jd", at: record.cycleEnd - 1, completed: false, overdue: record.cycleEnd - 1 < now, assigneeIds: assignees });
+          }
+        } else {
+          put(record.cycleStart, record.cycleEnd - 1, false, true);
+        }
+      }
 
       // Skipped occurrences (non-working due dates on daily/alternate cycles)
       // never enter the ledger; other recurrences report their shifted

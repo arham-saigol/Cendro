@@ -21,6 +21,7 @@ import {
   PanelRight,
   Pencil,
   Plus,
+  Repeat,
   Search,
   Settings,
   ShieldCheck,
@@ -44,7 +45,9 @@ import { DETAIL_DRAWER_CLOSE_MS } from "@/components/app/detail-drawer-motion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { DateField } from "@/components/ui/date-field";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { browserTimeZone, DEFAULT_TIME_ZONE, timeZoneOptions } from "@/lib/time-zones";
 import { cn, formatDate, initials } from "@/lib/utils";
 import { canAccessCompanyManagement, capabilityGroups, capabilityLabels, type Capability } from "@/lib/permissions";
@@ -504,16 +507,28 @@ function formatMonthDay(value: string) {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", timeZone: "UTC" }).format(date);
 }
 
+// Yearly ranges print as month-days ("Dec 24 – Jan 6") — the entered year is
+// ignored by the backend — with recurrence carried by the "Yearly" badge on the
+// row. One-time ranges compress shared year/month ("Dec 24 – 26, 2026").
 function holidayRangeLabel(holiday: CalendarHoliday) {
+  const start = new Date(holiday.startDate);
+  const end = new Date(holiday.endDate);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return "—";
+  const single = holiday.startDate === holiday.endDate;
   if (holiday.recursYearly) {
-    const dates = holiday.startDate === holiday.endDate
-      ? formatMonthDay(holiday.startDate)
-      : `${formatMonthDay(holiday.startDate)} – ${formatMonthDay(holiday.endDate)}`;
-    return `Every year · ${dates}`;
+    return single ? formatMonthDay(holiday.startDate) : `${formatMonthDay(holiday.startDate)} – ${formatMonthDay(holiday.endDate)}`;
   }
-  return holiday.startDate === holiday.endDate
-    ? formatCalendarDate(holiday.startDate)
-    : `${formatCalendarDate(holiday.startDate)} – ${formatCalendarDate(holiday.endDate)}`;
+  if (single) return formatCalendarDate(holiday.startDate);
+  const sameYear = start.getUTCFullYear() === end.getUTCFullYear();
+  if (sameYear && start.getUTCMonth() === end.getUTCMonth()) {
+    const month = new Intl.DateTimeFormat(undefined, { month: "short", timeZone: "UTC" }).format(start);
+    return `${month} ${start.getUTCDate()} – ${end.getUTCDate()}, ${end.getUTCFullYear()}`;
+  }
+  if (sameYear) {
+    const endMonthDay = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", timeZone: "UTC" }).format(end);
+    return `${formatMonthDay(holiday.startDate)} – ${endMonthDay}, ${end.getUTCFullYear()}`;
+  }
+  return `${formatCalendarDate(holiday.startDate)} – ${formatCalendarDate(holiday.endDate)}`;
 }
 
 function WorkCalendarSection({
@@ -576,39 +591,59 @@ function WorkCalendarSection({
             </p>
           </div>
           <div className="company-settings-control">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-              {WEEKDAY_OPTIONS.map((day) => (
-                <label key={day.value} className="flex items-center gap-1.5 text-[13px] text-[var(--ink)]">
-                  <Checkbox
-                    checked={workingDays.has(day.value)}
-                    onCheckedChange={(next) => setWorkingDay(day.value, next)}
-                    disabled={!canManageCalendar}
+            <div className="flex flex-wrap gap-1.5">
+              {WEEKDAY_OPTIONS.map((day) => {
+                const on = workingDays.has(day.value);
+                const lastWorkingDay = on && workingDays.size === 1;
+                return (
+                  <button
+                    key={day.value}
+                    type="button"
+                    aria-pressed={on}
                     aria-label={day.label}
-                  />
-                  {day.label.slice(0, 3)}
-                </label>
-              ))}
+                    title={lastWorkingDay ? "At least one working day is required" : undefined}
+                    disabled={!canManageCalendar}
+                    onClick={() => setWorkingDay(day.value, !on)}
+                    className={cn(
+                      "h-7 min-w-[42px] rounded-md border px-2 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:cursor-not-allowed disabled:opacity-60",
+                      on
+                        ? "border-[var(--primary)] bg-[var(--primary)] text-[var(--on-primary)]"
+                        : "border-[var(--hairline)] bg-[var(--surface)] text-[var(--ink-muted)] hover:border-[var(--hairline-strong)] hover:text-[var(--ink)]",
+                    )}
+                  >
+                    {day.label.slice(0, 3)}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>
         <div className="company-settings-row">
           <div className="min-w-0">
             <div className="company-settings-label">Holidays</div>
-            <p className="company-settings-help">Named days off, as single dates or ranges. Holidays count as non-working days; check Every year for fixed dates that repeat annually.</p>
+            <p className="company-settings-help">Named days off, as a single date or a start–end range. Holidays count as non-working days; turn on Repeats every year for fixed dates that recur annually.</p>
           </div>
-          <div className="company-settings-control w-full sm:w-auto sm:min-w-[320px]">
+          <div className="company-settings-control w-full sm:w-[380px]">
             <div className="flex w-full flex-col gap-2">
-              {calendar.holidays.length === 0 && <p className="text-[12px] text-[var(--ink-muted)]">No holidays yet.</p>}
+              {calendar.holidays.length === 0 && (
+                <p className="rounded-md border border-dashed border-[var(--hairline)] px-3 py-2.5 text-[12px] text-[var(--ink-muted)]">No holidays yet.</p>
+              )}
               {calendar.holidays.map((holiday) => (
-                <div key={holiday._id} className="flex items-center justify-between gap-2 rounded-md border border-[var(--hairline)] px-2.5 py-1.5">
-                  <div className="min-w-0">
-                    <div className="truncate text-[13px] text-[var(--ink)]">{holiday.name}</div>
+                <div key={holiday._id} className="flex items-center gap-2 rounded-md border border-[var(--hairline)] px-2.5 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[13px] font-medium text-[var(--ink)]">{holiday.name}</div>
                     <div className="text-[12px] text-[var(--ink-muted)]">{holidayRangeLabel(holiday)}</div>
                   </div>
+                  {holiday.recursYearly && (
+                    <Badge tone="blue" className="shrink-0 gap-1">
+                      <Repeat className="h-3 w-3" />
+                      Yearly
+                    </Badge>
+                  )}
                   {canManageCalendar && (
                     <button
                       type="button"
-                      className="shrink-0 rounded p-1 text-[var(--ink-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--ink)]"
+                      className="grid h-7 w-7 shrink-0 place-items-center rounded text-[var(--ink-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--ink)]"
                       onClick={() => void onRemoveHoliday(holiday._id)}
                       aria-label={`Remove ${holiday.name}`}
                     >
@@ -618,48 +653,54 @@ function WorkCalendarSection({
                 </div>
               ))}
               {canManageCalendar && (
-                <div className="flex flex-wrap items-center gap-2 pt-1">
+                <div className="rounded-md border border-[var(--hairline)] p-2.5">
                   <Input
                     value={holidayName}
                     onChange={(event) => setHolidayName(event.target.value)}
                     placeholder="Holiday name"
                     aria-label="Holiday name"
-                    className="min-w-[140px] flex-1"
                     onKeyDown={(event) => {
                       if (event.key === "Enter" && holidayName.trim() && holidayStart) void submitHoliday();
                     }}
                   />
-                  <Input
-                    type="date"
-                    value={holidayStart}
-                    onChange={(event) => setHolidayStart(event.target.value)}
-                    aria-label="Holiday start date"
-                    className="w-auto"
-                  />
-                  <Input
-                    type="date"
-                    value={holidayEnd}
-                    onChange={(event) => setHolidayEnd(event.target.value)}
-                    aria-label="Holiday end date"
-                    className="w-auto"
-                    placeholder="End"
-                  />
-                  <label className="flex items-center gap-1.5 text-[13px] text-[var(--ink)]">
-                    <Checkbox
-                      checked={holidayYearly}
-                      onCheckedChange={setHolidayYearly}
-                      aria-label="Repeat holiday every year"
+                  <div className="mt-2 flex items-center gap-1.5">
+                    <DateField
+                      value={holidayStart}
+                      onChange={setHolidayStart}
+                      placeholder="Start date"
+                      aria-label="Holiday start date"
+                      className="min-w-0 flex-1"
                     />
-                    Every year
-                  </label>
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={!holidayName.trim() || !holidayStart || holidaySaving}
-                    onClick={() => void submitHoliday()}
-                  >
-                    <Plus className="h-3.5 w-3.5" /> Add
-                  </Button>
+                    <span className="shrink-0 px-0.5 text-[12px] text-[var(--ink-faint)]">to</span>
+                    <DateField
+                      value={holidayEnd}
+                      onChange={setHolidayEnd}
+                      placeholder="End date"
+                      aria-label="Holiday end date (optional)"
+                      clearable
+                      className="min-w-0 flex-1"
+                    />
+                  </div>
+                  <div className="mt-2.5 flex items-center justify-between gap-3">
+                    <Switch checked={holidayYearly} onCheckedChange={setHolidayYearly} aria-label="Repeat holiday every year">
+                      <span className="text-[13px] text-[var(--ink)]">Repeats every year</span>
+                    </Switch>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={!holidayName.trim() || !holidayStart || holidaySaving}
+                      onClick={() => void submitHoliday()}
+                    >
+                      <Plus className="h-3.5 w-3.5" /> Add
+                    </Button>
+                  </div>
+                  {holidayYearly && (
+                    <p className="mt-2 text-[12px] leading-snug text-[var(--ink-muted)]">
+                      {holidayStart && holidayEnd && holidayEnd.slice(5) < holidayStart.slice(5)
+                        ? `Wraps the year boundary — runs ${formatMonthDay(holidayStart)} through ${formatMonthDay(holidayEnd)} each year.`
+                        : "Repeats on the same dates every year; the picked year is ignored."}
+                    </p>
+                  )}
                 </div>
               )}
             </div>

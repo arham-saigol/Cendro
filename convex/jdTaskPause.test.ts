@@ -21,6 +21,10 @@ test("pause preserves history and suppresses discovery, counts and cycles; resum
   await admin.mutation(api.tasks.addComment, { companyId, taskType: "jd", taskId, body: "Keep this discussion" });
   vi.setSystemTime(utc(3));
   await admin.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [taskId], paused: true });
+  // Recurrence changes can retire a pre-pause completion before the delayed
+  // old-grid snapshot runs. That completed work must not become missed.
+  await admin.mutation(api.tasks.updateJdFields, { companyId, taskId, recurrence: "weekly" });
+  await admin.mutation(api.tasks.updateJdFields, { companyId, taskId, recurrence: "daily" });
   // Retrying pause must not add events or advance the suspension timestamp.
   await admin.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [taskId], paused: true });
   expect((await admin.query(api.tasks.listJdRows, { companyId, paginationOpts })).page).toEqual([]);

@@ -179,6 +179,19 @@ test("preserved paused ledgers cannot exhaust the active dashboard report budget
   expect(dashboard).toMatchObject({ jd: { due: 9, completed: 0, overdue: 0 }, isTruncated: false });
 });
 
+test("self-scoped lifecycle grants apply to assigned shared tasks but never to other people's tasks", async () => {
+  const f = await createAuthzFixture();
+  const admin = f.asUser("adminA"), employee = f.asUser("employeeA1"), companyId = f.companyA;
+  const shared = await admin.mutation(api.tasks.createJd, { companyId, title: "Shared task", recurrence: "weekly", assigneeMembershipIds: [f.employee1M, f.employee2M] });
+  const outside = await admin.mutation(api.tasks.createJd, { companyId, title: "Outside task", recurrence: "weekly", assigneeMembershipIds: [f.employee2M] });
+  await f.setRoleCapabilities(companyId, "Employee", [...defaultRoleCapabilities.Employee, "tasks:jd:pause", "tasks:jd:resume"]);
+  const rows = await employee.query(api.tasks.listJdRows, { companyId, paginationOpts });
+  expect(rows.page).toMatchObject([{ _id: shared, canPause: true, canResume: true }]);
+  await employee.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [shared], paused: true });
+  await employee.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [shared], paused: false });
+  await expect(employee.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [outside], paused: true })).rejects.toThrow("Task not found");
+});
+
 test("release backfill enables lifecycle defaults only for untouched Admin roles", async () => {
   const f = await createAuthzFixture();
   const previous = defaultRoleCapabilities.Admin.filter((cap) => cap !== "tasks:jd:pause" && cap !== "tasks:jd:resume");

@@ -176,6 +176,9 @@ async function canManageJdLifecycle(ctx: Ctx, companyId: Id<"companies">, member
   if (!auth.caps.has("tasks:jd:pause") && !auth.caps.has("tasks:jd:resume")) return false;
   if (membership.role !== "Manager" && auth.caps.has("tasks:jd:view:any")) return true;
   const targets = updateAuthTargets(task);
+  // Self-only grants cover assigned shared work. Managers must still own
+  // every target in the selection, even when they are also an assignee.
+  if (membership.role !== "Manager" && !auth.caps.has("tasks:jd:view:managed") && auth.caps.has("tasks:jd:view:self") && targets.includes(membership._id)) return true;
   const scope = await auth.getManagedScope();
   return scope.complete ? targets.every((id) => scope.ids.has(id)) : await hasAllManagedMemberships(ctx, companyId, membership._id, targets, scope.ids);
 }

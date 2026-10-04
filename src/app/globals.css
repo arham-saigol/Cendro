@@ -50,6 +50,11 @@
   --priority-low-fg: #2c7046;
   --shadow-popover: 0 10px 28px rgba(30, 28, 24, 0.12), 0 1px 2px rgba(30, 28, 24, 0.08);
   --shadow-elevated: var(--shadow-popover);
+  /* Component-level shadows are cast from --shadow-cast at (alpha * --shadow-strength).
+     Light mode casts ink-toned shade; dark mode casts stronger pure black so elevated
+     surfaces read as shade on the dark canvas instead of a light glow. */
+  --shadow-cast: var(--ink);
+  --shadow-strength: 1;
   --assistant-orb-bg: #ffffff;
   --assistant-orb-hover: #fbfbfb;
   --assistant-orb-border: rgba(31, 32, 32, 0.14);
@@ -111,6 +116,8 @@
   --priority-low-fg: #9bd6b3;
   --shadow-popover: 0 14px 34px rgba(0, 0, 0, 0.42), 0 1px 2px rgba(0, 0, 0, 0.28);
   --shadow-elevated: var(--shadow-popover);
+  --shadow-cast: #000000;
+  --shadow-strength: 2.75;
   --assistant-orb-bg: #d8d8d8;
   --assistant-orb-hover: #e1e1e1;
   --assistant-orb-border: rgba(9, 9, 11, 0.35);
@@ -415,7 +422,7 @@ button:disabled { cursor: not-allowed; }
   border: 1px solid var(--hairline-strong);
   border-radius: 5px;
   background: var(--surface);
-  box-shadow: 0 3px 9px color-mix(in srgb, var(--ink) 14%, transparent), 0 1px 2px color-mix(in srgb, var(--ink) 10%, transparent);
+  box-shadow: 0 3px 9px color-mix(in srgb, var(--shadow-cast) calc(14% * var(--shadow-strength)), transparent), 0 1px 2px color-mix(in srgb, var(--shadow-cast) calc(10% * var(--shadow-strength)), transparent);
   color: var(--ink-muted);
   font-size: 11px;
   font-weight: 650;
@@ -454,6 +461,8 @@ button:disabled { cursor: not-allowed; }
 }
 .task-title-open:hover::before,
 .task-title-open:focus-visible::before { opacity: 1; }
+/* The tooltip's fixed dark fill blends into dark surfaces; a hairline edge keeps it distinct. */
+[data-theme="dark"] .task-title-open::before { border: 1px solid var(--hairline-strong); }
 .task-table .col-meta { color: var(--ink-faint); white-space: nowrap; font-size: 12px; }
 .task-table td:has(.task-cell-input:focus) {
   position: relative;
@@ -492,7 +501,7 @@ button:disabled { cursor: not-allowed; }
   border: 1px solid var(--hairline);
   border-radius: 7px;
   background: var(--surface);
-  box-shadow: 0 18px 36px color-mix(in srgb, var(--ink) 13%, transparent), 0 1px 2px color-mix(in srgb, var(--ink) 9%, transparent);
+  box-shadow: 0 18px 36px color-mix(in srgb, var(--shadow-cast) calc(13% * var(--shadow-strength)), transparent), 0 1px 2px color-mix(in srgb, var(--shadow-cast) calc(9% * var(--shadow-strength)), transparent);
 }
 .task-cell-popover-header {
   display: flex;
@@ -575,9 +584,9 @@ button:disabled { cursor: not-allowed; }
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   outline: none;
-  box-shadow: 0 8px 18px color-mix(in srgb, var(--ink) 11%, transparent), 0 1px 2px color-mix(in srgb, var(--ink) 8%, transparent);
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--shadow-cast) calc(11% * var(--shadow-strength)), transparent), 0 1px 2px color-mix(in srgb, var(--shadow-cast) calc(8% * var(--shadow-strength)), transparent);
 }
-.task-cell-input:focus { outline: none; box-shadow: 0 8px 18px color-mix(in srgb, var(--ink) 11%, transparent), 0 1px 2px color-mix(in srgb, var(--ink) 8%, transparent); }
+.task-cell-input:focus { outline: none; box-shadow: 0 8px 18px color-mix(in srgb, var(--shadow-cast) calc(11% * var(--shadow-strength)), transparent), 0 1px 2px color-mix(in srgb, var(--shadow-cast) calc(8% * var(--shadow-strength)), transparent); }
 .sop-title-cell-input {
   left: -17px;
   top: -1.75px;
@@ -587,7 +596,7 @@ button:disabled { cursor: not-allowed; }
 }
 .sop-title-cell-input,
 .sop-title-cell-input:focus {
-  box-shadow: 0 6px 14px color-mix(in srgb, var(--ink) 8%, transparent), 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent);
+  box-shadow: 0 6px 14px color-mix(in srgb, var(--shadow-cast) calc(8% * var(--shadow-strength)), transparent), 0 1px 2px color-mix(in srgb, var(--shadow-cast) calc(6% * var(--shadow-strength)), transparent);
 }
 .task-table .task-inline-control {
   height: 41px;
@@ -619,7 +628,7 @@ button:disabled { cursor: not-allowed; }
   border: 1px solid var(--hairline-strong);
   border-radius: 8px;
   background: var(--surface);
-  box-shadow: 0 10px 24px color-mix(in srgb, var(--ink) 14%, transparent), 0 1px 3px color-mix(in srgb, var(--ink) 14%, transparent);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--shadow-cast) calc(14% * var(--shadow-strength)), transparent), 0 1px 3px color-mix(in srgb, var(--shadow-cast) calc(14% * var(--shadow-strength)), transparent);
   color: var(--ink-secondary);
   font-size: 13px;
   line-height: 1;
@@ -737,7 +746,7 @@ button:disabled { cursor: not-allowed; }
   background: var(--surface);
   padding: 2px;
   color: var(--ink-muted);
-  box-shadow: 0 2px 8px color-mix(in srgb, var(--ink) 12%, transparent), 0 0 0 1px var(--hairline);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--shadow-cast) calc(12% * var(--shadow-strength)), transparent), 0 0 0 1px var(--hairline);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.12s ease;
@@ -1018,7 +1027,7 @@ button:disabled { cursor: not-allowed; }
   border-radius: 9px;
   background: color-mix(in srgb, var(--surface) 96%, white);
   padding: 3px;
-  box-shadow: 0 10px 24px color-mix(in srgb, var(--ink) 12%, transparent), 0 1px 2px color-mix(in srgb, var(--ink) 8%, transparent);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--shadow-cast) calc(12% * var(--shadow-strength)), transparent), 0 1px 2px color-mix(in srgb, var(--shadow-cast) calc(8% * var(--shadow-strength)), transparent);
 }
 .sop-rich-toolbar-btn {
   display: inline-grid;

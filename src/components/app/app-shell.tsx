@@ -335,7 +335,7 @@ function SearchCommandDialog({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-black/20" />
-        <Dialog.Content className="fixed left-1/2 top-[22vh] z-50 w-[min(560px,calc(100vw-32px))] -translate-x-1/2 overflow-hidden rounded-lg bg-[var(--surface)] text-[var(--ink)] shadow-[var(--shadow-popover)]">
+        <Dialog.Content className="fixed left-1/2 top-[22vh] z-50 w-[min(560px,calc(100vw-32px))] -translate-x-1/2 overflow-hidden rounded-lg border border-[var(--hairline)] bg-[var(--surface)] text-[var(--ink)] shadow-[var(--shadow-popover)]">
           <Dialog.Title className="sr-only">Search Cendro</Dialog.Title>
           <div className="flex h-11 items-center gap-2 px-3">
             <Search className="h-4 w-4 text-[var(--ink-faint)]" />

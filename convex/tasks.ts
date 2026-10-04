@@ -171,27 +171,41 @@ async function canDeleteTask(
 }
 
 
+/** Lifecycle grants never widen a manager's assignment scope. */
+async function canManageJdLifecycle(ctx: Ctx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, task: Doc<"jdTasks">, auth: TaskVisibilityAuth) {
+  if (!auth.caps.has("tasks:jd:pause") && !auth.caps.has("tasks:jd:resume")) return false;
+  if (membership.role !== "Manager" && auth.caps.has("tasks:jd:view:any")) return true;
+  const targets = updateAuthTargets(task);
+  // Self-only grants cover assigned shared work. Managers must still own
+  // every target in the selection, even when they are also an assignee.
+  if (membership.role !== "Manager" && !auth.caps.has("tasks:jd:view:managed") && auth.caps.has("tasks:jd:view:self") && targets.includes(membership._id)) return true;
+  const scope = await auth.getManagedScope();
+  return scope.complete ? targets.every((id) => scope.ids.has(id)) : await hasAllManagedMemberships(ctx, companyId, membership._id, targets, scope.ids);
+}
+
 async function companyTimeZone(ctx: Ctx, companyId: Id<"companies">) {
   const company = await ctx.db.get(companyId);
   return company?.timeZone ?? defaultTimeZone;
 }
 
 async function currentJdCompletion(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: number) {
-  return await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).unique();
+  return await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).filter((q) => q.eq(q.field("retiredAt"), undefined)).unique();
 }
 
-// A completion recorded under a previous grid can coincide with a new cycle's
-// start; clear it so a cycle reset actually shows as due.
-async function clearJdCompletionAtCycle(ctx: MutationCtx, taskId: Id<"jdTasks">, cycleStart: number) {
-  const done = await currentJdCompletion(ctx, taskId, cycleStart);
-  if (done) await ctx.db.delete(done._id);
+// A previous grid can share the new cycle's start. Retire its ledger rows
+// from current state while retaining the original work and deadlines as history.
+export async function retireJdHistoryAtCycle(ctx: MutationCtx, taskId: Id<"jdTasks">, cycleStart: number, now = Date.now()) {
+  const [done, missed] = await Promise.all([currentJdCompletion(ctx, taskId, cycleStart), currentJdCycleRecord(ctx, taskId, cycleStart)]);
+  if (done) await ctx.db.patch(done._id, { retiredAt: now });
+  if (missed) await ctx.db.patch(missed._id, { retiredAt: now });
 }
 
 async function currentJdCycleRecord(ctx: Ctx, taskId: Id<"jdTasks">, cycleStart: number) {
-  return await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).unique();
+  return await ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", cycleStart)).filter((q) => q.eq(q.field("retiredAt"), undefined)).unique();
 }
 
 export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string, calendar?: WorkCalendar) {
+  if (task.pausedAt !== undefined) return { occurrences: [], nextActiveAt: task.cycleStartedAt };
   const zone = timeZone ?? await companyTimeZone(ctx, task.companyId);
   const cal = calendar ?? await loadWorkCalendar(ctx, task.companyId);
   const { occurrences, nextActiveAt } = elapsedJdOccurrences(cal, task.recurrence, task.cycleStartedAt, now, 200, zone);
@@ -251,6 +265,7 @@ async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">,
  * executes, the task document already carries the new recurrence.
  */
 function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, schedule?: { recurrence: JdRecurrence; cycleStartedAt: number }, timeZone?: string) {
+  if (task.pausedAt !== undefined) return;
   // The snapshot path re-walks the old grid from the cycle containing the
   // floor: anything between it and that grid's current cycle — elapsed or
   // still pending on a shifted deadline — needs the check. `through` pins the
@@ -260,12 +275,13 @@ function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, cu
     ? currentJdCycle(schedule.recurrence, task.cycleStartedAt, timeZone).start < currentJdCycle(schedule.recurrence, Date.now(), timeZone).start
     : task.cycleStartedAt < currentCycleStart;
   if (needsCatchUp) {
-    const snapshot = schedule ? { ...schedule, through: currentJdCycle(schedule.recurrence, Date.now(), timeZone).start } : undefined;
+    const snapshot = schedule ? { ...schedule, through: currentJdCycle(schedule.recurrence, Date.now(), timeZone).start, stoppedAt: Date.now() } : undefined;
     return ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, { taskId: task._id, schedule: snapshot });
   }
 }
 
 async function jdState(ctx: Ctx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string, calendar?: WorkCalendar) {
+  if (task.pausedAt !== undefined) return { status: "Paused", rawStatus: "paused" as const, isOverdue: false, currentCycleStart: null, currentCycleEnd: null, dueAt: null };
   const zone = timeZone ?? await companyTimeZone(ctx, task.companyId);
   const cal = calendar ?? await loadWorkCalendar(ctx, task.companyId);
   const c = effectiveCurrentJdCycle(cal, task.recurrence, now, zone);
@@ -289,7 +305,7 @@ async function getVisibleTask(ctx: Ctx, companyId: Id<"companies">, membership: 
   return { normalized, task };
 }
 
-async function logTaskActivity(ctx: MutationCtx, args: { companyId: Id<"companies">; taskType: TaskKind; taskId: string; actorMembershipId: Id<"companyMemberships">; event: "created" | "status_changed"; fromStatus?: ManualStatus; toStatus?: ManualStatus; createdAt?: number }) {
+async function logTaskActivity(ctx: MutationCtx, args: { companyId: Id<"companies">; taskType: TaskKind; taskId: string; actorMembershipId: Id<"companyMemberships">; event: "created" | "status_changed" | "paused" | "resumed"; fromStatus?: ManualStatus; toStatus?: ManualStatus; createdAt?: number }) {
   await ctx.db.insert("taskActivityLogs", { companyId: args.companyId, taskType: args.taskType, taskId: args.taskId, actorMembershipId: args.actorMembershipId, event: args.event, ...(args.fromStatus ? { fromStatus: args.fromStatus } : {}), ...(args.toStatus ? { toStatus: args.toStatus } : {}), createdAt: args.createdAt ?? Date.now() });
 }
 
@@ -563,7 +579,7 @@ async function taskListOrderKeyMap(ctx: Ctx, companyId: Id<"companies">, members
 }
 
 export const listJdRows = query({
-  args: { companyId: v.id("companies"), search: v.optional(v.string()), frequency: v.optional(jdFrequencyFilterValidator), paginationOpts: paginationOptsValidator },
+  args: { companyId: v.id("companies"), search: v.optional(v.string()), frequency: v.optional(jdFrequencyFilterValidator), paused: v.optional(v.boolean()), paginationOpts: paginationOptsValidator },
   returns: paginationResultValidator(v.any()),
   handler: async (ctx, args) => {
     const { membership, company } = await requireMembership(ctx, args.companyId);
@@ -572,7 +588,7 @@ export const listJdRows = query({
       displayScopedMembershipIds(ctx, args.companyId, auth, "tasks:jd:view:any"),
       getTaskListPreference(ctx, args.companyId, membership._id, "jd"),
     ]);
-    const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").paginate(args.paginationOpts);
+    const page = await ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt", (q) => args.paused ? q.eq("companyId", args.companyId).gt("pausedAt", undefined) : q.eq("companyId", args.companyId).eq("pausedAt", undefined)).order("desc").paginate(args.paginationOpts);
     const candidates = page.page.filter((task) =>
       (!args.frequency || args.frequency === "all" || task.recurrence === args.frequency) && matchesSearch(task, args.search),
     );
@@ -593,12 +609,15 @@ export const listJdRows = query({
       Promise.all(visibleTasks.map((task) => canDeleteTask(ctx, args.companyId, membership, task, "jd", auth))),
       includeCustomOrderKeys ? taskListOrderKeyMap(ctx, args.companyId, membership._id, "jd") : Promise.resolve(null),
     ]);
+    const lifecycleScopes = await Promise.all(visibleTasks.map((task) => canManageJdLifecycle(ctx, args.companyId, membership, task, auth)));
     const rows = visibleTasks.map((task, index) => ({
       ...task,
       state: states[index],
       assignees: task.assigneeMembershipIds.filter((id) => scoped.has(id)).flatMap((id) => assigneeById.get(id) ?? []),
       canUpdate: updates[index],
       canDelete: deletes[index],
+      canPause: auth.caps.has("tasks:jd:pause") && lifecycleScopes[index],
+      canResume: auth.caps.has("tasks:jd:resume") && lifecycleScopes[index],
       ...(orderKeys?.get(task._id) ? { customOrderKey: orderKeys.get(task._id) } : {}),
     }));
     return { ...page, page: rows };
@@ -613,9 +632,9 @@ export const exportRows = query({
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
     const scoped = await displayScopedMembershipIds(ctx, args.companyId, auth, args.kind === "jd" ? "tasks:jd:view:any" : "tasks:one_time:view:any");
     if (args.kind === "jd") {
-      const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("asc").paginate(args.paginationOpts);
+      const page = await ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt", (q) => q.eq("companyId", args.companyId).eq("pausedAt", undefined)).order("asc").paginate(args.paginationOpts);
       const visibleFlags = await Promise.all(page.page.map((task) => visible(ctx, args.companyId, membership, task, "jd", auth)));
-      const visibleTasks = page.page.filter((_, index) => visibleFlags[index]);
+      const visibleTasks = page.page.filter((task, index) => task.pausedAt === undefined && visibleFlags[index]);
       const assigneeRows = await enrich(ctx, visibleTasks.flatMap((task) => task.assigneeMembershipIds.filter((id) => scoped.has(id))));
       const assigneeById = new Map(assigneeRows.map((row) => [row.membership._id, row]));
       const rows = visibleTasks.map((task) => ({ reference: task.reference, title: task.title, description: task.description ?? null, notes: task.notes ?? null, recurrence: task.recurrence, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: task.assigneeMembershipIds.filter((id) => scoped.has(id)).map((id) => assigneeById.get(id)?.user.email).filter(Boolean).join("; ") }));
@@ -700,12 +719,12 @@ async function searchTasksOfKind(
     input,
     prefixes: kind === "jd" ? ["JD"] : ["TSK", "OT"],
     byReference: (prefix) => kind === "jd"
-      ? ctx.db.query("jdTasks").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).gte("reference", prefix).lt("reference", `${prefix}\uffff`))
+      ? ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt_and_reference", (q) => q.eq("companyId", companyId).eq("pausedAt", undefined).gte("reference", prefix).lt("reference", `${prefix}\uffff`))
       : ctx.db.query("oneTimeTasks").withIndex("by_companyId_and_reference", (q) => q.eq("companyId", companyId).gte("reference", prefix).lt("reference", `${prefix}\uffff`)),
     byTitle: (title) => kind === "jd"
-      ? ctx.db.query("jdTasks").withSearchIndex("search_title", (q) => q.search("title", title).eq("companyId", companyId))
+      ? ctx.db.query("jdTasks").withSearchIndex("search_active_title", (q) => q.search("title", title).eq("companyId", companyId).eq("pausedAt", undefined))
       : ctx.db.query("oneTimeTasks").withSearchIndex("search_title", (q) => q.search("title", title).eq("companyId", companyId)),
-    isVisible: async (task) => await visible(ctx, companyId, membership, task, kind, auth),
+    isVisible: async (task) => !("pausedAt" in task && task.pausedAt !== undefined) && await visible(ctx, companyId, membership, task, kind, auth),
   });
 }
 
@@ -1001,10 +1020,10 @@ export const personalFilterOptions = query({
   handler: async (ctx, args) => {
     const { membership } = await requireMembership(ctx, args.companyId);
     if (args.kind === "jd") {
-      const tasks = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(500);
+      const tasks = await ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt", (q) => q.eq("companyId", args.companyId).eq("pausedAt", undefined)).take(500);
       const values = new Set<string>();
       for (const t of tasks) {
-        if (t.assigneeMembershipIds.includes(membership._id)) values.add(t.recurrence);
+        if (t.pausedAt === undefined && t.assigneeMembershipIds.includes(membership._id)) values.add(t.recurrence);
       }
       return { values: Array.from(values) };
     } else {
@@ -1089,7 +1108,7 @@ export const updateJd = mutation({
     nextTask.recurrence = args.recurrence;
     nextTask.assigneeMembershipIds = args.assigneeMembershipIds;
     if (args.recurrence !== task.recurrence) {
-      await clearJdCompletionAtCycle(ctx, task._id, nextCycleStart);
+      await retireJdHistoryAtCycle(ctx, task._id, nextCycleStart, now);
       nextTask.cycleStartedAt = nextCycleStart;
       nextTask.status = "due";
       nextTask.statusCycleStart = nextCycleStart;
@@ -1183,7 +1202,7 @@ export const updateJdFields = mutation({
     if (args.recurrence !== undefined) {
       nextTask.recurrence = args.recurrence;
       if (args.recurrence !== task.recurrence) {
-        await clearJdCompletionAtCycle(ctx, task._id, nextCycleStart!);
+        await retireJdHistoryAtCycle(ctx, task._id, nextCycleStart!, now);
         nextTask.cycleStartedAt = nextCycleStart!;
         nextTask.status = "due";
         nextTask.statusCycleStart = nextCycleStart;
@@ -1201,6 +1220,7 @@ async function setJdStatus(ctx: MutationCtx, companyId: Id<"companies">, taskId:
   const task = await ctx.db.get(taskId);
   if (!task || task.companyId !== companyId) throw new ConvexError("Task not found.");
   await assertCanUpdateTaskStatus(ctx, companyId, membership, task, "jd");
+  if (task.pausedAt !== undefined) throw new ConvexError("Resume this task before changing its status.");
   const now = Date.now();
   const timeZone = await companyTimeZone(ctx, companyId);
   const calendar = await loadWorkCalendar(ctx, companyId);
@@ -1221,6 +1241,45 @@ async function setJdStatus(ctx: MutationCtx, companyId: Id<"companies">, taskId:
   await ctx.db.patch(taskId, { status, statusCycleStart: cycle.start, updatedAt: now });
   if (previousStatus !== status) await logTaskActivity(ctx, { companyId, taskType: "jd", taskId, actorMembershipId: membership._id, event: "status_changed", fromStatus: previousStatus, toStatus: status, createdAt: now });
 }
+
+export const setJdPausedBulk = mutation({
+  args: { companyId: v.id("companies"), taskIds: v.array(v.id("jdTasks")), paused: v.boolean() },
+  handler: async (ctx, args) => {
+    const { membership, company } = await requireCapability(ctx, args.companyId, args.paused ? "tasks:jd:pause" : "tasks:jd:resume");
+    if (args.taskIds.length === 0 || args.taskIds.length > 100 || new Set(args.taskIds).size !== args.taskIds.length) {
+      throw new ConvexError("Select between 1 and 100 unique tasks.");
+    }
+    const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
+    const now = Date.now();
+    const timeZone = company.timeZone ?? defaultTimeZone;
+    const calendar = await loadWorkCalendar(ctx, args.companyId);
+    // All checks and writes share one transaction: a stale or forbidden row
+    // rejects the entire selection, rather than partially changing it.
+    for (const taskId of args.taskIds) {
+      const task = await ctx.db.get(taskId);
+      if (!task || task.companyId !== args.companyId || !(await visible(ctx, args.companyId, membership, task, "jd", auth))) throw new ConvexError("Task not found.");
+      if (!(await canManageJdLifecycle(ctx, args.companyId, membership, task, auth))) throw new ConvexError("You can only pause or resume tasks assigned within your managed scope.");
+      if ((task.pausedAt !== undefined) === args.paused) continue; // Retry-safe.
+      const cycle = effectiveCurrentJdCycle(calendar, task.recurrence, now, timeZone);
+      if (args.paused) {
+        await preserveJdCompletionStamp(ctx, task, cycle.start + 1, timeZone, calendar);
+        // Freeze both the grid and deadline bound. Deferred catch-up may keep
+        // pre-pause history, but must never turn suspended deadlines into misses.
+        await ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, {
+          taskId, schedule: { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt, through: cycle.start, deadlineThrough: now },
+        });
+        await ctx.db.patch(taskId, { pausedAt: now, overdueAt: undefined, updatedAt: now });
+      } else {
+        // Rejoin the existing calendar grid, not a backlog of suspended cycles.
+        // Keep same-cycle completion rows: resuming must not erase history.
+        const sameCycle = task.statusCycleStart === cycle.start;
+        await ctx.db.patch(taskId, { pausedAt: undefined, cycleStartedAt: cycle.start, status: sameCycle ? task.status : "due", statusCycleStart: cycle.start, overdueAt: undefined, updatedAt: now });
+      }
+      await logTaskActivity(ctx, { companyId: args.companyId, taskType: "jd", taskId, actorMembershipId: membership._id, event: args.paused ? "paused" : "resumed", createdAt: now });
+    }
+    return null;
+  },
+});
 
 export const updateJdStatus = mutation({
   args: { companyId: v.id("companies"), taskId: v.id("jdTasks"), status: statusValidator },
@@ -1244,7 +1303,7 @@ export const listJdCycleRecords = query({
 
 /** Deferred per-task catch-up scheduled by interactive mutations. Idempotent. */
 export const catchUpMissedJdCycles = internalMutation({
-  args: { taskId: v.id("jdTasks"), schedule: v.optional(v.object({ recurrence: recurrenceValidator, cycleStartedAt: v.number(), through: v.optional(v.number()) })) },
+  args: { taskId: v.id("jdTasks"), schedule: v.optional(v.object({ recurrence: recurrenceValidator, cycleStartedAt: v.number(), through: v.optional(v.number()), stoppedAt: v.optional(v.number()), deadlineThrough: v.optional(v.number()) })) },
   handler: async (ctx, args) => {
     const task = await ctx.db.get(args.taskId);
     if (!task) return null;
@@ -1255,16 +1314,38 @@ export const catchUpMissedJdCycles = internalMutation({
       // grid's cycleStartedAt must not move from here.
       const timeZone = await companyTimeZone(ctx, task.companyId);
       const calendar = await loadWorkCalendar(ctx, task.companyId);
-      const now = Date.now();
+      // An older recurrence snapshot can outlive a pause and resume. The
+      // first subsequent pause permanently caps its deadlines, even after
+      // later resumes or further pauses remove/replace task.pausedAt.
+      const firstPause = args.schedule.deadlineThrough === undefined
+        ? await ctx.db.query("taskActivityLogs")
+          .withIndex("by_taskType_and_taskId_and_event_and_createdAt", (q) => q.eq("taskType", "jd").eq("taskId", task._id).eq("event", "paused").gte("createdAt", args.schedule!.stoppedAt ?? args.schedule!.through ?? task.createdAt))
+          .first()
+        : null;
+      const deadlineThrough = args.schedule.deadlineThrough ?? firstPause?.createdAt;
+      const now = Math.min(Date.now(), deadlineThrough ?? Infinity);
       // `through` freezes the walk's bound at the grid position where the old
       // schedule stopped — cycles after the recurrence change are not the old
       // schedule's to record.
       const throughStart = args.schedule.through ?? currentJdCycle(args.schedule.recurrence, now, timeZone).start;
       const { occurrences, nextActiveAt } = elapsedJdOccurrences(calendar, args.schedule.recurrence, args.schedule.cycleStartedAt, now, 200, timeZone, throughStart);
+      const completionThrough = args.schedule.stoppedAt ?? args.schedule.deadlineThrough ?? now;
       for (const cycle of occurrences) {
         const [done, recorded] = await Promise.all([
-          currentJdCompletion(ctx, task._id, cycle.start),
-          currentJdCycleRecord(ctx, task._id, cycle.start),
+          // Credit work belonging to this grid when it stopped. Deadlines
+          // depend on the mutable calendar, so they are not cycle identity.
+          // Earlier retired grids and work completed after the stop do not count.
+          ctx.db.query("jdTaskCompletions")
+            .withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", cycle.start))
+            .filter((q) => q.and(
+              q.or(q.eq(q.field("retiredAt"), undefined), q.gte(q.field("retiredAt"), completionThrough)),
+              q.lte(q.field("completedAt"), completionThrough),
+            ))
+            .first(),
+          ctx.db.query("jdTaskCycleRecords")
+            .withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", cycle.start))
+            .filter((q) => q.eq(q.field("cycleEnd"), cycle.deadline))
+            .first(),
         ]);
         if (!done && !recorded) {
           await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.deadline, status: "missed", recordedAt: now });
@@ -1275,9 +1356,9 @@ export const catchUpMissedJdCycles = internalMutation({
       if (occurrences.length === 200) {
         await ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, {
           taskId: args.taskId,
-          schedule: { recurrence: args.schedule.recurrence, cycleStartedAt: nextActiveAt, through: args.schedule.through },
+          schedule: { ...args.schedule, cycleStartedAt: nextActiveAt, deadlineThrough },
         });
-      } else if (nextActiveAt < throughStart) {
+      } else if (deadlineThrough === undefined && nextActiveAt < throughStart) {
         // The walk stopped at an old-grid occurrence whose shifted deadline is
         // still pending. The task's new-grid floor will never revisit it, so
         // schedule the one re-check that records it if it goes undone — still
@@ -1286,7 +1367,7 @@ export const catchUpMissedJdCycles = internalMutation({
         if (deadline !== null && deadline > now) {
           await ctx.scheduler.runAfter(deadline - now, internal.tasks.catchUpMissedJdCycles, {
             taskId: args.taskId,
-            schedule: { recurrence: args.schedule.recurrence, cycleStartedAt: nextActiveAt, through: throughStart },
+            schedule: { ...args.schedule, cycleStartedAt: nextActiveAt, through: throughStart },
           });
         }
       }
@@ -1305,6 +1386,7 @@ export const recordMissedJdCyclesBatch = internalMutation({
     const calendars = new Map<Id<"companies">, Promise<WorkCalendar>>();
     const page = await ctx.db.query("jdTasks").paginate({ numItems: 10, cursor: args.cursor ?? null });
     for (const task of page.page) {
+      if (task.pausedAt !== undefined) continue;
       // Skip the catch-up entirely when no cycle has elapsed for this task:
       // the cron scans every JD task hourly, so the common case must not
       // touch completion/cycle-record reads at all.
@@ -2033,12 +2115,15 @@ export const aiListVisible = query({
     // across all matches so the scan budget also bounds total reads below
     // transaction limits.
     const collect = async (kind: TaskKind, table: "jdTasks" | "oneTimeTasks") => {
-      const page = await ctx.db.query(table).withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(AI_LIST_TASK_SCAN_LIMIT);
+      const page = table === "jdTasks"
+        ? await ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt", (q) => q.eq("companyId", args.companyId).eq("pausedAt", undefined)).order("desc").take(AI_LIST_TASK_SCAN_LIMIT)
+        : await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(AI_LIST_TASK_SCAN_LIMIT);
       const matched: { task: Doc<"jdTasks"> | Doc<"oneTimeTasks">; state: { status: string; dueAt: number | null } }[] = [];
       let offset = 0;
       while (offset < page.length && matched.length < limit) {
         const batch = page.slice(offset, offset + AI_LIST_TASK_EVAL_CHUNK);
         const evaluated = await Promise.all(batch.map(async (task) => {
+          if ("pausedAt" in task && task.pausedAt !== undefined) return null;
           if (!(await visible(ctx, args.companyId, membership, task, kind, auth))) return null;
           if (!matchesSearch(task, needle)) return null;
           const state = kind === "jd" ? await jdState(ctx, task as Doc<"jdTasks">, now, timeZone, calendar) : oneState(task as Doc<"oneTimeTasks">);

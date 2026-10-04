@@ -1,5 +1,6 @@
 import { ConvexError, v } from "convex/values";
-import { mutation } from "./_generated/server";
+import { internalMutation, mutation } from "./_generated/server";
+import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import {
@@ -9,7 +10,7 @@ import {
   requireMembership,
   roleDocByName,
 } from "./permissions";
-import { isKnownCapability, type Capability } from "../src/lib/permissions";
+import { defaultRoleCapabilities, isKnownCapability, type Capability } from "../src/lib/permissions";
 import { nonEmpty } from "./validation";
 
 const ROLE_NAME_LIMIT = 60;
@@ -102,6 +103,25 @@ async function deleteLegacyOverrideRows(ctx: MutationCtx, companyId: Id<"compani
     }
   }
 }
+
+/** One-time release backfill for untouched default Admin roles, not customized roles. */
+export const enableJdLifecycleDefaults = internalMutation({
+  args: { cursor: v.optional(v.union(v.string(), v.null())) },
+  handler: async (ctx, args) => {
+    const previousDefaults = new Set<string>(defaultRoleCapabilities.Admin.filter((cap) => cap !== "tasks:jd:pause" && cap !== "tasks:jd:resume"));
+    const page = await ctx.db.query("roles").paginate({ numItems: 100, cursor: args.cursor ?? null });
+    let updated = 0;
+    for (const role of page.page) {
+      const caps = new Set(role.capabilities);
+      if (role.name === "Admin" && caps.size === previousDefaults.size && [...previousDefaults].every((cap) => caps.has(cap))) {
+        await ctx.db.patch(role._id, { capabilities: [...defaultRoleCapabilities.Admin], updatedAt: Date.now() });
+        updated++;
+      }
+    }
+    if (!page.isDone) await ctx.scheduler.runAfter(0, internal.roles.enableJdLifecycleDefaults, { cursor: page.continueCursor });
+    return updated;
+  },
+});
 
 export const ensureDefaults = mutation({
   args: { companyId: v.id("companies") },

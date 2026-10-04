@@ -4,7 +4,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { getManagedMembershipIds, hasAllManagedMemberships, isManagedMembership, membershipCapabilities, requireCapability } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
 import { effectiveCurrentJdCycle, loadWorkCalendar } from "./workCalendar";
-import { recordMissedJdCycles } from "./tasks";
+import { recordMissedJdCycles, retireJdHistoryAtCycle } from "./tasks";
 import { syncReferenceCounter } from "./references";
 import { normalizeEmail, nonEmpty } from "./validation";
 
@@ -439,7 +439,7 @@ export const commitTaskImportBatch = mutation({
           const rolled = await ctx.db.get(task._id);
           if (!rolled) fail("One or more import rows became unavailable. Re-preview and try again.");
           const activeCycleStart = nextCycleStart ?? currentCycle.start;
-          const previousDone = await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", activeCycleStart)).unique();
+          const previousDone = await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", activeCycleStart)).filter((q) => q.eq(q.field("retiredAt"), undefined)).unique();
           const previousStatus = previousDone || (rolled.statusCycleStart === activeCycleStart && rolled.status === "completed") ? "completed" : rolled.statusCycleStart === activeCycleStart ? rolled.status : "due";
           const nextTask = { ...rolled };
           if (hasField(item.draft, "title")) nextTask.title = nonEmpty(item.draft.title ?? "", "Task title");
@@ -465,9 +465,8 @@ export const commitTaskImportBatch = mutation({
           if (hasField(item.draft, "recurrence") && item.draft.recurrence) nextTask.recurrence = item.draft.recurrence;
           if (item.assigneePatchRequested) nextTask.assigneeMembershipIds = item.assigneeMembershipIds;
           if (nextCycleStart !== undefined) {
-            // A completion recorded under the old grid can coincide with the
-            // new cycle's start; clear it so the reset actually shows as due.
-            if (previousDone) await ctx.db.delete(previousDone._id);
+            // Preserve the old grid's work without completing the reset cycle.
+            await retireJdHistoryAtCycle(ctx, task._id, nextCycleStart, now);
             nextTask.cycleStartedAt = nextCycleStart;
             nextTask.status = "due";
             nextTask.statusCycleStart = nextCycleStart;

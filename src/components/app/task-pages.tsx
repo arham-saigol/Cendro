@@ -119,6 +119,9 @@ type TaskRow = TaskListOrderingRow & {
   notes?: string | null;
   time?: string | null;
   quantity?: number | null;
+  pausedAt?: number;
+  canPause?: boolean;
+  canResume?: boolean;
   recurrence?: Frequency;
   priority?: Priority;
   dueDate?: number | null;
@@ -127,7 +130,7 @@ type TaskRow = TaskListOrderingRow & {
   assignees: TaskRowAssignee[];
   state?: {
     status?: string;
-    rawStatus?: ManualStatus | "overdue";
+    rawStatus?: ManualStatus | "overdue" | "paused";
   } | string;
   canUpdate?: boolean;
   canDelete?: boolean;
@@ -254,9 +257,9 @@ function quantityFromInput(value: string) { const parsed = Number(value); return
 function frequencyLabel(value?: Frequency) { return frequencies.find((frequency) => frequency.value === value)?.label ?? "—"; }
 function priorityLabel(value?: Priority) { return value ? value[0].toUpperCase() + value.slice(1) : "—"; }
 function statusText(task: any) { return typeof task.state === "string" ? task.state : task.state?.status ?? "Pending"; }
-function rawStatus(task: any): ManualStatus | "overdue" { return task.state?.rawStatus ?? (statusText(task) === "Completed" ? "completed" : statusText(task) === "In Progress" ? "in_progress" : statusText(task) === "Overdue" ? "overdue" : statusText(task) === "Pending" ? "due" : "due"); }
+function rawStatus(task: any): ManualStatus | "overdue" | "paused" { return task.state?.rawStatus ?? (statusText(task) === "Completed" ? "completed" : statusText(task) === "In Progress" ? "in_progress" : statusText(task) === "Overdue" ? "overdue" : statusText(task) === "Pending" ? "due" : "due"); }
 function statusTone(status: string) { if (status === "Overdue") return "red"; if (status === "Completed") return "green"; if (status === "In Progress") return "blue"; return "neutral"; }
-function statusDotClass(status: ManualStatus | "overdue") { return status === "completed" ? "bg-[var(--badge-green-fg)]" : status === "in_progress" ? "bg-[var(--badge-blue-fg)]" : status === "overdue" ? "bg-[var(--badge-red-fg)]" : "bg-[var(--badge-neutral-fg)]"; }
+function statusDotClass(status: ManualStatus | "overdue" | "paused") { return status === "completed" ? "bg-[var(--badge-green-fg)]" : status === "in_progress" ? "bg-[var(--badge-blue-fg)]" : status === "overdue" ? "bg-[var(--badge-red-fg)]" : "bg-[var(--badge-neutral-fg)]"; }
 function taskTypeFor(kind: Kind) { return kind === "jd" ? "jd" : "one_time"; }
 function hasAnyCapability(active: { capabilities: string[] } | null | undefined, capabilities: string[]) { return capabilities.some((capability) => active?.capabilities.includes(capability)); }
 function canCreateTasks(active: { capabilities: string[] } | null | undefined, kind: Kind) { return active?.capabilities.includes(kind === "jd" ? "tasks:jd:create" : "tasks:one_time:create") ?? false; }
@@ -293,6 +296,8 @@ function activityActorName(item: any) { return item.actor?.user.name || item.act
 function activityLogText(item: any) {
   const name = activityActorName(item);
   if (item.event === "created") return `${name} created this task`;
+  if (item.event === "paused") return `${name} paused this task`;
+  if (item.event === "resumed") return `${name} resumed this task`;
   if (item.event === "status_changed") {
     if (item.toStatus === "completed") return `${name} marked this task complete`;
     if (item.toStatus === "in_progress") return `${name} moved this task to in progress`;
@@ -539,7 +544,7 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   const locked = status === "Overdue" || raw === "overdue";
   const isAssignee = taskHasAssignee(task, active?.membership?._id);
   // Pending rows carry a synthetic id — a status mutation against it would reject.
-  const canUpdate = !isPendingTask(task) && (isAssignee || (canUpdateOverride ?? canEditTasks(active, kind)));
+  const canUpdate = task.pausedAt === undefined && !isPendingTask(task) && (isAssignee || (canUpdateOverride ?? canEditTasks(active, kind)));
   const pad = size === "md" ? "h-7 px-2.5" : "h-[22px] px-2";
 
   async function change(nextStatus: ManualStatus) {
@@ -638,6 +643,8 @@ function TaskFilterMenu({
   assigneeFilter,
   assignees,
   showAssigneeFilter,
+  paused,
+  onPausedChange,
   activeCount,
   onStatusChange,
   onFrequencyChange,
@@ -651,6 +658,8 @@ function TaskFilterMenu({
   assigneeFilter: string;
   assignees: any[];
   showAssigneeFilter: boolean;
+  paused: boolean;
+  onPausedChange: (paused: boolean) => void;
   activeCount: number;
   onStatusChange: (value: StatusFilter) => void;
   onFrequencyChange: (value: FrequencyFilter) => void;
@@ -677,7 +686,8 @@ function TaskFilterMenu({
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content align="end" sideOffset={6} className="task-menu min-w-48" aria-label="Task filters">
-          <TaskFilterSubmenu label="Status" value={statusFilter} options={statusOptions} onChange={onStatusChange} />
+          {kind === "jd" && <DropdownMenu.CheckboxItem className="task-menu-item" checked={paused} onCheckedChange={onPausedChange}>Paused tasks{paused && <Check className="ml-auto h-3.5 w-3.5" />}</DropdownMenu.CheckboxItem>}
+          {!paused && <TaskFilterSubmenu label="Status" value={statusFilter} options={statusOptions} onChange={onStatusChange} />}
           {kind === "jd" ? (
             <TaskFilterSubmenu label="Frequency" value={frequency} options={frequencyOptions} onChange={onFrequencyChange} />
           ) : (
@@ -1623,6 +1633,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [personalFrequencyView, setPersonalFrequencyView] = useState<FrequencyFilter>("all");
   const [personalPriorityView, setPersonalPriorityView] = useState<PriorityFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [pausedFilter, setPausedFilter] = useState(false);
+  const [changingPaused, setChangingPaused] = useState(false);
   const [assigneeFilter, setAssigneeFilter] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -1642,8 +1654,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const filterableAssignees = useQuery(api.tasks.filterableAssignees, activeCompanyId && canUseAllTasks ? { companyId: activeCompanyId } : "skip") as any[] | undefined;
   const taskType: TaskListTaskType = taskTypeFor(kind);
   const queryArgs = useMemo(
-    () => (activeCompanyId ? { companyId: activeCompanyId } : "skip" as const),
-    [activeCompanyId],
+    () => (activeCompanyId ? { companyId: activeCompanyId, ...(kind === "jd" ? { paused: taskView !== "custom" && pausedFilter } : {}) } : "skip" as const),
+    [activeCompanyId, kind, taskView, pausedFilter],
   );
 
   const {
@@ -1679,6 +1691,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const deleteJd = useMutation(api.tasks.deleteJd).withOptimisticUpdate((localStore, args) => {
     removeFromListPages(localStore, api.tasks.listJdRows, new Set([args.taskId]));
   });
+  const setJdPausedBulk = useMutation(api.tasks.setJdPausedBulk);
   const deleteJdBulk = useMutation(api.tasks.deleteJdBulk).withOptimisticUpdate((localStore, args) => {
     removeFromListPages(localStore, api.tasks.listJdRows, new Set(args.taskIds));
   });
@@ -1776,17 +1789,18 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   }, [activePreference?.customOrder, activeSort, allTasks, currentMembershipId, customViewState.preference, isCustomView, subscribedCustomView, taskOrderKeys, taskType]);
   const filteredTasks = useMemo(() => (
     orderedTasks.filter((task) => {
+      if (kind === "jd" && (task.pausedAt !== undefined) !== (!isCustomView && pausedFilter)) return false;
       if (isCustomView) return true;
       const needle = search.trim().toLowerCase();
       if (needle && !task.title.toLowerCase().includes(needle) && !task.reference.toLowerCase().includes(needle)) return false;
       if (effectiveTaskView === "my" && !taskHasAssignee(task, currentMembershipId)) return false;
       if (kind === "jd" && frequency !== "all" && task.recurrence !== frequency) return false;
-      if (!statusMatches(task, statusFilter)) return false;
+      if (!(kind === "jd" && pausedFilter) && !statusMatches(task, statusFilter)) return false;
       if (kind === "one" && priorityFilter !== "all" && task.priority !== priorityFilter) return false;
       if (assigneeFilter !== "all" && !taskHasAssignee(task, assigneeFilter)) return false;
       return true;
     })
-  ), [assigneeFilter, currentMembershipId, effectiveTaskView, frequency, isCustomView, kind, orderedTasks, priorityFilter, search, statusFilter]);
+  ), [assigneeFilter, currentMembershipId, effectiveTaskView, frequency, isCustomView, kind, orderedTasks, pausedFilter, priorityFilter, search, statusFilter]);
   const displayedTasks = filteredTasks;
   const renderedTasks = useMemo(() => displayedTasks.slice(0, renderedCount), [displayedTasks, renderedCount]);
   const visibleIds = useMemo(() => renderedTasks.filter((task) => !isPendingTask(task)).map((task) => task._id), [renderedTasks]);
@@ -1795,6 +1809,11 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
   const selectionCount = selectedIds.size;
   const canDeleteSelection = selectionCount > 0 && !deleting && Array.from(selectedIds).every((id) => canDeleteTaskRow(active, kind, allTasks.find((task) => task._id === id)));
+  const selection = allTasks.filter((task) => selectedIds.has(task._id));
+  const lifecycleAction = kind === "jd" && selectionCount > 0 && selection.length === selectionCount
+    ? selection.every((task) => task.pausedAt === undefined && task.canPause) ? "pause"
+      : selection.every((task) => task.pausedAt !== undefined && task.canResume) ? "resume" : null
+    : null;
   const selectedTaskId = selectionCount === 1 ? Array.from(selectedIds)[0] : null;
   const selectedTask = selectedTaskId ? allTasks.find((task) => task._id === selectedTaskId) ?? null : null;
   const canEditSelectedTask = Boolean(selectedTask && canEditTaskRow(active, kind, selectedTask));
@@ -1844,12 +1863,12 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   }, [effectiveTaskView, assigneeFilter]);
 
   useEffect(() => {
-    if (!dataReady || kind !== "jd" || personalFrequencyView === "all") return;
+    if (!dataReady || kind !== "jd" || pausedFilter || personalFrequencyView === "all") return;
     if (!ownFrequencyValues.includes(personalFrequencyView)) {
       setPersonalFrequencyView("all");
       setFrequency((current) => current === personalFrequencyView ? "all" : current);
     }
-  }, [dataReady, kind, ownFrequencyValues, personalFrequencyView]);
+  }, [dataReady, kind, ownFrequencyValues, pausedFilter, personalFrequencyView]);
 
   useEffect(() => {
     if (!dataReady || kind !== "one" || personalPriorityView === "all") return;
@@ -1949,6 +1968,21 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     setEditOpen(open);
     if (!open) {
       setEditingTask(null);
+    }
+  }
+
+  async function handlePausedSelection() {
+    if (!activeCompanyId || !lifecycleAction || changingPaused) return;
+    setChangingPaused(true);
+    setDeleteError(null);
+    const ids = new Set(selectedIds);
+    try {
+      await setJdPausedBulk({ companyId: activeCompanyId, taskIds: Array.from(ids) as Id<"jdTasks">[], paused: lifecycleAction === "pause" });
+      setSelectedIds((current) => new Set(Array.from(current).filter((id) => !ids.has(id))));
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : "Could not change the selected tasks.");
+    } finally {
+      setChangingPaused(false);
     }
   }
 
@@ -2081,7 +2115,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
 
   const jdColumns = 5 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional frequency + optional assignee + status + time + quantity
   const oneColumns = 5 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional priority + optional assignee + status + date assigned + due
-  const filterCount = [statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
+  const filterCount = [kind === "jd" && pausedFilter, !pausedFilter && statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
   const hasActiveFilters = !isCustomView && (filterCount > 0 || search.trim() !== "");
 
   return (
@@ -2166,6 +2200,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
             assigneeFilter={assigneeFilter}
             assignees={filterableAssignees ?? []}
             showAssigneeFilter={showAssigneeColumn}
+            paused={kind === "jd" && pausedFilter}
+            onPausedChange={setPausedFilter}
             activeCount={filterCount}
             onStatusChange={setStatusFilter}
             onFrequencyChange={changeFrequencyFilter}
@@ -2229,6 +2265,20 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                     title="Edit selected"
                   >
                     <Pencil className="h-4 w-4" />
+                  </button>
+                </>
+              )}
+              {lifecycleAction && (
+                <>
+                  <span className="task-selection-pill-divider" aria-hidden="true" />
+                  <button
+                    type="button"
+                    className="task-selection-pill-btn"
+                    onClick={() => void handlePausedSelection()}
+                    disabled={changingPaused || deleting || exportingSelection || selectionCount > 100}
+                    title={selectionCount > 100 ? "Select at most 100 tasks at once" : undefined}
+                  >
+                    {lifecycleAction === "pause" ? "Pause tasks" : "Resume tasks"}
                   </button>
                 </>
               )}
@@ -2309,7 +2359,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                       </Button>
                     )}
                     {hasActiveFilters && (
-                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); setStatusFilter("all"); setFrequency("all"); setPriorityFilter("all"); setPersonalFrequencyView("all"); setPersonalPriorityView("all"); setAssigneeFilter("all"); }}>Clear filters</Button>
+                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); setStatusFilter("all"); setPausedFilter(false); setFrequency("all"); setPriorityFilter("all"); setPersonalFrequencyView("all"); setPersonalPriorityView("all"); setAssigneeFilter("all"); }}>Clear filters</Button>
                     )}
                   </div>
                   )}

@@ -481,7 +481,7 @@ describe("task import backend", () => {
     expect(updatedOt.task.description).toBe("Updated OT description via import");
   });
 
-  test("a recurrence-changing import clears a completion coinciding with the new cycle start", async () => {
+  test("a recurrence-changing import retires a coincident completion without deleting history", async () => {
     const { t, companyId, adminMembershipId } = await seed();
     const admin = t.withIdentity(identity("admin"));
     const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Coincident", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
@@ -501,7 +501,7 @@ describe("task import backend", () => {
     expect(updated.task.status).toBe("due");
     expect(updated.task.state.rawStatus).toBe("due");
     const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId)).collect());
-    expect(completions).toHaveLength(0);
+    expect(completions).toMatchObject([{ retiredAt: expect.any(Number) }]);
 
     // The manual edit path resets the cycle the same way.
     const manualTaskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Manual coincident", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });

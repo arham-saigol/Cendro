@@ -354,7 +354,7 @@ export const dashboard = query({
     const [jdTasks, oneTimeTasks] = await Promise.all([
       takeBudgetedRows(
         completeness,
-        (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
+        (limit) => ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt", (q) => q.eq("companyId", args.companyId).eq("pausedAt", undefined)).take(limit),
       ),
       takeBudgetedRows(
         completeness,
@@ -365,74 +365,35 @@ export const dashboard = query({
     // tables. The ledger fan-out below then only reads rows for tasks the
     // viewer can actually see.
     const visibleJdTasks = jdTasks
+      .filter((task) => task.pausedAt === undefined)
       .map((task) => ({ task, assignees: visibleAssigneeMembershipIds(task.assigneeMembershipIds, effectiveIds) }))
       .filter((entry) => entry.assignees.length > 0);
 
-    // Two company-range scans grouped by task replace 2N per-task queries, but
-    // only when the visible set covers every loaded task — scan rows then all
-    // belong to ledgers we build anyway. A partially scoped viewer keeps the
-    // per-task path: unrelated tasks' rows would burn the scan budget, and a
-    // truncated scan would erase visible results the per-task reads could have
-    // served. The company task list itself is already bounded by
-    // dashboardTakeLimit, so full coverage of it is the only safe bulk signal.
+    // Read only active, visible task ledgers. Company-wide scans also include
+    // preserved paused history, which must not consume the active report budget.
     type TaskLedger = { completions: Doc<"jdTaskCompletions">[]; missed: Doc<"jdTaskCycleRecords">[]; truncated: boolean };
     const ledgersByTask = new Map<Id<"jdTasks">, TaskLedger>();
-    if (visibleJdTasks.length < jdTasks.length || visibleJdTasks.length <= BUDGET_WAVE) {
-      // Every takeBudgetedRows call reserves its allowance before yielding, so
-      // the wave cannot double-spend the shared budget. A task whose reads
-      // truncated contributes no items — partial ledger data would silently
-      // misreport completions — so it tracks truncation on its own phase that
-      // still shares the global ledger.
-      await mapInWaves(visibleJdTasks, async ({ task }) => {
-        const taskPhase: QueryCompleteness = {
-          get remaining() { return completeness.remaining; },
-          set remaining(value) { completeness.remaining = value; },
-          isTruncated: false,
-          truncatedReads: 0,
-        };
-        const [completions, missed] = await Promise.all([
-          takeBudgetedRows(
-            taskPhase,
-            (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit),
-          ),
-          takeBudgetedRows(
-            taskPhase,
-            (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
-          ),
-        ]);
-        ledgersByTask.set(task._id, { completions, missed, truncated: taskPhase.isTruncated });
-      });
-    } else {
-      // One +1 row over each cap proves whether the range was cut short; caps
-      // halve the remaining ledger so the concurrent scans cannot overspend it.
-      const scanCap = Math.max(0, Math.floor((completeness.remaining - 2) / 2));
-      const scan = async <T>(take: (limit: number) => Promise<T[]>) => {
-        if (scanCap === 0) {
-          completeness.isTruncated = true;
-          completeness.truncatedReads++;
-          return { rows: [] as T[], truncated: true };
-        }
-        const rows = await take(scanCap + 1);
-        completeness.remaining -= rows.length;
-        const truncated = rows.length > scanCap;
-        if (truncated) {
-          completeness.isTruncated = true;
-          completeness.truncatedReads++;
-        }
-        return { rows: rows.slice(0, scanCap), truncated };
+    await mapInWaves(visibleJdTasks, async ({ task }) => {
+      // Reserve before yielding and keep each task's completeness separate:
+      // incomplete history must never silently misreport completed work.
+      const taskPhase: QueryCompleteness = {
+        get remaining() { return completeness.remaining; },
+        set remaining(value) { completeness.remaining = value; },
+        isTruncated: false,
+        truncatedReads: 0,
       };
-      const [completionScan, missedScan] = await Promise.all([
-        scan((limit) => ctx.db.query("jdTaskCompletions").withIndex("by_companyId_and_cycleStart", (q) => q.eq("companyId", args.companyId).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit)),
-        scan((limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_companyId_and_cycleEnd", (q) => q.eq("companyId", args.companyId).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).order("desc").take(limit)),
+      const [completions, missed] = await Promise.all([
+        takeBudgetedRows(
+          taskPhase,
+          (limit) => ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", range.start - jdCompletionLookbackMs).lte("cycleStart", range.end)).order("desc").take(limit),
+        ),
+        takeBudgetedRows(
+          taskPhase,
+          (limit) => ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleEnd", (q) => q.eq("jdTaskId", task._id).gte("cycleEnd", range.start + 1).lte("cycleEnd", range.end + 1)).take(limit),
+        ),
       ]);
-      const truncated = completionScan.truncated || missedScan.truncated;
-      // A truncated scan cannot be attributed to individual tasks, so no task's
-      // ledger is trusted — same "only complete data counts" contract as the
-      // per-task path.
-      for (const { task } of visibleJdTasks) ledgersByTask.set(task._id, { completions: [], missed: [], truncated });
-      for (const row of completionScan.rows) ledgersByTask.get(row.jdTaskId)?.completions.push(row);
-      for (const row of missedScan.rows) ledgersByTask.get(row.jdTaskId)?.missed.push(row);
-    }
+      ledgersByTask.set(task._id, { completions, missed, truncated: taskPhase.isTruncated });
+    });
 
     const jdItemGroups = visibleJdTasks.map(({ task, assignees }) => {
       const ledger = ledgersByTask.get(task._id)!;
@@ -442,14 +403,18 @@ export const dashboard = query({
       }
       const { completions, missed } = ledger;
 
-      const cycles = new Map<number, { dueAt: number; completed: boolean; stored: boolean }>();
-      // Ledger rows (completions, missed records) keep their stored deadlines;
-      // reconstructed cycles only fill starts the ledger never recorded, so a
-      // recurrence or timezone change cannot rewrite history onto the new grid.
-      const put = (start: number, dueAt: number, completed: boolean, stored: boolean) => {
-        const existing = cycles.get(start);
-        cycles.set(start, {
-          dueAt: existing?.stored && !stored ? existing.dueAt : dueAt,
+      const cycles = new Map<string, { start: number; retired: boolean; dueAt: number; completed: boolean; stored: boolean }>();
+      // Group rows by grid lifetime as well as start: retired work must not
+      // complete a reset grid, but its completion and miss still count once.
+      // Completed rows own their stored deadlines; reconstruction or a stale
+      // missed record must not rewrite completed history.
+      const put = (start: number, dueAt: number, completed: boolean, stored: boolean, retiredAt?: number) => {
+        const key = `${start}:${retiredAt ?? "current"}`;
+        const existing = cycles.get(key);
+        cycles.set(key, {
+          start,
+          retired: retiredAt !== undefined,
+          dueAt: existing && ((existing.stored && !stored) || (existing.completed && !completed)) ? existing.dueAt : dueAt,
           completed: (existing?.completed ?? false) || completed,
           stored: (existing?.stored ?? false) || stored,
         });
@@ -461,6 +426,7 @@ export const dashboard = query({
       // their own cycleEnd; legacy rows fall back to the current grid.
       // Missed records store their own deadline, so they stay exact across
       // recurrence and timezone changes; match on that deadline directly.
+      const taskItems: WorkItem[] = [];
       for (const completion of completions) {
         // Legacy rows predate cycleEnd. When the stored start no longer sits on
         // the task's grid the recurrence or timezone changed since, so the
@@ -471,10 +437,12 @@ export const dashboard = query({
             ? nextJdCycleStart(completion.cycleStart, task.recurrence, timeZone)
             : completion.completedAt + 1
         );
-        put(completion.cycleStart, end - 1, true, true);
+        put(completion.cycleStart, end - 1, true, true, completion.retiredAt);
       }
 
-      for (const record of missed) put(record.cycleStart, record.cycleEnd - 1, false, true);
+      for (const record of missed) {
+        put(record.cycleStart, record.cycleEnd - 1, false, true, record.retiredAt);
+      }
 
       // Skipped occurrences (non-working due dates on daily/alternate cycles)
       // never enter the ledger; other recurrences report their shifted
@@ -485,12 +453,11 @@ export const dashboard = query({
 
       const current = currentJdCycle(task.recurrence, now, timeZone);
       const currentDeadline = occurrenceDeadline(calendar, task.recurrence, current.end, timeZone);
-      if (currentDeadline !== null) put(current.start, currentDeadline - 1, Boolean(cycles.get(current.start)?.completed), false);
+      if (currentDeadline !== null && current.start >= currentJdCycle(task.recurrence, task.cycleStartedAt, timeZone).start) put(current.start, currentDeadline - 1, false, false);
 
-      const taskItems: WorkItem[] = [];
-      for (const [start, cycle] of cycles) {
-        if (start <= now && cycle.dueAt >= range.start && cycle.dueAt <= range.end) {
-          const completed = cycle.completed || (task.status === "completed" && task.statusCycleStart === start);
+      for (const cycle of cycles.values()) {
+        if (cycle.start <= now && cycle.dueAt >= range.start && cycle.dueAt <= range.end) {
+          const completed = cycle.completed || (!cycle.retired && task.status === "completed" && task.statusCycleStart === cycle.start);
           taskItems.push({ kind: "jd", at: cycle.dueAt, completed, overdue: !completed && cycle.dueAt < now, assigneeIds: assignees });
         }
       }
@@ -663,7 +630,7 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
   const [jd, one, sops, recentRows] = await Promise.all([
     takeBudgetedRows(
       completeness,
-      (limit) => ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).take(limit),
+      (limit) => ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt", (q) => q.eq("companyId", args.companyId).eq("pausedAt", undefined)).take(limit),
     ),
     takeBudgetedRows(
       completeness,
@@ -677,7 +644,7 @@ async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"
       ? ctx.db.query("auditEvents").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("desc").take(8)
       : Promise.resolve([]),
   ]);
-  const visibleJd = jd.filter((task) => taskHasVisibleAssignee(task, scoped));
+  const visibleJd = jd.filter((task) => task.pausedAt === undefined && taskHasVisibleAssignee(task, scoped));
   const visibleOne = one.filter((task) => taskHasVisibleAssignee(task, scoped));
   const overdueOne = visibleOne.filter((t) => t.status !== "completed" && (t.overdueAt || (t.dueDate && t.dueDate < Date.now()))).length;
   const completedOne = visibleOne.filter((t) => t.status === "completed").length;

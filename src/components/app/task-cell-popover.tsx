@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { cellPopoverTop } from "@/lib/cell-popover-position";
 import { cn } from "@/lib/utils";
 
 const VIEWPORT_MARGIN = 8;
@@ -75,9 +76,8 @@ export function TaskCellPopover({
       if (!panel) return;
       const height = panel.offsetHeight;
       const desired = showHeader ? anchor.top : anchor.bottom + 4;
-      const fitsBelow = desired + height <= window.innerHeight - VIEWPORT_MARGIN;
       const flipped = showHeader ? window.innerHeight - VIEWPORT_MARGIN - height : anchor.top - 4 - height;
-      setTop(Math.max(VIEWPORT_MARGIN, Math.min(fitsBelow ? desired : flipped, window.innerHeight - VIEWPORT_MARGIN - height)));
+      setTop(cellPopoverTop({ desired, flipped, panelHeight: height, viewportHeight: window.innerHeight, margin: VIEWPORT_MARGIN }));
     }
     update();
     const observer = new ResizeObserver(update);

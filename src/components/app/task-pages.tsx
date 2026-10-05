@@ -38,6 +38,7 @@ import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
 import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
+import { TaskCellPopover } from "./task-cell-popover";
 import { TaskImportExportMenu } from "./task-import-dialog";
 import { TaskRail, useTaskRailAutoScroll } from "./task-rail-scroll";
 import { ListDragOverlay, ListDragRailRow, ListSortableRow, useListDrag, type ListDrag } from "./list-dnd";
@@ -419,88 +420,6 @@ function AvatarStack({ assignees, max = 3, showName = false }: { assignees: { us
         {extra > 0 && <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--surface-hover)] text-[10px] font-semibold text-[var(--ink-secondary)] ring-2 ring-[var(--canvas)]">+{extra}</span>}
       </span>
       {showName && <span className="min-w-0 truncate">{assigneeDisplayName(assignees[0])}</span>}
-    </span>
-  );
-}
-
-function TaskCellPopover({
-  open,
-  onOpenChange,
-  disabled = false,
-  pending = false,
-  ariaLabel,
-  header,
-  children,
-  panelClassName,
-  preferredWidth,
-  showHeader = true,
-  hideTriggerOnOpen = true,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  disabled?: boolean;
-  pending?: boolean;
-  ariaLabel: string;
-  header: React.ReactNode;
-  children: React.ReactNode;
-  panelClassName?: string;
-  preferredWidth?: number;
-  showHeader?: boolean;
-  hideTriggerOnOpen?: boolean;
-}) {
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const [rect, setRect] = useState<{ top: number; bottom: number; left: number; width: number } | null>(null);
-
-  function measure() {
-    const bounds = triggerRef.current?.getBoundingClientRect();
-    if (!bounds) return;
-    // A popover with preferredWidth renders wider than its trigger; the left
-    // clamp must use that same width so right-edge cells can't overflow.
-    const width = Math.min(Math.max(bounds.width + 28, preferredWidth ?? 220), window.innerWidth - 16);
-    const left = Math.min(Math.max(8, bounds.left - 14), Math.max(8, window.innerWidth - width - 8));
-    setRect({ top: bounds.top, bottom: bounds.bottom, left, width });
-  }
-
-  useEffect(() => {
-    if (!open) return;
-    measure();
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onOpenChange(false);
-    }
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("resize", measure);
-    window.addEventListener("scroll", measure, true);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("resize", measure);
-      window.removeEventListener("scroll", measure, true);
-    };
-  }, [onOpenChange, open]);
-
-  return (
-    <span className="task-cell-popover-root">
-      <button
-        ref={triggerRef}
-        type="button"
-        disabled={disabled || pending}
-        data-interactive="true"
-        data-cell-popover-open={open && hideTriggerOnOpen ? "true" : undefined}
-        onClick={(event) => { event.stopPropagation(); if (!open) measure(); onOpenChange(!open); }}
-        className={cn("task-cell-control", pending && "opacity-60")}
-        aria-label={ariaLabel}
-        aria-expanded={open}
-      >
-        {header}
-      </button>
-      {open && rect && (
-        <>
-          <button type="button" aria-label="Close menu" className="task-cell-popover-backdrop" onClick={(event) => { event.stopPropagation(); onOpenChange(false); }} />
-          <div className={cn("task-cell-popover", panelClassName)} style={{ top: showHeader ? rect.top : rect.bottom + 4, left: rect.left, width: rect.width }} data-interactive="true" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-            {showHeader && <div className="task-cell-popover-header">{header}</div>}
-            <div className="task-cell-popover-body">{children}</div>
-          </div>
-        </>
-      )}
     </span>
   );
 }

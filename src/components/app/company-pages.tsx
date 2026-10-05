@@ -42,6 +42,7 @@ import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "@/components/app/company-context";
 import { DETAIL_DRAWER_CLOSE_MS } from "@/components/app/detail-drawer-motion";
+import { TaskCellPopover } from "@/components/app/task-cell-popover";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -279,73 +280,27 @@ function PeopleCellMenu<T extends string>({
   placeholder?: string;
   renderValue?: (option: { value: T; label: string; helper?: string } | undefined) => React.ReactNode;
 }) {
-  const triggerRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
-  const [rect, setRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const selected = options.find((option) => option.value === value);
   const label = selected?.label || placeholder;
   const content = renderValue ? renderValue(selected) : <span className={cn("min-w-0 truncate", !selected && "text-[var(--ink-faint)]")}>{label}</span>;
-
-  function measure() {
-    const bounds = triggerRef.current?.getBoundingClientRect();
-    if (!bounds) return;
-    setRect({ top: bounds.top, left: bounds.left - 14, width: Math.max(bounds.width + 28, 220) });
-  }
-
-  useEffect(() => {
-    if (!open) return;
-    measure();
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpen(false);
-    }
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("resize", measure);
-    window.addEventListener("scroll", measure, true);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("resize", measure);
-      window.removeEventListener("scroll", measure, true);
-    };
-  }, [open]);
 
   if (disabled) {
     return <span className="task-cell-control cursor-not-allowed opacity-55">{content}</span>;
   }
 
   return (
-    <span className="task-cell-popover-root">
-      <button
-        ref={triggerRef}
-        type="button"
-        className="task-cell-control"
-        data-interactive="true"
-        data-cell-popover-open={open ? "true" : undefined}
-        onClick={(event) => { event.stopPropagation(); if (!open) measure(); setOpen(!open); }}
-        aria-label={ariaLabel}
-        aria-expanded={open}
-      >
-        {content}
-      </button>
-      {open && rect && (
-        <>
-          <button type="button" aria-label="Close menu" className="task-cell-popover-backdrop" onClick={(event) => { event.stopPropagation(); setOpen(false); }} />
-          <div className="task-cell-popover" style={{ top: rect.top, left: rect.left, width: rect.width }} data-interactive="true" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-            <div className="task-cell-popover-header">{content}</div>
-            <div className="task-cell-popover-body">
-              {options.map((option) => (
-                <button key={option.value} type="button" onClick={() => { setOpen(false); if (option.value !== value) onChange(option.value); }} className="task-cell-popover-item">
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate">{option.label}</span>
-                    {option.helper && <span className="block truncate text-[11.5px] text-[var(--ink-muted)]">{option.helper}</span>}
-                  </span>
-                  {option.value === value && <Check className="h-3.5 w-3.5 text-[var(--ink-faint)]" />}
-                </button>
-              ))}
-            </div>
-          </div>
-        </>
-      )}
-    </span>
+    <TaskCellPopover open={open} onOpenChange={setOpen} ariaLabel={ariaLabel} header={content}>
+      {options.map((option) => (
+        <button key={option.value} type="button" onClick={() => { setOpen(false); if (option.value !== value) onChange(option.value); }} className="task-cell-popover-item">
+          <span className="min-w-0 flex-1">
+            <span className="block truncate">{option.label}</span>
+            {option.helper && <span className="block truncate text-[11.5px] text-[var(--ink-muted)]">{option.helper}</span>}
+          </span>
+          {option.value === value && <Check className="h-3.5 w-3.5 text-[var(--ink-faint)]" />}
+        </button>
+      ))}
+    </TaskCellPopover>
   );
 }
 

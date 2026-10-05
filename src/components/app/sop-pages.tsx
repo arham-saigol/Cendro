@@ -32,6 +32,7 @@ import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
 import { requestDetailDrawerClose } from "./detail-drawer-motion";
 import { PageHeader } from "./page-header";
+import { TaskCellPopover } from "./task-cell-popover";
 import { ListDragOverlay, ListDragRailRow, ListSortableRow, useListDrag, type ListDrag } from "./list-dnd";
 import { ListSortHeader } from "./list-sort-header";
 import { Button } from "@/components/ui/button";
@@ -729,85 +730,11 @@ function InlineTitleCell({ value, ariaLabel, pending, onSave }: { value: string;
   );
 }
 
-function SopCellPopover({
-  open,
-  onOpenChange,
-  disabled = false,
-  pending = false,
-  ariaLabel,
-  header,
-  children,
-  panelClassName,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  disabled?: boolean;
-  pending?: boolean;
-  ariaLabel: string;
-  header: React.ReactNode;
-  children: React.ReactNode;
-  panelClassName?: string;
-}) {
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const [rect, setRect] = useState<{ top: number; left: number; width: number } | null>(null);
-
-  function measure() {
-    const bounds = triggerRef.current?.getBoundingClientRect();
-    if (!bounds) return;
-    const width = Math.min(Math.max(bounds.width + 28, 220), window.innerWidth - 16);
-    const left = Math.min(Math.max(8, bounds.left - 14), Math.max(8, window.innerWidth - width - 8));
-    setRect({ top: bounds.top, left, width });
-  }
-
-  useEffect(() => {
-    if (!open) return;
-    measure();
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onOpenChange(false);
-    }
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("resize", measure);
-    window.addEventListener("scroll", measure, true);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("resize", measure);
-      window.removeEventListener("scroll", measure, true);
-    };
-  }, [onOpenChange, open]);
-
-  return (
-    <span className="task-cell-popover-root">
-      <button
-        ref={triggerRef}
-        type="button"
-        disabled={disabled || pending}
-        data-interactive="true"
-        data-cell-popover-open={open ? "true" : undefined}
-        onClick={(event) => { event.stopPropagation(); if (!open) measure(); onOpenChange(!open); }}
-        className={cn("task-cell-control", pending && "opacity-60")}
-        aria-label={ariaLabel}
-        aria-expanded={open}
-      >
-        {header}
-      </button>
-      {open && rect && (
-        <>
-          <button type="button" aria-label="Close menu" className="task-cell-popover-backdrop" onClick={(event) => { event.stopPropagation(); onOpenChange(false); }} />
-          <div className={cn("task-cell-popover", panelClassName)} style={{ top: rect.top, left: rect.left, width: rect.width }} data-interactive="true" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-            <div className="task-cell-popover-header">{header}</div>
-            <div className="task-cell-popover-body">{children}</div>
-          </div>
-        </>
-      )}
-    </span>
-  );
-}
-
 function InlineScopeCell({ value, options, pending, onSave }: { value: EditableScopeType; options: EditableScopeType[]; pending?: boolean; onSave: (value: EditableScopeType) => Promise<boolean> }) {
   const [open, setOpen] = useState(false);
   const header = <span className="min-w-0 flex-1 truncate"><ScopePill scopeType={value} /></span>;
   return (
-    <SopCellPopover open={open} onOpenChange={setOpen} disabled={pending || options.length === 0} pending={pending} ariaLabel="Change SOP type" header={header}>
+    <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending || options.length === 0} pending={pending} ariaLabel="Change SOP type" header={header}>
       {options.map((option) => (
         <button key={option} type="button" onClick={() => { setOpen(false); if (option !== value) void onSave(option); }} className="task-cell-popover-item">
           <ScopePill scopeType={option} />
@@ -815,7 +742,7 @@ function InlineScopeCell({ value, options, pending, onSave }: { value: EditableS
           {option === value && <Check className="h-3.5 w-3.5 text-[var(--ink-faint)]" />}
         </button>
       ))}
-    </SopCellPopover>
+    </TaskCellPopover>
   );
 }
 
@@ -855,7 +782,7 @@ function InlineSopTargetCell({ scopeType, targetName, targetUser, scopeOptions, 
     });
   }
 
-  return <SopCellPopover open={open} onOpenChange={setOpen} disabled={pending} pending={pending} ariaLabel="Change SOP assignment" header={header} panelClassName="task-cell-popover-scroll">{body}</SopCellPopover>;
+  return <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending} pending={pending} ariaLabel="Change SOP assignment" header={header} panelClassName="task-cell-popover-scroll">{body}</TaskCellPopover>;
 }
 
 export function SopList({ selectedId }: { selectedId?: string }) {

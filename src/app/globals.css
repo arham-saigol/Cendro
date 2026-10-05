@@ -497,7 +497,11 @@ button:disabled { cursor: not-allowed; }
 .task-cell-popover {
   position: fixed;
   z-index: 89;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
+  max-height: calc(100vh - 16px);
+  max-height: calc(100dvh - 16px);
   border: 1px solid var(--hairline);
   border-radius: 7px;
   background: var(--surface);
@@ -506,6 +510,7 @@ button:disabled { cursor: not-allowed; }
 .task-cell-popover-header {
   display: flex;
   height: 41px;
+  flex-shrink: 0;
   align-items: center;
   gap: 7px;
   border-bottom: 1px solid var(--hairline);
@@ -513,7 +518,7 @@ button:disabled { cursor: not-allowed; }
   padding: 0 14px;
   color: var(--ink-secondary);
 }
-.task-cell-popover-body { padding: 5px; background: var(--surface); }
+.task-cell-popover-body { padding: 5px; background: var(--surface); overflow-y: auto; min-height: 0; }
 .task-cell-popover-item {
   display: flex;
   width: 100%;

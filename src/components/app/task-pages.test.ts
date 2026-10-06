@@ -44,7 +44,7 @@ vi.mock("convex/react", () => ({
       [...(state.pending ? ["pending:new"] : []), "A", "B", "C"]
         .filter((_id) => state.ignorePausedQuery || state.pausedIds.includes(_id) === Boolean(args.paused))
         .map((_id) => ({
-          _id, reference: _id, title: _id, recurrence: "daily", priority: "low", createdAt: 1,
+          _id, reference: _id, title: _id, recurrence: _id === "B" ? "weekly" : "daily", priority: "low", createdAt: 1,
           pausedAt: state.pausedIds.includes(_id) ? 1 : undefined,
           canPause: state.lifecycleAllowed, canResume: state.lifecycleAllowed,
           assigneeMembershipIds: ["member"], assignees: [], state: { status: "Due" },
@@ -216,6 +216,8 @@ test("paused filtering works in All and My views and with a frequency filter, wh
   await act(async () => state.selectMy!());
   expect([...state.railRows.keys()]).toEqual(["B"]);
   await act(async () => state.selects.get("Daily")!());
+  expect([...state.railRows.keys()]).toEqual([]);
+  await act(async () => state.selects.get("Weekly")!());
   expect([...state.railRows.keys()]).toEqual(["B"]);
   state.filterPaused = null;
   await act(async () => state.selectCustom!());

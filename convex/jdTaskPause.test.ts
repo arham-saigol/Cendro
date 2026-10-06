@@ -29,12 +29,13 @@ test("pause preserves history and suppresses discovery, counts and cycles; resum
   await admin.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [taskId], paused: true });
   expect((await admin.query(api.tasks.listJdRows, { companyId, paginationOpts })).page).toEqual([]);
   const paused = await admin.query(api.tasks.listJdRows, { companyId, paused: true, paginationOpts });
-  expect(paused.page).toMatchObject([{ _id: taskId, canResume: true, state: { status: "Paused", dueAt: null, isOverdue: false } }]);
+  expect(paused.page).toMatchObject([{ _id: taskId, canResume: true, state: { status: "Inactive", dueAt: null, isOverdue: false } }]);
   expect((await admin.query(api.analytics.summary, { companyId })).jdTaskCount).toBe(0);
   expect((await admin.query(api.tasks.searchJd, { companyId, query: "Daily" })).tasks).toEqual([]);
-  expect((await admin.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts })).page).toEqual([]);
+  // Exports keep inactive rows and flag them instead of hiding them.
+  expect((await admin.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts })).page).toMatchObject([{ title: "Daily check", isActive: false }]);
   expect((await admin.query(api.tasks.aiListVisible, { companyId, kind: "jd", status: "all", limit: 30 })).rows).toEqual([]);
-  await expect(f.asUser("employeeA1").mutation(api.tasks.completeJd, { companyId, taskId })).rejects.toThrow("Resume this task");
+  await expect(f.asUser("employeeA1").mutation(api.tasks.completeJd, { companyId, taskId })).rejects.toThrow("Make this task active");
   const pausedDashboard = await admin.query(api.analytics.dashboard, { companyId, now: utc(3), range: { preset: "custom", startDate: "2026-06-01", endDate: "2026-06-30" } });
   expect(pausedDashboard.jd).toMatchObject({ due: 0, overdue: 0 });
   vi.setSystemTime(utc(20)); // Saturday: next working occurrence is Monday June 22.
@@ -76,7 +77,7 @@ test("pause and resume permissions are independent, scoped on every row and atom
   }
   await pause([own]);
   const rows = await manager.query(api.tasks.listJdRows, { companyId, paused: true, paginationOpts });
-  expect(rows.page).toMatchObject([{ _id: own, canPause: true, canResume: false }]);
+  expect(rows.page).toMatchObject([{ _id: own, canPause: false, canResume: false }]);
   await expect(pause([own], false)).rejects.toThrow("access");
   await f.setRoleCapabilities(companyId, "Manager", [...defaultRoleCapabilities.Manager, "tasks:jd:resume"]);
   await expect(pause([outside])).rejects.toThrow("access");
@@ -127,7 +128,11 @@ test("paused rows cannot consume the active AI scan or dashboard task budget", a
   const list = await admin.query(api.tasks.aiListVisible, { companyId, kind: "jd", status: "all", limit: 30 });
   expect(list).toMatchObject({ rows: [{ reference: "JD-001", title: "Active check" }], truncated: false });
   expect((await admin.query(api.analytics.summary, { companyId })).jdTaskCount).toBe(1);
-  expect((await admin.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts })).page).toMatchObject([{ reference: "JD-001" }]);
+  // Inactive rows ride along in exports even though they are hidden elsewhere.
+  const exported = await admin.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts: { numItems: 600, cursor: null } });
+  expect(exported.page).toHaveLength(502);
+  expect(exported.page.filter((row) => "isActive" in row && row.isActive)).toMatchObject([{ reference: "JD-001" }]);
+  expect(exported.page.filter((row) => "isActive" in row && !row.isActive)).toHaveLength(501);
 });
 
 test("resuming onto a new grid keeps old misses separate from the new current cycle", async () => {
@@ -212,7 +217,7 @@ test("self-scoped lifecycle grants apply to assigned shared tasks but never to o
   const outside = await admin.mutation(api.tasks.createJd, { companyId, title: "Outside task", recurrence: "weekly", assigneeMembershipIds: [f.employee2M] });
   await f.setRoleCapabilities(companyId, "Employee", [...defaultRoleCapabilities.Employee, "tasks:jd:pause", "tasks:jd:resume"]);
   const rows = await employee.query(api.tasks.listJdRows, { companyId, paginationOpts });
-  expect(rows.page).toMatchObject([{ _id: shared, canPause: true, canResume: true }]);
+  expect(rows.page).toMatchObject([{ _id: shared, canPause: true, canResume: false }]);
   await employee.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [shared], paused: true });
   await employee.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [shared], paused: false });
   await expect(employee.mutation(api.tasks.setJdPausedBulk, { companyId, taskIds: [outside], paused: true })).rejects.toThrow("Task not found");

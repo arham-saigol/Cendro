@@ -2198,7 +2198,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                     className="task-selection-pill-btn"
                     onClick={() => void handlePausedSelection()}
                     disabled={changingPaused || deleting || exportingSelection || selectionCount > 100}
-                    aria-label={lifecycleAction === "pause" ? "Make inactive" : "Make active"}
+                    aria-label={`${lifecycleAction === "pause" ? "Make inactive" : "Make active"}${selectionCount > 100 ? " (select at most 100 tasks at once)" : ""}`}
                     data-tooltip={selectionCount > 100 ? "Select at most 100 tasks at once" : lifecycleAction === "pause" ? "Make inactive" : "Make active"}
                   >
                     {lifecycleAction === "pause" ? <CirclePause className="h-4 w-4" /> : <CirclePlay className="h-4 w-4" />}

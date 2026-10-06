@@ -149,7 +149,7 @@ function descendants(node: any): any[] {
   return [node, ...(node.children ?? []).flatMap(descendants)];
 }
 function button(label: string) {
-  return descendants(container).find((node) => node.tagName === "BUTTON" && descendants(node).some((child) => child.nodeValue === label || child.textContent === label));
+  return descendants(container).find((node) => node.tagName === "BUTTON" && (node.getAttribute?.("aria-label") === label || descendants(node).some((child) => child.nodeValue === label || child.textContent === label)));
 }
 async function clickButton(label: string) {
   const node = button(label);
@@ -163,6 +163,8 @@ test("bulk lifecycle actions follow selection state and permissions, and submit 
   await act(async () => state.railRows.get("A")!());
   await act(async () => state.railRows.get("B")!());
   expect(button("Make inactive")).toBeDefined();
+  // Icon-only button: the label lives on the tooltip, not as button text.
+  expect(button("Make inactive")?.getAttribute("data-tooltip")).toBe("Make inactive");
   expect(button("Make active")).toBeUndefined();
   await clickButton("Make inactive");
   expect(state.lifecycleWrites).toEqual([{ companyId: "company", taskIds: ["A", "B"], paused: true }]);

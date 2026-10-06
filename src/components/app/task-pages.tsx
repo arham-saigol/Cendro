@@ -12,6 +12,8 @@ import {
   ChevronRight,
   ChevronsRight,
   CircleAlert,
+  CirclePause,
+  CirclePlay,
   Clock,
   Download,
   Flag,
@@ -2170,7 +2172,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
             <div className="task-selection-pill" role="status" aria-live="polite">
               <span className="task-selection-pill-count">{selectionCount} selected</span>
               <span className="task-selection-pill-divider" aria-hidden="true" />
-              <button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={deleting || exportingSelection} aria-label="Cancel selection" title="Cancel selection">
+              <button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={deleting || exportingSelection} aria-label="Cancel selection" data-tooltip="Cancel selection">
                 <X className="h-4 w-4" />
               </button>
               {selectionCount === 1 && canEditSelectedTask && (
@@ -2182,7 +2184,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                     onClick={handleEditSelection}
                     disabled={deleting || exportingSelection}
                     aria-label="Edit selected task"
-                    title="Edit selected"
+                    data-tooltip="Edit selected"
                   >
                     <Pencil className="h-4 w-4" />
                   </button>
@@ -2196,22 +2198,23 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                     className="task-selection-pill-btn"
                     onClick={() => void handlePausedSelection()}
                     disabled={changingPaused || deleting || exportingSelection || selectionCount > 100}
-                    title={selectionCount > 100 ? "Select at most 100 tasks at once" : undefined}
+                    aria-label={lifecycleAction === "pause" ? "Make inactive" : "Make active"}
+                    data-tooltip={selectionCount > 100 ? "Select at most 100 tasks at once" : lifecycleAction === "pause" ? "Make inactive" : "Make active"}
                   >
-                    {lifecycleAction === "pause" ? "Make inactive" : "Make active"}
+                    {lifecycleAction === "pause" ? <CirclePause className="h-4 w-4" /> : <CirclePlay className="h-4 w-4" />}
                   </button>
                 </>
               )}
               {canExport && (
                 <>
                   <span className="task-selection-pill-divider" aria-hidden="true" />
-                  <button type="button" className="task-selection-pill-btn" onClick={() => void handleExportSelection()} disabled={exportingSelection || deleting} aria-label={selectionCount === 1 ? "Export selected task" : `Export ${selectionCount} selected tasks`} title="Export selected">
+                  <button type="button" className="task-selection-pill-btn" onClick={() => void handleExportSelection()} disabled={exportingSelection || deleting} aria-label={selectionCount === 1 ? "Export selected task" : `Export ${selectionCount} selected tasks`} data-tooltip="Export selected">
                     <Download className="h-4 w-4" />
                   </button>
                 </>
               )}
               <span className="task-selection-pill-divider" aria-hidden="true" />
-              <button type="button" className="task-selection-pill-btn" data-danger="true" onClick={handleDeleteSelection} disabled={!canDeleteSelection || deleting || exportingSelection} aria-label={selectionCount === 1 ? "Delete selected task" : `Delete ${selectionCount} selected tasks`} title="Delete selected">
+              <button type="button" className="task-selection-pill-btn" data-danger="true" onClick={handleDeleteSelection} disabled={!canDeleteSelection || deleting || exportingSelection} aria-label={selectionCount === 1 ? "Delete selected task" : `Delete ${selectionCount} selected tasks`} data-tooltip="Delete selected">
                 <Trash2 className="h-4 w-4" />
               </button>
             </div>

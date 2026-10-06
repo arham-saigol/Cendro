@@ -724,7 +724,7 @@ function HolidayDialog({
     if (!open) return;
     const inerted: HTMLElement[] = [];
     for (const el of Array.from(document.body.children)) {
-      if (!(el instanceof HTMLElement) || el.querySelector('[role="dialog"]')) continue;
+      if (!(el instanceof HTMLElement) || el.matches('[role="dialog"]') || el.querySelector('[role="dialog"]')) continue;
       el.inert = true;
       inerted.push(el);
     }

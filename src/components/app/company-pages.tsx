@@ -609,8 +609,8 @@ function WorkCalendarSection({
             <div className="company-settings-label">Holidays</div>
             <p className="company-settings-help">Named days off, as a single date or a start–end range. Holidays count as non-working days; turn on Repeats every year for fixed dates that recur annually.</p>
           </div>
-          <div className="company-settings-control w-full sm:w-[380px]">
-            <div className="flex w-full flex-col gap-2">
+          <div className="company-settings-control">
+            <div className="flex w-full flex-col gap-2 sm:w-[380px]">
               {calendar.holidays.length === 0 && (
                 <p className="rounded-md border border-dashed border-[var(--hairline)] px-3 py-2.5 text-[12px] text-[var(--ink-muted)]">No holidays yet.</p>
               )}

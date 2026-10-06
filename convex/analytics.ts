@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
-import { analyticsScopedMembershipIds, assertAnalyticsViewAccess, buildSopVisibilityContext, membershipCapabilities, requireMembership, sopListScopeAuth, taskHasVisibleAssignee, visibleAssigneeMembershipIds, visibleSop } from "./permissions";
+import { analyticsScopedMembershipIds, assertAnalyticsViewAccess, buildSopVisibilityContext, requireMembership, sopListScopeAuth, taskHasVisibleAssignee, visibleAssigneeMembershipIds, visibleSop } from "./permissions";
 import { currentJdCycle, localDateField, nextJdCycleStart } from "./taskCycles";
 import { jdOccurrencesDueBetween, loadWorkCalendar, maxHolidaySpanDays, occurrenceDeadline } from "./workCalendar";
 import { bucketIndexFor, buildDashboardBuckets, dashboardRangeValidator, resolveDashboardRange } from "./dashboardTime";
@@ -88,8 +88,7 @@ async function dashboardAccess(
   companyId: Id<"companies">,
   completeness: QueryCompleteness,
 ) {
-  const { membership, company } = await requireMembership(ctx, companyId);
-  const caps = await membershipCapabilities(ctx, membership);
+  const { membership, company, capabilities: caps } = await requireMembership(ctx, companyId);
   assertAnalyticsViewAccess(caps);
 
   const dashboardScope: DashboardScope = caps.has("analytics:view:company") ? "company" : caps.has("analytics:view:managed_scope") ? "managed" : "self";
@@ -616,8 +615,7 @@ export const dashboard = query({
 });
 
 async function analyticsSummary(ctx: QueryCtx, args: { companyId: Id<"companies"> }) {
-  const { membership } = await requireMembership(ctx, args.companyId);
-  const caps = await membershipCapabilities(ctx, membership);
+  const { membership, capabilities: caps } = await requireMembership(ctx, args.companyId);
   assertAnalyticsViewAccess(caps);
   const completeness: QueryCompleteness = { isTruncated: false, truncatedReads: 0, remaining: dashboardReadBudget };
   const scoped = await analyticsScopedMembershipIds(

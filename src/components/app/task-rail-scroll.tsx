@@ -9,8 +9,6 @@ export type TaskRailScrollOptions = {
   activeCompanyId?: string | null;
   canUseAllTasks: boolean;
   effectiveTaskView: "all" | "my" | "custom";
-  activeView: string;
-  ownFilterCount: number;
 };
 
 export function syncToggleScrollState(node: HTMLElement | null) {
@@ -70,8 +68,6 @@ export function useTaskRailAutoScroll({
   activeCompanyId,
   canUseAllTasks,
   effectiveTaskView,
-  activeView,
-  ownFilterCount,
 }: TaskRailScrollOptions) {
   const [scrollState, setScrollState] = useState({ canStart: false, canEnd: false });
   const isInitialMount = useRef(true);
@@ -144,13 +140,13 @@ export function useTaskRailAutoScroll({
     syncState();
   }, [activeCompanyId, scrollActive, syncState]);
 
-  // View state change (user clicks pills or filters change) -> always smooth scroll into view
+  // View state change (user clicks a view tab) -> always smooth scroll into view
   useEffect(() => {
     if (!isInitialMount.current) {
       scrollActive("smooth");
       syncState();
     }
-  }, [activeView, effectiveTaskView, ownFilterCount, canUseAllTasks, scrollActive, syncState]);
+  }, [effectiveTaskView, canUseAllTasks, scrollActive, syncState]);
 
   // Wheel listener
   useEffect(() => {

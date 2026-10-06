@@ -230,8 +230,6 @@ describe("useTaskRailAutoScroll hook", () => {
         activeCompanyId: "company-alpha",
         canUseAllTasks: true,
         effectiveTaskView: "all",
-        activeView: "all",
-        ownFilterCount: 3,
       });
 
       setPropsFn = (patch) => setOptions((prev) => ({ ...prev, ...patch }));
@@ -259,8 +257,8 @@ describe("useTaskRailAutoScroll hook", () => {
     railElement.scrollLeft = 0;
     railElement.dataset.scrollStart = "false";
 
-    // Switch company to "company-beta" with SAME role (canUseAllTasks: true),
-    // SAME option count (ownFilterCount: 3), and SAME activeView ("all")
+    // Switch company to "company-beta" with SAME role (canUseAllTasks: true)
+    // and SAME effectiveTaskView ("all")
     await act(async () => {
       setPropsFn({ activeCompanyId: "company-beta" });
     });
@@ -273,7 +271,7 @@ describe("useTaskRailAutoScroll hook", () => {
     railElement.scrollLeft = 0;
     railElement.dataset.scrollStart = "false";
 
-    // Switch effectiveTaskView from "all" to "my" with same company, role, count, and activeView
+    // Switch effectiveTaskView from "all" to "my" with same company and role
     await act(async () => {
       setPropsFn({ effectiveTaskView: "my" });
     });

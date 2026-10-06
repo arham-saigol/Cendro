@@ -382,6 +382,7 @@ function GeneralTab({
   canManageCalendar,
   onSetWorkingDays,
   onAddHoliday,
+  onUpdateHoliday,
   onRemoveHoliday,
 }: {
   data: Overview;
@@ -399,6 +400,7 @@ function GeneralTab({
   canManageCalendar: boolean;
   onSetWorkingDays: (workingDays: number[]) => Promise<void> | void;
   onAddHoliday: (name: string, startDate: string, endDate: string, recursYearly: boolean) => Promise<boolean> | boolean;
+  onUpdateHoliday: (holidayId: Id<"companyHolidays">, name: string, startDate: string, endDate: string, recursYearly: boolean) => Promise<boolean> | boolean;
   onRemoveHoliday: (holidayId: Id<"companyHolidays">) => Promise<void> | void;
 }) {
   const options = timeZoneOptions(timeZone);
@@ -472,6 +474,7 @@ function GeneralTab({
           canManageCalendar={canManageCalendar}
           onSetWorkingDays={onSetWorkingDays}
           onAddHoliday={onAddHoliday}
+          onUpdateHoliday={onUpdateHoliday}
           onRemoveHoliday={onRemoveHoliday}
         />
       )}
@@ -531,24 +534,24 @@ function holidayRangeLabel(holiday: CalendarHoliday) {
   return `${formatCalendarDate(holiday.startDate)} – ${formatCalendarDate(holiday.endDate)}`;
 }
 
+type HolidayDialogState = { mode: "add" } | { mode: "edit"; holiday: CalendarHoliday };
+
 function WorkCalendarSection({
   calendar,
   canManageCalendar,
   onSetWorkingDays,
   onAddHoliday,
+  onUpdateHoliday,
   onRemoveHoliday,
 }: {
   calendar: WorkCalendarData;
   canManageCalendar: boolean;
   onSetWorkingDays: (workingDays: number[]) => Promise<void> | void;
   onAddHoliday: (name: string, startDate: string, endDate: string, recursYearly: boolean) => Promise<boolean> | boolean;
+  onUpdateHoliday: (holidayId: Id<"companyHolidays">, name: string, startDate: string, endDate: string, recursYearly: boolean) => Promise<boolean> | boolean;
   onRemoveHoliday: (holidayId: Id<"companyHolidays">) => Promise<void> | void;
 }) {
-  const [holidayName, setHolidayName] = useState("");
-  const [holidayStart, setHolidayStart] = useState("");
-  const [holidayEnd, setHolidayEnd] = useState("");
-  const [holidayYearly, setHolidayYearly] = useState(false);
-  const [holidaySaving, setHolidaySaving] = useState(false);
+  const [holidayDialog, setHolidayDialog] = useState<HolidayDialogState | null>(null);
   const workingDays = new Set(calendar.workingDays);
 
   const setWorkingDay = (day: number, on: boolean) => {
@@ -560,23 +563,6 @@ function WorkCalendarSection({
       next.delete(day);
     }
     void onSetWorkingDays([...next].sort((a, b) => a - b));
-  };
-
-  const submitHoliday = async () => {
-    const name = holidayName.trim();
-    if (!name || !holidayStart || holidaySaving) return;
-    setHolidaySaving(true);
-    try {
-      // Keep the form filled when the save fails so the entry isn't lost.
-      if (await onAddHoliday(name, holidayStart, holidayEnd || holidayStart, holidayYearly)) {
-        setHolidayName("");
-        setHolidayStart("");
-        setHolidayEnd("");
-        setHolidayYearly(false);
-      }
-    } finally {
-      setHolidaySaving(false);
-    }
   };
 
   return (
@@ -641,73 +627,185 @@ function WorkCalendarSection({
                     </Badge>
                   )}
                   {canManageCalendar && (
-                    <button
-                      type="button"
-                      className="grid h-7 w-7 shrink-0 place-items-center rounded text-[var(--ink-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--ink)]"
-                      onClick={() => void onRemoveHoliday(holiday._id)}
-                      aria-label={`Remove ${holiday.name}`}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="grid h-7 w-7 shrink-0 place-items-center rounded text-[var(--ink-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--ink)]"
+                        onClick={() => setHolidayDialog({ mode: "edit", holiday })}
+                        aria-label={`Edit ${holiday.name}`}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        className="grid h-7 w-7 shrink-0 place-items-center rounded text-[var(--ink-muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--ink)]"
+                        onClick={() => void onRemoveHoliday(holiday._id)}
+                        aria-label={`Remove ${holiday.name}`}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </>
                   )}
                 </div>
               ))}
               {canManageCalendar && (
-                <div className="rounded-md border border-[var(--hairline)] p-2.5">
-                  <Input
-                    value={holidayName}
-                    onChange={(event) => setHolidayName(event.target.value)}
-                    placeholder="Holiday name"
-                    aria-label="Holiday name"
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && holidayName.trim() && holidayStart) void submitHoliday();
-                    }}
-                  />
-                  <div className="mt-2 flex items-center gap-1.5">
-                    <DateField
-                      value={holidayStart}
-                      onChange={setHolidayStart}
-                      placeholder="Start date"
-                      aria-label="Holiday start date"
-                      className="min-w-0 flex-1"
-                    />
-                    <span className="shrink-0 px-0.5 text-[12px] text-[var(--ink-faint)]">to</span>
-                    <DateField
-                      value={holidayEnd}
-                      onChange={setHolidayEnd}
-                      placeholder="End date"
-                      aria-label="Holiday end date (optional)"
-                      clearable
-                      className="min-w-0 flex-1"
-                    />
-                  </div>
-                  <div className="mt-2.5 flex items-center justify-between gap-3">
-                    <Switch checked={holidayYearly} onCheckedChange={setHolidayYearly} aria-label="Repeat holiday every year">
-                      <span className="text-[13px] text-[var(--ink)]">Repeats every year</span>
-                    </Switch>
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={!holidayName.trim() || !holidayStart || holidaySaving}
-                      onClick={() => void submitHoliday()}
-                    >
-                      <Plus className="h-3.5 w-3.5" /> Add
-                    </Button>
-                  </div>
-                  {holidayYearly && (
-                    <p className="mt-2 text-[12px] leading-snug text-[var(--ink-muted)]">
-                      {holidayStart && holidayEnd && holidayEnd.slice(5) < holidayStart.slice(5)
-                        ? `Wraps the year boundary — runs ${formatMonthDay(holidayStart)} through ${formatMonthDay(holidayEnd)} each year.`
-                        : "Repeats on the same dates every year; the picked year is ignored."}
-                    </p>
-                  )}
-                </div>
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-[var(--hairline)] px-2.5 py-2 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:border-[var(--hairline-strong)] hover:text-[var(--ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                  onClick={() => setHolidayDialog({ mode: "add" })}
+                >
+                  <Plus className="h-3.5 w-3.5" /> Add
+                </button>
               )}
             </div>
           </div>
         </div>
       </div>
+      <HolidayDialog
+        open={holidayDialog !== null}
+        onOpenChange={(open) => {
+          if (!open) setHolidayDialog(null);
+        }}
+        holiday={holidayDialog?.mode === "edit" ? holidayDialog.holiday : undefined}
+        onSave={(name, startDate, endDate, recursYearly) =>
+          holidayDialog?.mode === "edit"
+            ? onUpdateHoliday(holidayDialog.holiday._id, name, startDate, endDate, recursYearly)
+            : onAddHoliday(name, startDate, endDate, recursYearly)
+        }
+      />
     </section>
+  );
+}
+
+function HolidayDialog({
+  open,
+  onOpenChange,
+  holiday,
+  onSave,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  holiday?: CalendarHoliday;
+  onSave: (name: string, startDate: string, endDate: string, recursYearly: boolean) => Promise<boolean> | boolean;
+}) {
+  const editing = holiday !== undefined;
+  const [name, setName] = useState("");
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+  const [yearly, setYearly] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setName(holiday?.name ?? "");
+      setStart(holiday?.startDate ?? "");
+      setEnd(holiday?.endDate ?? "");
+      setYearly(holiday?.recursYearly ?? false);
+      setSaving(false);
+    }
+  }, [open, holiday]);
+
+  const submit = async () => {
+    const trimmed = name.trim();
+    if (!trimmed || !start || saving) return;
+    setSaving(true);
+    try {
+      // Keep the dialog filled when the save fails so the entry isn't lost.
+      if (await onSave(trimmed, start, end || start, yearly)) onOpenChange(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/35 backdrop-blur-[2px]" />
+        <Dialog.Content
+          onPointerDownOutside={(e) => e.preventDefault()}
+          onInteractOutside={(e) => e.preventDefault()}
+          className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(480px,94dvh)] w-[min(400px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] shadow-[var(--shadow-elevated)]"
+        >
+          <div className="flex items-start justify-between border-b border-[var(--hairline)] px-5 py-4">
+            <div>
+              <Dialog.Title className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">
+                {editing ? "Edit holiday" : "Add holiday"}
+              </Dialog.Title>
+              <Dialog.Description className="mt-0.5 text-[12.5px] text-[var(--ink-muted)]">
+                A single date or a start–end range of named days off.
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button type="button" className="task-icon-btn" aria-label="Close">
+                <X className="h-4 w-4" />
+              </button>
+            </Dialog.Close>
+          </div>
+          <form
+            className="flex min-h-0 flex-1 flex-col"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submit();
+            }}
+          >
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+              <label className="block">
+                <span className="mb-1.5 block text-[12px] font-medium text-[var(--ink-muted)]">
+                  Name
+                </span>
+                <Input
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="Holiday name"
+                  aria-label="Holiday name"
+                  autoFocus
+                />
+              </label>
+              <div className="mt-3 flex items-center gap-1.5">
+                <DateField
+                  value={start}
+                  onChange={setStart}
+                  placeholder="Start date"
+                  aria-label="Holiday start date"
+                  className="min-w-0 flex-1"
+                />
+                <span className="shrink-0 px-0.5 text-[12px] text-[var(--ink-faint)]">to</span>
+                <DateField
+                  value={end}
+                  onChange={setEnd}
+                  placeholder="End date"
+                  aria-label="Holiday end date (optional)"
+                  clearable
+                  className="min-w-0 flex-1"
+                />
+              </div>
+              <div className="mt-3">
+                <Switch checked={yearly} onCheckedChange={setYearly} aria-label="Repeat holiday every year">
+                  <span className="text-[13px] text-[var(--ink)]">Repeats every year</span>
+                </Switch>
+                {yearly && (
+                  <p className="mt-2 text-[12px] leading-snug text-[var(--ink-muted)]">
+                    {start && end && end.slice(5) < start.slice(5)
+                      ? `Wraps the year boundary — runs ${formatMonthDay(start)} through ${formatMonthDay(end)} each year.`
+                      : "Repeats on the same dates every year; the picked year is ignored."}
+                  </p>
+                )}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-[var(--hairline)] bg-[var(--surface)] px-5 py-3">
+              <Dialog.Close asChild>
+                <Button type="button">
+                  Cancel
+                </Button>
+              </Dialog.Close>
+              <Button type="submit" variant="primary" disabled={saving || !name.trim() || !start}>
+                {saving ? "Saving..." : editing ? "Save changes" : "Add holiday"}
+              </Button>
+            </div>
+          </form>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -2524,6 +2622,19 @@ export default function Company() {
       } as any);
     }
   });
+  const updateHoliday = useMutation(api.workCalendar.updateHoliday).withOptimisticUpdate((localStore, args) => {
+    const current = localStore.getQuery(api.workCalendar.get, { companyId: args.companyId }) as WorkCalendarData | undefined;
+    if (current) {
+      // Same normalization the backend applies to one-time ranges.
+      const swap = args.recursYearly !== true && args.startDate > args.endDate;
+      const startDate = swap ? args.endDate : args.startDate;
+      const endDate = swap ? args.startDate : args.endDate;
+      localStore.setQuery(api.workCalendar.get, { companyId: args.companyId }, {
+        ...current,
+        holidays: current.holidays.map((holiday) => holiday._id === args.holidayId ? { ...holiday, name: args.name.trim(), startDate, endDate, recursYearly: args.recursYearly === true } : holiday),
+      } as any);
+    }
+  });
   const removeHoliday = useMutation(api.workCalendar.removeHoliday).withOptimisticUpdate((localStore, args) => {
     const current = localStore.getQuery(api.workCalendar.get, { companyId: args.companyId }) as WorkCalendarData | undefined;
     if (current) {
@@ -2870,6 +2981,7 @@ export default function Company() {
                 canManageCalendar={canManageCalendar}
                 onSetWorkingDays={(workingDays) => { if (activeCompanyId) void run(async () => setWorkingDays({ companyId: activeCompanyId, workingDays }), "Could not update working days."); }}
                 onAddHoliday={async (name, startDate, endDate, recursYearly) => activeCompanyId ? await run(async () => addHoliday({ companyId: activeCompanyId, name, startDate, endDate, recursYearly }), "Could not add holiday.") : false}
+                onUpdateHoliday={async (holidayId, name, startDate, endDate, recursYearly) => activeCompanyId ? await run(async () => updateHoliday({ companyId: activeCompanyId, holidayId, name, startDate, endDate, recursYearly }), "Could not update holiday.") : false}
                 onRemoveHoliday={(holidayId) => { if (activeCompanyId) void run(async () => removeHoliday({ companyId: activeCompanyId, holidayId }), "Could not remove holiday."); }}
               />
             )}

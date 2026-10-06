@@ -348,6 +348,31 @@ export const addHoliday = mutation({
   },
 });
 
+export const updateHoliday = mutation({
+  args: { companyId: v.id("companies"), holidayId: v.id("companyHolidays"), name: v.string(), startDate: v.string(), endDate: v.string(), recursYearly: v.optional(v.boolean()) },
+  handler: async (ctx, args) => {
+    const { user } = await requireCapability(ctx, args.companyId, "company:manage_calendar");
+    const holiday = await ctx.db.get(args.holidayId);
+    if (!holiday || holiday.companyId !== args.companyId) throw new ConvexError("Holiday not found.");
+    const name = nonEmpty(args.name, "Holiday name");
+    const start = parseCalendarDate(args.startDate);
+    const end = parseCalendarDate(args.endDate);
+    if (start === null || end === null) throw new ConvexError("Holiday dates must be real calendar dates.");
+    const recursYearly = args.recursYearly === true;
+    // Same ordering rule as addHoliday: repeating ranges keep their entered
+    // order (a start after the end wraps the year boundary); one-time ranges
+    // normalize to chronological order.
+    const first = recursYearly ? start : Math.min(start, end);
+    const last = recursYearly ? end : Math.max(start, end);
+    if (!recursYearly && last - first > MAX_HOLIDAY_SPAN_DAYS) throw new ConvexError("A holiday range can span at most one year.");
+    const startDate = calendarDateString(first);
+    const endDate = calendarDateString(last);
+    await ctx.db.patch(args.holidayId, { name, startDate, endDate, recursYearly });
+    await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "work_calendar.update_holiday", targetType: "companyHoliday", targetId: args.holidayId, metadata: { name, startDate, endDate, recursYearly }, createdAt: Date.now() });
+    return null;
+  },
+});
+
 export const removeHoliday = mutation({
   args: { companyId: v.id("companies"), holidayId: v.id("companyHolidays") },
   handler: async (ctx, args) => {

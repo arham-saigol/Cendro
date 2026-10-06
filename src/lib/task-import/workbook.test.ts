@@ -126,6 +126,20 @@ describe("task workbook pure helpers", () => {
     expect(parsed.rows[0].warnings).toContain("Is active must be Yes or No.");
   });
 
+  test("warns when a ninth-column value sits under an unrecognized header", () => {
+    const parsed = parseCendroWorkbookSheets([
+      { sheet: "Cendro Metadata", data: [["Format identifier", "cendro-task-export"], ["Schema version", 1], ["Task kind", "jd"], ["Source company ID", "company-1"], ["Source company name", "Acme"], ["Export timestamp", "2026-01-01T00:00:00.000Z"]] },
+      { sheet: "JD Tasks", data: [["Code", "Title", "Description", "Notes", "Frequency", "Time", "Quantity", "Assignee Emails", "Is Actve"], ["JD-001", "Daily maintenance", "", "", "daily", "", "", "admin@example.com", "No"], ["JD-002", "Other", "", "", "weekly", "", "", "admin@example.com", ""]] },
+    ], "company-1", "jd");
+    expect(parsed.rows).toHaveLength(2);
+    // The unrecognized column is not applied, but the dropped value is surfaced.
+    expect(parsed.rows[0]).toMatchObject({ reference: "JD-001", isActive: null });
+    expect(parsed.rows[0].presentFields).not.toContain("isActive");
+    expect(parsed.rows[0].warnings).toContain("Column 9 has a value but its header is not \"Is Active\"; the value was ignored.");
+    // Rows with an empty cell under the unrecognized header lose nothing and stay quiet.
+    expect(parsed.rows[1].warnings).toHaveLength(0);
+  });
+
   test("handles sheets with trailing empty rows like Google Sheets exports and ignores an old Status column", () => {
     const emptyRows = Array.from({ length: 998 }, () => [null, null, null, null, null, null, null, null, null]);
     const parsed = parseCendroWorkbookSheets([

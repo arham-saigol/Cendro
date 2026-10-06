@@ -35,7 +35,8 @@ const draftValidator = v.object({
   rawAssigneeText: v.string(),
   assigneeEmails: v.array(v.string()),
   status: v.union(statusValidator, v.null()),
-  isActive: v.union(v.boolean(), v.null()),
+  // Optional on the wire so clients running the pre-column bundle still validate; missing reads as null everywhere below.
+  isActive: v.optional(v.union(v.boolean(), v.null())),
   presentFields: v.array(presentFieldValidator),
   warnings: v.array(v.string()),
 });
@@ -71,7 +72,7 @@ type Draft = {
   rawAssigneeText: string;
   assigneeEmails: string[];
   status: "due" | "in_progress" | "completed" | null;
-  isActive: boolean | null;
+  isActive?: boolean | null;
   presentFields: string[];
   warnings: string[];
 };
@@ -260,8 +261,8 @@ function validateDraftValues(row: Draft, kind: TaskKind) {
   if (hasAssigneeValue(row) && !hasField(row, "assignees")) errors.push("Assignee data was not marked as present in the source.");
   if (kind === "jd" && (row.dueDate !== null || hasField(row, "dueDate") || row.priority !== null || hasField(row, "priority"))) errors.push("JD rows contain one-time task fields.");
   if (kind === "one_time" && (row.recurrence !== null || hasField(row, "recurrence"))) errors.push("One-time rows contain a recurrence.");
-  if (kind === "one_time" && (row.isActive !== null || hasField(row, "isActive"))) errors.push("One-time rows contain an active state.");
-  if (kind === "jd" && row.isActive === null && hasField(row, "isActive")) errors.push("Is active must be Yes or No.");
+  if (kind === "one_time" && (row.isActive != null || hasField(row, "isActive"))) errors.push("One-time rows contain an active state.");
+  if (kind === "jd" && row.isActive == null && hasField(row, "isActive")) errors.push("Is active must be Yes or No.");
   if (kind === "jd" && row.recurrence === null && hasField(row, "recurrence")) errors.push("Frequency is required and must be valid.");
   if (kind === "one_time" && row.priority === null && hasField(row, "priority")) errors.push("Priority is required and must be valid.");
   if (kind === "one_time" && row.dueDate !== null && !Number.isFinite(row.dueDate)) errors.push("Due date is invalid.");
@@ -282,7 +283,7 @@ async function checkJdLifecycleChange(
   draft: Draft,
   task: Doc<"jdTasks"> | null,
 ): Promise<{ change: "pause" | "resume" | null; error: string | null }> {
-  if (!hasField(draft, "isActive") || draft.isActive === null) return { change: null, error: null };
+  if (!hasField(draft, "isActive") || draft.isActive == null) return { change: null, error: null };
   const wantPaused = draft.isActive === false;
   if (task) {
     if ((task.pausedAt !== undefined) === wantPaused) return { change: null, error: null };

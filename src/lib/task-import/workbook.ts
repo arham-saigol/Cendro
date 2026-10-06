@@ -242,8 +242,12 @@ function findHeaderRow(rows: SheetData, kind: TaskImportKind) {
   );
 }
 
-function hasIsActiveColumn(row: readonly unknown[], kind: TaskImportKind) {
-  return kind === "jd" && normalizeHeader(row[jdRequiredHeaderCount]) === "is active";
+// The legacy "Status" column from older exports is silently ignored; any
+// other nonempty ninth header (e.g. a misspelled "Is Actve") is flagged per
+// row so lifecycle edits cannot vanish without a warning.
+function activeColumnState(row: readonly unknown[], kind: TaskImportKind) {
+  const header = kind === "jd" ? normalizeHeader(row[jdRequiredHeaderCount]) : "";
+  return header === "is active" ? "present" as const : header === "" || header === "status" ? "absent" as const : "unrecognized" as const;
 }
 
 function valueAt(row: readonly unknown[], index: number) {
@@ -257,7 +261,7 @@ function normalizeIsActive(value: unknown): boolean | null {
   return null;
 }
 
-function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number, row: readonly unknown[], isActiveColumn: boolean): TaskImportDraft {
+function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number, row: readonly unknown[], activeColumn: "present" | "unrecognized" | "absent"): TaskImportDraft {
   const referenceResult = referenceForKind(sourceText(valueAt(row, 0)), kind);
   const assignees = parseAssigneeEmails(sourceText(valueAt(row, kind === "jd" ? 7 : 8)));
   const title = sourceText(valueAt(row, 1)) || null;
@@ -270,7 +274,8 @@ function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number,
   const parsedDate = kind === "one_time" ? parseStrictDate(valueAt(row, 4)) : { value: null };
   const recurrence = kind === "jd" ? normalizeFrequency(valueAt(row, 4)) : null;
   const priority = kind === "one_time" ? normalizePriority(valueAt(row, 5)) : null;
-  const isActiveText = isActiveColumn ? sourceText(valueAt(row, jdRequiredHeaderCount)) : "";
+  const activeCellText = activeColumn === "absent" ? "" : sourceText(valueAt(row, jdRequiredHeaderCount));
+  const isActiveText = activeColumn === "present" ? activeCellText : "";
   const isActive = isActiveText ? normalizeIsActive(isActiveText) : null;
   const warnings = [
     ...(referenceResult.error ? [referenceResult.error] : []),
@@ -279,6 +284,7 @@ function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number,
     ...(kind === "jd" && sourceText(valueAt(row, 4)) && !recurrence ? ["Frequency is not a supported canonical value."] : []),
     ...(kind === "one_time" && sourceText(valueAt(row, 5)) && !priority ? ["Priority is not a supported canonical value."] : []),
     ...(isActiveText && isActive === null ? ["Is active must be Yes or No."] : []),
+    ...(activeColumn === "unrecognized" && activeCellText ? ["Column 9 has a value but its header is not \"Is Active\"; the value was ignored."] : []),
     ...(isFormulaLikeValue(valueAt(row, 0)) || isFormulaLikeValue(valueAt(row, 1)) ? ["Formula-like text was rejected as an input value."] : []),
   ];
   const presentFields = [
@@ -319,8 +325,8 @@ function makeDraft(kind: TaskImportKind, sourceSheet: string, sourceRow: number,
 function parseTaskSheet(rows: SheetData, kind: TaskImportKind, sheetName: string) {
   const headerIndex = findHeaderRow(rows, kind);
   if (headerIndex < 0) return { rows: [] as TaskImportDraft[], headerIndex };
-  const isActiveColumn = hasIsActiveColumn(rows[headerIndex], kind);
-  const drafts = rows.slice(headerIndex + 1).map((row, index) => ({ row, index })).filter(({ row }) => rowHasValues(row)).map(({ row, index }) => makeDraft(kind, sheetName, headerIndex + index + 2, row, isActiveColumn));
+  const activeColumn = activeColumnState(rows[headerIndex], kind);
+  const drafts = rows.slice(headerIndex + 1).map((row, index) => ({ row, index })).filter(({ row }) => rowHasValues(row)).map(({ row, index }) => makeDraft(kind, sheetName, headerIndex + index + 2, row, activeColumn));
   return { rows: drafts, headerIndex };
 }
 

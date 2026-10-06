@@ -1223,6 +1223,14 @@ describe("task import backend", () => {
     expect(events.map((event) => event.event)).toEqual(expect.arrayContaining(["paused", "resumed"]));
   });
 
+  test("drafts without the isActive field from older clients still validate", async () => {
+    const { t, companyId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+    const { isActive: _omitted, ...oldClientDraft } = draft({ reference: "JD-100" });
+    const preview = await admin.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [oldClientDraft] });
+    expect(preview.rows[0].operation).toBe("create");
+  });
+
   test("creating and editing inactive state via import requires the matching lifecycle capability", async () => {
     const { t, companyId } = await seed();
     const admin = t.withIdentity(identity("admin"));

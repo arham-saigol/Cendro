@@ -695,25 +695,58 @@ function HolidayDialog({
   const [yearly, setYearly] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // Seed the draft once per dialog session (keyed by the holiday id): the
+  // calendar is a live query, so an unrelated update to this row must not
+  // reset fields the user is mid-way through editing. sessionRef distinguishes
+  // successive opens of the same target for the stale-save guard in submit.
+  const seededKeyRef = useRef<string | null>(null);
+  const sessionRef = useRef(0);
   useEffect(() => {
-    if (open) {
-      setName(holiday?.name ?? "");
-      setStart(holiday?.startDate ?? "");
-      setEnd(holiday?.endDate ?? "");
-      setYearly(holiday?.recursYearly ?? false);
-      setSaving(false);
+    if (!open) {
+      seededKeyRef.current = null;
+      return;
     }
+    const key = holiday?._id ?? "add";
+    if (seededKeyRef.current === key) return;
+    seededKeyRef.current = key;
+    sessionRef.current += 1;
+    setName(holiday?.name ?? "");
+    setStart(holiday?.startDate ?? "");
+    setEnd(holiday?.endDate ?? "");
+    setYearly(holiday?.recursYearly ?? false);
+    setSaving(false);
   }, [open, holiday]);
+
+  // The non-modal dialog leaves the page behind it in the tab order; inert it
+  // so keyboard and assistive-tech users stay inside the dialog. The DateField
+  // popover portals to body after this runs, so it stays reachable.
+  useEffect(() => {
+    if (!open) return;
+    const inerted: HTMLElement[] = [];
+    for (const el of Array.from(document.body.children)) {
+      if (!(el instanceof HTMLElement) || el.querySelector('[role="dialog"]')) continue;
+      el.inert = true;
+      inerted.push(el);
+    }
+    return () => {
+      for (const el of inerted) el.inert = false;
+    };
+  }, [open]);
 
   const submit = async () => {
     const trimmed = name.trim();
     if (!trimmed || !start || saving) return;
+    // A save from an earlier session must not close or update a dialog the
+    // user has since closed and reopened.
+    const session = sessionRef.current;
     setSaving(true);
     try {
       // Keep the dialog filled when the save fails so the entry isn't lost.
-      if (await onSave(trimmed, start, end || start, yearly)) onOpenChange(false);
+      if ((await onSave(trimmed, start, end || start, yearly)) && session === sessionRef.current) {
+        onOpenChange(false);
+      }
     } finally {
-      setSaving(false);
+      if (session === sessionRef.current) setSaving(false);
     }
   };
 
@@ -721,8 +754,9 @@ function HolidayDialog({
     // Non-modal on purpose: a modal dialog sets pointer-events:none on body
     // and traps focus inside Dialog.Content, which would make DateField's
     // body-portaled calendar popover unreachable by mouse and keyboard. The
-    // overlay plus the outside-interaction guards below keep the rest of the
-    // page inert and the dialog open, so it still behaves modally.
+    // overlay, the inert background above, and the outside-interaction guards
+    // below keep the rest of the page inert and the dialog open, so it still
+    // behaves modally.
     <Dialog.Root open={open} onOpenChange={onOpenChange} modal={false}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/35 backdrop-blur-[2px]" />

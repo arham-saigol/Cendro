@@ -573,7 +573,7 @@ function WorkCalendarSection({
           <div className="min-w-0">
             <div className="company-settings-label">Working days</div>
             <p className="company-settings-help">
-              Daily and every-other-day tasks skip non-working days; other frequencies move their due date to the next working day.
+              Daily and every-other-day tasks skip these days; other tasks move to the next working day.
             </p>
           </div>
           <div className="company-settings-control">
@@ -607,7 +607,7 @@ function WorkCalendarSection({
         <div className="company-settings-row">
           <div className="min-w-0">
             <div className="company-settings-label">Holidays</div>
-            <p className="company-settings-help">Named days off, as a single date or a start–end range. Holidays count as non-working days; turn on Repeats every year for fixed dates that recur annually.</p>
+            <p className="company-settings-help">Days off, as a single date or a range. They count as non-working days; turn on Repeats every year to recur annually.</p>
           </div>
           <div className="company-settings-control">
             <div className="flex w-full flex-col gap-2 sm:w-[380px]">

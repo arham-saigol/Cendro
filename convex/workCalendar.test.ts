@@ -77,6 +77,36 @@ describe("work calendar settings", () => {
       t.withIdentity(identity("admin")).mutation(api.workCalendar.setWorkingDays, { companyId, workingDays: [] })
     ).rejects.toThrow();
   });
+
+  test("updateHoliday edits fields and normalizes a reversed one-time range", async () => {
+    const { t, companyId } = await seedCompany();
+    const holidayId = await t.withIdentity(identity("admin")).mutation(api.workCalendar.addHoliday, { companyId, name: "Office closed", startDate: "2026-12-24", endDate: "2026-12-24" });
+
+    await t.withIdentity(identity("admin")).mutation(api.workCalendar.updateHoliday, { companyId, holidayId, name: "Winter break", startDate: "2026-12-31", endDate: "2026-12-24", recursYearly: false });
+    let calendar = await t.withIdentity(identity("admin")).query(api.workCalendar.get, { companyId });
+    expect(calendar.holidays).toEqual([{ _id: holidayId, name: "Winter break", startDate: "2026-12-24", endDate: "2026-12-31", recursYearly: false }]);
+
+    // Repeating ranges keep their entered order so they can wrap the year.
+    await t.withIdentity(identity("admin")).mutation(api.workCalendar.updateHoliday, { companyId, holidayId, name: "Winter break", startDate: "2026-12-24", endDate: "2026-01-06", recursYearly: true });
+    calendar = await t.withIdentity(identity("admin")).query(api.workCalendar.get, { companyId });
+    expect(calendar.holidays).toEqual([{ _id: holidayId, name: "Winter break", startDate: "2026-12-24", endDate: "2026-01-06", recursYearly: true }]);
+
+    await expect(
+      t.withIdentity(identity("employee")).mutation(api.workCalendar.updateHoliday, { companyId, holidayId, name: "Nope", startDate: "2026-01-01", endDate: "2026-01-01" })
+    ).rejects.toThrow();
+    await expect(
+      t.withIdentity(identity("admin")).mutation(api.workCalendar.updateHoliday, { companyId, holidayId, name: "Too long", startDate: "2026-01-01", endDate: "2028-01-01" })
+    ).rejects.toThrow();
+
+    // A holiday id belonging to another company is rejected.
+    const otherHolidayId = await t.run(async (ctx) => {
+      const otherCompanyId = await ctx.db.insert("companies", { name: "Other", timeZone: "UTC", createdAt: Date.now() });
+      return await ctx.db.insert("companyHolidays", { companyId: otherCompanyId, name: "Theirs", startDate: "2026-01-01", endDate: "2026-01-01", recursYearly: false, createdAt: Date.now() });
+    });
+    await expect(
+      t.withIdentity(identity("admin")).mutation(api.workCalendar.updateHoliday, { companyId, holidayId: otherHolidayId, name: "Other company", startDate: "2026-01-01", endDate: "2026-01-01" })
+    ).rejects.toThrow();
+  });
 });
 
 describe("JD tasks on a work calendar", () => {

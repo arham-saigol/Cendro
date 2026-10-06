@@ -18,7 +18,7 @@ const state = vi.hoisted(() => ({
   lifecycleWrites: [] as { taskIds: string[]; paused: boolean }[],
   railRows: new Map<string, () => void>(),
   selectMy: null as null | (() => void),
-  selectFrequency: null as null | (() => void),
+  selects: new Map<string, () => void>(),
   filterPaused: null as null | ((value: boolean) => void),
   drop: null as null | ((id: string, insertion: ListInsertion) => void),
   selectCustom: null as null | (() => void),
@@ -44,7 +44,7 @@ vi.mock("convex/react", () => ({
       [...(state.pending ? ["pending:new"] : []), "A", "B", "C"]
         .filter((_id) => state.ignorePausedQuery || state.pausedIds.includes(_id) === Boolean(args.paused))
         .map((_id) => ({
-          _id, reference: _id, title: _id, recurrence: "daily", priority: "low", createdAt: 1,
+          _id, reference: _id, title: _id, recurrence: _id === "B" ? "weekly" : "daily", priority: "low", createdAt: 1,
           pausedAt: state.pausedIds.includes(_id) ? 1 : undefined,
           canPause: state.lifecycleAllowed, canResume: state.lifecycleAllowed,
           assigneeMembershipIds: ["member"], assignees: [], state: { status: "Due" },
@@ -81,7 +81,6 @@ vi.mock("./task-rail-scroll", () => ({
         const label = React.Children.toArray(button.props.children);
         if (label.includes("Custom")) state.selectCustom = button.props.onClick ?? null;
         if (label.includes("My Tasks")) state.selectMy = button.props.onClick ?? null;
-        if (label.includes("Daily")) state.selectFrequency = button.props.onClick ?? null;
       });
     });
     return null;
@@ -91,7 +90,24 @@ vi.mock("@/lib/use-is-coarse-pointer", () => ({ useIsCoarsePointer: () => false 
 
 vi.mock("@radix-ui/react-dropdown-menu", () => {
   const pass = ({ children }: { children: ReactNode }) => children;
-  return { Root: pass, Trigger: pass, Portal: pass, Content: pass, Sub: pass, SubTrigger: pass, SubContent: pass, Item: pass,
+  const findLabel = (node: ReactNode): string | null => {
+    if (typeof node === "string") return node;
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const label = findLabel(child);
+        if (label) return label;
+      }
+      return null;
+    }
+    if (React.isValidElement<{ children?: ReactNode }>(node)) return findLabel(node.props.children);
+    return null;
+  };
+  return { Root: pass, Trigger: pass, Portal: pass, Content: pass, Sub: pass, SubTrigger: pass, SubContent: pass,
+    Item: ({ onSelect, children }: { onSelect?: () => void; children?: ReactNode }) => {
+      const label = findLabel(children);
+      if (label && onSelect) state.selects.set(label, onSelect);
+      return children;
+    },
     CheckboxItem: ({ onCheckedChange, children }: { onCheckedChange: (value: boolean) => void; children: ReactNode }) => {
       state.filterPaused = onCheckedChange;
       return children;
@@ -112,6 +128,7 @@ afterEach(async () => {
   state.ignorePausedQuery = false;
   state.lifecycleWrites = [];
   state.filterPaused = null;
+  state.selects.clear();
   state.writes = [];
 });
 
@@ -191,7 +208,7 @@ test("a live selection that becomes mixed offers neither pause nor resume", asyn
   expect(button("Make active")).toBeUndefined();
 });
 
-test("paused filtering works in All, My and frequency views, while Custom never includes paused rows", async () => {
+test("paused filtering works in All and My views and with a frequency filter, while Custom never includes paused rows", async () => {
   state.pausedIds = ["B"];
   state.capabilities = ["tasks:jd:view:any"];
   await mount("jd", false);
@@ -200,7 +217,9 @@ test("paused filtering works in All, My and frequency views, while Custom never 
   expect([...state.railRows.keys()]).toEqual(["B"]);
   await act(async () => state.selectMy!());
   expect([...state.railRows.keys()]).toEqual(["B"]);
-  await act(async () => state.selectFrequency!());
+  await act(async () => state.selects.get("Daily")!());
+  expect([...state.railRows.keys()]).toEqual([]);
+  await act(async () => state.selects.get("Weekly")!());
   expect([...state.railRows.keys()]).toEqual(["B"]);
   state.filterPaused = null;
   await act(async () => state.selectCustom!());

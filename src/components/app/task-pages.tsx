@@ -1551,8 +1551,6 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [taskView, setTaskView] = useState<TaskView>("all");
   const [frequency, setFrequency] = useState<FrequencyFilter>("all");
   const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>("all");
-  const [personalFrequencyView, setPersonalFrequencyView] = useState<FrequencyFilter>("all");
-  const [personalPriorityView, setPersonalPriorityView] = useState<PriorityFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [pausedFilter, setPausedFilter] = useState(false);
   const [changingPaused, setChangingPaused] = useState(false);
@@ -1664,8 +1662,6 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const canExport = canExportTasks(active, kind);
   const frequencyFilterActive = kind === "jd" && frequency !== "all";
   const priorityFilterActive = kind === "one" && priorityFilter !== "all";
-  const frequencyViewActive = kind === "jd" && personalFrequencyView !== "all";
-  const priorityViewActive = kind === "one" && personalPriorityView !== "all";
   const effectiveTaskView: TaskView = taskView === "custom" ? "custom" : canUseAllTasks ? taskView : "my";
   const isCustomView = effectiveTaskView === "custom";
   const currentMembershipId = active?.membership._id as string | undefined;
@@ -1685,16 +1681,6 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   }, [allTasks, activePreference?.orderFormat]);
   const dataReady = Boolean(activeCompanyId && subscribedPreference && (!isCustomView || subscribedCustomView) && taskPageStatus === "Exhausted");
   const customOrderingEnabled = dataReady && (isCustomView ? allTasks.filter((task) => taskHasAssignee(task, currentMembershipId)).length : allTasks.length) <= TASK_LIST_ORDER_LIMIT;
-  const ownFrequencyValues = useMemo(() => {
-    if (kind !== "jd") return [] as Frequency[];
-    const set = new Set(allTasks.filter((task) => taskHasAssignee(task, currentMembershipId)).map((task) => task.recurrence).filter((value): value is Frequency => Boolean(value)));
-    return frequencies.map((option) => option.value).filter((value) => set.has(value));
-  }, [allTasks, currentMembershipId, kind]);
-  const ownPriorityValues = useMemo(() => {
-    if (kind !== "one") return [] as Priority[];
-    const set = new Set(allTasks.filter((task) => taskHasAssignee(task, currentMembershipId)).map((task) => task.priority).filter((value): value is Priority => Boolean(value)));
-    return priorities.filter((priority) => set.has(priority));
-  }, [allTasks, currentMembershipId, kind]);
   const showAssigneeColumn = canUseAllTasks && effectiveTaskView === "all";
   const showFrequencyColumn = kind === "jd" && (isCustomView || !frequencyFilterActive);
   const showPriorityColumn = kind === "one" && (isCustomView || !priorityFilterActive);
@@ -1775,40 +1761,17 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     if (!activeCompanyId) return;
     setTaskView(canUseAllTasks ? "all" : "my");
     setAssigneeFilter("all");
-    setPersonalFrequencyView("all");
-    setPersonalPriorityView("all");
   }, [activeCompanyId, canUseAllTasks]);
 
   useEffect(() => {
     if (effectiveTaskView === "my" && assigneeFilter !== "all") setAssigneeFilter("all");
   }, [effectiveTaskView, assigneeFilter]);
 
-  useEffect(() => {
-    if (!dataReady || kind !== "jd" || pausedFilter || personalFrequencyView === "all") return;
-    if (!ownFrequencyValues.includes(personalFrequencyView)) {
-      setPersonalFrequencyView("all");
-      setFrequency((current) => current === personalFrequencyView ? "all" : current);
-    }
-  }, [dataReady, kind, ownFrequencyValues, pausedFilter, personalFrequencyView]);
-
-  useEffect(() => {
-    if (!dataReady || kind !== "one" || personalPriorityView === "all") return;
-    if (!ownPriorityValues.includes(personalPriorityView)) {
-      setPersonalPriorityView("all");
-      setPriorityFilter((current) => current === personalPriorityView ? "all" : current);
-    }
-  }, [dataReady, kind, ownPriorityValues, personalPriorityView]);
-
-  const ownFilterCount = kind === "jd" ? ownFrequencyValues.length : ownPriorityValues.length;
-  const activeView = isCustomView ? "custom" : kind === "jd" ? personalFrequencyView : personalPriorityView;
-
   const { syncToggleScrollState } = useTaskRailAutoScroll({
     railRef: viewToggleRef,
     activeCompanyId,
     canUseAllTasks,
     effectiveTaskView,
-    activeView,
-    ownFilterCount,
   });
 
   useEffect(() => {
@@ -2008,16 +1971,6 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     }
   }, [activeCompanyId, kind, updateJdFields, updateOneTimeFields]);
 
-  function changeFrequencyFilter(value: FrequencyFilter) {
-    setFrequency(value);
-    setPersonalFrequencyView("all");
-  }
-
-  function changePriorityFilter(value: PriorityFilter) {
-    setPriorityFilter(value);
-    setPersonalPriorityView("all");
-  }
-
   function selectCustomView() {
     setSelectedIds(new Set());
     setTaskView("custom");
@@ -2069,41 +2022,31 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
         >
           {kind === "jd" ? (
             <>
-              <button type="button" className="task-view-button" data-active={!isCustomView && ((!canUseAllTasks && !frequencyViewActive) || (canUseAllTasks && effectiveTaskView === "all"))} onClick={() => { setFrequency("all"); setPersonalFrequencyView("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
+              <button type="button" className="task-view-button" data-active={!isCustomView && (!canUseAllTasks || effectiveTaskView === "all")} onClick={() => { setFrequency("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
                 <StarIcon className="h-4 w-4" />All Tasks
               </button>
               {canUseAllTasks && (
-                <button type="button" className="task-view-button" data-active={!isCustomView && effectiveTaskView === "my" && !frequencyViewActive} onClick={() => { setFrequency("all"); setPersonalFrequencyView("all"); setTaskView("my"); setAssigneeFilter("all"); }}>
+                <button type="button" className="task-view-button" data-active={!isCustomView && effectiveTaskView === "my"} onClick={() => { setFrequency("all"); setTaskView("my"); setAssigneeFilter("all"); }}>
                   <User className="h-4 w-4" />My Tasks
                 </button>
               )}
               <button type="button" className="task-view-button" data-active={isCustomView} onClick={selectCustomView}>
                 <ListOrdered className="h-4 w-4" aria-hidden="true" />Custom
               </button>
-              {ownFrequencyValues.map((option) => (
-                <button key={option} type="button" className="task-view-button" data-active={!isCustomView && personalFrequencyView === option} onClick={() => { setFrequency(option); setPersonalFrequencyView(option); setTaskView("my"); setAssigneeFilter("all"); }}>
-                  <FrequencyIcon className="h-4 w-4" />{frequencyLabel(option)}
-                </button>
-              ))}
             </>
           ) : (
             <>
-              <button type="button" className="task-view-button" data-active={!isCustomView && ((!canUseAllTasks && !priorityViewActive) || (canUseAllTasks && effectiveTaskView === "all"))} onClick={() => { setPriorityFilter("all"); setPersonalPriorityView("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
+              <button type="button" className="task-view-button" data-active={!isCustomView && (!canUseAllTasks || effectiveTaskView === "all")} onClick={() => { setPriorityFilter("all"); setTaskView(canUseAllTasks ? "all" : "my"); setAssigneeFilter("all"); }}>
                 <StarIcon className="h-4 w-4" />All Tasks
               </button>
               {canUseAllTasks && (
-                <button type="button" className="task-view-button" data-active={!isCustomView && effectiveTaskView === "my" && !priorityViewActive} onClick={() => { setPriorityFilter("all"); setPersonalPriorityView("all"); setTaskView("my"); setAssigneeFilter("all"); }}>
+                <button type="button" className="task-view-button" data-active={!isCustomView && effectiveTaskView === "my"} onClick={() => { setPriorityFilter("all"); setTaskView("my"); setAssigneeFilter("all"); }}>
                   <User className="h-4 w-4" />My Tasks
                 </button>
               )}
               <button type="button" className="task-view-button" data-active={isCustomView} onClick={selectCustomView}>
                 <ListOrdered className="h-4 w-4" aria-hidden="true" />Custom
               </button>
-              {ownPriorityValues.map((priority) => (
-                <button key={priority} type="button" className="task-view-button" data-active={!isCustomView && personalPriorityView === priority} onClick={() => { setPriorityFilter(priority); setPersonalPriorityView(priority); setTaskView("my"); setAssigneeFilter("all"); }}>
-                  <Flag className="h-4 w-4" />{priorityLabel(priority)}
-                </button>
-              ))}
             </>
           )}
         </TaskRail>
@@ -2126,8 +2069,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
             onPausedChange={setPausedFilter}
             activeCount={filterCount}
             onStatusChange={setStatusFilter}
-            onFrequencyChange={changeFrequencyFilter}
-            onPriorityChange={changePriorityFilter}
+            onFrequencyChange={setFrequency}
+            onPriorityChange={setPriorityFilter}
             onAssigneeChange={setAssigneeFilter}
           />}
           {(canImport || canExport) && (
@@ -2282,7 +2225,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                       </Button>
                     )}
                     {hasActiveFilters && (
-                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); setStatusFilter("all"); setPausedFilter(false); setFrequency("all"); setPriorityFilter("all"); setPersonalFrequencyView("all"); setPersonalPriorityView("all"); setAssigneeFilter("all"); }}>Clear filters</Button>
+                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); setStatusFilter("all"); setPausedFilter(false); setFrequency("all"); setPriorityFilter("all"); setAssigneeFilter("all"); }}>Clear filters</Button>
                     )}
                   </div>
                   )}

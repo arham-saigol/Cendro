@@ -212,26 +212,21 @@ export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks"
   const zone = timeZone ?? await companyTimeZone(ctx, task.companyId);
   const cal = calendar ?? await loadWorkCalendar(ctx, task.companyId);
   const { occurrences, nextActiveAt } = elapsedJdOccurrences(cal, task.recurrence, task.cycleStartedAt, now, 200, zone);
-  // One range scan per ledger table instead of two index lookups per elapsed
-  // cycle — a task behind by 200 cycles would otherwise issue 400 reads.
-  const doneByStart = new Map<number, Doc<"jdTaskCompletions">>();
-  const recordByStart = new Map<number, Doc<"jdTaskCycleRecords">>();
-  if (occurrences.length > 0) {
-    const lo = Math.min(...occurrences.map((c) => c.start));
-    const hi = Math.max(...occurrences.map((c) => c.start));
-    const [doneRows, recordRows] = await Promise.all([
-      ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", lo).lte("cycleStart", hi)).collect(),
-      ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", lo).lte("cycleStart", hi)).collect(),
-    ]);
-    for (const row of doneRows) if (row.retiredAt === undefined) doneByStart.set(row.cycleStart, row);
-    for (const row of recordRows) if (row.retiredAt === undefined) recordByStart.set(row.cycleStart, row);
-  }
-  for (const cycle of occurrences) {
-    const done = doneByStart.get(cycle.start);
+  // The per-cycle lookups run in parallel instead of two sequential index
+  // lookups per elapsed cycle. Keeping each lookup bounded to its own cycle
+  // start means retired rows left at other starts by older, denser grids are
+  // never scanned.
+  const [doneDocs, recordDocs] = await Promise.all([
+    Promise.all(occurrences.map((cycle) => currentJdCompletion(ctx, task._id, cycle.start))),
+    Promise.all(occurrences.map((cycle) => currentJdCycleRecord(ctx, task._id, cycle.start))),
+  ]);
+  for (let i = 0; i < occurrences.length; i++) {
+    const cycle = occurrences[i];
+    const done = doneDocs[i];
     // Legacy tasks predate jdTaskCompletions; their only completed-cycle signal
     // is the status pair stamped when the cycle was current.
     const markedDone = task.status === "completed" && task.statusCycleStart === cycle.start;
-    const recorded = recordByStart.get(cycle.start);
+    const recorded = recordDocs[i];
     if (done) continue;
     if (markedDone) {
       // Persist the stamped completion before cycleStartedAt advances past the
@@ -1372,27 +1367,32 @@ export const catchUpMissedJdCycles = internalMutation({
       const throughStart = args.schedule.through ?? currentJdCycle(args.schedule.recurrence, now, timeZone).start;
       const { occurrences, nextActiveAt } = elapsedJdOccurrences(calendar, args.schedule.recurrence, args.schedule.cycleStartedAt, now, 200, timeZone, throughStart);
       const completionThrough = args.schedule.stoppedAt ?? args.schedule.deadlineThrough ?? now;
-      // Two range scans replace two index lookups per elapsed cycle.
-      const doneByStart = new Map<number, Doc<"jdTaskCompletions">[]>();
-      const recordByStart = new Map<number, Doc<"jdTaskCycleRecords">[]>();
-      if (occurrences.length > 0) {
-        const lo = Math.min(...occurrences.map((c) => c.start));
-        const hi = Math.max(...occurrences.map((c) => c.start));
-        const [doneRows, recordRows] = await Promise.all([
-          ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", lo).lte("cycleStart", hi)).collect(),
-          ctx.db.query("jdTaskCycleRecords").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).gte("cycleStart", lo).lte("cycleStart", hi)).collect(),
-        ]);
-        for (const row of doneRows) doneByStart.set(row.cycleStart, [...(doneByStart.get(row.cycleStart) ?? []), row]);
-        for (const row of recordRows) recordByStart.set(row.cycleStart, [...(recordByStart.get(row.cycleStart) ?? []), row]);
-      }
-      for (const cycle of occurrences) {
-        // Credit work belonging to this grid when it stopped. Deadlines
-        // depend on the mutable calendar, so they are not cycle identity.
-        // Earlier retired grids and work completed after the stop do not count.
-        const done = (doneByStart.get(cycle.start) ?? []).some(
-          (row) => (row.retiredAt === undefined || row.retiredAt >= completionThrough) && row.completedAt <= completionThrough,
-        );
-        const recorded = (recordByStart.get(cycle.start) ?? []).some((row) => row.cycleEnd === cycle.deadline);
+      // The two index lookups per elapsed cycle now run in parallel; each
+      // stays bounded to its own cycle start so retired rows from older,
+      // denser grids are never scanned.
+      const perCycle = await Promise.all(
+        occurrences.map((cycle) =>
+          Promise.all([
+            // Credit work belonging to this grid when it stopped. Deadlines
+            // depend on the mutable calendar, so they are not cycle identity.
+            // Earlier retired grids and work completed after the stop do not count.
+            ctx.db.query("jdTaskCompletions")
+              .withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", cycle.start))
+              .filter((q) => q.and(
+                q.or(q.eq(q.field("retiredAt"), undefined), q.gte(q.field("retiredAt"), completionThrough)),
+                q.lte(q.field("completedAt"), completionThrough),
+              ))
+              .first(),
+            ctx.db.query("jdTaskCycleRecords")
+              .withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", task._id).eq("cycleStart", cycle.start))
+              .filter((q) => q.eq(q.field("cycleEnd"), cycle.deadline))
+              .first(),
+          ] as const),
+        ),
+      );
+      for (let i = 0; i < occurrences.length; i++) {
+        const cycle = occurrences[i];
+        const [done, recorded] = perCycle[i];
         if (!done && !recorded) {
           await ctx.db.insert("jdTaskCycleRecords", { companyId: task.companyId, jdTaskId: task._id, cycleStart: cycle.start, cycleEnd: cycle.deadline, status: "missed", recordedAt: now });
         }

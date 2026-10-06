@@ -5,7 +5,7 @@ import { getManagedMembershipIds, hasAllManagedMemberships, isManagedMembership,
 import type { Capability } from "../src/lib/permissions";
 import { effectiveCurrentJdCycle, loadWorkCalendar } from "./workCalendar";
 import { defaultTimeZone } from "./taskCycles";
-import { canManageJdLifecycle, recordMissedJdCycles, retireJdHistoryAtCycle, transitionJdTaskActiveState, type TaskVisibilityAuth } from "./tasks";
+import { canManageJdLifecycle, preserveJdCompletionStamp, recordMissedJdCycles, retireJdHistoryAtCycle, transitionJdTaskActiveState, type TaskVisibilityAuth } from "./tasks";
 import { syncReferenceCounter } from "./references";
 import { normalizeEmail, nonEmpty } from "./validation";
 
@@ -382,7 +382,9 @@ export const previewTaskImport = query({
       if (operation === "create" && args.kind === "one_time" && !draft.priority) errors.push("Priority is required for new one-time tasks.");
       if (args.kind === "jd" && task && draft.recurrence && draft.recurrence !== (task as Doc<"jdTasks">).recurrence) warnings.push("Changing recurrence resets the active JD cycle and status.");
       if (args.kind === "jd" && (operation === "update" || operation === "create")) {
-        const lifecycle = await checkJdLifecycleChange(ctx, args.companyId, auth, draft, task as Doc<"jdTasks"> | null);
+        // Authorize the lifecycle change against the post-import assignees so a
+        // combined reassign + lifecycle row cannot slip out of a managed scope.
+        const lifecycle = await checkJdLifecycleChange(ctx, args.companyId, auth, draft, task ? { ...(task as Doc<"jdTasks">), assigneeMembershipIds: assignees.membershipIds } : null);
         if (lifecycle.error) errors.push(lifecycle.error);
         else if (lifecycle.change === "pause") warnings.push(task ? "This task will be made inactive." : "This task will be created inactive.");
         else if (lifecycle.change === "resume") warnings.push("This task will be made active.");
@@ -429,7 +431,7 @@ async function validateCommitRow(ctx: MutationCtx, companyId: Id<"companies">, k
   if (!task && resolved.membershipIds.length === 0) fail("New tasks need an assignee.");
   const assigneePatchRequested = row.selectedAssigneeMembershipIds !== null || hasAssigneeValue(draft);
   if (assigneePatchRequested && resolved.membershipIds.length === 0) fail("Tasks need at least one assignee.");
-  const lifecycle = kind === "jd" ? await checkJdLifecycleChange(ctx, companyId, auth, draft, task as Doc<"jdTasks"> | null) : { change: null, error: null };
+  const lifecycle = kind === "jd" ? await checkJdLifecycleChange(ctx, companyId, auth, draft, task ? { ...(task as Doc<"jdTasks">), assigneeMembershipIds: resolved.membershipIds } : null) : { change: null, error: null };
   if (lifecycle.error) fail(lifecycle.error);
   return { draft, task, reference, assigneeMembershipIds: resolved.membershipIds, assigneePatchRequested, lifecycleChange: lifecycle.change };
 }
@@ -508,6 +510,11 @@ export const commitTaskImportBatch = mutation({
           if (hasField(item.draft, "recurrence") && item.draft.recurrence) nextTask.recurrence = item.draft.recurrence;
           if (item.assigneePatchRequested) nextTask.assigneeMembershipIds = item.assigneeMembershipIds;
           if (nextCycleStart !== undefined) {
+            // Inactivating alone preserves even an in-cycle completion stamp;
+            // a combined frequency + inactive row must not lose it to the reset.
+            if (item.lifecycleChange === "pause" && rolled.status === "completed" && rolled.statusCycleStart !== undefined) {
+              await preserveJdCompletionStamp(ctx, rolled, rolled.statusCycleStart + 1, company.timeZone ?? defaultTimeZone, calendar);
+            }
             // Preserve the old grid's work without completing the reset cycle.
             await retireJdHistoryAtCycle(ctx, task._id, nextCycleStart, now);
             nextTask.cycleStartedAt = nextCycleStart;

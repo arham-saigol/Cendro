@@ -243,7 +243,7 @@ export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks"
  * completion row before the stamp is overwritten, so deferred catch-up cannot
  * record the stamped cycle as missed. Bounded to one stamped cycle.
  */
-async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, timeZone: string, calendar?: WorkCalendar) {
+export async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, timeZone: string, calendar?: WorkCalendar) {
   if (task.status !== "completed" || task.statusCycleStart === undefined || task.statusCycleStart >= currentCycleStart) return;
   const stampedStart = task.statusCycleStart;
   const [existingCompletion, existingRecord] = await Promise.all([

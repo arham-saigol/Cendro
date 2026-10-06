@@ -1231,6 +1231,76 @@ describe("task import backend", () => {
     expect(preview.rows[0].operation).toBe("create");
   });
 
+  test("a combined reassign + inactive row cannot escape a manager's scope", async () => {
+    const t = convexTest(schema, modules);
+    const { companyId, taskId, taskRef } = await t.run(async (ctx) => {
+      const now = Date.now();
+      const companyId = await ctx.db.insert("companies", { name: "Scoped Corp", createdAt: now });
+      const adminUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin", email: "admin@example.com", firstName: "Admin", createdAt: now, updatedAt: now });
+      const managerUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|manager", email: "manager@example.com", firstName: "Manager", createdAt: now, updatedAt: now });
+      const empAUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|empa", email: "empa@example.com", firstName: "EmpA", createdAt: now, updatedAt: now });
+      const empBUserId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|empb", email: "empb@example.com", firstName: "EmpB", createdAt: now, updatedAt: now });
+      const adminMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: adminUserId, role: "Admin", active: true, createdAt: now, updatedAt: now });
+      const managerMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: managerUserId, role: "Manager", active: true, createdAt: now, updatedAt: now });
+      const empAMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: empAUserId, role: "Employee", active: true, createdAt: now, updatedAt: now });
+      const empBMembershipId = await ctx.db.insert("companyMemberships", { companyId, userId: empBUserId, role: "Employee", active: true, createdAt: now, updatedAt: now });
+      const branchA = await ctx.db.insert("branches", { companyId, name: "Branch A", createdAt: now, updatedAt: now });
+      const branchB = await ctx.db.insert("branches", { companyId, name: "Branch B", createdAt: now, updatedAt: now });
+      await ctx.db.insert("managerBranchScopes", { companyId, managerMembershipId, branchId: branchA, updatedAt: now });
+      await ctx.db.insert("userBranchAssignments", { companyId, membershipId: empAMembershipId, branchId: branchA });
+      await ctx.db.insert("userBranchAssignments", { companyId, membershipId: empBMembershipId, branchId: branchB });
+      // The manager may assign anyone and update in-scope tasks, but lifecycle
+      // grants never widen past the managed scope.
+      await ctx.db.insert("roles", { companyId, name: "Manager", capabilities: ["tasks:jd:import", "tasks:jd:view:managed", "tasks:jd:update:managed", "tasks:jd:assign:any", "tasks:jd:pause", "tasks:jd:resume"], createdAt: now, updatedAt: now });
+      const taskId = await ctx.db.insert("jdTasks", { companyId, reference: "JD-001", title: "Branch A Task", recurrence: "daily", assigneeMembershipIds: [empAMembershipId], createdByMembershipId: adminMembershipId, createdAt: now, updatedAt: now, cycleStartedAt: now, status: "due", statusCycleStart: now });
+      return { companyId, taskId, taskRef: "JD-001" };
+    });
+    const manager = t.withIdentity(identity("manager"));
+    const admin = t.withIdentity(identity("admin"));
+    const task = await admin.query(api.tasks.getJd, { companyId, taskId });
+
+    // In-scope task stays in-scope on lifecycle alone.
+    const inScopeDraft = draft({ reference: taskRef, isActive: false, presentFields: ["reference", "isActive"], rawAssigneeText: "", assigneeEmails: [] });
+    const okPreview = await manager.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [inScopeDraft] });
+    expect(okPreview.rows[0].errors).toEqual([]);
+
+    // Reassigning the same task out of scope in the same row must fail the
+    // lifecycle check — the check has to look at the proposed assignees.
+    const escapeDraft = draft({ reference: taskRef, isActive: false, presentFields: ["reference", "assignees", "isActive"], rawAssigneeText: "empb@example.com", assigneeEmails: ["empb@example.com"] });
+    const preview = await manager.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [escapeDraft] });
+    expect(preview.rows[0].errors).toContain("You do not have permission to make this task inactive.");
+    await expect(manager.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "scope-escape", batchKey: "batch-1", source: "cendro",
+      rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: escapeDraft }],
+    })).rejects.toThrow(/permission to make this task inactive/);
+    expect((await admin.query(api.tasks.getJd, { companyId, taskId })).task.pausedAt).toBeUndefined();
+  });
+
+  test("a combined frequency + inactive row preserves an in-cycle completion", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+    const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Daily check", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+    await admin.mutation(api.tasks.updateJdStatus, { companyId, taskId, status: "completed" });
+    const completed = await admin.query(api.tasks.getJd, { companyId, taskId });
+    const stampedStart = completed.task.statusCycleStart!;
+
+    await admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-combined", batchKey: "batch-1", source: "cendro",
+      rows: [{
+        include: true,
+        expectedUpdatedAt: completed.task.updatedAt,
+        selectedAssigneeMembershipIds: null,
+        draft: draft({ reference: completed.task.reference, recurrence: "weekly", isActive: false, presentFields: ["reference", "recurrence", "isActive"], rawAssigneeText: "", assigneeEmails: [] }),
+      }],
+    });
+
+    const task = await admin.query(api.tasks.getJd, { companyId, taskId });
+    expect(task.task.pausedAt).toBeTypeOf("number");
+    expect(task.task.recurrence).toBe("weekly");
+    const completions = await t.run(async (ctx) => await ctx.db.query("jdTaskCompletions").withIndex("by_task_and_cycleStart", (q) => q.eq("jdTaskId", taskId).eq("cycleStart", stampedStart)).collect());
+    expect(completions.filter((row) => row.retiredAt === undefined)).toHaveLength(1);
+  });
+
   test("creating and editing inactive state via import requires the matching lifecycle capability", async () => {
     const { t, companyId } = await seed();
     const admin = t.withIdentity(identity("admin"));

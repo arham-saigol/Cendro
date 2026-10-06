@@ -686,7 +686,9 @@ button:disabled { cursor: not-allowed; }
   content: attr(data-tooltip);
   position: absolute;
   left: 50%;
-  bottom: calc(100% + 7px);
+  /* Below, not above: the pill rides up to the list pane's top edge on scroll,
+     and an above-tooltip is clipped by the pane's overflow there. */
+  top: calc(100% + 7px);
   transform: translateX(-50%);
   border-radius: 5px;
   background: #252525;

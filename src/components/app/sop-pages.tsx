@@ -1236,7 +1236,7 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
             <div className="task-selection-pill" role="status" aria-live="polite">
               <span className="task-selection-pill-count">{selectionCount} selected</span>
               <span className="task-selection-pill-divider" aria-hidden="true" />
-              <button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={deleting} aria-label="Cancel selection" title="Cancel selection">
+              <button type="button" className="task-selection-pill-btn" onClick={clearSelection} disabled={deleting} aria-label="Cancel selection" data-tooltip="Cancel selection">
                 <X className="h-4 w-4" />
               </button>
               {selectionCount === 1 && canEditSelectedSop && (
@@ -1248,14 +1248,14 @@ function SopListContent({ selectedId }: { selectedId?: string }) {
                     onClick={handleEditSelection}
                     disabled={deleting}
                     aria-label="Edit selected SOP"
-                    title="Edit selected"
+                    data-tooltip="Edit selected"
                   >
                     <Pencil className="h-4 w-4" />
                   </button>
                 </>
               )}
               <span className="task-selection-pill-divider" aria-hidden="true" />
-              <button type="button" className="task-selection-pill-btn" data-danger="true" onClick={handleDeleteSelection} disabled={!canDeleteSelection || deleting} aria-label={selectionCount === 1 ? "Delete selected SOP" : `Delete ${selectionCount} selected SOPs`} title="Delete selected">
+              <button type="button" className="task-selection-pill-btn" data-danger="true" onClick={handleDeleteSelection} disabled={!canDeleteSelection || deleting} aria-label={selectionCount === 1 ? "Delete selected SOP" : `Delete ${selectionCount} selected SOPs`} data-tooltip="Delete selected">
                 <Trash2 className="h-4 w-4" />
               </button>
             </div>

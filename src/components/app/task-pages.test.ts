@@ -162,20 +162,20 @@ test("bulk lifecycle actions follow selection state and permissions, and submit 
   await mount("jd", false);
   await act(async () => state.railRows.get("A")!());
   await act(async () => state.railRows.get("B")!());
-  expect(button("Pause tasks")).toBeDefined();
-  expect(button("Resume tasks")).toBeUndefined();
-  await clickButton("Pause tasks");
+  expect(button("Make inactive")).toBeDefined();
+  expect(button("Make active")).toBeUndefined();
+  await clickButton("Make inactive");
   expect(state.lifecycleWrites).toEqual([{ companyId: "company", taskIds: ["A", "B"], paused: true }]);
   state.pausedIds = ["A", "B", "C"];
   await act(async () => state.filterPaused!(true));
   await act(async () => state.railRows.get("A")!());
-  expect(button("Resume tasks")).toBeDefined();
-  await clickButton("Resume tasks");
+  expect(button("Make active")).toBeDefined();
+  await clickButton("Make active");
   expect(state.lifecycleWrites[1]).toMatchObject({ taskIds: ["A"], paused: false });
   state.lifecycleAllowed = false;
   await act(async () => root!.render(React.createElement(TaskList, { kind: "jd" })));
   await act(async () => state.railRows.get("A")!());
-  expect(button("Resume tasks")).toBeUndefined();
+  expect(button("Make active")).toBeUndefined();
 });
 
 test("a live selection that becomes mixed offers neither pause nor resume", async () => {
@@ -185,8 +185,8 @@ test("a live selection that becomes mixed offers neither pause nor resume", asyn
   state.ignorePausedQuery = true;
   state.pausedIds = ["B"];
   await act(async () => root!.render(React.createElement(TaskList, { kind: "jd" })));
-  expect(button("Pause tasks")).toBeUndefined();
-  expect(button("Resume tasks")).toBeUndefined();
+  expect(button("Make inactive")).toBeUndefined();
+  expect(button("Make active")).toBeUndefined();
 });
 
 test("paused filtering works in All, My and frequency views, while Custom never includes paused rows", async () => {

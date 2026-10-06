@@ -24,6 +24,7 @@ export const taskImportFieldNames = [
   "quantity",
   "assignees",
   "status",
+  "isActive",
 ] as const;
 
 export type TaskImportField = (typeof taskImportFieldNames)[number];
@@ -58,6 +59,7 @@ export const taskImportDraftSchema = z.object({
   rawAssigneeText: z.string().max(2_000),
   assigneeEmails: z.array(z.string().max(320)).max(50),
   status: statusSchema.nullable(),
+  isActive: z.boolean().nullable(),
   presentFields: z.array(presentFieldSchema).max(taskImportFieldNames.length),
   warnings: z.array(z.string().max(500)).max(20),
 }).strict().superRefine((row, context) => {
@@ -73,6 +75,9 @@ export const taskImportDraftSchema = z.object({
   }
   if (row.kind === "one_time" && (row.recurrence !== null || uniqueFields.has("recurrence"))) {
     context.addIssue({ code: "custom", path: ["recurrence"], message: "One-time rows cannot contain a recurrence" });
+  }
+  if (row.kind === "one_time" && (row.isActive !== null || uniqueFields.has("isActive"))) {
+    context.addIssue({ code: "custom", path: ["isActive"], message: "One-time rows cannot contain an active state" });
   }
 });
 

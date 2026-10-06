@@ -22,7 +22,7 @@ import {
 type ManualStatus = "due" | "in_progress" | "completed";
 type TaskKind = "jd" | "one_time";
 type Ctx = QueryCtx | MutationCtx;
-type TaskVisibilityAuth = {
+export type TaskVisibilityAuth = {
   caps: Set<Capability>;
   /**
    * Lazily resolved managed scope, shared by every check in this invocation.
@@ -172,8 +172,8 @@ async function canDeleteTask(
 
 
 /** Lifecycle grants never widen a manager's assignment scope. */
-async function canManageJdLifecycle(ctx: Ctx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, task: Doc<"jdTasks">, auth: TaskVisibilityAuth) {
-  if (!auth.caps.has("tasks:jd:pause") && !auth.caps.has("tasks:jd:resume")) return false;
+export async function canManageJdLifecycle(ctx: Ctx, companyId: Id<"companies">, membership: Doc<"companyMemberships">, task: Doc<"jdTasks">, auth: TaskVisibilityAuth, paused: boolean) {
+  if (!auth.caps.has(paused ? "tasks:jd:pause" : "tasks:jd:resume")) return false;
   if (membership.role !== "Manager" && auth.caps.has("tasks:jd:view:any")) return true;
   const targets = updateAuthTargets(task);
   // Self-only grants cover assigned shared work. Managers must still own
@@ -243,7 +243,7 @@ export async function recordMissedJdCycles(ctx: MutationCtx, task: Doc<"jdTasks"
  * completion row before the stamp is overwritten, so deferred catch-up cannot
  * record the stamped cycle as missed. Bounded to one stamped cycle.
  */
-async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, timeZone: string, calendar?: WorkCalendar) {
+export async function preserveJdCompletionStamp(ctx: MutationCtx, task: Doc<"jdTasks">, currentCycleStart: number, timeZone: string, calendar?: WorkCalendar) {
   if (task.status !== "completed" || task.statusCycleStart === undefined || task.statusCycleStart >= currentCycleStart) return;
   const stampedStart = task.statusCycleStart;
   const [existingCompletion, existingRecord] = await Promise.all([
@@ -281,7 +281,7 @@ function scheduleMissedJdCycleCatchUp(ctx: MutationCtx, task: Doc<"jdTasks">, cu
 }
 
 async function jdState(ctx: Ctx, task: Doc<"jdTasks">, now = Date.now(), timeZone?: string, calendar?: WorkCalendar) {
-  if (task.pausedAt !== undefined) return { status: "Paused", rawStatus: "paused" as const, isOverdue: false, currentCycleStart: null, currentCycleEnd: null, dueAt: null };
+  if (task.pausedAt !== undefined) return { status: "Inactive", rawStatus: "paused" as const, isOverdue: false, currentCycleStart: null, currentCycleEnd: null, dueAt: null };
   const zone = timeZone ?? await companyTimeZone(ctx, task.companyId);
   const cal = calendar ?? await loadWorkCalendar(ctx, task.companyId);
   const c = effectiveCurrentJdCycle(cal, task.recurrence, now, zone);
@@ -609,15 +609,15 @@ export const listJdRows = query({
       Promise.all(visibleTasks.map((task) => canDeleteTask(ctx, args.companyId, membership, task, "jd", auth))),
       includeCustomOrderKeys ? taskListOrderKeyMap(ctx, args.companyId, membership._id, "jd") : Promise.resolve(null),
     ]);
-    const lifecycleScopes = await Promise.all(visibleTasks.map((task) => canManageJdLifecycle(ctx, args.companyId, membership, task, auth)));
+    const lifecycleScopes = await Promise.all(visibleTasks.map((task) => canManageJdLifecycle(ctx, args.companyId, membership, task, auth, task.pausedAt === undefined)));
     const rows = visibleTasks.map((task, index) => ({
       ...task,
       state: states[index],
       assignees: task.assigneeMembershipIds.filter((id) => scoped.has(id)).flatMap((id) => assigneeById.get(id) ?? []),
       canUpdate: updates[index],
       canDelete: deletes[index],
-      canPause: auth.caps.has("tasks:jd:pause") && lifecycleScopes[index],
-      canResume: auth.caps.has("tasks:jd:resume") && lifecycleScopes[index],
+      canPause: task.pausedAt === undefined && lifecycleScopes[index],
+      canResume: task.pausedAt !== undefined && lifecycleScopes[index],
       ...(orderKeys?.get(task._id) ? { customOrderKey: orderKeys.get(task._id) } : {}),
     }));
     return { ...page, page: rows };
@@ -632,12 +632,14 @@ export const exportRows = query({
     const auth = await taskVisibilityAuth(ctx, args.companyId, membership);
     const scoped = await displayScopedMembershipIds(ctx, args.companyId, auth, args.kind === "jd" ? "tasks:jd:view:any" : "tasks:one_time:view:any");
     if (args.kind === "jd") {
-      const page = await ctx.db.query("jdTasks").withIndex("by_companyId_and_pausedAt", (q) => q.eq("companyId", args.companyId).eq("pausedAt", undefined)).order("asc").paginate(args.paginationOpts);
+      // Exports always include inactive tasks: the sheet declares their state
+      // via isActive rather than dropping them like the on-screen list does.
+      const page = await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("asc").paginate(args.paginationOpts);
       const visibleFlags = await Promise.all(page.page.map((task) => visible(ctx, args.companyId, membership, task, "jd", auth)));
-      const visibleTasks = page.page.filter((task, index) => task.pausedAt === undefined && visibleFlags[index]);
+      const visibleTasks = page.page.filter((_, index) => visibleFlags[index]);
       const assigneeRows = await enrich(ctx, visibleTasks.flatMap((task) => task.assigneeMembershipIds.filter((id) => scoped.has(id))));
       const assigneeById = new Map(assigneeRows.map((row) => [row.membership._id, row]));
-      const rows = visibleTasks.map((task) => ({ reference: task.reference, title: task.title, description: task.description ?? null, notes: task.notes ?? null, recurrence: task.recurrence, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: task.assigneeMembershipIds.filter((id) => scoped.has(id)).map((id) => assigneeById.get(id)?.user.email).filter(Boolean).join("; ") }));
+      const rows = visibleTasks.map((task) => ({ reference: task.reference, title: task.title, description: task.description ?? null, notes: task.notes ?? null, recurrence: task.recurrence, time: task.time ?? null, quantity: task.quantity ?? null, assigneeEmails: task.assigneeMembershipIds.filter((id) => scoped.has(id)).map((id) => assigneeById.get(id)?.user.email).filter(Boolean).join("; "), isActive: task.pausedAt === undefined }));
       return { ...page, page: rows };
     }
     const page = await ctx.db.query("oneTimeTasks").withIndex("by_company", (q) => q.eq("companyId", args.companyId)).order("asc").paginate(args.paginationOpts);
@@ -1220,7 +1222,7 @@ async function setJdStatus(ctx: MutationCtx, companyId: Id<"companies">, taskId:
   const task = await ctx.db.get(taskId);
   if (!task || task.companyId !== companyId) throw new ConvexError("Task not found.");
   await assertCanUpdateTaskStatus(ctx, companyId, membership, task, "jd");
-  if (task.pausedAt !== undefined) throw new ConvexError("Resume this task before changing its status.");
+  if (task.pausedAt !== undefined) throw new ConvexError("Make this task active before changing its status.");
   const now = Date.now();
   const timeZone = await companyTimeZone(ctx, companyId);
   const calendar = await loadWorkCalendar(ctx, companyId);
@@ -1258,28 +1260,46 @@ export const setJdPausedBulk = mutation({
     for (const taskId of args.taskIds) {
       const task = await ctx.db.get(taskId);
       if (!task || task.companyId !== args.companyId || !(await visible(ctx, args.companyId, membership, task, "jd", auth))) throw new ConvexError("Task not found.");
-      if (!(await canManageJdLifecycle(ctx, args.companyId, membership, task, auth))) throw new ConvexError("You can only pause or resume tasks assigned within your managed scope.");
+      if (!(await canManageJdLifecycle(ctx, args.companyId, membership, task, auth, args.paused))) throw new ConvexError("You can only make tasks active or inactive within your managed scope.");
       if ((task.pausedAt !== undefined) === args.paused) continue; // Retry-safe.
-      const cycle = effectiveCurrentJdCycle(calendar, task.recurrence, now, timeZone);
-      if (args.paused) {
-        await preserveJdCompletionStamp(ctx, task, cycle.start + 1, timeZone, calendar);
-        // Freeze both the grid and deadline bound. Deferred catch-up may keep
-        // pre-pause history, but must never turn suspended deadlines into misses.
-        await ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, {
-          taskId, schedule: { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt, through: cycle.start, deadlineThrough: now },
-        });
-        await ctx.db.patch(taskId, { pausedAt: now, overdueAt: undefined, updatedAt: now });
-      } else {
-        // Rejoin the existing calendar grid, not a backlog of suspended cycles.
-        // Keep same-cycle completion rows: resuming must not erase history.
-        const sameCycle = task.statusCycleStart === cycle.start;
-        await ctx.db.patch(taskId, { pausedAt: undefined, cycleStartedAt: cycle.start, status: sameCycle ? task.status : "due", statusCycleStart: cycle.start, overdueAt: undefined, updatedAt: now });
-      }
-      await logTaskActivity(ctx, { companyId: args.companyId, taskType: "jd", taskId, actorMembershipId: membership._id, event: args.paused ? "paused" : "resumed", createdAt: now });
+      await transitionJdTaskActiveState(ctx, { companyId: args.companyId, task, paused: args.paused, actorMembershipId: membership._id, now, timeZone, calendar });
     }
     return null;
   },
 });
+
+// One active/inactive transition for a JD task, shared by the bulk mutation
+// and the import commit path. Callers authorize and guard no-ops first.
+export async function transitionJdTaskActiveState(
+  ctx: MutationCtx,
+  args: {
+    companyId: Id<"companies">;
+    task: Doc<"jdTasks">;
+    paused: boolean;
+    actorMembershipId: Id<"companyMemberships">;
+    now: number;
+    timeZone: string;
+    calendar: WorkCalendar;
+  },
+) {
+  const { task } = args;
+  const cycle = effectiveCurrentJdCycle(args.calendar, task.recurrence, args.now, args.timeZone);
+  if (args.paused) {
+    await preserveJdCompletionStamp(ctx, task, cycle.start + 1, args.timeZone, args.calendar);
+    // Freeze both the grid and deadline bound. Deferred catch-up may keep
+    // pre-pause history, but must never turn suspended deadlines into misses.
+    await ctx.scheduler.runAfter(0, internal.tasks.catchUpMissedJdCycles, {
+      taskId: task._id, schedule: { recurrence: task.recurrence, cycleStartedAt: task.cycleStartedAt, through: cycle.start, deadlineThrough: args.now },
+    });
+    await ctx.db.patch(task._id, { pausedAt: args.now, overdueAt: undefined, updatedAt: args.now });
+  } else {
+    // Rejoin the existing calendar grid, not a backlog of suspended cycles.
+    // Keep same-cycle completion rows: resuming must not erase history.
+    const sameCycle = task.statusCycleStart === cycle.start;
+    await ctx.db.patch(task._id, { pausedAt: undefined, cycleStartedAt: cycle.start, status: sameCycle ? task.status : "due", statusCycleStart: cycle.start, overdueAt: undefined, updatedAt: args.now });
+  }
+  await logTaskActivity(ctx, { companyId: args.companyId, taskType: "jd", taskId: task._id, actorMembershipId: args.actorMembershipId, event: args.paused ? "paused" : "resumed", createdAt: args.now });
+}
 
 export const updateJdStatus = mutation({
   args: { companyId: v.id("companies"), taskId: v.id("jdTasks"), status: statusValidator },

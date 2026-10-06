@@ -297,8 +297,8 @@ function activityActorName(item: any) { return item.actor?.user.name || item.act
 function activityLogText(item: any) {
   const name = activityActorName(item);
   if (item.event === "created") return `${name} created this task`;
-  if (item.event === "paused") return `${name} paused this task`;
-  if (item.event === "resumed") return `${name} resumed this task`;
+  if (item.event === "paused") return `${name} made this task inactive`;
+  if (item.event === "resumed") return `${name} made this task active`;
   if (item.event === "status_changed") {
     if (item.toStatus === "completed") return `${name} marked this task complete`;
     if (item.toStatus === "in_progress") return `${name} moved this task to in progress`;
@@ -605,7 +605,7 @@ function TaskFilterMenu({
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content align="end" sideOffset={6} className="task-menu min-w-48" aria-label="Task filters">
-          {kind === "jd" && <DropdownMenu.CheckboxItem className="task-menu-item" checked={paused} onCheckedChange={onPausedChange}>Paused tasks{paused && <Check className="ml-auto h-3.5 w-3.5" />}</DropdownMenu.CheckboxItem>}
+          {kind === "jd" && <DropdownMenu.CheckboxItem className="task-menu-item" checked={paused} onCheckedChange={onPausedChange}>Inactive tasks{paused && <Check className="ml-auto h-3.5 w-3.5" />}</DropdownMenu.CheckboxItem>}
           {!paused && <TaskFilterSubmenu label="Status" value={statusFilter} options={statusOptions} onChange={onStatusChange} />}
           {kind === "jd" ? (
             <TaskFilterSubmenu label="Frequency" value={frequency} options={frequencyOptions} onChange={onFrequencyChange} />
@@ -1946,6 +1946,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
         time: t.time ?? null,
         quantity: t.quantity ?? null,
         assigneeEmails: t.assignees?.map((a: any) => a.user.email).join("; ") ?? "",
+        isActive: kind === "jd" ? t.pausedAt === undefined : undefined,
       }));
       const { exportTaskWorkbook, downloadBlob } = await loadWorkbook();
       const workbook = await exportTaskWorkbook(
@@ -2197,7 +2198,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                     disabled={changingPaused || deleting || exportingSelection || selectionCount > 100}
                     title={selectionCount > 100 ? "Select at most 100 tasks at once" : undefined}
                   >
-                    {lifecycleAction === "pause" ? "Pause tasks" : "Resume tasks"}
+                    {lifecycleAction === "pause" ? "Make inactive" : "Make active"}
                   </button>
                 </>
               )}

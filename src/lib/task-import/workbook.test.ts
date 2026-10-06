@@ -89,14 +89,55 @@ describe("task workbook pure helpers", () => {
     expect(parsed.rows[1]).toMatchObject({ reference: "TSK-002", title: "Critical task", priority: "critical", status: null });
   });
 
-  test("exports and parses a JD task workbook preserving description and notes", async () => {
-    const workbook = await exportTaskWorkbook("jd", "company-1", "Acme", [{ reference: "JD-001", title: "Daily maintenance", description: "Inspect equipment", notes: "Check oil level", recurrence: "daily", time: "1h", quantity: 1, assigneeEmails: "admin@example.com" }]);
+  test("exports and parses a JD task workbook preserving description, notes and active state", async () => {
+    const workbook = await exportTaskWorkbook("jd", "company-1", "Acme", [
+      { reference: "JD-001", title: "Daily maintenance", description: "Inspect equipment", notes: "Check oil level", recurrence: "daily", time: "1h", quantity: 1, assigneeEmails: "admin@example.com", isActive: true },
+      { reference: "JD-002", title: "Paused checklist", recurrence: "weekly", isActive: false },
+    ]);
     const sheets = await readXlsxFile(await workbook.toBlob());
     const taskSheet = sheets.find((sheet) => sheet.sheet === "JD Tasks")!;
-    expect(taskSheet.data[0]).toEqual(["Code", "Title", "Description", "Notes", "Frequency", "Time", "Quantity", "Assignee Emails"]);
+    expect(taskSheet.data[0]).toEqual(["Code", "Title", "Description", "Notes", "Frequency", "Time", "Quantity", "Assignee Emails", "Is Active"]);
+    expect(taskSheet.data[1][8]).toBe("Yes");
+    expect(taskSheet.data[2][8]).toBe("No");
     const parsed = parseCendroWorkbookSheets(sheets, "company-1", "jd");
+    expect(parsed.rows).toHaveLength(2);
+    expect(parsed.rows[0]).toMatchObject({ reference: "JD-001", title: "Daily maintenance", description: "Inspect equipment", notes: "Check oil level", recurrence: "daily", status: null, isActive: true });
+    expect(parsed.rows[0].presentFields).toContain("isActive");
+    expect(parsed.rows[1]).toMatchObject({ reference: "JD-002", isActive: false });
+  });
+
+  test("parses older JD sheets without an Is active column", () => {
+    const parsed = parseCendroWorkbookSheets([
+      { sheet: "Cendro Metadata", data: [["Format identifier", "cendro-task-export"], ["Schema version", 1], ["Task kind", "jd"], ["Source company ID", "company-1"], ["Source company name", "Acme"], ["Export timestamp", "2026-01-01T00:00:00.000Z"]] },
+      { sheet: "JD Tasks", data: [["Code", "Title", "Description", "Notes", "Frequency", "Time", "Quantity", "Assignee Emails"], ["JD-001", "Daily maintenance", "", "", "daily", "", "", "admin@example.com"]] },
+    ], "company-1", "jd");
     expect(parsed.rows).toHaveLength(1);
-    expect(parsed.rows[0]).toMatchObject({ reference: "JD-001", title: "Daily maintenance", description: "Inspect equipment", notes: "Check oil level", recurrence: "daily", status: null });
+    expect(parsed.rows[0]).toMatchObject({ reference: "JD-001", isActive: null });
+    expect(parsed.rows[0].presentFields).not.toContain("isActive");
+  });
+
+  test("flags an invalid Is active value on a JD row", () => {
+    const parsed = parseCendroWorkbookSheets([
+      { sheet: "Cendro Metadata", data: [["Format identifier", "cendro-task-export"], ["Schema version", 1], ["Task kind", "jd"], ["Source company ID", "company-1"], ["Source company name", "Acme"], ["Export timestamp", "2026-01-01T00:00:00.000Z"]] },
+      { sheet: "JD Tasks", data: [["Code", "Title", "Description", "Notes", "Frequency", "Time", "Quantity", "Assignee Emails", "Is Active"], ["JD-001", "Daily maintenance", "", "", "daily", "", "", "admin@example.com", "maybe"]] },
+    ], "company-1", "jd");
+    expect(parsed.rows[0]).toMatchObject({ reference: "JD-001", isActive: null });
+    expect(parsed.rows[0].presentFields).toContain("isActive");
+    expect(parsed.rows[0].warnings).toContain("Is active must be Yes or No.");
+  });
+
+  test("warns when a ninth-column value sits under an unrecognized header", () => {
+    const parsed = parseCendroWorkbookSheets([
+      { sheet: "Cendro Metadata", data: [["Format identifier", "cendro-task-export"], ["Schema version", 1], ["Task kind", "jd"], ["Source company ID", "company-1"], ["Source company name", "Acme"], ["Export timestamp", "2026-01-01T00:00:00.000Z"]] },
+      { sheet: "JD Tasks", data: [["Code", "Title", "Description", "Notes", "Frequency", "Time", "Quantity", "Assignee Emails", "Is Actve"], ["JD-001", "Daily maintenance", "", "", "daily", "", "", "admin@example.com", "No"], ["JD-002", "Other", "", "", "weekly", "", "", "admin@example.com", ""]] },
+    ], "company-1", "jd");
+    expect(parsed.rows).toHaveLength(2);
+    // The unrecognized column is not applied, but the dropped value is surfaced.
+    expect(parsed.rows[0]).toMatchObject({ reference: "JD-001", isActive: null });
+    expect(parsed.rows[0].presentFields).not.toContain("isActive");
+    expect(parsed.rows[0].warnings).toContain("Column 9 has a value but its header is not \"Is Active\"; the value was ignored.");
+    // Rows with an empty cell under the unrecognized header lose nothing and stay quiet.
+    expect(parsed.rows[1].warnings).toHaveLength(0);
   });
 
   test("handles sheets with trailing empty rows like Google Sheets exports and ignores an old Status column", () => {

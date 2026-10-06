@@ -24,9 +24,9 @@ Cendro is a Notion-like internal operations workspace for company-scoped tasks, 
 - `npm audit --audit-level=high`
 - `npm run convex:codegen` after Convex env vars are configured
 
-## JD pause/resume rollout
+## JD active/inactive rollout
 
-Paused JD tasks retain their activity, comments, attachments, completions, and missed-cycle history. The “Paused tasks” filter replaces the active list in every non-Custom JD view without changing visibility scope. Bulk pause/resume is atomic for up to 100 selected tasks. Resume rejoins the current working-calendar cycle; suspended cycles are not replayed, and same-cycle completions remain completed. There is currently no task reminder sender in this repository.
+Inactive JD tasks retain their activity, comments, attachments, completions, and missed-cycle history. The “Inactive tasks” filter replaces the active list in every non-Custom JD view without changing visibility scope. Bulk make-inactive/make-active is atomic for up to 100 selected tasks. Reactivation rejoins the current working-calendar cycle; suspended cycles are not replayed, and same-cycle completions remain completed. JD import/export sheets carry an optional “Is Active” column (Yes/No); exports always include inactive tasks, and older sheets without the column remain compatible. There is currently no task reminder sender in this repository.
 
 ### Two-phase index deployment (existing deployments)
 

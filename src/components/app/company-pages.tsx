@@ -718,7 +718,12 @@ function HolidayDialog({
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+    // Non-modal on purpose: a modal dialog sets pointer-events:none on body
+    // and traps focus inside Dialog.Content, which would make DateField's
+    // body-portaled calendar popover unreachable by mouse and keyboard. The
+    // overlay plus the outside-interaction guards below keep the rest of the
+    // page inert and the dialog open, so it still behaves modally.
+    <Dialog.Root open={open} onOpenChange={onOpenChange} modal={false}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/35 backdrop-blur-[2px]" />
         <Dialog.Content

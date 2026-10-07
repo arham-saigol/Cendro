@@ -274,6 +274,11 @@ export async function requireCapability(ctx: Ctx, companyId: Id<"companies">, ca
   return auth;
 }
 
+/** Same check as requireCapability against capabilities the caller already resolved. */
+export function assertCapability(caps: Set<Capability>, capability: Capability) {
+  if (!caps.has(capability)) throw new ConvexError("You do not have access to do that.");
+}
+
 export async function assertCompanyDocument<Table extends TableNames>(
   ctx: Ctx,
   companyId: Id<"companies">,

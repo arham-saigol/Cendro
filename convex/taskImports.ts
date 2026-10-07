@@ -160,9 +160,10 @@ async function buildImportAuth(
   membership: Doc<"companyMemberships">,
   kind: TaskKind,
   requestedEmails: Iterable<string>,
-  selectedMembershipIds?: Iterable<Id<"companyMemberships">>
+  selectedMembershipIds?: Iterable<Id<"companyMemberships">>,
+  precomputedCaps?: Set<Capability>,
 ) {
-  const caps = await membershipCapabilities(ctx, membership);
+  const caps = precomputedCaps ?? (await membershipCapabilities(ctx, membership));
   const p = capabilityPrefix(kind);
   const canAssignAny = caps.has(`${p}:assign:any` as Capability);
   const canAssignManaged = caps.has(`${p}:assign:managed` as Capability);
@@ -329,9 +330,9 @@ export const previewTaskImport = query({
   handler: async (ctx, args) => {
     if (args.drafts.length > MAX_PREVIEW_ROWS) fail(`Imports may contain at most ${MAX_PREVIEW_ROWS} task rows.`);
     const capability: Capability = args.kind === "jd" ? "tasks:jd:import" : "tasks:one_time:import";
-    const { membership } = await requireCapability(ctx, args.companyId, capability);
+    const { membership, capabilities } = await requireCapability(ctx, args.companyId, capability);
     const { emails } = extractAssigneeTargets(args.drafts);
-    const auth = await buildImportAuth(ctx, args.companyId, membership, args.kind, emails);
+    const auth = await buildImportAuth(ctx, args.companyId, membership, args.kind, emails, undefined, capabilities);
     const duplicateRefs = new Set<string>();
     const seenRefs = new Set<string>();
     const duplicateRowKeys = new Set<string>();
@@ -442,7 +443,7 @@ export const commitTaskImportBatch = mutation({
     if (args.rows.length === 0 || args.rows.length > MAX_COMMIT_ROWS) fail(`Import batches must contain 1-${MAX_COMMIT_ROWS} rows.`);
     if (!args.importKey.trim() || !args.batchKey.trim() || args.importKey.length > 200 || args.batchKey.length > 200) fail("Import keys are invalid.");
     const capability: Capability = args.kind === "jd" ? "tasks:jd:import" : "tasks:one_time:import";
-    const { membership, user, company } = await requireCapability(ctx, args.companyId, capability);
+    const { membership, user, company, capabilities } = await requireCapability(ctx, args.companyId, capability);
     const requestFingerprint = await fingerprintRows(args.rows);
     const existingReceipt = await ctx.db.query("taskImportBatches").withIndex("by_companyId_and_importKey_and_batchKey", (q) => q.eq("companyId", args.companyId).eq("importKey", args.importKey).eq("batchKey", args.batchKey)).unique();
     if (existingReceipt) {
@@ -464,7 +465,7 @@ export const commitTaskImportBatch = mutation({
       includedRows.map((row) => row.draft),
       includedRows.map((row) => row.selectedAssigneeMembershipIds)
     );
-    const auth = await buildImportAuth(ctx, args.companyId, membership, args.kind, emails, membershipIds);
+    const auth = await buildImportAuth(ctx, args.companyId, membership, args.kind, emails, membershipIds, capabilities);
     const calendar = await loadWorkCalendar(ctx, args.companyId);
     const prepared = [];
     for (const row of includedRows) prepared.push(await validateCommitRow(ctx, args.companyId, args.kind, auth, row));

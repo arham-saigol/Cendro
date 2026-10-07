@@ -12,8 +12,9 @@ import {
   requireMembership,
   roleDocByName,
   roleDocCapabilities,
+  roleNameCapabilities,
 } from "./permissions";
-import { baselineInvitationCapabilities, companyManagementCapabilities, isKnownCapability } from "../src/lib/permissions";
+import { baselineInvitationCapabilities, companyManagementCapabilities, isKnownCapability, type Capability } from "../src/lib/permissions";
 import { defaultTimeZone } from "./taskCycles";
 import { nonEmpty, normalizeEmail } from "./validation";
 import { takeWithOverflow } from "./queryLimits";
@@ -106,8 +107,7 @@ async function clearUserManagementRows(ctx: any, membershipId: Id<"companyMember
 export const overview = query({
   args: { companyId: v.id("companies") },
   handler: async (ctx, args) => {
-    const { membership, company } = await requireMembership(ctx, args.companyId);
-    const caps = await membershipCapabilities(ctx, membership);
+    const { membership, company, capabilities: caps } = await requireMembership(ctx, args.companyId);
     if (!companyManagementCapabilities.some((capability) => caps.has(capability))) throw new ConvexError("You do not have access to do that.");
     if (company.deletedAt) throw new ConvexError("Company not found.");
 
@@ -338,10 +338,12 @@ export const removeUsers = mutation({
   handler: async (ctx, args) => {
     const { user, capabilities: actorCaps } = await requireCapability(ctx, args.companyId, "company:manage_users");
     const membershipIds = unique(args.membershipIds);
+    // Targets often share a role, so resolve each role doc at most once.
+    const roleCapsCache = new Map<string, Promise<Set<Capability>>>();
     const targetCapsList = await Promise.all(
       membershipIds.map(async (membershipId) => {
         const membership = await assertMembership(ctx, args.companyId, membershipId);
-        return membershipCapabilities(ctx, membership);
+        return roleNameCapabilities(ctx, args.companyId, membership.role, roleCapsCache);
       }),
     );
     for (const targetCaps of targetCapsList) {

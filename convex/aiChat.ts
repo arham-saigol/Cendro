@@ -3,7 +3,7 @@ import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { membershipCapabilities, requireMembership } from "./permissions";
+import { requireMembership } from "./permissions";
 import { nonEmpty } from "./validation";
 import { createAiPersistencePayload, verifyAiPersistenceSignature } from "../src/lib/ai-chat-hmac";
 
@@ -17,8 +17,7 @@ const aiRateLimitConfigs = {
 } as const;
 
 async function assertSession(ctx: QueryCtx | MutationCtx, companyId: Id<"companies">, sessionId: Id<"aiChatSessions">) {
-  const { membership, user, company } = await requireMembership(ctx, companyId);
-  const caps = await membershipCapabilities(ctx, membership);
+  const { membership, user, company, capabilities: caps } = await requireMembership(ctx, companyId);
   if (!caps.has("ai:use")) throw new ConvexError("You do not have permission to use AI.");
   const session = await ctx.db.get(sessionId);
   if (!session || session.companyId !== companyId || session.membershipId !== membership._id) throw new ConvexError("Chat session not found.");
@@ -64,8 +63,7 @@ export const consumeRateLimit = mutation({
 export const listSessions = query({
   args: { companyId: v.id("companies") },
   handler: async (ctx, args) => {
-    const { membership } = await requireMembership(ctx, args.companyId);
-    const caps = await membershipCapabilities(ctx, membership);
+    const { membership, capabilities: caps } = await requireMembership(ctx, args.companyId);
     if (!caps.has("ai:use")) return [];
     const rows = await ctx.db.query("aiChatSessions").withIndex("by_membership_and_updatedAt", (q) => q.eq("membershipId", membership._id)).order("desc").take(50);
     return rows
@@ -77,8 +75,7 @@ export const listSessions = query({
 export const createSession = mutation({
   args: { companyId: v.id("companies") },
   handler: async (ctx, args) => {
-    const { membership } = await requireMembership(ctx, args.companyId);
-    const caps = await membershipCapabilities(ctx, membership);
+    const { membership, capabilities: caps } = await requireMembership(ctx, args.companyId);
     if (!caps.has("ai:use")) throw new ConvexError("You do not have permission to use AI.");
     const now = Date.now();
     return await ctx.db.insert("aiChatSessions", { companyId: args.companyId, membershipId: membership._id, hasMessages: false, createdAt: now, updatedAt: now });
@@ -96,8 +93,7 @@ export const getSession = query({
 export const getOrCreateSession = mutation({
   args: { companyId: v.id("companies"), sessionId: v.optional(v.id("aiChatSessions")) },
   handler: async (ctx, args) => {
-    const { membership } = await requireMembership(ctx, args.companyId);
-    const caps = await membershipCapabilities(ctx, membership);
+    const { membership, capabilities: caps } = await requireMembership(ctx, args.companyId);
     if (!caps.has("ai:use")) throw new ConvexError("You do not have permission to use AI.");
     if (args.sessionId) {
       const existing = await ctx.db.get(args.sessionId);

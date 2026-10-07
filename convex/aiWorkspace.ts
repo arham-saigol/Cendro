@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { analyticsScopedMembershipIds, memberFullName, membershipCapabilities, requireMembership, scopedMembershipIds, taskHasVisibleAssignee } from "./permissions";
+import { analyticsScopedMembershipIds, memberFullName, requireMembership, scopedMembershipIds, taskHasVisibleAssignee } from "./permissions";
 import { takeWithOverflow } from "./queryLimits";
 
 const performancePeopleLimit = 20;
@@ -21,8 +21,7 @@ async function peopleRows(ctx: QueryCtx, companyId: Id<"companies">, ids: Set<Id
 export const context = query({
   args: { companyId: v.id("companies") },
   handler: async (ctx, args) => {
-    const { membership, company } = await requireMembership(ctx, args.companyId);
-    const capabilities = await membershipCapabilities(ctx, membership);
+    const { membership, company, capabilities } = await requireMembership(ctx, args.companyId);
     if (!capabilities.has("ai:use")) {
       throw new ConvexError("You do not have access to AI capabilities.");
     }
@@ -31,7 +30,7 @@ export const context = query({
       ctx,
       args.companyId,
       membership,
-      undefined,
+      capabilities,
       undefined,
       () => { isTruncated = true; },
     );
@@ -55,8 +54,7 @@ export const context = query({
 export const performanceSummary = query({
   args: { companyId: v.id("companies") },
   handler: async (ctx, args) => {
-    const { membership } = await requireMembership(ctx, args.companyId);
-    const capabilities = await membershipCapabilities(ctx, membership);
+    const { membership, capabilities } = await requireMembership(ctx, args.companyId);
     if (!capabilities.has("ai:use")) {
       throw new ConvexError("You do not have access to AI capabilities.");
     }

@@ -5,14 +5,13 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   AlertCircle,
   ArrowUpDown,
-  CheckCircle2,
   ChevronDown,
   Download,
   LoaderCircle,
   Upload,
   X,
 } from "lucide-react";
-import { useConvex, useMutation, useQuery } from "convex/react";
+import { useConvex, useMutation } from "convex/react";
 import { useRef, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
@@ -40,21 +39,12 @@ type ReviewRow = {
   include: boolean;
 };
 
-const MAX_BATCH_ROWS = 25;
-const recurrenceOptions = [
-  "daily",
-  "every_other_day",
-  "weekly",
-  "semimonthly",
-  "monthly",
-  "quarterly",
-  "semiannually",
-  "annually",
-] as const;
-const priorityOptions = ["low", "medium", "high", "critical"] as const;
-
 function taskKind(kind: PageKind): TaskImportKind {
   return kind === "jd" ? "jd" : "one_time";
+}
+
+function rowBlocksImport(row: ReviewRow) {
+  return row.operation === "blocked" || row.errors.length > 0;
 }
 
 export function TaskImportExportMenu({
@@ -76,15 +66,8 @@ export function TaskImportExportMenu({
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [fileName, setFileName] = useState("");
   const [rows, setRows] = useState<ReviewRow[]>([]);
-  const [importKey, setImportKey] = useState(() => crypto.randomUUID());
 
   const [exportBusy, setExportBusy] = useState(false);
-
-  const assignableResult = useQuery(
-    api.tasks.assignableUsers,
-    activeCompanyId ? { companyId: activeCompanyId, kind: taskKind(kind) } : "skip"
-  ) as { users: any[]; isTruncated: boolean } | undefined;
-  const assignable = assignableResult?.users;
 
   const isBusy = importBusy || exportBusy;
 
@@ -128,8 +111,7 @@ export function TaskImportExportMenu({
     if (!activeCompanyId) return;
     setImportBusy(true);
     setFileName(file.name);
-    const currentImportKey = crypto.randomUUID();
-    setImportKey(currentImportKey);
+    const importKey = crypto.randomUUID();
     try {
       const { parseWorkbook } = await loadWorkbook();
       const parsed = await parseWorkbook(file, activeCompanyId, taskKind(kind));
@@ -144,13 +126,13 @@ export function TaskImportExportMenu({
       });
 
       const nextRows = preview.rows as ReviewRow[];
-      const blocked = nextRows.filter((r) => r.operation === "blocked" || r.errors.length > 0);
-
-      if (blocked.length === 0) {
-        await executeImport(nextRows, currentImportKey);
-      } else {
+      // All-or-nothing: any row that fails validation blocks the import and the
+      // file must be fixed and uploaded again.
+      if (nextRows.some(rowBlocksImport)) {
         setRows(nextRows);
         setIssuesOpen(true);
+      } else {
+        await executeImport(nextRows, importKey);
       }
     } catch (err) {
       onNotification?.({
@@ -162,117 +144,42 @@ export function TaskImportExportMenu({
     }
   }
 
-  async function executeImport(rowsToImport: ReviewRow[], keyOverride?: string) {
-    if (!activeCompanyId) return;
-    setImportBusy(true);
-    const keyToUse = keyOverride ?? importKey;
-    const included = rowsToImport.filter((r) => r.include && r.operation !== "blocked" && r.errors.length === 0);
-    if (included.length === 0) {
-      onNotification?.({ type: "error", message: "No valid tasks to import." });
-      setImportBusy(false);
-      return;
-    }
-
-    try {
-      let created = 0;
-      let updated = 0;
-      for (let i = 0; i < included.length; i += MAX_BATCH_ROWS) {
-        const batch = included.slice(i, i + MAX_BATCH_ROWS);
-        const batchIndex = Math.floor(i / MAX_BATCH_ROWS);
-        try {
-          const result = await commit({
-            companyId: activeCompanyId,
-            kind: taskKind(kind),
-            importKey: keyToUse,
-            batchKey: `${keyToUse}:${batchIndex}`,
-            source: "cendro",
-            rows: batch.map((row) => ({
-              draft: row.draft,
-              include: true,
-              expectedUpdatedAt: row.current?.updatedAt,
-              selectedAssigneeMembershipIds:
-                row.draft.assigneeEmails.length || row.draft.rawAssigneeText.trim()
-                  ? (row.proposedAssigneeMembershipIds as Id<"companyMemberships">[])
-                  : null,
-            })),
-          });
-          created += result.created;
-          updated += result.updated;
-        } catch (err) {
-          onNotification?.({
-            type: "error",
-            message: `Imported ${created} created and ${updated} updated before the import stopped. ${err instanceof Error ? err.message : ""}`.trim(),
-          });
-          return;
-        }
-      }
-
-      setIssuesOpen(false);
-      onNotification?.({
-        type: "success",
-        message: `Successfully imported ${included.length} task${included.length === 1 ? "" : "s"} (${created} created, ${updated} updated).`,
-      });
-    } catch (err) {
-      onNotification?.({
-        type: "error",
-        message: err instanceof Error ? err.message : "Failed to import tasks.",
-      });
-    } finally {
-      setImportBusy(false);
-    }
-  }
-
-  function changeAssignees(rowKey: string, membershipIds: string[]) {
-    const people = membershipIds
-      .map((id) => (assignable ?? []).find((c) => c.membership._id === id))
-      .filter(Boolean);
-    const emails = people.map((p) => p!.user.email);
-    setRows((current) =>
-      current.map((row) => {
-        if (row.rowKey !== rowKey) return row;
-        return {
-          ...row,
-          draft: { ...row.draft, rawAssigneeText: emails.join("; "), assigneeEmails: emails },
-          proposedAssigneeMembershipIds: membershipIds,
-          unresolvedAssigneeHints: [],
-        };
-      })
-    );
-  }
-
-  function patchRow(rowKey: string, patch: Partial<TaskImportDraft>) {
-    setRows((current) =>
-      current.map((row) => (row.rowKey === rowKey ? { ...row, draft: { ...row.draft, ...patch } } : row))
-    );
-  }
-
-  async function revalidateAndImport() {
+  // One mutation per import: the commit either writes every row or nothing.
+  async function executeImport(rowsToImport: ReviewRow[], importKey: string) {
     if (!activeCompanyId) return;
     setImportBusy(true);
     try {
-      const preview = await convex.query(api.taskImports.previewTaskImport, {
+      const result = await commit({
         companyId: activeCompanyId,
         kind: taskKind(kind),
-        drafts: rows.map((r) => r.draft),
+        importKey,
+        batchKey: `${importKey}:0`,
+        source: "cendro",
+        rows: rowsToImport.map((row) => ({
+          draft: row.draft,
+          include: true,
+          expectedUpdatedAt: row.current?.updatedAt,
+          selectedAssigneeMembershipIds:
+            row.draft.assigneeEmails.length || row.draft.rawAssigneeText.trim()
+              ? (row.proposedAssigneeMembershipIds as Id<"companyMemberships">[])
+              : null,
+        })),
       });
-      const nextRows = preview.rows as ReviewRow[];
-      setRows(nextRows);
-      const blocked = nextRows.filter((r) => r.operation === "blocked" || r.errors.length > 0);
-      if (blocked.length === 0) {
-        await executeImport(nextRows);
-      }
+      onNotification?.({
+        type: "success",
+        message: `Successfully imported ${rowsToImport.length} task${rowsToImport.length === 1 ? "" : "s"} (${result.created} created, ${result.updated} updated).`,
+      });
     } catch (err) {
       onNotification?.({
         type: "error",
-        message: err instanceof Error ? err.message : "Validation failed.",
+        message: `Nothing was imported. ${err instanceof Error ? err.message : "Import failed."}`,
       });
     } finally {
       setImportBusy(false);
     }
   }
 
-  const validCount = rows.filter((r) => r.operation !== "blocked" && r.errors.length === 0).length;
-  const issueRows = rows.filter((r) => r.operation === "blocked" || r.errors.length > 0 || r.warnings.length > 0);
+  const issueRows = rows.filter((r) => rowBlocksImport(r) || r.warnings.length > 0);
 
   return (
     <>
@@ -338,21 +245,19 @@ export function TaskImportExportMenu({
         }}
       />
 
-      <Dialog.Root open={issuesOpen} onOpenChange={(open) => !importBusy && setIssuesOpen(open)}>
+      <Dialog.Root open={issuesOpen} onOpenChange={setIssuesOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]" />
           <Dialog.Content
-            onPointerDownOutside={(e) => e.preventDefault()}
-            onInteractOutside={(e) => e.preventDefault()}
             className="fixed inset-3 z-50 flex max-w-3xl flex-col overflow-hidden rounded-2xl border border-[var(--hairline)] bg-[var(--surface)] text-[var(--ink)] shadow-[var(--shadow-elevated)] md:inset-y-12 md:left-1/2 md:w-full md:-translate-x-1/2"
           >
             <div className="flex shrink-0 items-center justify-between border-b border-[var(--hairline)] px-5 py-4">
               <div className="flex items-center gap-3">
-                <AlertCircle className="h-5 w-5 text-[var(--badge-yellow-fg)]" />
+                <AlertCircle className="h-5 w-5 text-[var(--badge-red-fg)]" />
                 <div>
-                  <Dialog.Title className="text-[15px] font-semibold">Import Issues Found</Dialog.Title>
+                  <Dialog.Title className="text-[15px] font-semibold">Import Blocked</Dialog.Title>
                   <Dialog.Description className="mt-0.5 text-[12px] text-[var(--ink-muted)]">
-                    {fileName} — {issueRows.length} of {rows.length} rows need attention
+                    {fileName} · {issueRows.length} of {rows.length} rows have issues
                   </Dialog.Description>
                 </div>
               </div>
@@ -364,14 +269,11 @@ export function TaskImportExportMenu({
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto p-5 space-y-4">
-              {validCount > 0 && (
-                <div className="flex items-center gap-2 rounded-lg bg-[var(--surface-muted)] p-3 text-[13px] text-[var(--ink-muted)]">
-                  <CheckCircle2 className="h-4 w-4 text-[var(--badge-green-fg)]" />
-                  <span>
-                    <strong>{validCount}</strong> of {rows.length} tasks are valid and ready to import.
-                  </span>
-                </div>
-              )}
+              <div className="flex items-start gap-2 rounded-lg bg-[var(--surface-muted)] p-3 text-[13px] text-[var(--ink-muted)]">
+                <span>
+                  Nothing was imported. Fix these rows in the original file, then upload the file again.
+                </span>
+              </div>
 
               <div className="space-y-3">
                 {issueRows.map((row) => (
@@ -386,7 +288,7 @@ export function TaskImportExportMenu({
                             {row.reference || "Missing Code"}
                           </span>
                           <span className="text-[11px] text-[var(--ink-muted)]">
-                            Row {row.sourceRow}
+                            {row.sourceSheet} · row {row.sourceRow}
                           </span>
                         </div>
                         <p className="mt-1 text-[13px] font-medium text-[var(--ink)]">
@@ -397,12 +299,12 @@ export function TaskImportExportMenu({
                       <span
                         className={cn(
                           "rounded px-2 py-0.5 text-[11px] font-medium",
-                          row.operation === "blocked"
+                          rowBlocksImport(row)
                             ? "bg-[var(--badge-red-bg)] text-[var(--badge-red-fg)]"
                             : "bg-[var(--badge-yellow-bg)] text-[var(--badge-yellow-fg)]"
                         )}
                       >
-                        {row.operation === "blocked" ? "Blocked" : "Warning"}
+                        {rowBlocksImport(row) ? "Blocked" : "Warning"}
                       </span>
                     </div>
 
@@ -421,117 +323,17 @@ export function TaskImportExportMenu({
                         ))}
                       </div>
                     )}
-
-                    {/* Inline resolution tools */}
-                    <div className="mt-3 grid gap-2 border-t border-[var(--hairline)] pt-3 sm:grid-cols-2">
-                      <div>
-                        <label
-                          htmlFor={`assignee-${row.rowKey}`}
-                          className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]"
-                        >
-                          Assigned To
-                        </label>
-                        <select
-                          id={`assignee-${row.rowKey}`}
-                          className="h-8 w-full rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2 text-[12px]"
-                          value={row.proposedAssigneeMembershipIds[0] ?? ""}
-                          onChange={(e) => changeAssignees(row.rowKey, e.target.value ? [e.target.value] : [])}
-                        >
-                          <option value="">Select an active member</option>
-                          {(assignable ?? []).map((person) => (
-                            <option key={person.membership._id} value={person.membership._id}>
-                              {person.user.name || person.user.email} ({person.user.email})
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      {kind === "jd" ? (
-                        <div>
-                          <label
-                            htmlFor={`frequency-${row.rowKey}`}
-                            className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]"
-                          >
-                            Frequency
-                          </label>
-                          <select
-                            id={`frequency-${row.rowKey}`}
-                            className="h-8 w-full rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2 text-[12px]"
-                            value={row.draft.recurrence ?? ""}
-                            onChange={(e) =>
-                              patchRow(row.rowKey, {
-                                recurrence: (e.target.value || null) as TaskImportDraft["recurrence"],
-                              })
-                            }
-                          >
-                            <option value="">Select frequency</option>
-                            {recurrenceOptions.map((opt) => (
-                              <option key={opt} value={opt}>
-                                {opt}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      ) : (
-                        <div>
-                          <label
-                            htmlFor={`priority-${row.rowKey}`}
-                            className="mb-1 block text-[11px] font-medium text-[var(--ink-muted)]"
-                          >
-                            Priority
-                          </label>
-                          <select
-                            id={`priority-${row.rowKey}`}
-                            className="h-8 w-full rounded-md border border-[var(--hairline)] bg-[var(--surface)] px-2 text-[12px]"
-                            value={row.draft.priority ?? ""}
-                            onChange={(e) =>
-                              patchRow(row.rowKey, {
-                                priority: (e.target.value || null) as TaskImportDraft["priority"],
-                              })
-                            }
-                          >
-                            <option value="">Select priority</option>
-                            {priorityOptions.map((opt) => (
-                              <option key={opt} value={opt}>
-                                {opt}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      )}
-                    </div>
                   </div>
                 ))}
               </div>
             </div>
 
-            <div className="flex shrink-0 items-center justify-between border-t border-[var(--hairline)] px-5 py-4">
-              <Button variant="secondary" size="sm" onClick={() => setIssuesOpen(false)}>
-                Cancel
-              </Button>
-              <div className="flex gap-2">
-                {validCount > 0 && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={importBusy}
-                    onClick={() =>
-                      executeImport(rows.filter((r) => r.operation !== "blocked" && r.errors.length === 0))
-                    }
-                  >
-                    Import only {validCount} valid tasks
-                  </Button>
-                )}
-                <Button
-                  variant="primary"
-                  size="sm"
-                  disabled={importBusy}
-                  onClick={() => void revalidateAndImport()}
-                >
-                  {importBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
-                  Revalidate & Import
+            <div className="flex shrink-0 items-center justify-end border-t border-[var(--hairline)] px-5 py-4">
+              <Dialog.Close asChild>
+                <Button variant="primary" size="sm">
+                  Close
                 </Button>
-              </div>
+              </Dialog.Close>
             </div>
           </Dialog.Content>
         </Dialog.Portal>

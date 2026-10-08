@@ -3,6 +3,7 @@
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import { api } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 import { currentJdCycle, defaultTimeZone } from "./taskCycles";
 import { MAX_REFERENCE_NUMBER, nextReference, syncReferenceCounter } from "./references";
@@ -1346,5 +1347,127 @@ describe("task import backend", () => {
       rows: [{ include: true, expectedUpdatedAt: activeTask.task.updatedAt, selectedAssigneeMembershipIds: null, draft: deactivateDraft }],
     })).rejects.toThrow(/permission to make this task inactive/);
     expect((await admin.query(api.tasks.getJd, { companyId, taskId: pausedTask.task._id })).task.pausedAt).toBeUndefined();
+  });
+});
+
+describe("all-or-nothing imports", () => {
+  const makeTest = () => convexTest(schema, modules);
+  type ConvexTestEnv = ReturnType<typeof makeTest>;
+  async function countJdTasks(t: ConvexTestEnv, companyId: Id<"companies">) {
+    return await t.run(async (ctx) =>
+      (await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).collect()).length
+    );
+  }
+  async function countReceipts(t: ConvexTestEnv, companyId: Id<"companies">) {
+    return await t.run(async (ctx) =>
+      (await ctx.db.query("taskImportBatches").withIndex("by_companyId_and_importKey_and_batchKey", (q) => q.eq("companyId", companyId)).collect()).length
+    );
+  }
+
+  test("a mixed valid/invalid file blocks in preview and commits nothing", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+    const good = draft({ reference: "JD-001", title: "Good row" });
+    const bad = draft({ rowKey: "JD Tasks:3", sourceRow: 3, reference: "BROKEN", title: "Bad row" });
+
+    const preview = await admin.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [good, bad] });
+    expect(preview.rows[0]).toMatchObject({ operation: "create", sourceRow: 2 });
+    expect(preview.rows[1]).toMatchObject({ operation: "blocked", sourceRow: 3 });
+    expect(preview.rows[1].errors).toContain("Code must match JD-001.");
+
+    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-mixed", batchKey: "batch-1", source: "cendro",
+      rows: [
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: good },
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: bad },
+      ],
+    })).rejects.toThrow(/Code must match JD-001/);
+
+    expect(await countJdTasks(t, companyId)).toBe(0);
+    expect(await countReceipts(t, companyId)).toBe(0);
+  });
+
+  test("a fully invalid file commits nothing", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+    const badRef = draft({ reference: "XX-001" });
+    const noTitle = draft({ rowKey: "JD Tasks:3", sourceRow: 3, reference: "JD-002", title: null });
+
+    const preview = await admin.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [badRef, noTitle] });
+    expect(preview.rows.map((r) => r.operation)).toEqual(["blocked", "blocked"]);
+    expect(preview.rows[0].errors).toContain("Code must match JD-001.");
+    expect(preview.rows[1].errors).toContain("Task title is required.");
+
+    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-all-bad", batchKey: "batch-1", source: "cendro",
+      rows: [
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: badRef },
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: noTitle },
+      ],
+    })).rejects.toThrow();
+
+    expect(await countJdTasks(t, companyId)).toBe(0);
+    expect(await countReceipts(t, companyId)).toBe(0);
+  });
+
+  test("a fully valid file commits every row in one batch", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+    const drafts = [
+      draft({ reference: "JD-001", title: "First" }),
+      draft({ rowKey: "JD Tasks:3", sourceRow: 3, reference: "JD-002", title: "Second" }),
+      draft({ rowKey: "JD Tasks:4", sourceRow: 4, reference: "JD-003", title: "Third" }),
+    ];
+
+    const result = await admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-all-good", batchKey: "batch-1", source: "cendro",
+      rows: drafts.map((d) => ({ include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: d })),
+    });
+
+    expect(result).toMatchObject({ created: 3, updated: 0, skipped: 0, failed: 0 });
+    expect(result.taskReferences).toEqual(["JD-001", "JD-002", "JD-003"]);
+    expect(await countJdTasks(t, companyId)).toBe(3);
+  });
+
+  test("rejects a commit that excludes reviewed rows", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+
+    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-partial-include", batchKey: "batch-1", source: "cendro",
+      rows: [
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: draft({ reference: "JD-001" }) },
+        { include: false, selectedAssigneeMembershipIds: [adminMembershipId], draft: draft({ rowKey: "JD Tasks:3", sourceRow: 3, reference: "JD-002" }) },
+      ],
+    })).rejects.toThrow(/must include every reviewed row/);
+
+    expect(await countJdTasks(t, companyId)).toBe(0);
+    expect(await countReceipts(t, companyId)).toBe(0);
+  });
+
+  test("a second batch under a committed import key is rejected", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+
+    await admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-once", batchKey: "import-once:0", source: "cendro",
+      rows: [{ include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: draft({ reference: "JD-001" }) }],
+    });
+
+    // Same batchKey replays the receipt idempotently.
+    const replay = await admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-once", batchKey: "import-once:0", source: "cendro",
+      rows: [{ include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: draft({ reference: "JD-001" }) }],
+    });
+    expect(replay.created).toBe(1);
+
+    // A different batch under the same key can never double-apply rows.
+    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-once", batchKey: "import-once:1", source: "cendro",
+      rows: [{ include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: draft({ rowKey: "JD Tasks:3", sourceRow: 3, reference: "JD-002" }) }],
+    })).rejects.toThrow(/already committed/);
+
+    expect(await countJdTasks(t, companyId)).toBe(1);
+    expect(await countReceipts(t, companyId)).toBe(1);
   });
 });

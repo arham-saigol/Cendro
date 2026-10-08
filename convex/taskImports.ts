@@ -48,8 +48,9 @@ const reviewedRowValidator = v.object({
 });
 
 const MAX_PREVIEW_ROWS = 500;
-const MAX_COMMIT_ROWS = 25;
-const MAX_IMPORT_BATCHES = Math.ceil(MAX_PREVIEW_ROWS / MAX_COMMIT_ROWS);
+// An import commits in a single mutation so the whole file is one atomic
+// transaction: a failure mid-import can never leave partially imported tasks.
+const MAX_COMMIT_ROWS = MAX_PREVIEW_ROWS;
 
 type TaskKind = "jd" | "one_time";
 type ImportSource = "cendro";
@@ -452,23 +453,26 @@ export const commitTaskImportBatch = mutation({
       return existingReceipt.result;
     }
     if (args.rows.some((row) => row.draft.source !== args.source || row.draft.kind !== args.kind)) fail("Import source or task kind changed. Re-preview and try again.");
-    const includedRows = args.rows.filter((row) => row.include);
-    if (includedRows.length === 0) fail("Import batches need at least one included row.");
-    const rowKeys = includedRows.map((row) => row.draft.rowKey);
+    // All-or-nothing: every reviewed row must be included so the commit covers
+    // the whole file or nothing at all.
+    if (args.rows.some((row) => !row.include)) fail("Import batches must include every reviewed row.");
+    const rowKeys = args.rows.map((row) => row.draft.rowKey);
     if (new Set(rowKeys).size !== rowKeys.length) fail("Import batch contains duplicate source rows.");
-    const references = includedRows.map((row) => validateReference(row.draft.reference, args.kind));
+    const references = args.rows.map((row) => validateReference(row.draft.reference, args.kind));
     if (new Set(references).size !== references.length) fail("Import batch contains duplicate task references.");
-    const priorReceipts = await ctx.db.query("taskImportBatches").withIndex("by_companyId_and_importKey_and_batchKey", (q) => q.eq("companyId", args.companyId).eq("importKey", args.importKey)).take(MAX_IMPORT_BATCHES + 1);
-    if (priorReceipts.length > MAX_IMPORT_BATCHES || priorReceipts.some((receipt) => receipt.actorMembershipId !== membership._id || receipt.kind !== args.kind || receipt.source !== args.source)) fail("Import key is not available.");
-    const priorReferences = new Set(priorReceipts.flatMap((receipt) => receipt.result.taskReferences));
+    const priorReceipts = await ctx.db.query("taskImportBatches").withIndex("by_companyId_and_importKey_and_batchKey", (q) => q.eq("companyId", args.companyId).eq("importKey", args.importKey)).take(2);
+    if (priorReceipts.some((receipt) => receipt.actorMembershipId !== membership._id || receipt.kind !== args.kind || receipt.source !== args.source)) fail("Import key is not available.");
+    // A committed import already wrote its receipt; the same-batchKey retry was
+    // replayed above, so any other batch under this key is a spent import.
+    if (priorReceipts.length > 0) fail("This import was already committed. Preview the file again to retry.");
     const { emails, membershipIds } = extractAssigneeTargets(
-      includedRows.map((row) => row.draft),
-      includedRows.map((row) => row.selectedAssigneeMembershipIds)
+      args.rows.map((row) => row.draft),
+      args.rows.map((row) => row.selectedAssigneeMembershipIds)
     );
     const auth = await buildImportAuth(ctx, args.companyId, membership, args.kind, emails, membershipIds, capabilities);
     const calendar = await loadWorkCalendar(ctx, args.companyId);
     const prepared = [];
-    for (const row of includedRows) prepared.push(await validateCommitRow(ctx, args.companyId, args.kind, auth, row));
+    for (const row of args.rows) prepared.push(await validateCommitRow(ctx, args.companyId, args.kind, auth, row));
     let created = 0;
     let updated = 0;
     const taskReferences: string[] = [];
@@ -580,7 +584,7 @@ export const commitTaskImportBatch = mutation({
         taskReferences.push(reference);
       }
     }
-    const result = { created, updated, skipped: args.rows.length - includedRows.length, failed: 0, taskReferences };
+    const result = { created, updated, skipped: 0, failed: 0, taskReferences };
     await ctx.db.insert("taskImportBatches", { companyId: args.companyId, actorMembershipId: membership._id, kind: args.kind, importKey: args.importKey, batchKey: args.batchKey, source: args.source, requestFingerprint, result, createdAt: Date.now() });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "task_import.batch", targetType: "taskImportBatch", metadata: { importKey: args.importKey, source: args.source, kind: args.kind, createCount: created, updateCount: updated, taskReferences }, createdAt: Date.now() });
     return result;

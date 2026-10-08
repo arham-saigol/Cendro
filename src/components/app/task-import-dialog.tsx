@@ -119,7 +119,7 @@ export function TaskImportExportMenu({
         throw new Error("No task rows found in this workbook.");
       }
 
-      const preview = await convex.query(api.taskImports.previewTaskImport, {
+      const preview = await convex.mutation(api.taskImports.previewTaskImport, {
         companyId: activeCompanyId,
         kind: taskKind(kind),
         drafts: parsed.rows,
@@ -132,7 +132,7 @@ export function TaskImportExportMenu({
         setRows(nextRows);
         setIssuesOpen(true);
       } else {
-        await executeImport(nextRows, importKey);
+        await executeImport(nextRows, importKey, preview.previewId);
       }
     } catch (err) {
       onNotification?.({
@@ -144,8 +144,9 @@ export function TaskImportExportMenu({
     }
   }
 
-  // One mutation per import: the commit either writes every row or nothing.
-  async function executeImport(rowsToImport: ReviewRow[], importKey: string) {
+  // One mutation per import, bound to the staged preview: the commit either
+  // writes every validated row or nothing.
+  async function executeImport(rowsToImport: ReviewRow[], importKey: string, previewId: Id<"taskImportPreviews">) {
     if (!activeCompanyId) return;
     setImportBusy(true);
     try {
@@ -155,6 +156,7 @@ export function TaskImportExportMenu({
         importKey,
         batchKey: `${importKey}:0`,
         source: "cendro",
+        previewId,
         rows: rowsToImport.map((row) => ({
           draft: row.draft,
           include: true,

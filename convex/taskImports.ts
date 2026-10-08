@@ -1,5 +1,5 @@
 import { ConvexError, v } from "convex/values";
-import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { mutation, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { getManagedMembershipIds, hasAllManagedMemberships, isManagedMembership, membershipCapabilities, requireCapability } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
@@ -51,6 +51,10 @@ const MAX_PREVIEW_ROWS = 500;
 // An import commits in a single mutation so the whole file is one atomic
 // transaction: a failure mid-import can never leave partially imported tasks.
 const MAX_COMMIT_ROWS = MAX_PREVIEW_ROWS;
+// Preview records bind a commit to the exact file the server validated. They
+// are consumed by the committing mutation; abandoned ones are pruned lazily.
+const PREVIEW_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_STALE_PREVIEWS_PRUNED = 50;
 
 type TaskKind = "jd" | "one_time";
 type ImportSource = "cendro";
@@ -98,7 +102,7 @@ function hasField(draft: Draft, field: string) { return draft.presentFields.incl
 function hasAssigneeValue(draft: Draft) { return draft.assigneeEmails.length > 0 || draft.rawAssigneeText.trim().length > 0; }
 function fail(message: string): never { throw new ConvexError(message); }
 
-async function fingerprintRows(rows: ReviewedRow[]) {
+async function fingerprintRows(rows: readonly unknown[]) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(rows)));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -326,7 +330,9 @@ function resolveAssignees(auth: ImportAuth, draft: Draft, selected: Id<"companyM
   return { membershipIds: unique, hints, errors };
 }
 
-export const previewTaskImport = query({
+// Preview is a mutation so it can stage the server-side file record that a
+// later commit is bound to. It writes only taskImportPreviews rows.
+export const previewTaskImport = mutation({
   args: { companyId: v.id("companies"), kind: kindValidator, drafts: v.array(draftValidator) },
   handler: async (ctx, args) => {
     if (args.drafts.length > MAX_PREVIEW_ROWS) fail(`Imports may contain at most ${MAX_PREVIEW_ROWS} task rows.`);
@@ -394,7 +400,23 @@ export const previewTaskImport = query({
       if (args.kind === "one_time" && draft.dueDate !== null && draft.dueDate < Date.now() && (!task || task.status !== "completed")) warnings.push("This task will be overdue immediately.");
       rows.push({ rowKey: draft.rowKey, sourceSheet: draft.sourceSheet, sourceRow: draft.sourceRow, operation: errors.length > 0 ? "blocked" : operation, reference: reference ?? null, draft, current: task ? editableSnapshot(task, args.kind) : null, proposedAssigneeMembershipIds: assignees.membershipIds, unresolvedAssigneeHints: assignees.hints, errors, warnings, include: errors.length === 0 });
     }
-    return { rows, canCreate: auth.canCreate, canUpdate: auth.canUpdate };
+    // Stage the whole-file record a commit must match: commits that omit rows,
+    // alter drafts, or arrive from older clients without a previewId are
+    // rejected before they write anything.
+    const stale = await ctx.db
+      .query("taskImportPreviews")
+      .withIndex("by_membershipId_and_createdAt", (q) => q.eq("actorMembershipId", membership._id).lt("createdAt", Date.now() - PREVIEW_TTL_MS))
+      .take(MAX_STALE_PREVIEWS_PRUNED);
+    for (const preview of stale) await ctx.db.delete(preview._id);
+    const previewId = await ctx.db.insert("taskImportPreviews", {
+      companyId: args.companyId,
+      actorMembershipId: membership._id,
+      kind: args.kind,
+      fingerprint: await fingerprintRows(args.drafts),
+      rowCount: args.drafts.length,
+      createdAt: Date.now(),
+    });
+    return { rows, canCreate: auth.canCreate, canUpdate: auth.canUpdate, previewId };
   },
 });
 
@@ -439,7 +461,7 @@ async function validateCommitRow(ctx: MutationCtx, companyId: Id<"companies">, k
 }
 
 export const commitTaskImportBatch = mutation({
-  args: { companyId: v.id("companies"), kind: kindValidator, importKey: v.string(), batchKey: v.string(), source: sourceValidator, rows: v.array(reviewedRowValidator) },
+  args: { companyId: v.id("companies"), kind: kindValidator, importKey: v.string(), batchKey: v.string(), source: sourceValidator, previewId: v.id("taskImportPreviews"), rows: v.array(reviewedRowValidator) },
   handler: async (ctx, args) => {
     if (args.rows.length === 0 || args.rows.length > MAX_COMMIT_ROWS) fail(`Import batches must contain 1-${MAX_COMMIT_ROWS} rows.`);
     if (!args.importKey.trim() || !args.batchKey.trim() || args.importKey.length > 200 || args.batchKey.length > 200) fail("Import keys are invalid.");
@@ -453,8 +475,12 @@ export const commitTaskImportBatch = mutation({
       return existingReceipt.result;
     }
     if (args.rows.some((row) => row.draft.source !== args.source || row.draft.kind !== args.kind)) fail("Import source or task kind changed. Re-preview and try again.");
-    // All-or-nothing: every reviewed row must be included so the commit covers
-    // the whole file or nothing at all.
+    // All-or-nothing: the commit must present exactly the file the preview
+    // validated, so an omitted or altered row can never produce a partial
+    // import. Every reviewed row must also be included.
+    const preview = await ctx.db.get(args.previewId);
+    if (!preview || preview.companyId !== args.companyId || preview.actorMembershipId !== membership._id || preview.kind !== args.kind) fail("Import preview is not available. Preview the file again.");
+    if (preview.rowCount !== args.rows.length || preview.fingerprint !== (await fingerprintRows(args.rows.map((row) => row.draft)))) fail("Import rows do not match the previewed file. Preview the file again.");
     if (args.rows.some((row) => !row.include)) fail("Import batches must include every reviewed row.");
     const rowKeys = args.rows.map((row) => row.draft.rowKey);
     if (new Set(rowKeys).size !== rowKeys.length) fail("Import batch contains duplicate source rows.");
@@ -585,6 +611,7 @@ export const commitTaskImportBatch = mutation({
       }
     }
     const result = { created, updated, skipped: 0, failed: 0, taskReferences };
+    await ctx.db.delete(args.previewId);
     await ctx.db.insert("taskImportBatches", { companyId: args.companyId, actorMembershipId: membership._id, kind: args.kind, importKey: args.importKey, batchKey: args.batchKey, source: args.source, requestFingerprint, result, createdAt: Date.now() });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "task_import.batch", targetType: "taskImportBatch", metadata: { importKey: args.importKey, source: args.source, kind: args.kind, createCount: created, updateCount: updated, taskReferences }, createdAt: Date.now() });
     return result;

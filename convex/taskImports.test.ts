@@ -1542,6 +1542,41 @@ describe("all-or-nothing imports", () => {
     expect(renamed.task.title).toBe("Renamed 0");
   });
 
+  test("a file needing more catch-up than a transaction holds is rejected before writing", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+
+    // Ten tasks ~400 days behind on a daily recurrence each hit the 200-cycle
+    // catch-up cap: 10 x 400 estimated lookups exceeds the transaction bound.
+    const rows = [];
+    for (let i = 0; i < 10; i += 1) {
+      const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: `Stale ${i}`, recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+      await t.run(async (ctx) => {
+        await ctx.db.patch(taskId, { cycleStartedAt: Date.now() - 400 * 86_400_000 });
+      });
+      const task = await admin.query(api.tasks.getJd, { companyId, taskId });
+      rows.push({
+        include: true,
+        expectedUpdatedAt: task.task.updatedAt,
+        selectedAssigneeMembershipIds: null,
+        draft: draft({ rowKey: `JD Tasks:${i + 2}`, sourceRow: i + 2, reference: task.task.reference, title: `Renamed ${i}`, presentFields: ["reference", "title"], rawAssigneeText: "", assigneeEmails: [] }),
+      });
+    }
+
+    await expect(commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-too-big", batchKey: "batch-1",
+      rows,
+    })).rejects.toThrow(/catch-up work/);
+
+    // Nothing was written: titles are unchanged and there is no receipt.
+    const firstTaskId = await t.run(async (ctx) =>
+      (await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).first())!._id
+    );
+    const stale = await admin.query(api.tasks.getJd, { companyId, taskId: firstTaskId });
+    expect(stale.task.title).toBe("Stale 0");
+    expect(await countReceipts(t, companyId)).toBe(0);
+  });
+
   test("rejects a commit that excludes reviewed rows", async () => {
     const { t, companyId, adminMembershipId } = await seed();
     const admin = t.withIdentity(identity("admin"));

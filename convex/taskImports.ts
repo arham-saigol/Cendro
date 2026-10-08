@@ -3,7 +3,7 @@ import { mutation, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { getManagedMembershipIds, hasAllManagedMemberships, isManagedMembership, membershipCapabilities, requireCapability } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
-import { effectiveCurrentJdCycle, loadWorkCalendar } from "./workCalendar";
+import { effectiveCurrentJdCycle, elapsedJdOccurrences, loadWorkCalendar } from "./workCalendar";
 import { defaultTimeZone } from "./taskCycles";
 import { canManageJdLifecycle, preserveJdCompletionStamp, recordMissedJdCycles, retireJdHistoryAtCycle, transitionJdTaskActiveState, type TaskVisibilityAuth } from "./tasks";
 import { syncReferenceCounter } from "./references";
@@ -55,6 +55,11 @@ const MAX_COMMIT_ROWS = MAX_PREVIEW_ROWS;
 // are consumed by the committing mutation; abandoned ones are pruned lazily.
 const PREVIEW_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_STALE_PREVIEWS_PRUNED = 50;
+// A JD update runs two index lookups per elapsed cycle to catch up missed
+// records. The whole import is one transaction, so the estimated catch-up is
+// bounded up front: a file past this fails cleanly instead of hitting Convex's
+// transaction limit mid-write. Splitting the file stays the escape hatch.
+const MAX_CATCHUP_LOOKUPS = 3000;
 
 type TaskKind = "jd" | "one_time";
 type ImportSource = "cendro";
@@ -499,6 +504,19 @@ export const commitTaskImportBatch = mutation({
     const calendar = await loadWorkCalendar(ctx, args.companyId);
     const prepared = [];
     for (const row of args.rows) prepared.push(await validateCommitRow(ctx, args.companyId, args.kind, auth, row));
+    if (args.kind === "jd") {
+      // Estimate cycle catch-up without reads: elapsed occurrence counts are
+      // pure calendar math. Reject before any write when the file would need
+      // more lookups than a single transaction can hold.
+      const estimateNow = Date.now();
+      let catchUpLookups = 0;
+      for (const item of prepared) {
+        const task = item.task as Doc<"jdTasks"> | null;
+        if (!task || task.pausedAt !== undefined) continue;
+        catchUpLookups += 2 * elapsedJdOccurrences(calendar, task.recurrence, task.cycleStartedAt, estimateNow, 200, company.timeZone).occurrences.length;
+        if (catchUpLookups > MAX_CATCHUP_LOOKUPS) fail("This file needs more per-task catch-up work than one import can process. Split it into smaller files and import each.");
+      }
+    }
     let created = 0;
     let updated = 0;
     const taskReferences: string[] = [];

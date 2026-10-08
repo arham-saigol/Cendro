@@ -1,5 +1,6 @@
 import { ConvexError, v } from "convex/values";
-import { mutation, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internalMutation, mutation, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { getManagedMembershipIds, hasAllManagedMemberships, isManagedMembership, membershipCapabilities, requireCapability } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
@@ -52,14 +53,17 @@ const MAX_PREVIEW_ROWS = 500;
 // transaction: a failure mid-import can never leave partially imported tasks.
 const MAX_COMMIT_ROWS = MAX_PREVIEW_ROWS;
 // Preview records bind a commit to the exact file the server validated. They
-// are consumed by the committing mutation; abandoned ones are pruned lazily.
+// are consumed by the committing mutation; abandoned ones expire with the
+// sweepExpiredTaskImportPreviews cron after this TTL.
 const PREVIEW_TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_STALE_PREVIEWS_PRUNED = 50;
 // A JD update runs two index lookups per elapsed cycle to catch up missed
-// records. The whole import is one transaction, so the estimated catch-up is
-// bounded up front: a file past this fails cleanly instead of hitting Convex's
-// transaction limit mid-write. Splitting the file stays the escape hatch.
-const MAX_CATCHUP_LOOKUPS = 3000;
+// records, plus a few fixed reads per committed row (reference lookup, counter
+// sync, the post-catch-up task read, the current-cycle completion check). The
+// whole import is one transaction under Convex's index-read limit, so the
+// estimated total is bounded up front: a file past this fails cleanly instead
+// of hitting the limit mid-write. Splitting the file stays the escape hatch.
+const FIXED_LOOKUPS_PER_ROW = 4;
+const MAX_COMMIT_LOOKUPS = 3500;
 
 type TaskKind = "jd" | "one_time";
 type ImportSource = "cendro";
@@ -408,11 +412,6 @@ export const previewTaskImport = mutation({
     // Stage the whole-file record a commit must match: commits that omit rows,
     // alter drafts, or arrive from older clients without a previewId are
     // rejected before they write anything.
-    const stale = await ctx.db
-      .query("taskImportPreviews")
-      .withIndex("by_membershipId_and_createdAt", (q) => q.eq("actorMembershipId", membership._id).lt("createdAt", Date.now() - PREVIEW_TTL_MS))
-      .take(MAX_STALE_PREVIEWS_PRUNED);
-    for (const preview of stale) await ctx.db.delete(preview._id);
     const previewId = await ctx.db.insert("taskImportPreviews", {
       companyId: args.companyId,
       actorMembershipId: membership._id,
@@ -504,18 +503,18 @@ export const commitTaskImportBatch = mutation({
     const calendar = await loadWorkCalendar(ctx, args.companyId);
     const prepared = [];
     for (const row of args.rows) prepared.push(await validateCommitRow(ctx, args.companyId, args.kind, auth, row));
-    if (args.kind === "jd") {
-      // Estimate cycle catch-up without reads: elapsed occurrence counts are
-      // pure calendar math. Reject before any write when the file would need
-      // more lookups than a single transaction can hold.
-      const estimateNow = Date.now();
-      let catchUpLookups = 0;
-      for (const item of prepared) {
-        const task = item.task as Doc<"jdTasks"> | null;
-        if (!task || task.pausedAt !== undefined) continue;
-        catchUpLookups += 2 * elapsedJdOccurrences(calendar, task.recurrence, task.cycleStartedAt, estimateNow, 200, company.timeZone).occurrences.length;
-        if (catchUpLookups > MAX_CATCHUP_LOOKUPS) fail("This file needs more per-task catch-up work than one import can process. Split it into smaller files and import each.");
+    // Estimate the transaction's read work without reads: elapsed occurrence
+    // counts are pure calendar math and the rest scales with the row count.
+    // Reject before any write when the file needs more than a transaction holds.
+    const estimateNow = Date.now();
+    let estimatedLookups = 0;
+    for (const item of prepared) {
+      estimatedLookups += FIXED_LOOKUPS_PER_ROW;
+      const task = args.kind === "jd" ? item.task as Doc<"jdTasks"> | null : null;
+      if (task && task.pausedAt === undefined) {
+        estimatedLookups += 2 * elapsedJdOccurrences(calendar, task.recurrence, task.cycleStartedAt, estimateNow, 200, company.timeZone).occurrences.length;
       }
+      if (estimatedLookups > MAX_COMMIT_LOOKUPS) fail("This file needs more work than one import can process. Split it into smaller files and import each.");
     }
     let created = 0;
     let updated = 0;
@@ -633,5 +632,20 @@ export const commitTaskImportBatch = mutation({
     await ctx.db.insert("taskImportBatches", { companyId: args.companyId, actorMembershipId: membership._id, kind: args.kind, importKey: args.importKey, batchKey: args.batchKey, source: args.source, requestFingerprint, result, createdAt: Date.now() });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "task_import.batch", targetType: "taskImportBatch", metadata: { importKey: args.importKey, source: args.source, kind: args.kind, createCount: created, updateCount: updated, taskReferences }, createdAt: Date.now() });
     return result;
+  },
+});
+
+export const sweepExpiredTaskImportPreviews = internalMutation({
+  args: { cursor: v.optional(v.union(v.string(), v.null())) },
+  handler: async (ctx, args) => {
+    const cutoff = Date.now() - PREVIEW_TTL_MS;
+    const page = await ctx.db.query("taskImportPreviews").order("asc").paginate({ numItems: 200, cursor: args.cursor ?? null });
+    for (const preview of page.page) {
+      // Rows scan in creation order — a fresh preview means the rest are fresh.
+      if (preview.createdAt >= cutoff) return null;
+      await ctx.db.delete(preview._id);
+    }
+    if (!page.isDone) await ctx.scheduler.runAfter(0, internal.taskImports.sweepExpiredTaskImportPreviews, { cursor: page.continueCursor });
+    return null;
   },
 });

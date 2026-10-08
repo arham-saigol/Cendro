@@ -84,5 +84,5 @@ export default defineSchema({
   aiRateLimits: defineTable({ key: v.string(), count: v.number(), resetAt: v.number(), updatedAt: v.number() }).index("by_key", ["key"]).index("by_resetAt", ["resetAt"]),
   aiChatPersistenceRequests: defineTable({ requestId: v.string(), createdAt: v.number() }).index("by_requestId", ["requestId"]),
   taskImportBatches: defineTable({ companyId: v.id("companies"), actorMembershipId: v.id("companyMemberships"), kind: taskType, importKey: v.string(), batchKey: v.string(), source: v.union(v.literal("cendro"), v.literal("ai")), requestFingerprint: v.string(), result: v.object({ created: v.number(), updated: v.number(), skipped: v.number(), failed: v.number(), taskReferences: v.array(v.string()) }), createdAt: v.number() }).index("by_companyId_and_importKey_and_batchKey", ["companyId", "importKey", "batchKey"]),
-  taskImportPreviews: defineTable({ companyId: v.id("companies"), actorMembershipId: v.id("companyMemberships"), kind: taskType, fingerprint: v.string(), rowCount: v.number(), createdAt: v.number() }).index("by_membershipId_and_createdAt", ["actorMembershipId", "createdAt"]),
+  taskImportPreviews: defineTable({ companyId: v.id("companies"), actorMembershipId: v.id("companyMemberships"), kind: taskType, fingerprint: v.string(), rowCount: v.number(), createdAt: v.number() }),
 });

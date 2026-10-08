@@ -1547,7 +1547,7 @@ describe("all-or-nothing imports", () => {
     const admin = t.withIdentity(identity("admin"));
 
     // Ten tasks ~400 days behind on a daily recurrence each hit the 200-cycle
-    // catch-up cap: 10 x 400 estimated lookups exceeds the transaction bound.
+    // catch-up cap: 10 x 400 + 40 fixed estimated lookups exceeds the bound.
     const rows = [];
     for (let i = 0; i < 10; i += 1) {
       const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: `Stale ${i}`, recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
@@ -1566,7 +1566,7 @@ describe("all-or-nothing imports", () => {
     await expect(commitImport(admin, {
       companyId, kind: "jd", importKey: "import-too-big", batchKey: "batch-1",
       rows,
-    })).rejects.toThrow(/catch-up work/);
+    })).rejects.toThrow(/more work than one import can process/);
 
     // Nothing was written: titles are unchanged and there is no receipt.
     const firstTaskId = await t.run(async (ctx) =>

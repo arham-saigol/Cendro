@@ -3,10 +3,12 @@
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import { api } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 import { currentJdCycle, defaultTimeZone } from "./taskCycles";
 import { MAX_REFERENCE_NUMBER, nextReference, syncReferenceCounter } from "./references";
 import { defaultRoleCapabilities } from "../src/lib/permissions";
+import type { FunctionArgs } from "convex/server";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -15,7 +17,7 @@ function identity(key: string, email = `${key}@example.com`) {
 }
 
 async function seed() {
-  const t = convexTest(schema, modules);
+  const t = makeTest();
   const ids = await t.run(async (ctx) => {
     const now = Date.now();
     const companyId = await ctx.db.insert("companies", { name: "Acme", createdAt: now });
@@ -28,6 +30,11 @@ async function seed() {
   return { t, ...ids };
 }
 
+const makeTest = () => convexTest(schema, modules);
+type ConvexTestEnv = ReturnType<typeof makeTest>;
+type ConvexTestActor = ReturnType<ConvexTestEnv["withIdentity"]>;
+type CommitArgs = FunctionArgs<typeof api.taskImports.commitTaskImportBatch>;
+
 function draft(overrides: Record<string, unknown> = {}) {
   return {
     rowKey: "JD Tasks:2", sourceSheet: "JD Tasks", sourceRow: 2, source: "cendro" as const, kind: "jd" as const,
@@ -37,18 +44,37 @@ function draft(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// Commits the way the UI does: stage a preview of the file's drafts, then pass
+// the returned previewId so the commit is bound to the whole previewed file.
+async function commitImport(
+  actor: ConvexTestActor,
+  args: Omit<CommitArgs, "previewId" | "source" | "batchKey"> & { batchKey?: string },
+) {
+  const preview = await actor.mutation(api.taskImports.previewTaskImport, {
+    companyId: args.companyId,
+    kind: args.kind,
+    drafts: args.rows.map((row) => row.draft),
+  });
+  return await actor.mutation(api.taskImports.commitTaskImportBatch, {
+    ...args,
+    batchKey: args.batchKey ?? "batch-1",
+    source: "cendro",
+    previewId: preview.previewId,
+  });
+}
+
 describe("task import backend", () => {
   test("previews and commits a create, then returns the receipt on retry", async () => {
     const { t, companyId, adminMembershipId } = await seed();
     const admin = t.withIdentity(identity("admin"));
-    const preview = await admin.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [draft()] });
+    const preview = await admin.mutation(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [draft()] });
     expect(preview.rows[0]).toMatchObject({ operation: "create", proposedAssigneeMembershipIds: [adminMembershipId] });
-    const args = { companyId, kind: "jd" as const, importKey: "import-1", batchKey: "batch-1", source: "cendro" as const, rows: [{ draft: draft(), include: true, selectedAssigneeMembershipIds: [adminMembershipId] }] };
+    const args = { companyId, kind: "jd" as const, importKey: "import-1", batchKey: "batch-1", source: "cendro" as const, previewId: preview.previewId, rows: [{ draft: draft(), include: true, selectedAssigneeMembershipIds: [adminMembershipId] }] };
     const first = await admin.mutation(api.taskImports.commitTaskImportBatch, args);
     const second = await admin.mutation(api.taskImports.commitTaskImportBatch, args);
     expect(first).toMatchObject({ created: 1, updated: 0, taskReferences: ["JD-001"] });
     expect(second).toEqual(first);
-    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
+    await expect(commitImport(admin, {
       ...args,
       rows: [{ ...args.rows[0], draft: draft({ title: "Different task" }) }],
     })).rejects.toThrow(/already used for different rows/);
@@ -68,8 +94,8 @@ describe("task import backend", () => {
     });
     const task = await admin.query(api.tasks.getJd, { companyId, taskId });
 
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-current-cycle", batchKey: "batch-1", source: "cendro",
+    await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-current-cycle", batchKey: "batch-1", 
       rows: [{ include: true, expectedUpdatedAt, selectedAssigneeMembershipIds: null, draft: draft({ reference: task.task.reference, title: "Renamed", status: "completed", presentFields: ["reference", "title", "status"], rawAssigneeText: "", assigneeEmails: [] }) }],
     });
 
@@ -89,8 +115,8 @@ describe("task import backend", () => {
     const admin = t.withIdentity(identity("admin"));
     const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Old", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
     const task = await admin.query(api.tasks.getJd, { companyId, taskId });
-    const result = await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-2", batchKey: "batch-1", source: "cendro",
+    const result = await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-2", batchKey: "batch-1", 
       rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: draft({ rowKey: "JD Tasks:2", reference: task.task.reference, title: "New", status: "completed", presentFields: ["reference", "title", "assignees", "status"] }) }],
     });
     expect(result.updated).toBe(1);
@@ -110,12 +136,12 @@ describe("task import backend", () => {
     const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Old", recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
     const task = await admin.query(api.tasks.getJd, { companyId, taskId });
     const updateDraft = draft({ reference: task.task.reference, title: "New", presentFields: ["reference", "title"] });
-    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-stale", batchKey: "batch-1", source: "cendro",
+    await expect(commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-stale", batchKey: "batch-1", 
       rows: [{ include: true, selectedAssigneeMembershipIds: null, draft: updateDraft }],
     })).rejects.toThrow(/changed since preview/);
-    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-duplicate", batchKey: "batch-1", source: "cendro",
+    await expect(commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-duplicate", batchKey: "batch-1", 
       rows: [
         { include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: updateDraft },
         { include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: { ...updateDraft, rowKey: "JD Tasks:3" } },
@@ -128,9 +154,9 @@ describe("task import backend", () => {
     const admin = t.withIdentity(identity("admin"));
     const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: "Keep", description: "Keep description", recurrence: "weekly", assigneeMembershipIds: [adminMembershipId] });
     const task = await admin.query(api.tasks.getJd, { companyId, taskId });
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-partial", batchKey: "batch-1", source: "cendro",
-      rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: draft({ source: "cendro", reference: task.task.reference, title: "Ignored", description: "Ignored", recurrence: null, presentFields: ["reference"], rawAssigneeText: "", assigneeEmails: [] }) }],
+    await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-partial", batchKey: "batch-1", 
+      rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: draft({  reference: task.task.reference, title: "Ignored", description: "Ignored", recurrence: null, presentFields: ["reference"], rawAssigneeText: "", assigneeEmails: [] }) }],
     });
     const updated = await admin.query(api.tasks.getJd, { companyId, taskId });
     expect(updated.task).toMatchObject({ title: "Keep", description: "Keep description", recurrence: "weekly" });
@@ -143,8 +169,8 @@ describe("task import backend", () => {
     await admin.mutation(api.tasks.completeOneTime, { companyId, taskId });
     const task = await admin.query(api.tasks.getOneTime, { companyId, taskId });
     const oneTimeDraft = { ...draft(), rowKey: "One-Time Tasks:2", sourceSheet: "One-Time Tasks", kind: "one_time" as const, reference: task.task.reference, title: "Filed", recurrence: null, dueDate: Date.now() - 86_400_000, priority: "critical" as const, status: "completed" as const, presentFields: ["reference", "dueDate", "priority", "status"] as ("reference" | "dueDate" | "priority" | "status")[], rawAssigneeText: "", assigneeEmails: [] };
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "one_time", importKey: "import-completed", batchKey: "batch-1", source: "cendro",
+    await commitImport(admin, {
+      companyId, kind: "one_time", importKey: "import-completed", batchKey: "batch-1", 
       rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: oneTimeDraft }],
     });
     const updated = await admin.query(api.tasks.getOneTime, { companyId, taskId });
@@ -156,7 +182,7 @@ describe("task import backend", () => {
 
   test("invalid normalized workbook values stay blocked instead of clearing fields", async () => {
     const { t, companyId } = await seed();
-    const preview = await t.withIdentity(identity("admin")).query(api.taskImports.previewTaskImport, {
+    const preview = await t.withIdentity(identity("admin")).mutation(api.taskImports.previewTaskImport, {
       companyId, kind: "jd", drafts: [draft({ quantity: null, presentFields: ["reference", "title", "recurrence", "quantity", "assignees"], warnings: ["Quantity must be a positive number."] })],
     });
     expect(preview.rows[0]).toMatchObject({ operation: "blocked", errors: ["Quantity must be a positive number."] });
@@ -164,7 +190,7 @@ describe("task import backend", () => {
 
   test("unrecognized status warnings from old sheets do not block the import", async () => {
     const { t, companyId } = await seed();
-    const preview = await t.withIdentity(identity("admin")).query(api.taskImports.previewTaskImport, {
+    const preview = await t.withIdentity(identity("admin")).mutation(api.taskImports.previewTaskImport, {
       companyId, kind: "jd", drafts: [draft({ status: null, presentFields: ["reference", "title", "recurrence", "assignees", "status"], warnings: ['Status "Typo" is not recognized (use Pending, In Progress, or Completed).'] })],
     });
     expect(preview.rows[0].operation).toBe("create");
@@ -174,8 +200,8 @@ describe("task import backend", () => {
   test("an employee without create permission cannot call preview, commit, or export", async () => {
     const { t, companyId } = await seed();
     const employee = t.withIdentity(identity("employee"));
-    await expect(employee.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [draft()] })).rejects.toThrow(/You do not have access/);
-    await expect(employee.mutation(api.taskImports.commitTaskImportBatch, { companyId, kind: "jd", importKey: "k", batchKey: "b", source: "cendro", rows: [] })).rejects.toThrow();
+    await expect(employee.mutation(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [draft()] })).rejects.toThrow(/You do not have access/);
+    await expect(commitImport(employee, { companyId, kind: "jd", importKey: "k", batchKey: "b",  rows: [] })).rejects.toThrow();
     await expect(employee.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts: { cursor: null, numItems: 50 } })).rejects.toThrow(/You do not have access/);
   });
 
@@ -221,14 +247,14 @@ describe("task import backend", () => {
     expect(managerExport.page[0].title).toBe("Branch A Task");
 
     // Manager preview with Branch A employee is valid
-    const validPreview = await manager.query(api.taskImports.previewTaskImport, {
+    const validPreview = await manager.mutation(api.taskImports.previewTaskImport, {
       companyId, kind: "jd", drafts: [draft({ reference: "JD-003", rawAssigneeText: "empa@example.com", assigneeEmails: ["empa@example.com"] })],
     });
     expect(validPreview.rows[0].operation).toBe("create");
     expect(validPreview.rows[0].proposedAssigneeMembershipIds).toEqual([empAMembershipId]);
 
     // Manager preview with Branch B employee (outside scope) fails to resolve assignee
-    const outOfScopePreview = await manager.query(api.taskImports.previewTaskImport, {
+    const outOfScopePreview = await manager.mutation(api.taskImports.previewTaskImport, {
       companyId, kind: "jd", drafts: [draft({ reference: "JD-004", rawAssigneeText: "empb@example.com", assigneeEmails: ["empb@example.com"] })],
     });
     expect(outOfScopePreview.rows[0].operation).toBe("blocked");
@@ -293,7 +319,7 @@ describe("task import backend", () => {
       assigneeEmails: ["target@example.com"],
     });
 
-    const createPreview = await manager.query(api.taskImports.previewTaskImport, {
+    const createPreview = await manager.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [createDraft],
@@ -302,12 +328,12 @@ describe("task import backend", () => {
       operation: "create",
       proposedAssigneeMembershipIds: [targetMembershipId],
     });
-    await expect(manager.mutation(api.taskImports.commitTaskImportBatch, {
+    await expect(commitImport(manager, {
       companyId,
       kind: "jd",
       importKey: "large-scope-create",
       batchKey: "batch-1",
-      source: "cendro",
+      
       rows: [{ include: true, selectedAssigneeMembershipIds: [targetMembershipId!], draft: createDraft }],
     })).resolves.toMatchObject({ created: 1, updated: 0 });
 
@@ -318,18 +344,18 @@ describe("task import backend", () => {
       assigneeEmails: [],
       presentFields: ["reference", "title"],
     });
-    const updatePreview = await manager.query(api.taskImports.previewTaskImport, {
+    const updatePreview = await manager.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [updateDraft],
     });
     expect(updatePreview.rows[0]).toMatchObject({ operation: "update" });
-    await expect(manager.mutation(api.taskImports.commitTaskImportBatch, {
+    await expect(commitImport(manager, {
       companyId,
       kind: "jd",
       importKey: "large-scope-update",
       batchKey: "batch-1",
-      source: "cendro",
+      
       rows: [{
         include: true,
         expectedUpdatedAt: updatePreview.rows[0].current?.updatedAt,
@@ -347,13 +373,13 @@ describe("task import backend", () => {
     const task = await admin.query(api.tasks.getOneTime, { companyId, taskId });
     const exportedDraft = { ...draft(), rowKey: "One-Time Tasks:2", sourceSheet: "One-Time Tasks", kind: "one_time" as const, reference: task.task.reference, title: "Past Task", recurrence: null, dueDate: pastDueDate, priority: "medium" as const, status: "due" as const, presentFields: ["reference", "status"] as ("reference" | "status")[], rawAssigneeText: "", assigneeEmails: [] };
 
-    const preview = await admin.query(api.taskImports.previewTaskImport, {
+    const preview = await admin.mutation(api.taskImports.previewTaskImport, {
       companyId, kind: "one_time", drafts: [exportedDraft],
     });
     expect(preview.rows[0].operation).toBe("update");
     expect(preview.rows[0].errors).toEqual([]);
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "one_time", importKey: "import-overdue-roundtrip", batchKey: "batch-1", source: "cendro",
+    await commitImport(admin, {
+      companyId, kind: "one_time", importKey: "import-overdue-roundtrip", batchKey: "batch-1", 
       rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: exportedDraft }],
     });
 
@@ -361,8 +387,8 @@ describe("task import backend", () => {
     expect(unchanged.task.state.rawStatus).toBe("overdue");
     const changedDraft = { ...exportedDraft, title: "Edited overdue task", priority: "high" as const, status: "completed" as const, presentFields: ["reference", "title", "priority", "status"] as ("reference" | "title" | "priority" | "status")[] };
 
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "one_time", importKey: "import-overdue", batchKey: "batch-1", source: "cendro",
+    await commitImport(admin, {
+      companyId, kind: "one_time", importKey: "import-overdue", batchKey: "batch-1", 
       rows: [{ include: true, expectedUpdatedAt: unchanged.task.updatedAt, selectedAssigneeMembershipIds: null, draft: changedDraft }],
     });
 
@@ -381,8 +407,8 @@ describe("task import backend", () => {
     const task = await admin.query(api.tasks.getOneTime, { companyId, taskId });
     const statusDraft = { ...draft(), rowKey: "One-Time Tasks:2", sourceSheet: "One-Time Tasks", kind: "one_time" as const, reference: task.task.reference, title: "Renamed Task", recurrence: null, dueDate: futureDueDate, priority: "medium" as const, status: "completed" as const, presentFields: ["reference", "title", "status"] as ("reference" | "title" | "status")[], rawAssigneeText: "", assigneeEmails: [] };
 
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "one_time", importKey: "import-ot-status", batchKey: "batch-1", source: "cendro",
+    await commitImport(admin, {
+      companyId, kind: "one_time", importKey: "import-ot-status", batchKey: "batch-1", 
       rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: statusDraft }],
     });
 
@@ -412,8 +438,8 @@ describe("task import backend", () => {
     expect(otExport.page[0]).not.toHaveProperty("status");
 
     // 3. Create task via import with description and notes
-    const importCreateRes = await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-notes-create", batchKey: "batch-1", source: "cendro",
+    const importCreateRes = await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-notes-create", batchKey: "batch-1", 
       rows: [{
         include: true,
         selectedAssigneeMembershipIds: [adminMembershipId],
@@ -433,8 +459,8 @@ describe("task import backend", () => {
 
     // 4. Update existing task description and notes via import
     const existingJd = await admin.query(api.tasks.getJd, { companyId, taskId: jdId });
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-notes-update", batchKey: "batch-1", source: "cendro",
+    await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-notes-update", batchKey: "batch-1", 
       rows: [{
         include: true,
         expectedUpdatedAt: existingJd.task.updatedAt,
@@ -455,8 +481,8 @@ describe("task import backend", () => {
     expect(updatedJd.task.notes).toBe("Updated JD note via import");
 
     // 5. One-time create and update via import also apply description
-    const otCreateRes = await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "one_time", importKey: "import-ot-desc-create", batchKey: "batch-1", source: "cendro",
+    const otCreateRes = await commitImport(admin, {
+      companyId, kind: "one_time", importKey: "import-ot-desc-create", batchKey: "batch-1", 
       rows: [{
         include: true,
         selectedAssigneeMembershipIds: [adminMembershipId],
@@ -468,8 +494,8 @@ describe("task import backend", () => {
     expect(createdOt.page[0].description).toBe("OT created description");
 
     const existingOt = await admin.query(api.tasks.getOneTime, { companyId, taskId: otId });
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "one_time", importKey: "import-ot-desc-update", batchKey: "batch-1", source: "cendro",
+    await commitImport(admin, {
+      companyId, kind: "one_time", importKey: "import-ot-desc-update", batchKey: "batch-1", 
       rows: [{
         include: true,
         expectedUpdatedAt: existingOt.task.updatedAt,
@@ -491,8 +517,8 @@ describe("task import backend", () => {
       await ctx.db.insert("jdTaskCompletions", { companyId, jdTaskId: taskId, cycleStart: newCycleStart, completedAt: Date.now() });
     });
 
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-recurrence-coincident", batchKey: "batch-1", source: "cendro",
+    await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-recurrence-coincident", batchKey: "batch-1", 
       rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: draft({ reference: task.task.reference, recurrence: "weekly", presentFields: ["reference", "recurrence"], rawAssigneeText: "", assigneeEmails: [] }) }],
     });
 
@@ -527,7 +553,7 @@ describe("task import backend", () => {
     const admin = t.withIdentity(identity("admin"));
 
     // Preview import with non-existent code JD-050
-    const preview = await admin.query(api.taskImports.previewTaskImport, {
+    const preview = await admin.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: "JD-050", title: "Custom Code Task" })],
@@ -536,12 +562,12 @@ describe("task import backend", () => {
     expect(preview.rows[0].reference).toBe("JD-050");
 
     // Commit import with non-existent code JD-050
-    const commitRes = await admin.mutation(api.taskImports.commitTaskImportBatch, {
+    const commitRes = await commitImport(admin, {
       companyId,
       kind: "jd",
       importKey: "custom-code-import",
       batchKey: "batch-1",
-      source: "cendro",
+      
       rows: [{
         include: true,
         selectedAssigneeMembershipIds: [adminMembershipId],
@@ -582,7 +608,7 @@ describe("task import backend", () => {
     expect(created.task.reference).toBe("JD-001");
 
     // Preview import with existing code JD-001
-    const preview = await admin.query(api.taskImports.previewTaskImport, {
+    const preview = await admin.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: "JD-001", title: "Updated via Import" })],
@@ -591,12 +617,12 @@ describe("task import backend", () => {
     expect(preview.rows[0].reference).toBe("JD-001");
 
     // Commit update
-    const commitRes = await admin.mutation(api.taskImports.commitTaskImportBatch, {
+    const commitRes = await commitImport(admin, {
       companyId,
       kind: "jd",
       importKey: "update-existing-code",
       batchKey: "batch-1",
-      source: "cendro",
+      
       rows: [{
         include: true,
         expectedUpdatedAt: created.task.updatedAt,
@@ -617,7 +643,7 @@ describe("task import backend", () => {
     const admin = t.withIdentity(identity("admin"));
 
     // Missing / empty task code
-    const missingPreview = await admin.query(api.taskImports.previewTaskImport, {
+    const missingPreview = await admin.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: null, presentFields: ["title", "recurrence", "assignees"] })],
@@ -626,7 +652,7 @@ describe("task import backend", () => {
     expect(missingPreview.rows[0].errors).toContain("Task code is required and must match JD-001.");
 
     // Wrong prefix for JD (e.g. TSK-001)
-    const wrongPrefixPreview = await admin.query(api.taskImports.previewTaskImport, {
+    const wrongPrefixPreview = await admin.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: "TSK-001" })],
@@ -646,7 +672,7 @@ describe("task import backend", () => {
       priority: "medium" as const,
       presentFields: ["reference", "title", "dueDate", "priority", "assignees"] as ("reference" | "title" | "dueDate" | "priority" | "assignees")[],
     };
-    const wrongOneTimePrefix = await admin.query(api.taskImports.previewTaskImport, {
+    const wrongOneTimePrefix = await admin.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "one_time",
       drafts: [oneTimeDraft],
@@ -655,7 +681,7 @@ describe("task import backend", () => {
     expect(wrongOneTimePrefix.rows[0].errors).toContain("Code must match TSK-001.");
 
     // Invalid format (less than 3 digits, or non-numeric)
-    const malformedPreview = await admin.query(api.taskImports.previewTaskImport, {
+    const malformedPreview = await admin.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: "JD-1" })],
@@ -664,12 +690,12 @@ describe("task import backend", () => {
     expect(malformedPreview.rows[0].errors).toContain("Code must match JD-001.");
 
     // Direct commit with invalid format throws
-    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
+    await expect(commitImport(admin, {
       companyId,
       kind: "jd",
       importKey: "invalid-code-commit",
       batchKey: "batch-1",
-      source: "cendro",
+      
       rows: [{
         include: true,
         selectedAssigneeMembershipIds: [adminMembershipId],
@@ -692,7 +718,7 @@ describe("task import backend", () => {
     const importer = t.withIdentity(identity("importer"));
 
     // Preview non-existent code JD-999
-    const preview = await importer.query(api.taskImports.previewTaskImport, {
+    const preview = await importer.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: "JD-999", rawAssigneeText: "importer@example.com", assigneeEmails: ["importer@example.com"] })],
@@ -701,12 +727,12 @@ describe("task import backend", () => {
     expect(preview.rows[0].errors).toContain("You do not have permission to create tasks for this task kind.");
 
     // Commit fails
-    await expect(importer.mutation(api.taskImports.commitTaskImportBatch, {
+    await expect(commitImport(importer, {
       companyId,
       kind: "jd",
       importKey: "no-create-perm",
       batchKey: "batch-1",
-      source: "cendro",
+      
       rows: [{
         include: true,
         selectedAssigneeMembershipIds: [employeeMembershipId],
@@ -759,7 +785,7 @@ describe("task import backend", () => {
 
     // Manager (who has create permission, but only update:managed) tries to import code JD-001
     // JD-001 already exists for Branch B (outside manager's managed branch)
-    const preview = await manager.query(api.taskImports.previewTaskImport, {
+    const preview = await manager.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: "JD-001", title: "Hijack Task", rawAssigneeText: "empa@example.com", assigneeEmails: ["empa@example.com"] })],
@@ -770,12 +796,12 @@ describe("task import backend", () => {
     expect(preview.rows[0].errors).toContain("Task code belongs to an existing task that you do not have permission to edit.");
 
     // Commit must fail
-    await expect(manager.mutation(api.taskImports.commitTaskImportBatch, {
+    await expect(commitImport(manager, {
       companyId,
       kind: "jd",
       importKey: "hijack-attempt",
       batchKey: "batch-1",
-      source: "cendro",
+      
       rows: [{
         include: true,
         selectedAssigneeMembershipIds: [empAMembershipId],
@@ -815,7 +841,7 @@ describe("task import backend", () => {
     const manager = t.withIdentity(identity("mgr"));
 
     // Manager assigns to userb (in Branch B, outside scope)
-    const preview = await manager.query(api.taskImports.previewTaskImport, {
+    const preview = await manager.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: "JD-001", rawAssigneeText: "userb@example.com", assigneeEmails: ["userb@example.com"] })],
@@ -824,12 +850,12 @@ describe("task import backend", () => {
     expect(preview.rows[0].errors).toContain('Assignee "userb@example.com" is outside your assignable scope.');
 
     // Direct commit must also fail
-    await expect(manager.mutation(api.taskImports.commitTaskImportBatch, {
+    await expect(commitImport(manager, {
       companyId,
       kind: "jd",
       importKey: "unassignable-attempt",
       batchKey: "batch-1",
-      source: "cendro",
+      
       rows: [{
         include: true,
         selectedAssigneeMembershipIds: null,
@@ -860,17 +886,17 @@ describe("task import backend", () => {
       presentFields: ["reference", "title", "recurrence", "assignees"],
     }));
 
-    const preview = await admin.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts });
+    const preview = await admin.mutation(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts });
     expect(preview.rows).toHaveLength(2);
     expect(preview.rows[0].operation).toBe("update");
     expect(preview.rows[1].operation).toBe("update");
 
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
+    await commitImport(admin, {
       companyId,
       kind: "jd",
       importKey: "roundtrip-update",
       batchKey: "batch-1",
-      source: "cendro",
+      
       rows: preview.rows.map((r) => ({
         include: true,
         expectedUpdatedAt: r.current?.updatedAt,
@@ -892,7 +918,7 @@ describe("task import backend", () => {
     const admin = t.withIdentity(identity("admin"));
 
     // Preview with unsafe numeric suffix
-    const preview = await admin.query(api.taskImports.previewTaskImport, {
+    const preview = await admin.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: "JD-9007199254740992" }), draft({ rowKey: "JD Tasks:3", reference: "JD-99999999999999999999" })],
@@ -903,12 +929,12 @@ describe("task import backend", () => {
     expect(preview.rows[1].errors).toContain("Code must match JD-001.");
 
     // Commit with unsafe numeric suffix fails
-    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
+    await expect(commitImport(admin, {
       companyId,
       kind: "jd",
       importKey: "unsafe-code-commit",
       batchKey: "batch-1",
-      source: "cendro",
+      
       rows: [{
         include: true,
         selectedAssigneeMembershipIds: [adminMembershipId],
@@ -934,7 +960,7 @@ describe("task import backend", () => {
 
     // 1. Preview and commit largest valid 15-digit code JD-999999999999999
     const maxRef = `JD-${MAX_REFERENCE_NUMBER}`;
-    const preview = await admin.query(api.taskImports.previewTaskImport, {
+    const preview = await admin.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: maxRef, title: "Max Code Task" })],
@@ -942,12 +968,12 @@ describe("task import backend", () => {
     expect(preview.rows[0].operation).toBe("create");
     expect(preview.rows[0].errors).toEqual([]);
 
-    const commitRes = await admin.mutation(api.taskImports.commitTaskImportBatch, {
+    const commitRes = await commitImport(admin, {
       companyId,
       kind: "jd",
       importKey: "max-code-commit",
       batchKey: "batch-1",
-      source: "cendro",
+      
       rows: [{
         include: true,
         selectedAssigneeMembershipIds: [adminMembershipId],
@@ -966,7 +992,7 @@ describe("task import backend", () => {
     expect(counter?.lastNumber).toBe(MAX_REFERENCE_NUMBER);
 
     // 2. Re-import of the max-code task succeeds (round trip invariant preserved)
-    const reimportPreview = await admin.query(api.taskImports.previewTaskImport, {
+    const reimportPreview = await admin.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: maxRef, title: "Max Code Task" })],
@@ -1031,12 +1057,12 @@ describe("task import backend", () => {
     });
 
     // Import an update for JD-100
-    const result = await admin.mutation(api.taskImports.commitTaskImportBatch, {
+    const result = await commitImport(admin, {
       companyId,
       kind: "jd",
       importKey: "sync-on-update",
       batchKey: "batch-1",
-      source: "cendro",
+      
       rows: [{
         include: true,
         expectedUpdatedAt: updatedAt,
@@ -1096,7 +1122,7 @@ describe("task import backend", () => {
       return { member505Id: targetId };
     });
 
-    const preview = await admin.query(api.taskImports.previewTaskImport, {
+    const preview = await admin.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: "JD-505", rawAssigneeText: "user505@example.com", assigneeEmails: ["user505@example.com"] })],
@@ -1106,12 +1132,12 @@ describe("task import backend", () => {
     expect(preview.rows[0].proposedAssigneeMembershipIds).toEqual([member505Id]);
     expect(preview.rows[0].errors).toEqual([]);
 
-    const commitResult = await admin.mutation(api.taskImports.commitTaskImportBatch, {
+    const commitResult = await commitImport(admin, {
       companyId,
       kind: "jd",
       importKey: "commit-505",
       batchKey: "batch-1",
-      source: "cendro",
+      
       rows: [{
         include: true,
         selectedAssigneeMembershipIds: [member505Id],
@@ -1154,7 +1180,7 @@ describe("task import backend", () => {
     const selfUser = t.withIdentity(identity("selfonly"));
 
     // Preview with own email resolves to self
-    const previewSelf = await selfUser.query(api.taskImports.previewTaskImport, {
+    const previewSelf = await selfUser.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: "JD-001", rawAssigneeText: "selfonly@example.com", assigneeEmails: ["selfonly@example.com"] })],
@@ -1164,7 +1190,7 @@ describe("task import backend", () => {
     expect(previewSelf.rows[0].errors).toEqual([]);
 
     // Preview with someone else's email is blocked as outside assignable scope
-    const previewOther = await selfUser.query(api.taskImports.previewTaskImport, {
+    const previewOther = await selfUser.mutation(api.taskImports.previewTaskImport, {
       companyId,
       kind: "jd",
       drafts: [draft({ reference: "JD-002", rawAssigneeText: "admin@example.com", assigneeEmails: ["admin@example.com"] })],
@@ -1179,6 +1205,7 @@ describe("task import backend", () => {
       importKey: "self-import",
       batchKey: "batch-1",
       source: "cendro",
+      previewId: previewSelf.previewId,
       rows: [{
         include: true,
         selectedAssigneeMembershipIds: [selfMembershipId],
@@ -1196,11 +1223,11 @@ describe("task import backend", () => {
     const task = await admin.query(api.tasks.getJd, { companyId, taskId });
     const lifecycleDraft = (isActive: boolean) => draft({ reference: task.task.reference, isActive, presentFields: ["reference", "isActive"], rawAssigneeText: "", assigneeEmails: [] });
 
-    const preview = await admin.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [lifecycleDraft(false)] });
+    const preview = await admin.mutation(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [lifecycleDraft(false)] });
     expect(preview.rows[0]).toMatchObject({ operation: "update", warnings: ["This task will be made inactive."] });
 
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-inactive", batchKey: "batch-1", source: "cendro",
+    await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-inactive", batchKey: "batch-1", 
       rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: lifecycleDraft(false) }],
     });
     const paused = await admin.query(api.tasks.getJd, { companyId, taskId });
@@ -1211,8 +1238,8 @@ describe("task import backend", () => {
     expect((await admin.query(api.analytics.summary, { companyId })).jdTaskCount).toBe(0);
     expect((await admin.query(api.tasks.exportRows, { companyId, kind: "jd", paginationOpts: { numItems: 10, cursor: null } })).page).toMatchObject([{ reference: task.task.reference, isActive: false }]);
 
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-active", batchKey: "batch-1", source: "cendro",
+    await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-active", batchKey: "batch-1", 
       rows: [{ include: true, expectedUpdatedAt: paused.task.updatedAt, selectedAssigneeMembershipIds: null, draft: lifecycleDraft(true) }],
     });
     const restored = await admin.query(api.tasks.getJd, { companyId, taskId });
@@ -1227,7 +1254,7 @@ describe("task import backend", () => {
     const { t, companyId } = await seed();
     const admin = t.withIdentity(identity("admin"));
     const { isActive: _omitted, ...oldClientDraft } = draft({ reference: "JD-100" });
-    const preview = await admin.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [oldClientDraft] });
+    const preview = await admin.mutation(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [oldClientDraft] });
     expect(preview.rows[0].operation).toBe("create");
   });
 
@@ -1261,16 +1288,16 @@ describe("task import backend", () => {
 
     // In-scope task stays in-scope on lifecycle alone.
     const inScopeDraft = draft({ reference: taskRef, isActive: false, presentFields: ["reference", "isActive"], rawAssigneeText: "", assigneeEmails: [] });
-    const okPreview = await manager.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [inScopeDraft] });
+    const okPreview = await manager.mutation(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [inScopeDraft] });
     expect(okPreview.rows[0].errors).toEqual([]);
 
     // Reassigning the same task out of scope in the same row must fail the
     // lifecycle check — the check has to look at the proposed assignees.
     const escapeDraft = draft({ reference: taskRef, isActive: false, presentFields: ["reference", "assignees", "isActive"], rawAssigneeText: "empb@example.com", assigneeEmails: ["empb@example.com"] });
-    const preview = await manager.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [escapeDraft] });
+    const preview = await manager.mutation(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [escapeDraft] });
     expect(preview.rows[0].errors).toContain("You do not have permission to make this task inactive.");
-    await expect(manager.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "scope-escape", batchKey: "batch-1", source: "cendro",
+    await expect(commitImport(manager, {
+      companyId, kind: "jd", importKey: "scope-escape", batchKey: "batch-1", 
       rows: [{ include: true, expectedUpdatedAt: task.task.updatedAt, selectedAssigneeMembershipIds: null, draft: escapeDraft }],
     })).rejects.toThrow(/permission to make this task inactive/);
     expect((await admin.query(api.tasks.getJd, { companyId, taskId })).task.pausedAt).toBeUndefined();
@@ -1284,8 +1311,8 @@ describe("task import backend", () => {
     const completed = await admin.query(api.tasks.getJd, { companyId, taskId });
     const stampedStart = completed.task.statusCycleStart!;
 
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-combined", batchKey: "batch-1", source: "cendro",
+    await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-combined", batchKey: "batch-1", 
       rows: [{
         include: true,
         expectedUpdatedAt: completed.task.updatedAt,
@@ -1306,8 +1333,8 @@ describe("task import backend", () => {
     const admin = t.withIdentity(identity("admin"));
     // Creating an already-inactive task needs the same permission as making one inactive.
     const inactiveDraft = draft({ reference: "JD-050", isActive: false, presentFields: ["reference", "title", "recurrence", "assignees", "isActive"] });
-    await admin.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-create-inactive", batchKey: "batch-1", source: "cendro",
+    await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-create-inactive", batchKey: "batch-1", 
       rows: [{ include: true, selectedAssigneeMembershipIds: null, draft: inactiveDraft }],
     });
     expect((await admin.query(api.tasks.listJdRows, { companyId, paused: true, paginationOpts: { numItems: 10, cursor: null } })).page).toMatchObject([{ reference: "JD-050", state: { status: "Inactive" } }]);
@@ -1320,7 +1347,7 @@ describe("task import backend", () => {
       await ctx.db.insert("roles", { companyId, name: "Importer", capabilities: [...defaultRoleCapabilities.Employee, "tasks:jd:import", "tasks:jd:create", "tasks:jd:update:any", "tasks:jd:view:any", "tasks:jd:assign:any", "tasks:jd:resume"], createdAt: now, updatedAt: now });
     });
     const importer = t.withIdentity(identity("importer"));
-    const createPreview = await importer.query(api.taskImports.previewTaskImport, {
+    const createPreview = await importer.mutation(api.taskImports.previewTaskImport, {
       companyId, kind: "jd",
       drafts: [draft({ reference: "JD-051", isActive: false, presentFields: ["reference", "title", "recurrence", "assignees", "isActive"], rawAssigneeText: "importer@example.com", assigneeEmails: ["importer@example.com"] })],
     });
@@ -1329,22 +1356,266 @@ describe("task import backend", () => {
     const existing = await admin.query(api.tasks.listJdRows, { companyId, paused: true, paginationOpts: { numItems: 10, cursor: null } });
     const pausedTask = await admin.query(api.tasks.getJd, { companyId, taskId: existing.page[0]._id });
     const activateDraft = draft({ reference: "JD-050", isActive: true, presentFields: ["reference", "isActive"], rawAssigneeText: "", assigneeEmails: [] });
-    const resumePreview = await importer.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [activateDraft] });
+    const resumePreview = await importer.mutation(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [activateDraft] });
     expect(resumePreview.rows[0]).toMatchObject({ operation: "update", errors: [] });
-    await importer.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-resume", batchKey: "batch-1", source: "cendro",
+    await commitImport(importer, {
+      companyId, kind: "jd", importKey: "import-resume", batchKey: "batch-1", 
       rows: [{ include: true, expectedUpdatedAt: pausedTask.task.updatedAt, selectedAssigneeMembershipIds: null, draft: activateDraft }],
     });
     expect((await admin.query(api.tasks.getJd, { companyId, taskId: pausedTask.task._id })).task.pausedAt).toBeUndefined();
 
     const deactivateDraft = draft({ reference: "JD-050", isActive: false, presentFields: ["reference", "isActive"], rawAssigneeText: "", assigneeEmails: [] });
-    const pausePreview = await importer.query(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [deactivateDraft] });
+    const pausePreview = await importer.mutation(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [deactivateDraft] });
     expect(pausePreview.rows[0].errors).toContain("You do not have permission to make this task inactive.");
     const activeTask = await admin.query(api.tasks.getJd, { companyId, taskId: pausedTask.task._id });
-    await expect(importer.mutation(api.taskImports.commitTaskImportBatch, {
-      companyId, kind: "jd", importKey: "import-pause-denied", batchKey: "batch-1", source: "cendro",
+    await expect(commitImport(importer, {
+      companyId, kind: "jd", importKey: "import-pause-denied", batchKey: "batch-1", 
       rows: [{ include: true, expectedUpdatedAt: activeTask.task.updatedAt, selectedAssigneeMembershipIds: null, draft: deactivateDraft }],
     })).rejects.toThrow(/permission to make this task inactive/);
     expect((await admin.query(api.tasks.getJd, { companyId, taskId: pausedTask.task._id })).task.pausedAt).toBeUndefined();
+  });
+});
+
+describe("all-or-nothing imports", () => {
+  async function countJdTasks(t: ConvexTestEnv, companyId: Id<"companies">) {
+    return await t.run(async (ctx) =>
+      (await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).collect()).length
+    );
+  }
+  async function countReceipts(t: ConvexTestEnv, companyId: Id<"companies">) {
+    return await t.run(async (ctx) =>
+      (await ctx.db.query("taskImportBatches").withIndex("by_companyId_and_importKey_and_batchKey", (q) => q.eq("companyId", companyId)).collect()).length
+    );
+  }
+  async function countPreviews(t: ConvexTestEnv, companyId: Id<"companies">) {
+    return await t.run(async (ctx) =>
+      (await ctx.db.query("taskImportPreviews").collect()).filter((row) => row.companyId === companyId).length
+    );
+  }
+
+  test("a mixed valid/invalid file blocks in preview and commits nothing", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+    const good = draft({ reference: "JD-001", title: "Good row" });
+    const bad = draft({ rowKey: "JD Tasks:3", sourceRow: 3, reference: "BROKEN", title: "Bad row" });
+
+    const preview = await admin.mutation(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [good, bad] });
+    expect(preview.rows[0]).toMatchObject({ operation: "create", sourceRow: 2 });
+    expect(preview.rows[1]).toMatchObject({ operation: "blocked", sourceRow: 3 });
+    expect(preview.rows[1].errors).toContain("Code must match JD-001.");
+
+    await expect(commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-mixed", batchKey: "batch-1", 
+      rows: [
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: good },
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: bad },
+      ],
+    })).rejects.toThrow(/Code must match JD-001/);
+
+    expect(await countJdTasks(t, companyId)).toBe(0);
+    expect(await countReceipts(t, companyId)).toBe(0);
+  });
+
+  test("a fully invalid file commits nothing", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+    const badRef = draft({ reference: "XX-001" });
+    const noTitle = draft({ rowKey: "JD Tasks:3", sourceRow: 3, reference: "JD-002", title: null });
+
+    const preview = await admin.mutation(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [badRef, noTitle] });
+    expect(preview.rows.map((r) => r.operation)).toEqual(["blocked", "blocked"]);
+    expect(preview.rows[0].errors).toContain("Code must match JD-001.");
+    expect(preview.rows[1].errors).toContain("Task title is required.");
+
+    await expect(commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-all-bad", batchKey: "batch-1", 
+      rows: [
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: badRef },
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: noTitle },
+      ],
+    })).rejects.toThrow();
+
+    expect(await countJdTasks(t, companyId)).toBe(0);
+    expect(await countReceipts(t, companyId)).toBe(0);
+  });
+
+  test("a fully valid file commits every row in one batch", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+    const drafts = [
+      draft({ reference: "JD-001", title: "First" }),
+      draft({ rowKey: "JD Tasks:3", sourceRow: 3, reference: "JD-002", title: "Second" }),
+      draft({ rowKey: "JD Tasks:4", sourceRow: 4, reference: "JD-003", title: "Third" }),
+    ];
+
+    const result = await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-all-good", batchKey: "batch-1", 
+      rows: drafts.map((d) => ({ include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: d })),
+    });
+
+    expect(result).toMatchObject({ created: 3, updated: 0, skipped: 0, failed: 0 });
+    expect(result.taskReferences).toEqual(["JD-001", "JD-002", "JD-003"]);
+    expect(await countJdTasks(t, companyId)).toBe(3);
+    // The staged preview is consumed by the commit.
+    expect(await countPreviews(t, companyId)).toBe(0);
+  });
+
+  test("rejects commits that omit or alter rows from the previewed file", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+    const good = draft({ reference: "JD-001" });
+    const other = draft({ rowKey: "JD Tasks:3", sourceRow: 3, reference: "JD-002", title: "Second" });
+
+    const preview = await admin.mutation(api.taskImports.previewTaskImport, { companyId, kind: "jd", drafts: [good, other] });
+
+    // A subset of the file cannot commit: the row count diverges.
+    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-subset", batchKey: "batch-1", source: "cendro", previewId: preview.previewId,
+      rows: [{ include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: good }],
+    })).rejects.toThrow(/do not match the previewed file/);
+
+    // An altered draft cannot commit either: the fingerprint diverges.
+    await expect(admin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-altered", batchKey: "batch-1", source: "cendro", previewId: preview.previewId,
+      rows: [
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: good },
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: draft({ rowKey: "JD Tasks:3", sourceRow: 3, reference: "JD-002", title: "Edited" }) },
+      ],
+    })).rejects.toThrow(/do not match the previewed file/);
+
+    // A preview issued to another member cannot be reused either.
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      const userId = await ctx.db.insert("appUsers", { clerkSubject: "clerk|admin2", email: "admin2@example.com", firstName: "Admin2", createdAt: now, updatedAt: now });
+      await ctx.db.insert("companyMemberships", { companyId, userId, role: "Admin", active: true, createdAt: now, updatedAt: now });
+    });
+    const otherAdmin = t.withIdentity(identity("admin2"));
+    await expect(otherAdmin.mutation(api.taskImports.commitTaskImportBatch, {
+      companyId, kind: "jd", importKey: "import-stolen-preview", batchKey: "batch-1", source: "cendro", previewId: preview.previewId,
+      rows: [
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: good },
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: other },
+      ],
+    })).rejects.toThrow(/preview is not available/);
+
+    expect(await countJdTasks(t, companyId)).toBe(0);
+    expect(await countReceipts(t, companyId)).toBe(0);
+  });
+
+  test("a larger file with creates and elapsed-cycle updates commits in one batch", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+
+    // Ten existing daily tasks a few cycles behind exercise recordMissedJdCycles
+    // inside the same single commit.
+    const updateRows = [];
+    let firstTaskId: Id<"jdTasks"> | null = null;
+    for (let i = 0; i < 10; i += 1) {
+      const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: `Existing ${i}`, recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+      firstTaskId ??= taskId;
+      await t.run(async (ctx) => {
+        await ctx.db.patch(taskId, { cycleStartedAt: Date.now() - 3 * 86_400_000 });
+      });
+      const task = await admin.query(api.tasks.getJd, { companyId, taskId });
+      updateRows.push({
+        include: true,
+        expectedUpdatedAt: task.task.updatedAt,
+        selectedAssigneeMembershipIds: null,
+        draft: draft({ rowKey: `JD Tasks:${i + 2}`, sourceRow: i + 2, reference: task.task.reference, title: `Renamed ${i}`, presentFields: ["reference", "title"], rawAssigneeText: "", assigneeEmails: [] }),
+      });
+    }
+    const createRows = Array.from({ length: 50 }, (_, i) => ({
+      include: true,
+      selectedAssigneeMembershipIds: [adminMembershipId],
+      draft: draft({ rowKey: `JD Tasks:${i + 20}`, sourceRow: i + 20, reference: `JD-${String(i + 100)}`, title: `Created ${i}` }),
+    }));
+
+    const result = await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-large", batchKey: "batch-1",
+      rows: [...updateRows, ...createRows],
+    });
+
+    expect(result).toMatchObject({ created: 50, updated: 10, skipped: 0, failed: 0 });
+    expect(await countJdTasks(t, companyId)).toBe(60);
+    expect(await countPreviews(t, companyId)).toBe(0);
+    const renamed = await admin.query(api.tasks.getJd, { companyId, taskId: firstTaskId! });
+    expect(renamed.task.title).toBe("Renamed 0");
+  });
+
+  test("a file needing more catch-up than a transaction holds is rejected before writing", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+
+    // Ten tasks ~400 days behind on a daily recurrence each hit the 200-cycle
+    // catch-up cap: 10 x 400 + 40 fixed estimated lookups exceeds the bound.
+    const rows = [];
+    for (let i = 0; i < 10; i += 1) {
+      const taskId = await admin.mutation(api.tasks.createJd, { companyId, title: `Stale ${i}`, recurrence: "daily", assigneeMembershipIds: [adminMembershipId] });
+      await t.run(async (ctx) => {
+        await ctx.db.patch(taskId, { cycleStartedAt: Date.now() - 400 * 86_400_000 });
+      });
+      const task = await admin.query(api.tasks.getJd, { companyId, taskId });
+      rows.push({
+        include: true,
+        expectedUpdatedAt: task.task.updatedAt,
+        selectedAssigneeMembershipIds: null,
+        draft: draft({ rowKey: `JD Tasks:${i + 2}`, sourceRow: i + 2, reference: task.task.reference, title: `Renamed ${i}`, presentFields: ["reference", "title"], rawAssigneeText: "", assigneeEmails: [] }),
+      });
+    }
+
+    await expect(commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-too-big", batchKey: "batch-1",
+      rows,
+    })).rejects.toThrow(/more work than one import can process/);
+
+    // Nothing was written: titles are unchanged and there is no receipt.
+    const firstTaskId = await t.run(async (ctx) =>
+      (await ctx.db.query("jdTasks").withIndex("by_company", (q) => q.eq("companyId", companyId)).first())!._id
+    );
+    const stale = await admin.query(api.tasks.getJd, { companyId, taskId: firstTaskId });
+    expect(stale.task.title).toBe("Stale 0");
+    expect(await countReceipts(t, companyId)).toBe(0);
+  });
+
+  test("rejects a commit that excludes reviewed rows", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+
+    await expect(commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-partial-include", batchKey: "batch-1", 
+      rows: [
+        { include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: draft({ reference: "JD-001" }) },
+        { include: false, selectedAssigneeMembershipIds: [adminMembershipId], draft: draft({ rowKey: "JD Tasks:3", sourceRow: 3, reference: "JD-002" }) },
+      ],
+    })).rejects.toThrow(/must include every reviewed row/);
+
+    expect(await countJdTasks(t, companyId)).toBe(0);
+    expect(await countReceipts(t, companyId)).toBe(0);
+  });
+
+  test("a second batch under a committed import key is rejected", async () => {
+    const { t, companyId, adminMembershipId } = await seed();
+    const admin = t.withIdentity(identity("admin"));
+
+    await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-once", batchKey: "import-once:0", 
+      rows: [{ include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: draft({ reference: "JD-001" }) }],
+    });
+
+    // Same batchKey replays the receipt idempotently.
+    const replay = await commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-once", batchKey: "import-once:0", 
+      rows: [{ include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: draft({ reference: "JD-001" }) }],
+    });
+    expect(replay.created).toBe(1);
+
+    // A different batch under the same key can never double-apply rows.
+    await expect(commitImport(admin, {
+      companyId, kind: "jd", importKey: "import-once", batchKey: "import-once:1", 
+      rows: [{ include: true, selectedAssigneeMembershipIds: [adminMembershipId], draft: draft({ rowKey: "JD Tasks:3", sourceRow: 3, reference: "JD-002" }) }],
+    })).rejects.toThrow(/already committed/);
+
+    expect(await countJdTasks(t, companyId)).toBe(1);
+    expect(await countReceipts(t, companyId)).toBe(1);
   });
 });

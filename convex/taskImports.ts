@@ -1,9 +1,10 @@
 import { ConvexError, v } from "convex/values";
-import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internalMutation, mutation, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { getManagedMembershipIds, hasAllManagedMemberships, isManagedMembership, membershipCapabilities, requireCapability } from "./permissions";
 import type { Capability } from "../src/lib/permissions";
-import { effectiveCurrentJdCycle, loadWorkCalendar } from "./workCalendar";
+import { effectiveCurrentJdCycle, elapsedJdOccurrences, loadWorkCalendar } from "./workCalendar";
 import { defaultTimeZone } from "./taskCycles";
 import { canManageJdLifecycle, preserveJdCompletionStamp, recordMissedJdCycles, retireJdHistoryAtCycle, transitionJdTaskActiveState, type TaskVisibilityAuth } from "./tasks";
 import { syncReferenceCounter } from "./references";
@@ -48,8 +49,21 @@ const reviewedRowValidator = v.object({
 });
 
 const MAX_PREVIEW_ROWS = 500;
-const MAX_COMMIT_ROWS = 25;
-const MAX_IMPORT_BATCHES = Math.ceil(MAX_PREVIEW_ROWS / MAX_COMMIT_ROWS);
+// An import commits in a single mutation so the whole file is one atomic
+// transaction: a failure mid-import can never leave partially imported tasks.
+const MAX_COMMIT_ROWS = MAX_PREVIEW_ROWS;
+// Preview records bind a commit to the exact file the server validated. They
+// are consumed by the committing mutation; abandoned ones expire with the
+// sweepExpiredTaskImportPreviews cron after this TTL.
+const PREVIEW_TTL_MS = 24 * 60 * 60 * 1000;
+// A JD update runs two index lookups per elapsed cycle to catch up missed
+// records, plus a few fixed reads per committed row (reference lookup, counter
+// sync, the post-catch-up task read, the current-cycle completion check). The
+// whole import is one transaction under Convex's index-read limit, so the
+// estimated total is bounded up front: a file past this fails cleanly instead
+// of hitting the limit mid-write. Splitting the file stays the escape hatch.
+const FIXED_LOOKUPS_PER_ROW = 4;
+const MAX_COMMIT_LOOKUPS = 3500;
 
 type TaskKind = "jd" | "one_time";
 type ImportSource = "cendro";
@@ -97,7 +111,7 @@ function hasField(draft: Draft, field: string) { return draft.presentFields.incl
 function hasAssigneeValue(draft: Draft) { return draft.assigneeEmails.length > 0 || draft.rawAssigneeText.trim().length > 0; }
 function fail(message: string): never { throw new ConvexError(message); }
 
-async function fingerprintRows(rows: ReviewedRow[]) {
+async function fingerprintRows(rows: readonly unknown[]) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(rows)));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -325,7 +339,9 @@ function resolveAssignees(auth: ImportAuth, draft: Draft, selected: Id<"companyM
   return { membershipIds: unique, hints, errors };
 }
 
-export const previewTaskImport = query({
+// Preview is a mutation so it can stage the server-side file record that a
+// later commit is bound to. It writes only taskImportPreviews rows.
+export const previewTaskImport = mutation({
   args: { companyId: v.id("companies"), kind: kindValidator, drafts: v.array(draftValidator) },
   handler: async (ctx, args) => {
     if (args.drafts.length > MAX_PREVIEW_ROWS) fail(`Imports may contain at most ${MAX_PREVIEW_ROWS} task rows.`);
@@ -393,7 +409,18 @@ export const previewTaskImport = query({
       if (args.kind === "one_time" && draft.dueDate !== null && draft.dueDate < Date.now() && (!task || task.status !== "completed")) warnings.push("This task will be overdue immediately.");
       rows.push({ rowKey: draft.rowKey, sourceSheet: draft.sourceSheet, sourceRow: draft.sourceRow, operation: errors.length > 0 ? "blocked" : operation, reference: reference ?? null, draft, current: task ? editableSnapshot(task, args.kind) : null, proposedAssigneeMembershipIds: assignees.membershipIds, unresolvedAssigneeHints: assignees.hints, errors, warnings, include: errors.length === 0 });
     }
-    return { rows, canCreate: auth.canCreate, canUpdate: auth.canUpdate };
+    // Stage the whole-file record a commit must match: commits that omit rows,
+    // alter drafts, or arrive from older clients without a previewId are
+    // rejected before they write anything.
+    const previewId = await ctx.db.insert("taskImportPreviews", {
+      companyId: args.companyId,
+      actorMembershipId: membership._id,
+      kind: args.kind,
+      fingerprint: await fingerprintRows(args.drafts),
+      rowCount: args.drafts.length,
+      createdAt: Date.now(),
+    });
+    return { rows, canCreate: auth.canCreate, canUpdate: auth.canUpdate, previewId };
   },
 });
 
@@ -438,7 +465,7 @@ async function validateCommitRow(ctx: MutationCtx, companyId: Id<"companies">, k
 }
 
 export const commitTaskImportBatch = mutation({
-  args: { companyId: v.id("companies"), kind: kindValidator, importKey: v.string(), batchKey: v.string(), source: sourceValidator, rows: v.array(reviewedRowValidator) },
+  args: { companyId: v.id("companies"), kind: kindValidator, importKey: v.string(), batchKey: v.string(), source: sourceValidator, previewId: v.id("taskImportPreviews"), rows: v.array(reviewedRowValidator) },
   handler: async (ctx, args) => {
     if (args.rows.length === 0 || args.rows.length > MAX_COMMIT_ROWS) fail(`Import batches must contain 1-${MAX_COMMIT_ROWS} rows.`);
     if (!args.importKey.trim() || !args.batchKey.trim() || args.importKey.length > 200 || args.batchKey.length > 200) fail("Import keys are invalid.");
@@ -452,23 +479,43 @@ export const commitTaskImportBatch = mutation({
       return existingReceipt.result;
     }
     if (args.rows.some((row) => row.draft.source !== args.source || row.draft.kind !== args.kind)) fail("Import source or task kind changed. Re-preview and try again.");
-    const includedRows = args.rows.filter((row) => row.include);
-    if (includedRows.length === 0) fail("Import batches need at least one included row.");
-    const rowKeys = includedRows.map((row) => row.draft.rowKey);
+    // All-or-nothing: the commit must present exactly the file the preview
+    // validated, so an omitted or altered row can never produce a partial
+    // import. Every reviewed row must also be included.
+    const preview = await ctx.db.get(args.previewId);
+    if (!preview || preview.companyId !== args.companyId || preview.actorMembershipId !== membership._id || preview.kind !== args.kind) fail("Import preview is not available. Preview the file again.");
+    if (preview.rowCount !== args.rows.length || preview.fingerprint !== (await fingerprintRows(args.rows.map((row) => row.draft)))) fail("Import rows do not match the previewed file. Preview the file again.");
+    if (args.rows.some((row) => !row.include)) fail("Import batches must include every reviewed row.");
+    const rowKeys = args.rows.map((row) => row.draft.rowKey);
     if (new Set(rowKeys).size !== rowKeys.length) fail("Import batch contains duplicate source rows.");
-    const references = includedRows.map((row) => validateReference(row.draft.reference, args.kind));
+    const references = args.rows.map((row) => validateReference(row.draft.reference, args.kind));
     if (new Set(references).size !== references.length) fail("Import batch contains duplicate task references.");
-    const priorReceipts = await ctx.db.query("taskImportBatches").withIndex("by_companyId_and_importKey_and_batchKey", (q) => q.eq("companyId", args.companyId).eq("importKey", args.importKey)).take(MAX_IMPORT_BATCHES + 1);
-    if (priorReceipts.length > MAX_IMPORT_BATCHES || priorReceipts.some((receipt) => receipt.actorMembershipId !== membership._id || receipt.kind !== args.kind || receipt.source !== args.source)) fail("Import key is not available.");
-    const priorReferences = new Set(priorReceipts.flatMap((receipt) => receipt.result.taskReferences));
+    const priorReceipts = await ctx.db.query("taskImportBatches").withIndex("by_companyId_and_importKey_and_batchKey", (q) => q.eq("companyId", args.companyId).eq("importKey", args.importKey)).take(2);
+    if (priorReceipts.some((receipt) => receipt.actorMembershipId !== membership._id || receipt.kind !== args.kind || receipt.source !== args.source)) fail("Import key is not available.");
+    // A committed import already wrote its receipt; the same-batchKey retry was
+    // replayed above, so any other batch under this key is a spent import.
+    if (priorReceipts.length > 0) fail("This import was already committed. Preview the file again to retry.");
     const { emails, membershipIds } = extractAssigneeTargets(
-      includedRows.map((row) => row.draft),
-      includedRows.map((row) => row.selectedAssigneeMembershipIds)
+      args.rows.map((row) => row.draft),
+      args.rows.map((row) => row.selectedAssigneeMembershipIds)
     );
     const auth = await buildImportAuth(ctx, args.companyId, membership, args.kind, emails, membershipIds, capabilities);
     const calendar = await loadWorkCalendar(ctx, args.companyId);
     const prepared = [];
-    for (const row of includedRows) prepared.push(await validateCommitRow(ctx, args.companyId, args.kind, auth, row));
+    for (const row of args.rows) prepared.push(await validateCommitRow(ctx, args.companyId, args.kind, auth, row));
+    // Estimate the transaction's read work without reads: elapsed occurrence
+    // counts are pure calendar math and the rest scales with the row count.
+    // Reject before any write when the file needs more than a transaction holds.
+    const estimateNow = Date.now();
+    let estimatedLookups = 0;
+    for (const item of prepared) {
+      estimatedLookups += FIXED_LOOKUPS_PER_ROW;
+      const task = args.kind === "jd" ? item.task as Doc<"jdTasks"> | null : null;
+      if (task && task.pausedAt === undefined) {
+        estimatedLookups += 2 * elapsedJdOccurrences(calendar, task.recurrence, task.cycleStartedAt, estimateNow, 200, company.timeZone).occurrences.length;
+      }
+      if (estimatedLookups > MAX_COMMIT_LOOKUPS) fail("This file needs more work than one import can process. Split it into smaller files and import each.");
+    }
     let created = 0;
     let updated = 0;
     const taskReferences: string[] = [];
@@ -580,9 +627,25 @@ export const commitTaskImportBatch = mutation({
         taskReferences.push(reference);
       }
     }
-    const result = { created, updated, skipped: args.rows.length - includedRows.length, failed: 0, taskReferences };
+    const result = { created, updated, skipped: 0, failed: 0, taskReferences };
+    await ctx.db.delete(args.previewId);
     await ctx.db.insert("taskImportBatches", { companyId: args.companyId, actorMembershipId: membership._id, kind: args.kind, importKey: args.importKey, batchKey: args.batchKey, source: args.source, requestFingerprint, result, createdAt: Date.now() });
     await ctx.db.insert("auditEvents", { companyId: args.companyId, actorUserId: user._id, action: "task_import.batch", targetType: "taskImportBatch", metadata: { importKey: args.importKey, source: args.source, kind: args.kind, createCount: created, updateCount: updated, taskReferences }, createdAt: Date.now() });
     return result;
+  },
+});
+
+export const sweepExpiredTaskImportPreviews = internalMutation({
+  args: { cursor: v.optional(v.union(v.string(), v.null())) },
+  handler: async (ctx, args) => {
+    const cutoff = Date.now() - PREVIEW_TTL_MS;
+    const page = await ctx.db.query("taskImportPreviews").order("asc").paginate({ numItems: 200, cursor: args.cursor ?? null });
+    for (const preview of page.page) {
+      // Rows scan in creation order — a fresh preview means the rest are fresh.
+      if (preview.createdAt >= cutoff) return null;
+      await ctx.db.delete(preview._id);
+    }
+    if (!page.isDone) await ctx.scheduler.runAfter(0, internal.taskImports.sweepExpiredTaskImportPreviews, { cursor: page.continueCursor });
+    return null;
   },
 });

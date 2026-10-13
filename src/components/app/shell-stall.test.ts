@@ -76,9 +76,10 @@ describe("useShellStall", () => {
   let container: any;
   let root: Root;
   let status: string;
+  let stage: "data" | "convex-auth";
 
   function Host() {
-    result = useShellStall(status, "data", disconnected);
+    result = useShellStall(status, stage, disconnected);
     return null;
   }
 
@@ -113,6 +114,7 @@ describe("useShellStall", () => {
     vi.useFakeTimers();
     result = null;
     status = "loading";
+    stage = "data";
     container = createMockElement("div");
     root = createRoot(container);
   });
@@ -170,6 +172,21 @@ describe("useShellStall", () => {
     expect(reloadSpy).toHaveBeenCalledTimes(2);
     expect(readShellRetries(sessionStorage)).toBe(2);
     expect(result!.stalled).toBe(true);
+  });
+
+  test("pending Convex auth keeps the reconnecting client alive past the reload deadline", async () => {
+    stage = "convex-auth";
+    await render();
+    await advance(SHELL_AUTO_RETRY_MS * 3);
+    expect(result!.stalled).toBe(true);
+    expect(reloadSpy).not.toHaveBeenCalled();
+    expect(readShellRetries(sessionStorage)).toBe(0);
+    // Advancing into a different stalled stage still enables its reload policy;
+    // the continuous clock has not restarted.
+    stage = "data";
+    await render();
+    await advance(1_000);
+    expect(reloadSpy).toHaveBeenCalledOnce();
   });
 
   test("disabled storage stops automatic reloads but keeps manual retry", async () => {

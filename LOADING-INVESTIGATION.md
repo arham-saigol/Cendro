@@ -1,5 +1,118 @@
 # Loading investigation
 
+## October 13: both socket routes fail, then the same episode recovers
+
+The supplied report is from production build
+`62fbce82575bdd69f3c3bba54b6f0bbdf3024d97`, which the connected Vercel API
+confirms is still deployed to `www.cendro.app` as
+`dpl_76FpDAgUFwD4gk8wuPccUSXBApkf`. Episode
+`75cef2b8-2148-4eab-a91f-e2df75065448` records prompt token acquisition
+(368 ms), eight native socket attempts, zero opens/messages/auth sends, and
+no auth errors. Its retained history includes a failed same-origin relay
+attempt. The previous reload also records a failed relay attempt. This is
+failure before a WebSocket opens; there is no evidenced JWT rejection.
+
+The relay is a second **WebSocket** route through Vercel, not HTTPS polling.
+Changing its host can help with a Convex-specific reachability problem, but
+does not remove the requirement for a successful browser WebSocket upgrade.
+Code 1006 does not expose the failed upgrade status or establish whether the
+cause is network filtering, TLS, routing, Clerk middleware/session rejection,
+or another platform condition.
+
+Production runtime logs for this exact episode establish subsequent recovery:
+
+- Copied report: **2026-10-13 06:31:41.470 UTC**.
+- Recovery capture: **06:31:45.895 UTC**, 4.425 seconds later. The log was
+  ingested at 06:31:46.986 UTC and records `event=recovered`, `status=ready`,
+  `confirmation=confirmed`, nine attempts, one open, three received messages,
+  two authentication sends, zero authentication errors, and a connected socket.
+- Earlier logs show repeated waits/reloads from the initial trace starting at
+  **06:27:50.150 UTC**: approximately 236 seconds until recovery. The final
+  segment's 100-second duration does not include the preceding reloads.
+
+This proves eventual recovery of the episode, not that either route is
+consistently available or which route eventually succeeded. The historical
+logs collapse nested socket events to `[Object]`; the relay has no application
+logs for early HTTP rejections. An incident-window query found no relay output
+or runtime error clusters. Absence of output does not establish that the relay
+request failed before reaching Vercel. The corrected incident request-status query was blocked with HTTP 402:
+Vercel requires Observability Plus for it. The firewall-config read returned
+404. Neither provided incident-specific upgrade evidence.
+
+A current credential-free production control returned 426 for an ordinary
+relay GET and 401 for a valid same-origin WebSocket upgrade without Clerk
+cookies. This checks route reachability and the expected unauthenticated
+boundary from this environment; it does not test the affected browser's
+authenticated upgrade.
+
+### Startup recovery fix
+
+The logging-only patch was withdrawn after the user clarified that they want
+an availability fix, and that failures occur when opening the app while data
+works normally once inside it. No new production logging is included.
+
+The old startup loop selected the relay only after three direct failures.
+If that relay attempt failed, the next three attempts again used direct.
+Automatic shell reloads also destroyed the SDK's connection state and reset
+route selection to direct. This delays access to a potentially healthy route
+and repeatedly restarts a reconnect that the SDK already owns.
+
+The updated shared constructor alternates after each failed upgrade, retains
+healthy routes after connection rotation, and saves the next route in tab
+session storage for 30 minutes, scoped to the Convex deployment. Blocked,
+invalid, or expired storage degrades to direct-first selection. Healthy-route
+storage is written once per socket, not on every workspace update. Intentional
+SDK closes do not trigger failover. While initial Convex authentication remains
+pending, the shell retains its warning and manual retry controls but does not
+automatically reload over the SDK reconnect loop. Other stalled stages retain
+their existing bounded automatic reload policy.
+
+The real installed SDK regression now recovers through the relay after **one**
+failed direct upgrade and still waits for the Convex identity transition before
+reporting authentication. It retains the relay on rotation. Additional tests
+cover reload continuity, deployment scoping, expiry, and keeping pending auth
+alive beyond the shell reload deadline.
+
+This fixes application-imposed startup recovery delays. It does not establish
+or fix the external reason both routes failed in the supplied episode. There
+was no authenticated affected-device check, login, or production deployment.
+
+### Current supported integration and alternative route
+
+Registry verification on October 13 reports Convex **1.46.0** as latest stable,
+matching the installed and reported SDK. The current documented integration
+uses `ConvexProviderWithClerk`, whose installed adapter delegates to
+`ConvexProviderWithAuth`; Cendro uses that supported auth interface with the
+same token-template/integration selection, refresh flag, and session/org
+invalidation, plus bounded token acquisition and terminal-auth retry. Changing
+providers cannot open a socket that failed before any authentication was sent.
+The Vercel relay uses the documented Node/Fluid `experimental_upgradeWebSocket`
+API. A project read confirmed production custom domains are exempt from Vercel
+SSO protection; a protected vercel.app alias would not be a reliable third path.
+
+Convex's React client has no documented HTTP-polling transport replacement.
+Its supported HTTP client performs point-in-time requests, without the React
+client's realtime subscriptions. Merely confirming auth over HTTPS would leave
+workspace subscriptions and mutations waiting on the same unavailable socket.
+A bespoke protocol shim is not an upgrade to the recommended integration.
+
+The supported additional endpoint is a **Convex custom API domain**, for example
+`api.cendro.app`, configured on this exact Convex deployment with the DNS records
+supplied by Convex. It requires a Convex Pro plan and deployment configuration;
+this session has neither Convex administration access nor a deploy key. It is
+still a WebSocket path, so it cannot guarantee access through a network that
+blocks all WebSocket upgrades. It must be configured and verified before adding
+it to client routing, to prevent directing auth or operations to another backend.
+
+Sources: https://docs.convex.dev/auth/clerk,
+https://docs.convex.dev/client/react/overview,
+https://docs.convex.dev/client/javascript/overview,
+https://docs.convex.dev/production/custom-domains,
+https://vercel.com/docs/functions/websockets.
+
+Validation: full suite **48 files / 424 tests passed**; package typecheck,
+changed-file ESLint, and diff whitespace checks passed.
+
 ## Runtime recovery added to PR #39
 
 Cendro previously retried the same direct Convex route until startup reloaded.

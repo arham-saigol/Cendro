@@ -455,6 +455,60 @@ describe("task authorization hardening", () => {
     expect(emp2JdDetail.task.assignees[0].membership._id).toBe(f.employee2M);
   });
 
+  test.each([
+    ["full edit by admin", "adminA", api.tasks.updateOneTime],
+    ["partial edit by permitted manager", "managerA", api.tasks.updateOneTimeFields],
+  ] as const)("rescheduling overdue one-time tasks restores their prior status: %s", async (_label, actor, update) => {
+    const f = await createAuthzFixture();
+    const admin = f.asUser("adminA");
+    const editor = f.asUser(actor);
+    const employee = f.asUser("employeeA1");
+    const pastDueDate = Date.now() - 86_400_000;
+    const futureDueDate = Date.now() + 86_400_000;
+
+    for (const status of ["due", "in_progress"] as const) {
+      const fields = { companyId: f.companyA, title: "Reschedule task", priority: "medium" as const, assigneeMembershipIds: [f.employee1M] };
+      const taskId = await admin.mutation(api.tasks.createOneTime, { ...fields, dueDate: futureDueDate });
+      await employee.mutation(api.tasks.updateOneTimeStatus, { companyId: f.companyA, taskId, status });
+      // Move the deadline into the past, then edit again to persist the overdue flag.
+      await editor.mutation(update, { ...fields, taskId, dueDate: pastDueDate });
+      await editor.mutation(api.tasks.updateOneTimeFields, { companyId: f.companyA, taskId, notes: "Still overdue" });
+      const overdue = await admin.query(api.tasks.getOneTime, { companyId: f.companyA, taskId });
+      expect(overdue.task.state.rawStatus).toBe("overdue");
+      expect(overdue.task.overdueAt).toBeDefined();
+      await expect(employee.mutation(api.tasks.completeOneTime, { companyId: f.companyA, taskId })).rejects.toThrow(/Overdue tasks are locked/);
+
+      await editor.mutation(update, { ...fields, taskId, dueDate: futureDueDate });
+      const restored = await admin.query(api.tasks.getOneTime, { companyId: f.companyA, taskId });
+      expect(restored.task.state).toMatchObject({ rawStatus: status, isOverdue: false });
+      expect(restored.task.overdueAt).toBeUndefined();
+      await expect(employee.mutation(api.tasks.completeOneTime, { companyId: f.companyA, taskId })).resolves.toBeNull();
+    }
+  });
+
+  test.each([
+    ["full edit", api.tasks.updateOneTime],
+    ["partial edit", api.tasks.updateOneTimeFields],
+  ] as const)("due-date edits preserve non-overdue one-time statuses and completion details: %s", async (_label, update) => {
+    const f = await createAuthzFixture();
+    const admin = f.asUser("adminA");
+    const futureDueDate = Date.now() + 86_400_000;
+
+    for (const status of ["due", "in_progress", "completed"] as const) {
+      const fields = { companyId: f.companyA, title: "Keep status", priority: "medium" as const, assigneeMembershipIds: [f.employee1M] };
+      const taskId = await admin.mutation(api.tasks.createOneTime, { ...fields, dueDate: futureDueDate });
+      await admin.mutation(api.tasks.updateOneTimeStatus, { companyId: f.companyA, taskId, status });
+      const before = await admin.query(api.tasks.getOneTime, { companyId: f.companyA, taskId });
+      // Completed tasks stay completed even if their new deadline is in the past.
+      const dueDate = status === "completed" ? Date.now() - 86_400_000 : futureDueDate + 86_400_000;
+      await admin.mutation(update, { ...fields, taskId, dueDate });
+      const after = await admin.query(api.tasks.getOneTime, { companyId: f.companyA, taskId });
+      expect(after.task.state).toMatchObject({ rawStatus: status, isOverdue: false });
+      expect(after.task.completedAt).toBe(before.task.completedAt);
+      expect(after.task.completedByMembershipId).toBe(before.task.completedByMembershipId);
+    }
+  });
+
   test("assignees can update task status without update capabilities", async () => {
     const f = await createAuthzFixture();
 

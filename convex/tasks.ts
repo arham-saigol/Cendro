@@ -303,6 +303,15 @@ async function jdState(ctx: Ctx, task: Doc<"jdTasks">, now = Date.now(), timeZon
   return { status: statusLabel(status), rawStatus: status, isOverdue: false, currentCycleStart: c.start, currentCycleEnd: c.end, dueAt };
 }
 
+// Overdue is an overlay; keep the stored manual status when a deadline changes.
+export function reconcileOneTimeOverdue(task: Doc<"oneTimeTasks">, now = Date.now()) {
+  if (task.status !== "completed" && task.dueDate !== undefined && task.dueDate < now) {
+    task.overdueAt ??= now;
+  } else {
+    delete task.overdueAt;
+  }
+}
+
 function oneState(task: Doc<"oneTimeTasks">) {
   const isOverdue = Boolean(task.overdueAt) || Boolean(task.dueDate && task.status !== "completed" && task.dueDate < Date.now());
   const status: ManualStatus | "overdue" = isOverdue ? "overdue" : task.status;
@@ -1596,7 +1605,6 @@ export const updateOneTime = mutation({
     await assertAssigneesInCompany(ctx, args.companyId, args.assigneeMembershipIds);
     const assigneesChanged = task.assigneeMembershipIds.length !== args.assigneeMembershipIds.length || args.assigneeMembershipIds.some((id) => !task.assigneeMembershipIds.includes(id));
     if (assigneesChanged && args.assigneeMembershipIds.length) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time", capabilities);
-    const state = oneState(task);
     const nextTask = { ...task };
     nextTask.title = nonEmpty(args.title, "Task title");
     const desc = cleanOptionalText(args.description);
@@ -1615,7 +1623,7 @@ export const updateOneTime = mutation({
     else nextTask.quantity = q;
     nextTask.assigneeMembershipIds = args.assigneeMembershipIds;
     nextTask.priority = args.priority;
-    if (state.isOverdue && !nextTask.overdueAt) nextTask.overdueAt = Date.now();
+    reconcileOneTimeOverdue(nextTask);
     nextTask.updatedAt = Date.now();
     await ctx.db.replace(args.taskId, nextTask);
     return null;
@@ -1674,7 +1682,6 @@ export const updateOneTimeFields = mutation({
       const assigneesChanged = task.assigneeMembershipIds.length !== args.assigneeMembershipIds.length || args.assigneeMembershipIds.some((id) => !task.assigneeMembershipIds.includes(id));
       if (assigneesChanged) await assertCanAssign(ctx, args.companyId, membership, args.assigneeMembershipIds, "one_time", capabilities);
     }
-    const state = oneState(task);
     const nextTask = { ...task };
     if (args.title !== undefined) nextTask.title = nonEmpty(args.title, "Task title");
     if (args.description !== undefined) {
@@ -1703,7 +1710,7 @@ export const updateOneTimeFields = mutation({
     }
     if (args.assigneeMembershipIds !== undefined) nextTask.assigneeMembershipIds = args.assigneeMembershipIds;
     if (args.priority !== undefined) nextTask.priority = args.priority;
-    if (state.isOverdue && !nextTask.overdueAt) nextTask.overdueAt = Date.now();
+    reconcileOneTimeOverdue(nextTask);
     nextTask.updatedAt = Date.now();
     await ctx.db.replace(args.taskId, nextTask);
     return null;

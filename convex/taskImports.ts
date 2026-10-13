@@ -6,7 +6,7 @@ import { getManagedMembershipIds, hasAllManagedMemberships, isManagedMembership,
 import type { Capability } from "../src/lib/permissions";
 import { effectiveCurrentJdCycle, elapsedJdOccurrences, loadWorkCalendar } from "./workCalendar";
 import { defaultTimeZone } from "./taskCycles";
-import { canManageJdLifecycle, preserveJdCompletionStamp, recordMissedJdCycles, retireJdHistoryAtCycle, transitionJdTaskActiveState, type TaskVisibilityAuth } from "./tasks";
+import { canManageJdLifecycle, preserveJdCompletionStamp, reconcileOneTimeOverdue, recordMissedJdCycles, retireJdHistoryAtCycle, transitionJdTaskActiveState, type TaskVisibilityAuth } from "./tasks";
 import { syncReferenceCounter } from "./references";
 import { normalizeEmail, nonEmpty } from "./validation";
 
@@ -579,7 +579,6 @@ export const commitTaskImportBatch = mutation({
           }
         } else {
           const task = item.task as Doc<"oneTimeTasks">;
-          const wasOverdue = Boolean(task.overdueAt) || Boolean(task.dueDate && task.status !== "completed" && task.dueDate < now);
           const nextTask = { ...task };
           if (hasField(item.draft, "title")) nextTask.title = nonEmpty(item.draft.title ?? "", "Task title");
           if (hasField(item.draft, "description")) {
@@ -607,7 +606,7 @@ export const commitTaskImportBatch = mutation({
             else nextTask.quantity = item.draft.quantity;
           }
           if (item.assigneePatchRequested) nextTask.assigneeMembershipIds = item.assigneeMembershipIds;
-          if (wasOverdue) nextTask.overdueAt = task.overdueAt ?? now;
+          reconcileOneTimeOverdue(nextTask, now);
           nextTask.updatedAt = now;
           await ctx.db.replace(task._id, nextTask);
         }

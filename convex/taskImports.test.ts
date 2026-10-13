@@ -397,6 +397,17 @@ describe("task import backend", () => {
     expect(updated.task.priority).toBe("high");
     expect(updated.task.state.rawStatus).toBe("overdue");
     expect(updated.task.overdueAt).toBeDefined();
+
+    const rescheduledDraft = { ...changedDraft, dueDate: Date.now() + 86_400_000, presentFields: ["reference", "dueDate", "status"] as ("reference" | "dueDate" | "status")[] };
+    await commitImport(admin, {
+      companyId, kind: "one_time", importKey: "import-rescheduled", batchKey: "batch-1",
+      rows: [{ include: true, expectedUpdatedAt: updated.task.updatedAt, selectedAssigneeMembershipIds: null, draft: rescheduledDraft }],
+    });
+    const rescheduled = await admin.query(api.tasks.getOneTime, { companyId, taskId });
+    expect(rescheduled.task.state).toMatchObject({ rawStatus: "due", isOverdue: false });
+    expect(rescheduled.task.overdueAt).toBeUndefined();
+    // Imported status is still ignored; rescheduling only removes the overdue overlay.
+    await expect(admin.mutation(api.tasks.completeOneTime, { companyId, taskId })).resolves.toBeNull();
   });
 
   test("imports never change one-time task status or log status_changed", async () => {

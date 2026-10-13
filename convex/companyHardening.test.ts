@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import { createAuthzFixture, identity } from "./authz.fixture";
 import { defaultRoleCapabilities } from "../src/lib/permissions";
@@ -9,6 +9,68 @@ describe("company management & invitation hardening", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
+  });
+
+  afterEach(() => vi.useRealTimers());
+
+  test("invites remain usable after two days but are rejected at the 14-day deadline", async () => {
+    vi.useFakeTimers();
+    const issuedAt = Date.UTC(2026, 0, 1);
+    vi.setSystemTime(issuedAt);
+    const f = await createAuthzFixture();
+    const invite = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "delayed@example.com",
+      role: "Employee",
+    });
+    const invitee = f.t.withIdentity(identity("delayed", "delayed@example.com"));
+    const timelyInvite = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "timely@example.com",
+      role: "Employee",
+    });
+
+    vi.setSystemTime(issuedAt + 2 * 86_400_000);
+    await expect(f.t.query(api.invitations.preview, { token: invite.token })).resolves.toMatchObject({
+      companyName: "Company A",
+      expiresAt: issuedAt + 14 * 86_400_000,
+    });
+
+    await expect(f.t.withIdentity(identity("timely", "timely@example.com"))
+      .mutation(api.invitations.accept, { token: timelyInvite.token })).resolves.toEqual({ companyId: f.companyA });
+
+    vi.setSystemTime(issuedAt + 14 * 86_400_000);
+    await expect(invitee.mutation(api.invitations.accept, { token: invite.token })).rejects.toThrow("This invitation has expired.");
+    const overview = await f.asUser("adminA").query(api.companyManagement.overview, { companyId: f.companyA });
+    expect(overview.invitations.some((row) => row._id === invite.id)).toBe(true);
+    expect(overview.users.some((row) => row.user.email === "delayed@example.com")).toBe(false);
+  });
+
+  test.each([undefined, "false"])("acceptance rejects an email verification claim of %s", async (emailVerified) => {
+    const f = await createAuthzFixture();
+    const invite = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "claim@example.com",
+      role: "Employee",
+    });
+    // Exercise malformed JWT data that the static UserIdentity type cannot describe.
+    const invitee = { ...identity("claim", "claim@example.com"), emailVerified: emailVerified as boolean | undefined };
+    await expect(f.t.withIdentity(invitee).mutation(api.invitations.accept, { token: invite.token }))
+      .rejects.toThrow("Email verification is required to accept an invitation.");
+  });
+
+  test("a different signed-in email cannot consume the invitation", async () => {
+    const f = await createAuthzFixture();
+    const invite = await f.asUser("adminA").mutation(internal.companyManagement.createInvitationRecord, {
+      companyId: f.companyA,
+      email: "invited@example.com",
+      role: "Employee",
+    });
+    await expect(f.t.withIdentity(identity("other", "other@example.com"))
+      .mutation(api.invitations.accept, { token: invite.token }))
+      .rejects.toThrow("This invitation was sent to a different email address.");
+    await expect(f.t.withIdentity(identity("invited", "invited@example.com"))
+      .mutation(api.invitations.accept, { token: invite.token })).resolves.toEqual({ companyId: f.companyA });
   });
 
   test("User without company:manage_roles can only invite baseline roles and cannot grant scopes", async () => {

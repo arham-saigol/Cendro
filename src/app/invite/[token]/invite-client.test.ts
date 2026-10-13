@@ -9,11 +9,12 @@ const mocks = vi.hoisted(() => ({
   accept: vi.fn(),
   push: vi.fn(),
   preview: { companyName: "Company", role: "Admin", expiresAt: 0 },
+  isSignedIn: true,
 }));
-vi.mock("@clerk/nextjs", () => ({ useUser: () => ({ isLoaded: true, isSignedIn: true }) }));
+vi.mock("@clerk/nextjs", () => ({ useUser: () => ({ isLoaded: true, isSignedIn: mocks.isSignedIn }) }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: mocks.push }) }));
 vi.mock("convex/react", () => ({
-  useConvexAuth: () => ({ isLoading: false, isAuthenticated: true }),
+  useConvexAuth: () => ({ isLoading: false, isAuthenticated: mocks.isSignedIn }),
   useQuery: () => mocks.preview,
   useMutation: () => mocks.accept,
 }));
@@ -26,6 +27,7 @@ beforeEach(() => {
   mocks.preview.expiresAt = Date.now() + 14 * 86_400_000;
   mocks.accept.mockReset();
   mocks.push.mockReset();
+  mocks.isSignedIn = true;
 });
 afterEach(async () => {
   if (root) await act(async () => root!.unmount());
@@ -76,19 +78,31 @@ test("unexpected acceptance failures show safe recovery guidance rather than tra
   expect(acceptButton()).toBeDefined();
 });
 
-test("an open invitation expires without a database update and stops offering acceptance", async () => {
-  mocks.preview.expiresAt = Date.now() + 1_000;
+test("a fast device clock does not block sign-in or acceptance of a server-valid invite", async () => {
+  const serverNow = Date.UTC(2026, 0, 1);
+  mocks.preview.expiresAt = serverNow + 60_000;
+  vi.setSystemTime(serverNow + 5 * 60_000);
+  mocks.isSignedIn = false;
+  mocks.accept.mockResolvedValue({ companyId: "company" });
   await mount();
-  expect(acceptButton()).toBeDefined();
-  await act(async () => vi.advanceTimersByTime(1_000));
-  expect(text(container)).toContain("This invitation has expired. Ask your company admin to send a new invitation.");
-  expect(acceptButton()).toBeUndefined();
-  expect(mocks.accept).not.toHaveBeenCalled();
+  expect(text(container)).toContain("Sign in");
+  expect(text(container)).toContain("Create account");
+  expect(text(container)).not.toContain("This invitation has expired.");
+
+  mocks.isSignedIn = true;
+  await act(async () => root!.render(React.createElement(InviteClient, { token: "invite-token" })));
+  await accept();
+  expect(mocks.push).toHaveBeenCalledWith("/dashboard");
 });
 
-test("an already expired invitation never offers acceptance", async () => {
-  mocks.preview.expiresAt = Date.now() - 1;
+test("a slow device clock still displays the server's authoritative expiry rejection", async () => {
+  const serverNow = Date.UTC(2026, 0, 1);
+  mocks.preview.expiresAt = serverNow - 1;
+  vi.setSystemTime(serverNow - 5 * 60_000);
+  mocks.accept.mockRejectedValue(new ConvexError("This invitation has expired."));
   await mount();
-  expect(text(container)).toContain("This invitation has expired.");
-  expect(acceptButton()).toBeUndefined();
+  await accept();
+  const alert = nodes(container).find((node) => node.getAttribute?.("role") === "alert");
+  expect(text(alert)).toBe("This invitation has expired.");
+  expect(mocks.push).not.toHaveBeenCalled();
 });

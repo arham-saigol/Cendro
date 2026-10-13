@@ -26,7 +26,7 @@ function browserOnline(): boolean {
 /**
  * Escalates a pending boot state: after SHELL_STALL_WARN_MS the caller swaps the
  * skeleton for a recoverable error card; after SHELL_AUTO_RETRY_MS the page
- * reloads itself once per episode (the retry counter survives reloads and is
+ * reloads itself once per episode outside pending Convex auth (the retry counter survives reloads and is
  * capped in sessionStorage so a hard outage can't spin forever — if storage
  * can't persist the counter, automatic reloads are disabled entirely and only
  * the manual Try again remains).
@@ -94,7 +94,9 @@ export function useShellStall(accessStatus: string, stage: ShellLoadingStage | n
         console.warn("[cendro] app shell still waiting", snapshot);
         reportAuthDiagnostic("stall", snapshot);
       }
-      if (!autoRetried && persistable && shouldAutoRetry(elapsed, readShellRetries(storage))) {
+      // The SDK is already reconnecting during pending Convex authentication.
+      // Reloading destroys its client/backoff and can cancel the fallback route.
+      if (!autoRetried && persistable && diagnosticsRef.current(elapsed).stage !== "convex-auth" && shouldAutoRetry(elapsed, readShellRetries(storage))) {
         autoRetried = true;
         bumpShellRetries(storage);
         const snapshot = diagnosticsRef.current(elapsed);

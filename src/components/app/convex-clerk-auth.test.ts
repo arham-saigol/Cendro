@@ -150,16 +150,14 @@ describe("real Convex auth boundary", () => {
     expect(state).toMatchObject({ isLoading: false, isAuthenticated: true });
   });
 
-  test("repeated failed direct upgrades recover through the relay and retain it after rotation", async () => {
+  test("the first failed direct upgrade recovers through the relay and retains it after rotation", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
-    for (let attempt = 0; attempt < 3; attempt++) {
-      expect(ControlledSocket.sockets.at(-1)!.url).toContain("happy-otter-123.convex.cloud");
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1_200);
-        ControlledSocket.sockets.at(-1)!.failUpgrade();
-        await vi.advanceTimersByTimeAsync(8_000);
-      });
-    }
+    expect(ControlledSocket.sockets.at(-1)!.url).toContain("happy-otter-123.convex.cloud");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_200);
+      ControlledSocket.sockets.at(-1)!.failUpgrade();
+      await vi.advanceTimersByTimeAsync(8_000);
+    });
     const relay = ControlledSocket.sockets.at(-1)!;
     expect(relay.url).toBe(`wss://www.cendro.app/api/convex-relay/${convexVersion}`);
     expect(clerk.token).toHaveBeenCalledTimes(1);

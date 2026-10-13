@@ -13,7 +13,7 @@ import { recoveringWebSocket } from "@/lib/convex-connection-recovery";
 
 const url = process.env.NEXT_PUBLIC_CONVEX_URL;
 const convex = url ? new ConvexReactClient(url, {
-  // Convex owns auth/retries. A failed direct upgrade can use our Vercel relay
+  // Convex owns auth/retries. The first failed upgrade uses the alternate route
   // without replacing the client or discarding its subscriptions/mutations.
   ...(typeof window !== "undefined" && typeof WebSocket !== "undefined" && {
     webSocketConstructor: diagnosticWebSocket(process.env.NEXT_PUBLIC_CONVEX_RELAY === "true"

@@ -2,6 +2,7 @@
 
 import { useUser } from "@clerk/nextjs";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
+import { ConvexError } from "convex/values";
 import { Mail } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -10,6 +11,7 @@ import { api } from "../../../../convex/_generated/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { formatDate } from "@/lib/utils";
 
 export function InviteClient({ token }: { token: string }) {
   const router = useRouter();
@@ -33,7 +35,9 @@ export function InviteClient({ token }: { token: string }) {
       }
       router.push("/dashboard");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not accept invitation.");
+      setError(err instanceof ConvexError && typeof err.data === "string"
+        ? err.data
+        : "Could not accept invitation. Please try again. If the problem continues, contact your company admin.");
       setIsAccepting(false);
     }
   }
@@ -54,10 +58,11 @@ export function InviteClient({ token }: { token: string }) {
           <div className="mt-3 space-y-2 text-sm">
             <p>You have been invited to join <strong>{preview.companyName}</strong>.</p>
             <p><Badge>{preview.role}</Badge></p>
+            <p className="text-[var(--ink-muted)]">Expires {formatDate(preview.expiresAt)}. Expiry is checked when you accept.</p>
           </div>
-        ) : <p className="mt-2 text-sm text-[var(--ink-muted)]">This invitation is invalid or expired.</p>}
-        {authUnavailable && <p className="alert-error mt-3 rounded-md p-2 text-sm">Could not authenticate your session with Convex. Please refresh and try again.</p>}
-        {error && <p className="alert-error mt-3 rounded-md p-2 text-sm">{error}</p>}
+        ) : <p className="mt-2 text-sm text-[var(--ink-muted)]">This invitation is invalid or no longer available. Ask your company admin to send a new invitation.</p>}
+        {authUnavailable && <p role="alert" className="alert-error mt-3 rounded-md p-2 text-sm">Could not authenticate your session. Please refresh and try again.</p>}
+        {error && <p role="alert" className="alert-error mt-3 rounded-md p-2 text-sm">{error}</p>}
         {preview && <div className="mt-5">
           {isSignedIn ? <Button variant="primary" onClick={acceptInvite} disabled={!canAccept || isAccepting}>{isAccepting ? "Accepting..." : canAccept ? "Accept invitation" : authUnavailable ? "Authentication unavailable" : "Finishing sign-in..."}</Button> : <div className="flex gap-2"><Button asChild><Link href={`/sign-in?redirect_url=${encodeURIComponent(invitePath)}`}>Sign in</Link></Button><Button asChild variant="primary"><Link href={`/sign-up?redirect_url=${encodeURIComponent(invitePath)}`}>Create account</Link></Button></div>}
         </div>}

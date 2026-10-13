@@ -4,25 +4,29 @@ import { assertRoleManagerRemains, currentOrCreateUser, ensureDefaultRoles, role
 
 export const preview = query({
   args: { token: v.string() },
+  returns: v.union(v.null(), v.object({ role: v.string(), companyName: v.string(), expiresAt: v.number() })),
   handler: async (ctx, args) => {
     const invitation = await ctx.db.query("invitations").withIndex("by_token", (q) => q.eq("token", args.token)).unique();
-    if (!invitation || invitation.status !== "pending" || invitation.expiresAt < Date.now()) return null;
+    if (!invitation || invitation.status !== "pending") return null;
     const company = await ctx.db.get(invitation.companyId);
     if (!company || company.deletedAt) return null;
-    return { role: invitation.role, companyName: company.name };
+    // The client owns time-based presentation; cached queries do not rerun at expiry.
+    // Acceptance still checks the authoritative server clock.
+    return { role: invitation.role, companyName: company.name, expiresAt: invitation.expiresAt };
   },
 });
 
 export const accept = mutation({
   args: { token: v.string() },
+  returns: v.object({ companyId: v.id("companies") }),
   handler: async (ctx, args) => {
     const { user, identity } = await currentOrCreateUser(ctx);
-    if (!identity.emailVerified) {
+    if (identity.emailVerified !== true) {
       throw new ConvexError("Email verification is required to accept an invitation.");
     }
     const invitation = await ctx.db.query("invitations").withIndex("by_token", (q) => q.eq("token", args.token)).unique();
     if (!invitation || invitation.status !== "pending") throw new ConvexError("Invitation not found.");
-    if (invitation.expiresAt < Date.now()) throw new ConvexError("This invitation has expired.");
+    if (invitation.expiresAt <= Date.now()) throw new ConvexError("This invitation has expired.");
     if (invitation.email.toLowerCase() !== user.email.toLowerCase()) throw new ConvexError("This invitation was sent to a different email address.");
     const company = await ctx.db.get(invitation.companyId);
     if (!company || company.deletedAt) throw new ConvexError("Company not found.");

@@ -348,13 +348,13 @@ function dueLabel(task: any) {
   if (Number.isNaN(date.getTime())) return "—";
   return dateHasExplicitTime(ms) ? `${formatDateOnly(date)} ${formatTimeOnly(date)}` : formatDateOnly(date);
 }
-function dueTone(task: any) {
+function dueTone(task: any, now: number | null) {
   const ms = task.dueDate;
   if (!ms) return "muted";
   if (rawStatus(task) === "completed") return "muted";
-  if (rawStatus(task) === "overdue" || ms < Date.now()) return "danger";
+  if (rawStatus(task) === "overdue") return "danger";
   const day = 86_400_000;
-  if (ms - Date.now() <= 2 * day) return "warn";
+  if (now !== null && ms - now <= 2 * day) return "warn";
   return "ink";
 }
 
@@ -435,17 +435,11 @@ function taskStateLabel(status: ManualStatus | "overdue") {
   return status === "due" ? "Pending" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue";
 }
 
-// Mirrors the server-side state computation so a status change can be patched
-// into loaded list/detail query results before the mutation round-trips.
-function optimisticTaskState(task: any, kind: Kind, status: ManualStatus) {
+// Patch manual status only; the shared deadline projection owns overdue state,
+// including optimistic updates. Device wall time must not hide or lock a task.
+function optimisticTaskState(task: any, status: ManualStatus) {
   const state = typeof task.state === "object" && task.state ? task.state : {};
-  const now = Date.now();
-  if (kind === "jd") {
-    return { ...state, status: taskStateLabel(status), rawStatus: status, isOverdue: false };
-  }
-  const isOverdue = status !== "completed" && (Boolean(task.overdueAt) || Boolean(task.dueDate && task.dueDate < now));
-  const raw = isOverdue ? "overdue" : status;
-  return { ...state, status: taskStateLabel(raw), rawStatus: raw, isOverdue };
+  return { ...state, status: taskStateLabel(status), rawStatus: status, isOverdue: false };
 }
 
 function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger = false }: { kind: Kind; task: any; size?: "sm" | "md"; canUpdateOverride?: boolean; cellTrigger?: boolean }) {
@@ -453,12 +447,12 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   // Patch the loaded list/detail queries so every view of this task — the row,
   // the open detail pane, and status filters — reflects the change immediately.
   const updateJdStatus = useMutation(api.tasks.updateJdStatus).withOptimisticUpdate((localStore, args) => {
-    const patch = (row: any) => ({ ...row, state: optimisticTaskState(row, "jd", args.status), ...(args.status === "completed" ? { completedAt: Date.now() } : {}) });
+    const patch = (row: any) => ({ ...row, state: optimisticTaskState(row, args.status), ...(args.status === "completed" ? { completedAt: Date.now() } : {}) });
     updateInListPages(localStore, api.tasks.listJdRows, args.taskId, patch);
     updateInDetailQueries(localStore, api.tasks.getJd, args.taskId, patch);
   });
   const updateOneStatus = useMutation(api.tasks.updateOneTimeStatus).withOptimisticUpdate((localStore, args) => {
-    const patch = (row: any) => ({ ...row, state: optimisticTaskState(row, "one", args.status), ...(args.status === "completed" ? { completedAt: Date.now() } : {}) });
+    const patch = (row: any) => ({ ...row, state: optimisticTaskState(row, args.status), ...(args.status === "completed" ? { completedAt: Date.now() } : {}) });
     updateInListPages(localStore, api.tasks.listOneTimeRows, args.taskId, patch);
     updateInDetailQueries(localStore, api.tasks.getOneTime, args.taskId, patch);
   });
@@ -467,6 +461,8 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   const [open, setOpen] = useState(false);
   const status = statusText(task);
   const raw = rawStatus(task);
+  const deadlineClock = useContext(TaskDeadlineContext);
+  const awaitingClock = kind === "one" && task.dueDate != null && !deadlineClock?.synchronized;
   const locked = status === "Overdue" || raw === "overdue";
   const isAssignee = taskHasAssignee(task, active?.membership?._id);
   // Pending rows carry a synthetic id — a status mutation against it would reject.
@@ -474,7 +470,7 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   const pad = size === "md" ? "h-7 px-2.5" : "h-[22px] px-2";
 
   async function change(nextStatus: ManualStatus) {
-    if (!activeCompanyId || locked || pending) return;
+    if (!activeCompanyId || locked || pending || awaitingClock) return;
     setPending(true);
     setFailed(false);
     try {
@@ -492,7 +488,7 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   if (!canUpdate) return <span className={cn("task-pill", toneClasses[statusTone(status)], pad)}><span className={cn("task-pill-dot", statusDotClass(raw))} />{status}</span>;
 
   const pill = (
-    <span className={cn("task-pill", toneClasses[statusTone(status)], pad, failed && "ring-1 ring-[var(--danger)]")} title={failed ? "Could not update status — try again." : undefined}>
+    <span className={cn("task-pill", toneClasses[statusTone(status)], pad, failed && "ring-1 ring-[var(--danger)]")} title={awaitingClock ? "Synchronizing task deadline…" : failed ? "Could not update status — try again." : undefined}>
       <span className={cn("task-pill-dot", statusDotClass(raw))} />
       {manualStatuses.find((option) => option.value === raw)?.label ?? status}
       {failed && <CircleAlert className="h-3 w-3 text-[var(--danger)]" />}
@@ -501,9 +497,9 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
 
   if (cellTrigger || isAssignee) {
     return (
-      <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending} pending={pending} ariaLabel="Change status" header={pill}>
+      <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending || awaitingClock} pending={pending} ariaLabel="Change status" header={pill}>
         {manualStatuses.map((option) => (
-          <button key={option.value} type="button" onClick={() => { setOpen(false); void change(option.value); }} className="task-cell-popover-item">
+          <button key={option.value} type="button" disabled={pending || awaitingClock} onClick={() => { setOpen(false); void change(option.value); }} className="task-cell-popover-item">
             <span className={cn("task-pill h-[22px] px-2", toneClasses[statusTone(option.label)])}>
               <span className={cn("task-pill-dot", statusDotClass(option.value))} />
               {option.label}
@@ -519,7 +515,7 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   return (
     <DropdownMenu.Root open={open} onOpenChange={setOpen}>
       <DropdownMenu.Trigger asChild>
-        <button type="button" disabled={pending} onClick={(event) => event.stopPropagation()} data-interactive="true" className={cn("task-pill", toneClasses[statusTone(status)], pad)} aria-label="Change status">
+        <button type="button" disabled={pending || awaitingClock} onClick={(event) => event.stopPropagation()} data-interactive="true" className={cn("task-pill", toneClasses[statusTone(status)], pad)} aria-label="Change status">
           <span className={cn("task-pill-dot", statusDotClass(raw))} />
           {manualStatuses.find((option) => option.value === raw)?.label ?? status}
         </button>
@@ -527,7 +523,7 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
       <DropdownMenu.Portal>
         <DropdownMenu.Content align="start" sideOffset={4} className="task-menu" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
           {manualStatuses.map((option) => (
-            <DropdownMenu.Item key={option.value} onSelect={() => change(option.value)} className="task-menu-item">
+            <DropdownMenu.Item key={option.value} disabled={pending || awaitingClock} onSelect={() => change(option.value)} className="task-menu-item">
               <span className={cn("task-pill-dot", statusDotClass(option.value))} />
               <span className="flex-1">{option.label}</span>
               {raw === option.value && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
@@ -789,6 +785,8 @@ const TaskTableRow = memo(function TaskTableRow({
   onOpenDetails: (task: TaskRow) => void;
   onSaveInline: (task: any, patch: Partial<TaskFormValues>, label: string) => Promise<boolean>;
 }) {
+  const clock = useContext(TaskDeadlineContext)?.clock;
+  const dueDateTone = dueTone(task, clock ? clock.serverTime + clock.elapsed : null);
   const pending = (field: string) => pendingCell === `${task._id}:${field}`;
   const isPending = isPendingTask(task);
   const openDetails = () => {
@@ -872,7 +870,7 @@ const TaskTableRow = memo(function TaskTableRow({
           {rowCanEdit ? (
             <DatePicker value={task.dueDate ? toDateField(task.dueDate, dateHasExplicitTime(task.dueDate)) : ""} displayValue={dueLabel(task)} compact onChange={(dueDate) => { void onSaveInline(task, { dueDate }, "due"); }} />
           ) : (
-            <span className={cn(dueTone(task) === "danger" && "font-medium text-[var(--danger)]", dueTone(task) === "warn" && "font-medium text-[var(--badge-yellow-fg)]", dueTone(task) === "muted" && "text-[var(--ink-faint)]")}>{dueLabel(task)}</span>
+            <span className={cn(dueDateTone === "danger" && "font-medium text-[var(--danger)]", dueDateTone === "warn" && "font-medium text-[var(--badge-yellow-fg)]", dueDateTone === "muted" && "text-[var(--ink-faint)]")}>{dueLabel(task)}</span>
           )}
         </td>
       )}
@@ -1578,10 +1576,14 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
 }
 
 const taskDeadlineSyncError = "Could not refresh task deadlines. Retrying automatically.";
+// Bound accepted round trips to one second and compensate at their midpoint.
+// Never let network queues, suspended tabs or sleep create an unbounded offset.
+const TASK_CLOCK_MAX_ROUND_TRIP_MS = 1000;
 
 type TaskDeadlineClock = { serverTime: number; receivedAt: number; elapsed: number };
 const TaskDeadlineContext = createContext<{
   clock: TaskDeadlineClock | null;
+  synchronized: boolean;
   deadlineError: string | null;
   advanceClock: () => void;
 } | null>(null);
@@ -1594,6 +1596,7 @@ export function TaskDeadlineProvider({ children }: { children: ReactNode }) {
 function TaskDeadlineProviderContent({ companyId, children }: { companyId: Id<"companies"> | null; children: ReactNode }) {
   const getServerTime = useMutation(api.tasks.getServerTime);
   const [clock, setClock] = useState<TaskDeadlineClock | null>(null);
+  const [synchronized, setSynchronized] = useState(false);
   const [deadlineError, setDeadlineError] = useState<string | null>(null);
   const advanceClock = useCallback(() => {
     setClock((current) => current && { ...current, elapsed: performance.now() - current.receivedAt });
@@ -1602,41 +1605,63 @@ function TaskDeadlineProviderContent({ companyId, children }: { companyId: Id<"c
     if (!companyId) return;
     let cancelled = false;
     let request = 0;
+    let inFlight = false;
     let retryTimer: number | undefined;
     let retryDelay = 1000;
     const isPageVisible = () => document.visibilityState !== "hidden";
     const syncClock = async () => {
       window.clearTimeout(retryTimer);
       retryTimer = undefined;
-      if (cancelled || !isPageVisible()) return;
+      if (cancelled || !isPageVisible() || inFlight) return;
+      inFlight = true;
+      setSynchronized(false);
       const current = ++request;
+      const startedAt = performance.now();
+      const wallStartedAt = Date.now();
       try {
         const serverTime = await getServerTime({ companyId });
         if (!cancelled && current === request) {
           const receivedAt = performance.now();
+          const roundTrip = receivedAt - startedAt;
+          // Some browsers stop the monotonic clock during OS sleep. Wall time
+          // can reject a suspect sample, but never advances task deadlines.
+          const wallRoundTrip = Date.now() - wallStartedAt;
+          if (Math.max(roundTrip, wallRoundTrip) > TASK_CLOCK_MAX_ROUND_TRIP_MS || Math.abs(wallRoundTrip - roundTrip) > TASK_CLOCK_MAX_ROUND_TRIP_MS) {
+            throw new Error("Stale task clock sample.");
+          }
+          const sampledTime = serverTime + roundTrip / 2;
           // A delayed reply must not undo a deadline already observed.
           setClock((previous) => ({
-            serverTime: previous ? Math.max(serverTime, previous.serverTime + receivedAt - previous.receivedAt) : serverTime,
+            serverTime: previous ? Math.max(sampledTime, previous.serverTime + receivedAt - previous.receivedAt) : sampledTime,
             receivedAt,
             elapsed: 0,
           }));
           retryDelay = 1000;
+          setSynchronized(true);
           setDeadlineError(null);
         }
       } catch {
         if (!cancelled && current === request) {
-          setClock((previous) => previous && { ...previous, elapsed: performance.now() - previous.receivedAt });
+          advanceClock();
           setDeadlineError(taskDeadlineSyncError);
           if (isPageVisible()) {
             retryTimer = window.setTimeout(() => { void syncClock(); }, retryDelay);
             retryDelay = Math.min(retryDelay * 2, 30_000);
           }
         }
+      } finally {
+        inFlight = false;
+        // A visibility transition invalidates the pending sample. Wait for it
+        // to settle before resyncing; Convex mutations cannot be aborted.
+        if (!cancelled && current !== request && isPageVisible()) void syncClock();
       }
     };
     const onVisible = () => {
-      if (document.visibilityState === "visible") void syncClock();
-      else {
+      if (document.visibilityState === "visible") {
+        advanceClock();
+        void syncClock();
+      } else {
+        request++;
         window.clearTimeout(retryTimer);
         retryTimer = undefined;
       }
@@ -1648,8 +1673,8 @@ function TaskDeadlineProviderContent({ companyId, children }: { companyId: Id<"c
       window.clearTimeout(retryTimer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [companyId, getServerTime]);
-  const value = useMemo(() => ({ clock, deadlineError, advanceClock }), [clock, deadlineError, advanceClock]);
+  }, [companyId, getServerTime, advanceClock]);
+  const value = useMemo(() => ({ clock, synchronized, deadlineError, advanceClock }), [clock, synchronized, deadlineError, advanceClock]);
   return <TaskDeadlineContext.Provider value={value}>{children}</TaskDeadlineContext.Provider>;
 }
 

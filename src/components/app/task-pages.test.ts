@@ -2,6 +2,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import React, { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { getFunctionName } from "convex/server";
+import type { OptimisticLocalStore } from "convex/browser";
 import type { ListInsertion } from "@/lib/list-drag";
 import { createMockElement } from "./test-dom";
 import { TaskDetail, TaskList } from "./task-pages";
@@ -13,6 +14,7 @@ Object.assign(window, { matchMedia: () => ({ matches: true, addEventListener: ()
 const state = vi.hoisted(() => ({
   view: { orderedIds: ["A", "B", "C"], revision: 0 },
   pending: false,
+  renderRows: false,
   taskIds: ["A", "B", "C"],
   taskStates: {} as Record<string, { status: string; rawStatus: string }>,
   dueDates: {} as Record<string, number>,
@@ -21,6 +23,7 @@ const state = vi.hoisted(() => ({
   clockRequests: 0,
   clockFailAfterFirst: false,
   clockWait: null as Promise<void> | null,
+  statusWait: null as Promise<void> | null,
   detail: null as null | { task: { _id: string; title: string; createdAt: number; priority: string; dueDate: number; assigneeMembershipIds: string[]; state: { status: string; rawStatus: string } }; canUpdate: boolean },
   otherAssigneeIds: [] as string[],
   pausedIds: [] as string[],
@@ -85,6 +88,18 @@ vi.mock("convex/react", () => {
     },
     useMutation: (ref: Parameters<typeof getFunctionName>[0]) => {
       if (getFunctionName(ref) === "tasks:getServerTime") return getServerTime;
+      if (getFunctionName(ref) === "tasks:updateOneTimeStatus") {
+        type StatusArgs = { taskId: string; status: string };
+        let optimistic: ((store: OptimisticLocalStore, args: StatusArgs) => void) | undefined;
+        const store = {
+          getQuery: () => undefined,
+          getAllQueries: (query: Parameters<typeof getFunctionName>[0]) => getFunctionName(query) === "tasks:getOneTime" && state.detail
+            ? [{ args: { companyId: "company", taskId: state.detail.task._id }, value: state.detail }] : [],
+          setQuery: (_query: unknown, _args: unknown, value: unknown) => { state.detail = value as typeof state.detail; },
+        } as OptimisticLocalStore;
+        const mutate = async (args: StatusArgs) => { optimistic?.(store, args); if (state.statusWait) await state.statusWait; };
+        return Object.assign(mutate, { withOptimisticUpdate: (update: typeof optimistic) => { optimistic = update; return mutate; } });
+      }
       const mutate = ["tasks:saveCustomView", "tasks:saveListOrder"].includes(getFunctionName(ref))
         ? (args: typeof state.writes[number]["args"]) => new Promise<{ orderedIds: string[]; revision: number }>((resolve) => state.writes.push({ args, resolve }))
         : getFunctionName(ref) === "tasks:setJdPausedBulk"
@@ -102,7 +117,7 @@ vi.mock("./list-dnd", () => ({
     state.railRows.set(id, children.props.onCheckedChange);
     return null;
   },
-  ListSortableRow: () => null,
+  ListSortableRow: ({ id, children }: { id: string; children: ReactNode }) => state.renderRows ? React.createElement("tr", { "data-task-id": id }, children) : null,
 }));
 vi.mock("@dnd-kit/react", () => ({ DragDropProvider: ({ children }: { children: ReactNode }) => children }));
 vi.mock("./task-rail-scroll", () => ({
@@ -161,6 +176,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
   state.view = { orderedIds: ["A", "B", "C"], revision: 0 };
   state.pending = false;
+  state.renderRows = false;
   state.taskIds = ["A", "B", "C"];
   state.taskStates = {};
   state.dueDates = {};
@@ -169,6 +185,7 @@ afterEach(async () => {
   state.clockRequests = 0;
   state.clockFailAfterFirst = false;
   state.clockWait = null;
+  state.statusWait = null;
   state.detail = null;
   state.otherAssigneeIds = [];
   state.pausedIds = [];
@@ -560,6 +577,150 @@ test("a failed clock refresh retains overdue status and keeps future deadline ti
     expect(descendants(container).some((node) => node.textContent === "Could not refresh task deadlines. Retrying automatically.")).toBe(true);
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
     expect([...state.railRows.keys()]).toEqual(["C"]);
+  } finally {
+    Reflect.deleteProperty(document, "visibilityState");
+  }
+});
+
+test("optimistic status changes use the trusted deadline projection, not the device wall clock", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+  vi.stubGlobal("innerWidth", 1024);
+  vi.stubGlobal("innerHeight", 768);
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(private onResize: () => void) {}
+    observe(node: HTMLElement) { Object.defineProperty(node, "offsetHeight", { value: 100 }); this.onResize(); }
+    disconnect() {}
+  });
+  state.serverTime = Date.parse("2026-10-14T12:00:00Z");
+  vi.setSystemTime(state.serverTime + 600_000);
+  state.dueDates = { A: state.serverTime + 5000 };
+  state.detail = { task: { _id: "A", title: "A", createdAt: 1, priority: "low", dueDate: state.dueDates.A, assigneeMembershipIds: ["member"], state: { status: "Pending", rawStatus: "due" } }, canUpdate: false };
+  let release!: () => void;
+  state.statusWait = new Promise<void>((resolve) => { release = resolve; });
+  state.renderRows = true;
+  const page = () => React.createElement(OneTimeTasksLayout, null,
+    React.createElement("section", { "aria-label": "Task detail" }, React.createElement(TaskDetail, { kind: "one", id: "A" })),
+  );
+  try {
+    container = createMockElement();
+    root = createRoot(container);
+    await act(async () => root!.render(page()));
+    const row = descendants(container).find((node) => node.getAttribute?.("data-task-id") === "A");
+    expect(descendants(row).some((node) => node.getAttribute?.("class")?.includes("text-[var(--danger)]"))).toBe(false);
+    expect(descendants(row).some((node) => node.getAttribute?.("class")?.includes("text-[var(--badge-yellow-fg)]"))).toBe(true);
+    const detail = descendants(container).find((node) => node.getAttribute?.("aria-label") === "Task detail");
+    const statusControl = () => descendants(detail).find((node) => node.getAttribute?.("aria-label") === "Change status");
+    statusControl().getBoundingClientRect = () => ({ top: 0, bottom: 30, left: 0, right: 100, width: 100, height: 30 });
+    await act(async () => statusControl().dispatchEvent(new Event("click", { bubbles: true })));
+    await clickButton("In Progress");
+    await act(async () => root!.render(page())); // Deliver the optimistic subscription update.
+    expect([...state.railRows.keys()]).toContain("A");
+    expect(statusControl()).toBeDefined();
+    expect(descendants(container).some((node) => node.getAttribute?.("aria-label") === "Overdue (locked)")).toBe(false);
+    expect(descendants(container).some((node) => node.textContent === "In Progress" || node.nodeValue === "In Progress")).toBe(true);
+  } finally {
+    await act(async () => release());
+    vi.unstubAllGlobals();
+  }
+});
+
+test.each([[400, false], [5000, false], [5000, true]] as const)("a delayed initial clock sample does not restart an elapsed deadline (%s ms, clock paused: %s)", async (delay, pausedClock) => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+  state.serverTime = Date.parse("2026-10-14T12:00:00Z");
+  vi.setSystemTime(state.serverTime + 600_000);
+  state.dueDates = { A: state.serverTime + 100, B: state.serverTime + 100_000 };
+  state.detail = { task: { _id: "A", title: "A", createdAt: 1, priority: "low", dueDate: state.dueDates.A, assigneeMembershipIds: ["member"], state: { status: "Pending", rawStatus: "due" } }, canUpdate: false };
+  let release!: () => void;
+  state.clockWait = new Promise<void>((resolve) => { release = resolve; });
+  container = createMockElement();
+  root = createRoot(container);
+  await act(async () => root!.render(React.createElement(OneTimeTasksLayout, null, React.createElement(TaskDetail, { kind: "one", id: "A" }))));
+  expect(button("Change status")?.getAttribute("disabled")).not.toBeNull();
+  await act(async () => { await vi.advanceTimersByTimeAsync(delay); });
+  const monotonicClock = pausedClock ? vi.spyOn(performance, "now").mockReturnValue(0) : undefined;
+  state.clockWait = null;
+  state.serverTime += delay;
+  await act(async () => release());
+  monotonicClock?.mockRestore();
+  if (delay === 5000) {
+    // An arbitrarily old initial sample is unusable; keep controls disabled
+    // until the single automatic retry obtains fresh server time.
+    expect([...state.railRows.keys()]).toContain("A");
+    expect(button("Change status")?.getAttribute("disabled")).not.toBeNull();
+    expect(descendants(container).some((node) => node.getAttribute?.("role") === "alert")).toBe(true);
+    state.serverTime += 1000;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  }
+  expect([...state.railRows.keys()]).toEqual(["B", "C"]);
+  expect(button("Change status")).toBeUndefined();
+  expect(descendants(container).some((node) => node.getAttribute?.("aria-label") === "Overdue (locked)")).toBe(true);
+  expect(descendants(container).some((node) => node.getAttribute?.("role") === "alert")).toBe(false);
+});
+
+test("visibility advances trusted deadlines immediately even while the refresh is pending", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+  state.serverTime = Date.parse("2026-10-14T12:00:00Z");
+  state.dueDates = { A: state.serverTime + 1000, B: state.serverTime + 100_000 };
+  state.detail = { task: { _id: "B", title: "B", createdAt: 1, priority: "low", dueDate: state.dueDates.B, assigneeMembershipIds: ["member"], state: { status: "Pending", rawStatus: "due" } }, canUpdate: false };
+  let onVisible: (() => void) | undefined;
+  vi.spyOn(document, "addEventListener").mockImplementation((type, listener) => {
+    if (type === "visibilitychange") onVisible = listener as () => void;
+  });
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+  try {
+    container = createMockElement();
+    root = createRoot(container);
+    await act(async () => root!.render(React.createElement(OneTimeTasksLayout, null, React.createElement(TaskDetail, { kind: "one", id: "B" }))));
+    expect(button("Change status")?.getAttribute("disabled")).toBeNull();
+    vi.spyOn(performance, "now").mockReturnValue(5000); // Elapsed time, but no delivered deadline timer.
+    let reject!: (error: Error) => void;
+    state.clockWait = new Promise<void>((_resolve, rejectRequest) => { reject = rejectRequest; });
+    await act(async () => onVisible!());
+    expect([...state.railRows.keys()]).toEqual(["B", "C"]);
+    expect(button("Change status")?.getAttribute("disabled")).not.toBeNull();
+    await act(async () => reject(new Error("Clock unavailable")));
+    expect(button("Change status")?.getAttribute("disabled")).not.toBeNull();
+    state.clockWait = null;
+    state.serverTime += 6000;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(button("Change status")?.getAttribute("disabled")).toBeNull();
+  } finally {
+    Reflect.deleteProperty(document, "visibilityState");
+  }
+});
+
+test("visibility changes neither queue overlapping clock requests nor accept pre-hide replies", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+  state.serverTime = Date.parse("2026-10-14T12:00:00Z");
+  state.dueDates = { A: state.serverTime + 10 };
+  let release!: () => void;
+  state.clockWait = new Promise<void>((resolve) => { release = resolve; });
+  let visibility = "visible";
+  let onVisible: (() => void) | undefined;
+  vi.spyOn(document, "addEventListener").mockImplementation((type, listener) => {
+    if (type === "visibilitychange") onVisible = listener as () => void;
+  });
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+  try {
+    await mount("one", false);
+    for (let cycle = 0; cycle < 3; cycle++) {
+      visibility = "hidden";
+      await act(async () => onVisible!());
+      visibility = "visible";
+      await act(async () => onVisible!());
+    }
+    expect(state.clockRequests).toBe(1);
+    visibility = "hidden";
+    await act(async () => onVisible!());
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    state.clockWait = null;
+    await act(async () => release());
+    expect([...state.railRows.keys()]).toContain("A");
+    state.serverTime += 200;
+    visibility = "visible";
+    await act(async () => onVisible!());
+    expect(state.clockRequests).toBe(2);
+    expect([...state.railRows.keys()]).toEqual(["B", "C"]);
   } finally {
     Reflect.deleteProperty(document, "visibilityState");
   }

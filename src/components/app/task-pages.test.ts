@@ -403,7 +403,65 @@ test("failed server clock synchronization preserves server state and reports the
   state.dueDates = { A: Date.now() - 1000 };
   await mount("one", false);
   expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
-  expect(descendants(container).some((node) => node.textContent === "Could not refresh task deadlines. Try reloading.")).toBe(true);
+  expect(descendants(container).some((node) => node.textContent === "Could not refresh task deadlines. Retrying automatically.")).toBe(true);
+});
+
+test("an initially unavailable clock recovers automatically while the page remains visible", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+  const start = Date.parse("2026-10-14T12:00:00Z");
+  vi.setSystemTime(start);
+  state.clockFails = true;
+  state.dueDates = { A: start + 500, B: start + 4000 };
+  await mount("one", false);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); // A second failed attempt.
+  state.clockFails = false;
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect([...state.railRows.keys()]).toEqual(["B", "C"]);
+  expect(descendants(container).some((node) => node.getAttribute?.("role") === "alert")).toBe(false);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1001); });
+  expect([...state.railRows.keys()]).toEqual(["C"]);
+});
+
+test("clock retries pause while hidden, resume on visibility, and are removed on unmount", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+  state.clockFails = true;
+  state.dueDates = { A: Date.now() + 500 };
+  let visibility = "visible";
+  let onVisible: (() => void) | undefined;
+  vi.spyOn(document, "addEventListener").mockImplementation((type, listener) => {
+    if (type === "visibilitychange") onVisible = listener as () => void;
+  });
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+  try {
+    await mount("one", false);
+    expect(vi.getTimerCount()).toBe(1);
+    visibility = "hidden";
+    await act(async () => onVisible!());
+    expect(vi.getTimerCount()).toBe(0);
+    state.clockFails = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
+    visibility = "visible";
+    await act(async () => onVisible!());
+    expect([...state.railRows.keys()]).toEqual(["B", "C"]);
+    let reject!: (error: Error) => void;
+    state.clockWait = new Promise<void>((_resolve, rejectRequest) => { reject = rejectRequest; });
+    await act(async () => onVisible!());
+    visibility = "hidden";
+    await act(async () => onVisible!());
+    await act(async () => reject(new Error("Clock unavailable")));
+    expect(vi.getTimerCount()).toBe(0); // A request that fails after hiding must not restart retries.
+    state.clockWait = null;
+    state.clockFails = true;
+    visibility = "visible";
+    await act(async () => onVisible!());
+    expect(vi.getTimerCount()).toBe(1);
+    await act(async () => root!.unmount());
+    root = undefined;
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    Reflect.deleteProperty(document, "visibilityState");
+  }
 });
 
 test("a failed clock refresh retains overdue status and keeps future deadline timers running", async () => {
@@ -422,7 +480,7 @@ test("a failed clock refresh retains overdue status and keeps future deadline ti
     state.clockFails = true;
     await act(async () => onVisible!());
     expect([...state.railRows.keys()]).toEqual(["B", "C"]);
-    expect(descendants(container).some((node) => node.textContent === "Could not refresh task deadlines. Try reloading.")).toBe(true);
+    expect(descendants(container).some((node) => node.textContent === "Could not refresh task deadlines. Retrying automatically.")).toBe(true);
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
     expect([...state.railRows.keys()]).toEqual(["C"]);
   } finally {

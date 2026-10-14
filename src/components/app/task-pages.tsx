@@ -1577,14 +1577,22 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
   );
 }
 
-function useTaskListRows(tasks: TaskRow[] | undefined, kind: Kind, companyId: Id<"companies"> | null, onError: (message: string) => void) {
+const taskDeadlineSyncError = "Could not refresh task deadlines. Retrying automatically.";
+
+function useTaskListRows(tasks: TaskRow[] | undefined, kind: Kind, companyId: Id<"companies"> | null, onError: React.Dispatch<React.SetStateAction<string | null>>) {
   const getServerTime = useMutation(api.tasks.getServerTime);
   const [clock, setClock] = useState<{ serverTime: number; receivedAt: number; elapsed: number } | null>(null);
   useEffect(() => {
     if (kind !== "one" || !companyId) return;
     let cancelled = false;
     let request = 0;
+    let retryTimer: number | undefined;
+    let retryDelay = 1000;
+    const isPageVisible = () => document.visibilityState !== "hidden";
     const syncClock = async () => {
+      window.clearTimeout(retryTimer);
+      retryTimer = undefined;
+      if (cancelled || !isPageVisible()) return;
       const current = ++request;
       try {
         const serverTime = await getServerTime({ companyId });
@@ -1596,21 +1604,32 @@ function useTaskListRows(tasks: TaskRow[] | undefined, kind: Kind, companyId: Id
             receivedAt,
             elapsed: 0,
           }));
+          retryDelay = 1000;
+          onError((message) => message === taskDeadlineSyncError ? null : message);
         }
       } catch {
         if (!cancelled && current === request) {
           setClock((previous) => previous && { ...previous, elapsed: performance.now() - previous.receivedAt });
-          onError("Could not refresh task deadlines. Try reloading.");
+          onError(taskDeadlineSyncError);
+          if (isPageVisible()) {
+            retryTimer = window.setTimeout(() => { void syncClock(); }, retryDelay);
+            retryDelay = Math.min(retryDelay * 2, 30_000);
+          }
         }
       }
     };
     const onVisible = () => {
       if (document.visibilityState === "visible") void syncClock();
+      else {
+        window.clearTimeout(retryTimer);
+        retryTimer = undefined;
+      }
     };
     void syncClock();
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
+      window.clearTimeout(retryTimer);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [companyId, getServerTime, kind, onError]);

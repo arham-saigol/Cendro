@@ -1577,19 +1577,49 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
   );
 }
 
-function useTaskListRows(tasks: TaskRow[] | undefined, kind: Kind) {
-  const [taskTime, setTaskTime] = useState(Date.now);
+function useTaskListRows(tasks: TaskRow[] | undefined, kind: Kind, companyId: Id<"companies"> | null, onError: (message: string) => void) {
+  const getServerTime = useMutation(api.tasks.getServerTime);
+  const [clock, setClock] = useState<{ serverTime: number; receivedAt: number; elapsed: number } | null>(null);
+  useEffect(() => {
+    if (kind !== "one" || !companyId) return;
+    let cancelled = false;
+    let request = 0;
+    const syncClock = async () => {
+      const current = ++request;
+      try {
+        const serverTime = await getServerTime({ companyId });
+        if (!cancelled && current === request) setClock({ serverTime, receivedAt: performance.now(), elapsed: 0 });
+      } catch {
+        if (!cancelled && current === request) {
+          setClock(null);
+          onError("Could not refresh task deadlines. Try reloading.");
+        }
+      }
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void syncClock();
+    };
+    void syncClock();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [companyId, getServerTime, kind, onError]);
+  // Only monotonic elapsed time advances the server clock; device wall-clock
+  // skew or adjustments must not hide upcoming tasks or lock their controls.
+  const taskTime = clock ? clock.serverTime + clock.elapsed : null;
   const allTasks = useMemo<TaskRow[]>(() => {
-    if (kind !== "one") return tasks ?? [];
+    if (kind !== "one" || taskTime === null) return tasks ?? [];
     return (tasks ?? []).map((task) => {
       if (rawStatus(task) === "completed" || rawStatus(task) === "overdue" || task.dueDate == null || task.dueDate >= taskTime) return task;
       return { ...task, state: { ...(typeof task.state === "object" ? task.state : {}), status: "Overdue", rawStatus: "overdue" as const, isOverdue: true } };
     });
   }, [kind, tasks, taskTime]);
   useEffect(() => {
-    if (kind !== "one") return;
+    if (kind !== "one" || !clock) return;
     // Convex queries do not rerun just because time passes. Use one timer for
-    // the next deadline, and catch up when a suspended tab becomes visible.
+    // the next deadline; visibility changes resync server time after sleep.
     let nextDeadline = Infinity;
     for (const task of allTasks) {
       if (task.dueDate != null && rawStatus(task) !== "completed" && rawStatus(task) !== "overdue") {
@@ -1597,18 +1627,13 @@ function useTaskListRows(tasks: TaskRow[] | undefined, kind: Kind) {
       }
     }
     // Browser timers overflow beyond the signed 32-bit millisecond limit.
-    const timer = Number.isFinite(nextDeadline)
-      ? window.setTimeout(() => setTaskTime(Date.now()), Math.min(2_147_483_647, Math.max(0, nextDeadline + 1 - Date.now())))
-      : undefined;
-    const onVisible = () => {
-      if (document.visibilityState === "visible") setTaskTime(Date.now());
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      window.clearTimeout(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [allTasks, kind]);
+    const serverNow = clock.serverTime + performance.now() - clock.receivedAt;
+    const delay = Math.min(2_147_483_647, Math.max(0, Math.ceil(nextDeadline + 1 - serverNow)));
+    const timer = Number.isFinite(nextDeadline) ? window.setTimeout(() => {
+      setClock((current) => current && { ...current, elapsed: performance.now() - current.receivedAt });
+    }, delay) : undefined;
+    return () => window.clearTimeout(timer);
+  }, [allTasks, clock, kind]);
   return allTasks;
 }
 
@@ -1665,7 +1690,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     { initialNumItems: TASK_PAGE_SIZE }
   );
   const tasks = taskPageStatus === "LoadingFirstPage" ? undefined : taskPageResults as TaskRow[];
-  const allTasks = useTaskListRows(tasks, kind);
+  const allTasks = useTaskListRows(tasks, kind, activeCompanyId, setInlineError);
   const preferenceResult = useQuery(
     api.tasks.getListPreference,
     activeCompanyId ? { companyId: activeCompanyId, taskType } : "skip",
@@ -2072,6 +2097,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const filterCount = isCustomView ? Number(kind === "one" && !customShowOverdue) : [kind === "jd" && pausedFilter, !pausedFilter && statusFilter.length !== allStatusFilters.length, kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
   const hasOnlyDefaultStatusFilter = kind === "one" && filterCount === 1 && search.trim() === "" && statusFilter.length === manualStatuses.length && manualStatuses.every((option) => statusFilter.includes(option.value));
   const hasActiveFilters = isCustomView ? filterCount > 0 && orderedTasks.length > 0 : (filterCount > 0 || search.trim() !== "") && (allTasks.length > 0 || !hasOnlyDefaultStatusFilter);
+  const hasHiddenOverdueTasks = !isCustomView && hasOnlyDefaultStatusFilter && orderedTasks.some((task) => rawStatus(task) === "overdue" && (effectiveTaskView !== "my" || taskHasAssignee(task, currentMembershipId)));
 
   return (
     <div>
@@ -2301,7 +2327,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
                     <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{!hasActiveFilters && (isCustomView || allTasks.length === 0) ? "No tasks yet" : "No matching tasks"}</div>
-                    {(!isCustomView || hasActiveFilters) && <p className="mt-1 max-w-[280px] text-[13px] text-[var(--ink-muted)]">{isCustomView ? "Try showing overdue tasks." : !hasActiveFilters && allTasks.length === 0 ? "Create your first task to get started." : "Try adjusting your search or filters."}</p>}
+                    {(!isCustomView || hasActiveFilters) && <p className="mt-1 max-w-[280px] text-[13px] text-[var(--ink-muted)]">{isCustomView ? "Try showing overdue tasks." : hasHiddenOverdueTasks ? "Overdue tasks are hidden by default. Select Overdue in the status filter or clear filters to show them." : !hasActiveFilters && allTasks.length === 0 ? "Create your first task to get started." : "Try adjusting your search or filters."}</p>}
                     {canCreate && !hasActiveFilters && (isCustomView || allTasks.length === 0) && (
                       <Button className="mt-4" size="sm" variant="primary" onClick={() => setCreateOpen(true)}>
                         <Plus className="h-3.5 w-3.5" />New task

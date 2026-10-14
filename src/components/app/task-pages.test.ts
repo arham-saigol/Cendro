@@ -14,6 +14,8 @@ const state = vi.hoisted(() => ({
   taskIds: ["A", "B", "C"],
   taskStates: {} as Record<string, { status: string; rawStatus: string }>,
   dueDates: {} as Record<string, number>,
+  serverTime: null as number | null,
+  clockFails: false,
   otherAssigneeIds: [] as string[],
   pausedIds: [] as string[],
   lifecycleAllowed: true,
@@ -35,40 +37,47 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("./company-context", () => ({ useCompany: () => ({
   activeCompanyId: "company", active: { membership: { _id: "member" }, capabilities: state.capabilities },
 }) }));
-vi.mock("convex/react", () => ({
-  useQuery: (ref: Parameters<typeof getFunctionName>[0]) => {
-    switch (getFunctionName(ref)) {
-      case "tasks:getCustomView": return state.view;
-      case "tasks:getListPreference": return { sort: { mode: "default" }, customOrder: null, revision: 0 };
-      case "tasks:assignableUsers": return { users: [], isTruncated: false };
-      default: return [];
-    }
-  },
-  usePaginatedQuery: (_ref: unknown, args: { paused?: boolean }) => {
-    state.railRows.clear();
-    state.selects.clear();
-    state.checkboxes.clear();
-    return { status: "Exhausted", loadMore: vi.fn(), results:
-      [...(state.pending ? ["pending:new"] : []), ...state.taskIds]
-        .filter((_id) => state.ignorePausedQuery || state.pausedIds.includes(_id) === Boolean(args.paused))
-        .map((_id) => ({
-          _id, reference: _id, title: _id, recurrence: _id === "B" ? "weekly" : "daily", priority: "low", createdAt: 1,
-          dueDate: state.dueDates[_id],
-          pausedAt: state.pausedIds.includes(_id) ? 1 : undefined,
-          canPause: state.lifecycleAllowed, canResume: state.lifecycleAllowed,
-          assigneeMembershipIds: [state.otherAssigneeIds.includes(_id) ? "other" : "member"], assignees: [], state: state.taskStates[_id] ?? { status: "Due" },
-        })),
-    };
-  },
-  useMutation: (ref: Parameters<typeof getFunctionName>[0]) => {
-    const mutate = ["tasks:saveCustomView", "tasks:saveListOrder"].includes(getFunctionName(ref))
-      ? (args: typeof state.writes[number]["args"]) => new Promise<{ orderedIds: string[]; revision: number }>((resolve) => state.writes.push({ args, resolve }))
-      : getFunctionName(ref) === "tasks:setJdPausedBulk"
-        ? async (args: { taskIds: string[]; paused: boolean }) => { state.lifecycleWrites.push(args); }
-        : vi.fn();
-    return Object.assign(mutate, { withOptimisticUpdate: () => mutate });
-  },
-}));
+vi.mock("convex/react", () => {
+  const getServerTime = async () => {
+    if (state.clockFails) throw new Error("Clock unavailable");
+    return state.serverTime ?? Date.now();
+  };
+  return {
+    useQuery: (ref: Parameters<typeof getFunctionName>[0]) => {
+      switch (getFunctionName(ref)) {
+        case "tasks:getCustomView": return state.view;
+        case "tasks:getListPreference": return { sort: { mode: "default" }, customOrder: null, revision: 0 };
+        case "tasks:assignableUsers": return { users: [], isTruncated: false };
+        default: return [];
+      }
+    },
+    usePaginatedQuery: (_ref: unknown, args: { paused?: boolean }) => {
+      state.railRows.clear();
+      state.selects.clear();
+      state.checkboxes.clear();
+      return { status: "Exhausted", loadMore: vi.fn(), results:
+        [...(state.pending ? ["pending:new"] : []), ...state.taskIds]
+          .filter((_id) => state.ignorePausedQuery || state.pausedIds.includes(_id) === Boolean(args.paused))
+          .map((_id) => ({
+            _id, reference: _id, title: _id, recurrence: _id === "B" ? "weekly" : "daily", priority: "low", createdAt: 1,
+            dueDate: state.dueDates[_id],
+            pausedAt: state.pausedIds.includes(_id) ? 1 : undefined,
+            canPause: state.lifecycleAllowed, canResume: state.lifecycleAllowed,
+            assigneeMembershipIds: [state.otherAssigneeIds.includes(_id) ? "other" : "member"], assignees: [], state: state.taskStates[_id] ?? { status: "Due" },
+          })),
+      };
+    },
+    useMutation: (ref: Parameters<typeof getFunctionName>[0]) => {
+      if (getFunctionName(ref) === "tasks:getServerTime") return getServerTime;
+      const mutate = ["tasks:saveCustomView", "tasks:saveListOrder"].includes(getFunctionName(ref))
+        ? (args: typeof state.writes[number]["args"]) => new Promise<{ orderedIds: string[]; revision: number }>((resolve) => state.writes.push({ args, resolve }))
+        : getFunctionName(ref) === "tasks:setJdPausedBulk"
+          ? async (args: { taskIds: string[]; paused: boolean }) => { state.lifecycleWrites.push(args); }
+          : vi.fn();
+      return Object.assign(mutate, { withOptimisticUpdate: () => mutate });
+    },
+  };
+});
 // Drive the list's drag/drop seam without depending on pointer geometry or animation.
 vi.mock("./list-dnd", () => ({
   useListDrag: (options: { onDrop: typeof state.drop }) => { state.drop = options.onDrop; return { active: false }; },
@@ -139,6 +148,8 @@ afterEach(async () => {
   state.taskIds = ["A", "B", "C"];
   state.taskStates = {};
   state.dueDates = {};
+  state.serverTime = null;
+  state.clockFails = false;
   state.otherAssigneeIds = [];
   state.pausedIds = [];
   state.lifecycleAllowed = true;
@@ -347,7 +358,7 @@ test("explicit One-Time status filters remain clearable even when the query is e
 });
 
 test.each([false, true])("One-Time tasks become overdue without a subscription update (Custom: %s)", async (custom) => {
-  vi.useFakeTimers();
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
   vi.setSystemTime(new Date("2026-10-14T12:00:00Z"));
   state.taskStates = {
     A: { status: "Pending", rawStatus: "due" },
@@ -367,8 +378,45 @@ test.each([false, true])("One-Time tasks become overdue without a subscription u
   expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
 });
 
+test.each([-600_000, 600_000])("deadline updates ignore device clock skew (%s ms)", async (skew) => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+  state.serverTime = Date.parse("2026-10-14T12:00:00Z");
+  vi.setSystemTime(state.serverTime + skew);
+  state.dueDates = { A: state.serverTime + 1000, B: state.serverTime + 2000 };
+  await mount("one", false);
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1001); });
+  expect([...state.railRows.keys()]).toEqual(["B", "C"]);
+  vi.setSystemTime(Date.now() + 3_600_000); // Changing the wall clock must not advance server time.
+  await act(async () => root!.render(React.createElement(TaskList, { kind: "one" })));
+  expect([...state.railRows.keys()]).toEqual(["B", "C"]);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect([...state.railRows.keys()]).toEqual(["C"]);
+});
+
+test("failed server clock synchronization preserves server state and reports the failure", async () => {
+  state.clockFails = true;
+  state.dueDates = { A: Date.now() - 1000 };
+  await mount("one", false);
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
+  expect(descendants(container).some((node) => node.textContent === "Could not refresh task deadlines. Try reloading.")).toBe(true);
+});
+
+test("overdue-only All and My views explain the default filter and reuse Clear filters", async () => {
+  state.taskStates = Object.fromEntries(["A", "B", "C"].map((id) => [id, { status: "Overdue", rawStatus: "overdue" }]));
+  state.capabilities = ["tasks:one_time:view:any"];
+  await mount("one", false);
+  const explanation = "Overdue tasks are hidden by default. Select Overdue in the status filter or clear filters to show them.";
+  expect(descendants(container).some((node) => node.textContent === explanation)).toBe(true);
+  await act(async () => state.selectMy!());
+  expect(descendants(container).some((node) => node.textContent === explanation)).toBe(true);
+  expect(button("Show overdue tasks")).toBeUndefined();
+  await clickButton("Clear filters");
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
+});
+
 test("returning to a suspended tab immediately re-evaluates deadlines", async () => {
-  vi.useFakeTimers();
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
   vi.setSystemTime(new Date("2026-10-14T12:00:00Z"));
   let onVisible: (() => void) | undefined;
   vi.spyOn(document, "addEventListener").mockImplementation((type, listener) => {
@@ -387,7 +435,7 @@ test("returning to a suspended tab immediately re-evaluates deadlines", async ()
 });
 
 test("deadline updates cancel the old timer and handle deadlines beyond the browser timer limit", async () => {
-  vi.useFakeTimers();
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
   vi.setSystemTime(new Date("2026-10-14T12:00:00Z"));
   const start = Date.now();
   const month = 30 * 24 * 60 * 60 * 1000;

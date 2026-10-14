@@ -793,6 +793,16 @@ export const searchOneTime = query({
   handler: async (ctx, args) => await paletteSearch(ctx, args, "one_time"),
 });
 
+// A mutation supplies fresh, uncached server time without changing any data.
+export const getServerTime = mutation({
+  args: { companyId: v.id("companies") },
+  returns: v.number(),
+  handler: async (ctx, args) => {
+    await requireMembership(ctx, args.companyId);
+    return Date.now();
+  },
+});
+
 export const getListPreference = query({
   args: {
     companyId: v.id("companies"),

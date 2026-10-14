@@ -13,6 +13,7 @@ const state = vi.hoisted(() => ({
   pending: false,
   taskIds: ["A", "B", "C"],
   taskStates: {} as Record<string, { status: string; rawStatus: string }>,
+  dueDates: {} as Record<string, number>,
   otherAssigneeIds: [] as string[],
   pausedIds: [] as string[],
   lifecycleAllowed: true,
@@ -52,6 +53,7 @@ vi.mock("convex/react", () => ({
         .filter((_id) => state.ignorePausedQuery || state.pausedIds.includes(_id) === Boolean(args.paused))
         .map((_id) => ({
           _id, reference: _id, title: _id, recurrence: _id === "B" ? "weekly" : "daily", priority: "low", createdAt: 1,
+          dueDate: state.dueDates[_id],
           pausedAt: state.pausedIds.includes(_id) ? 1 : undefined,
           canPause: state.lifecycleAllowed, canResume: state.lifecycleAllowed,
           assigneeMembershipIds: [state.otherAssigneeIds.includes(_id) ? "other" : "member"], assignees: [], state: state.taskStates[_id] ?? { status: "Due" },
@@ -130,10 +132,13 @@ let root: Root | undefined;
 afterEach(async () => {
   if (root) await act(async () => root!.unmount());
   root = undefined;
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   state.view = { orderedIds: ["A", "B", "C"], revision: 0 };
   state.pending = false;
   state.taskIds = ["A", "B", "C"];
   state.taskStates = {};
+  state.dueDates = {};
   state.otherAssigneeIds = [];
   state.pausedIds = [];
   state.lifecycleAllowed = true;
@@ -323,6 +328,79 @@ test("the default overdue filter does not turn a genuinely empty list into a no-
   await mount("one", false);
   expect(descendants(container).some((node) => node.nodeValue === "No tasks yet" || node.textContent === "No tasks yet")).toBe(true);
   expect(button("Clear filters")).toBeUndefined();
+});
+
+test("an empty inactive JD view keeps its filter and offers to return to active tasks", async () => {
+  await mount("jd", false);
+  await checkFilter("Inactive tasks", true);
+  expect([...state.railRows.keys()]).toEqual([]);
+  expect(descendants(container).some((node) => node.textContent === "No matching tasks")).toBe(true);
+  await clickButton("Clear filters");
+  expect(new Set(state.railRows.keys())).toEqual(new Set(["A", "B", "C"]));
+});
+
+test("explicit One-Time status filters remain clearable even when the query is empty", async () => {
+  state.taskIds = [];
+  await mount("one", false);
+  await checkFilter("Completed", false);
+  expect(button("Clear filters")).toBeDefined();
+});
+
+test.each([false, true])("One-Time tasks become overdue without a subscription update (Custom: %s)", async (custom) => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-14T12:00:00Z"));
+  state.taskStates = {
+    A: { status: "Pending", rawStatus: "due" },
+    B: { status: "In Progress", rawStatus: "in_progress" },
+    C: { status: "Completed", rawStatus: "completed" },
+  };
+  state.dueDates = { A: Date.now() + 1000, B: Date.now() + 2000, C: Date.now() - 1000 };
+  state.capabilities = ["tasks:one_time:view:any"];
+  await mount("one", custom);
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1001); });
+  expect([...state.railRows.keys()]).toEqual(["B", "C"]);
+  if (!custom) await act(async () => state.selectMy!());
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect([...state.railRows.keys()]).toEqual(["C"]);
+  await checkFilter(custom ? "Show overdue tasks" : "Overdue", true);
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
+});
+
+test("returning to a suspended tab immediately re-evaluates deadlines", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-14T12:00:00Z"));
+  let onVisible: (() => void) | undefined;
+  vi.spyOn(document, "addEventListener").mockImplementation((type, listener) => {
+    if (type === "visibilitychange") onVisible = listener as () => void;
+  });
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+  try {
+    state.dueDates = { A: Date.now() + 1000 };
+    await mount("one", false);
+    vi.setSystemTime(Date.now() + 5000); // The browser has not delivered its timer yet.
+    await act(async () => onVisible!());
+    expect([...state.railRows.keys()]).toEqual(["B", "C"]);
+  } finally {
+    Reflect.deleteProperty(document, "visibilityState");
+  }
+});
+
+test("deadline updates cancel the old timer and handle deadlines beyond the browser timer limit", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-14T12:00:00Z"));
+  const start = Date.now();
+  const month = 30 * 24 * 60 * 60 * 1000;
+  state.dueDates = { A: start + 1000 };
+  await mount("one", false);
+  state.dueDates.A = start + month;
+  await act(async () => root!.render(React.createElement(TaskList, { kind: "one" })));
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_147_483_647 - 2000); });
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
+  await act(async () => { await vi.advanceTimersByTimeAsync(month - 2_147_483_647 + 1); });
+  expect([...state.railRows.keys()]).toEqual(["B", "C"]);
 });
 
 test("Job Description retains its all-status default and single-select status filter", async () => {

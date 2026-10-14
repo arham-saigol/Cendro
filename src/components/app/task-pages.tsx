@@ -1577,6 +1577,41 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
   );
 }
 
+function useTaskListRows(tasks: TaskRow[] | undefined, kind: Kind) {
+  const [taskTime, setTaskTime] = useState(Date.now);
+  const allTasks = useMemo<TaskRow[]>(() => {
+    if (kind !== "one") return tasks ?? [];
+    return (tasks ?? []).map((task) => {
+      if (rawStatus(task) === "completed" || rawStatus(task) === "overdue" || task.dueDate == null || task.dueDate >= taskTime) return task;
+      return { ...task, state: { ...(typeof task.state === "object" ? task.state : {}), status: "Overdue", rawStatus: "overdue" as const, isOverdue: true } };
+    });
+  }, [kind, tasks, taskTime]);
+  useEffect(() => {
+    if (kind !== "one") return;
+    // Convex queries do not rerun just because time passes. Use one timer for
+    // the next deadline, and catch up when a suspended tab becomes visible.
+    let nextDeadline = Infinity;
+    for (const task of allTasks) {
+      if (task.dueDate != null && rawStatus(task) !== "completed" && rawStatus(task) !== "overdue") {
+        nextDeadline = Math.min(nextDeadline, task.dueDate);
+      }
+    }
+    // Browser timers overflow beyond the signed 32-bit millisecond limit.
+    const timer = Number.isFinite(nextDeadline)
+      ? window.setTimeout(() => setTaskTime(Date.now()), Math.min(2_147_483_647, Math.max(0, nextDeadline + 1 - Date.now())))
+      : undefined;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") setTaskTime(Date.now());
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [allTasks, kind]);
+  return allTasks;
+}
+
 export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string }) {
   const { activeCompanyId, active } = useCompany();
   return <TaskListContent key={`${activeCompanyId}:${active?.membership._id}:${kind}`} kind={kind} selectedId={selectedId} />;
@@ -1630,7 +1665,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     { initialNumItems: TASK_PAGE_SIZE }
   );
   const tasks = taskPageStatus === "LoadingFirstPage" ? undefined : taskPageResults as TaskRow[];
-  const allTasks = useMemo<TaskRow[]>(() => tasks ?? [], [tasks]);
+  const allTasks = useTaskListRows(tasks, kind);
   const preferenceResult = useQuery(
     api.tasks.getListPreference,
     activeCompanyId ? { companyId: activeCompanyId, taskType } : "skip",
@@ -2035,7 +2070,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const jdColumns = 5 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional frequency + optional assignee + status + time + quantity
   const oneColumns = 5 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional priority + optional assignee + status + date assigned + due
   const filterCount = isCustomView ? Number(kind === "one" && !customShowOverdue) : [kind === "jd" && pausedFilter, !pausedFilter && statusFilter.length !== allStatusFilters.length, kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
-  const hasActiveFilters = isCustomView ? filterCount > 0 && orderedTasks.length > 0 : allTasks.length > 0 && (filterCount > 0 || search.trim() !== "");
+  const hasOnlyDefaultStatusFilter = kind === "one" && filterCount === 1 && search.trim() === "" && statusFilter.length === manualStatuses.length && manualStatuses.every((option) => statusFilter.includes(option.value));
+  const hasActiveFilters = isCustomView ? filterCount > 0 && orderedTasks.length > 0 : (filterCount > 0 || search.trim() !== "") && (allTasks.length > 0 || !hasOnlyDefaultStatusFilter);
 
   return (
     <div>

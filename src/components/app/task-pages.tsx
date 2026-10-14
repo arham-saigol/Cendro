@@ -1579,9 +1579,10 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
 
 const taskDeadlineSyncError = "Could not refresh task deadlines. Retrying automatically.";
 
-function useTaskListRows(tasks: TaskRow[] | undefined, kind: Kind, companyId: Id<"companies"> | null, onError: React.Dispatch<React.SetStateAction<string | null>>) {
+function useTaskDeadlineRows(tasks: TaskRow[] | undefined, kind: Kind, companyId: Id<"companies"> | null) {
   const getServerTime = useMutation(api.tasks.getServerTime);
   const [clock, setClock] = useState<{ serverTime: number; receivedAt: number; elapsed: number } | null>(null);
+  const [deadlineError, setDeadlineError] = useState<string | null>(null);
   useEffect(() => {
     if (kind !== "one" || !companyId) return;
     let cancelled = false;
@@ -1605,12 +1606,12 @@ function useTaskListRows(tasks: TaskRow[] | undefined, kind: Kind, companyId: Id
             elapsed: 0,
           }));
           retryDelay = 1000;
-          onError((message) => message === taskDeadlineSyncError ? null : message);
+          setDeadlineError(null);
         }
       } catch {
         if (!cancelled && current === request) {
           setClock((previous) => previous && { ...previous, elapsed: performance.now() - previous.receivedAt });
-          onError(taskDeadlineSyncError);
+          setDeadlineError(taskDeadlineSyncError);
           if (isPageVisible()) {
             retryTimer = window.setTimeout(() => { void syncClock(); }, retryDelay);
             retryDelay = Math.min(retryDelay * 2, 30_000);
@@ -1632,7 +1633,7 @@ function useTaskListRows(tasks: TaskRow[] | undefined, kind: Kind, companyId: Id
       window.clearTimeout(retryTimer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [companyId, getServerTime, kind, onError]);
+  }, [companyId, getServerTime, kind]);
   // Only monotonic elapsed time advances the server clock; device wall-clock
   // skew or adjustments must not hide upcoming tasks or lock their controls.
   const taskTime = clock ? clock.serverTime + clock.elapsed : null;
@@ -1661,7 +1662,7 @@ function useTaskListRows(tasks: TaskRow[] | undefined, kind: Kind, companyId: Id
     }, delay) : undefined;
     return () => window.clearTimeout(timer);
   }, [allTasks, clock, kind]);
-  return allTasks;
+  return { allTasks, deadlineError };
 }
 
 export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string }) {
@@ -1717,7 +1718,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     { initialNumItems: TASK_PAGE_SIZE }
   );
   const tasks = taskPageStatus === "LoadingFirstPage" ? undefined : taskPageResults as TaskRow[];
-  const allTasks = useTaskListRows(tasks, kind, activeCompanyId, setInlineError);
+  const { allTasks, deadlineError } = useTaskDeadlineRows(tasks, kind, activeCompanyId);
   const preferenceResult = useQuery(
     api.tasks.getListPreference,
     activeCompanyId ? { companyId: activeCompanyId, taskType } : "skip",
@@ -2238,6 +2239,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
         </div>
       )}
 
+      {deadlineError && <p className="alert-error mb-3 rounded-lg px-3 py-2 text-[13px]" role="alert">{deadlineError}</p>}
+
       {inlineError && (
         <div className="alert-error mb-3 flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-[13px]" role="alert">
           <span>{inlineError}</span>
@@ -2684,6 +2687,11 @@ function PeekBar({ kind, canEdit, onEdit }: { kind: Kind; canEdit: boolean; onEd
 }
 
 export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
+  const { activeCompanyId, active } = useCompany();
+  return <TaskDetailContent key={`${activeCompanyId}:${active?.membership._id}:${kind}`} kind={kind} id={id} />;
+}
+
+function TaskDetailContent({ kind, id }: { kind: Kind; id: string }) {
   const { activeCompanyId, active, email } = useCompany();
   const taskType = taskTypeFor(kind);
   const data = useQuery(kind === "jd" ? api.tasks.getJd : api.tasks.getOneTime, activeCompanyId ? { companyId: activeCompanyId, taskId: id as any } : "skip") as any;
@@ -2760,8 +2768,13 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   // While the detail query resolves, paint from the seeded list-row preview.
   // Editing stays disabled until the authoritative record arrives.
   const preview = data === undefined ? getDetailPreview<TaskRow>(`task:${activeCompanyId}:${kind}:${active?.membership._id}`, id) : undefined;
+  const detailRows = useMemo<TaskRow[]>(() => {
+    const task = data?.task ?? preview;
+    return task ? [task] : [];
+  }, [data?.task, preview]);
+  const { allTasks, deadlineError } = useTaskDeadlineRows(detailRows, kind, activeCompanyId);
   if (!data && !preview) return <TaskDetailSkeleton />;
-  const task = (data?.task ?? preview) as any;
+  const task = allTasks[0] as any;
 
   async function saveTaskText(patch: { title?: string; description?: string; notes?: string }) {
     if (!activeCompanyId) return false;
@@ -2909,6 +2922,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
       <PeekBar kind={kind} canEdit={canEdit} onEdit={() => setEditOpen(true)} />
       <TaskDialog kind={kind} mode="edit" open={editOpen} onOpenChange={setEditOpen} task={task} assignable={assignable ?? []} assignableIsTruncated={assignableResult?.isTruncated ?? false} onUploadError={setUploadError} />
 
+      {deadlineError && <p className="alert-error mt-4 rounded-md p-2 text-[13px]" role="alert">{deadlineError}</p>}
       {textError && <p className="alert-error mt-4 rounded-md p-2 text-[13px]" role="alert">{textError}</p>}
 
       <div className="pt-6">

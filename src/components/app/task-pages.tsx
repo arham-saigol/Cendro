@@ -80,7 +80,7 @@ type Kind = "jd" | "one";
 type Priority = "low" | "medium" | "high" | "critical";
 type Frequency = "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "quarterly" | "semiannually" | "annually";
 type ManualStatus = "due" | "in_progress" | "completed";
-type StatusFilter = "all" | ManualStatus | "overdue";
+type StatusFilter = ManualStatus | "overdue";
 type TaskView = "all" | "my" | "custom";
 type PriorityFilter = "all" | Priority;
 type FrequencyFilter = Frequency | "all";
@@ -158,6 +158,14 @@ const manualStatuses: { value: ManualStatus; label: string }[] = [
   { value: "in_progress", label: "In Progress" },
   { value: "completed", label: "Completed" },
 ];
+
+const statusOptions: { value: StatusFilter; label: string }[] = [
+  { value: "due", label: "Pending" },
+  { value: "in_progress", label: "In progress" },
+  { value: "completed", label: "Completed" },
+  { value: "overdue", label: "Overdue" },
+];
+const allStatusFilters = statusOptions.map((option) => option.value);
 
 const taskListPreferenceMessages: ListPreferenceControllerOptions = {
   conflict: "Task order changed in another session. Please repeat the move.",
@@ -286,11 +294,8 @@ function canDeleteTaskRow(active: { capabilities: string[]; membership: { _id: s
   if (active?.capabilities.includes(`${prefix}:delete:managed`)) return true;
   return Boolean(active?.capabilities.includes(`${prefix}:delete:self`) && taskHasAssignee(task, active?.membership?._id));
 }
-function statusMatches(task: any, filter: StatusFilter) {
-  if (filter === "all") return true;
-  const raw = rawStatus(task);
-  if (filter === "overdue") return raw === "overdue" || statusText(task) === "Overdue";
-  return raw === filter;
+function statusMatches(task: TaskRow, filters: StatusFilter[]) {
+  return filters.some((filter) => rawStatus(task) === filter);
 }
 function taskHasAssignee(task: any, membershipId?: string) { return Boolean(membershipId && Array.isArray(task.assigneeMembershipIds) && task.assigneeMembershipIds.includes(membershipId)); }
 function assigneeDisplayName(assignee: any) { return assignee?.user?.name || assignee?.user?.email || "Unknown user"; }
@@ -559,6 +564,9 @@ function TaskFilterSubmenu<T extends string>({ label, value, options, onChange }
 function TaskFilterMenu({
   kind,
   statusFilter,
+  custom,
+  showOverdue,
+  onShowOverdueChange,
   frequency,
   priorityFilter,
   assigneeFilter,
@@ -573,7 +581,10 @@ function TaskFilterMenu({
   onAssigneeChange,
 }: {
   kind: Kind;
-  statusFilter: StatusFilter;
+  statusFilter: StatusFilter[];
+  custom: boolean;
+  showOverdue: boolean;
+  onShowOverdueChange: (value: boolean) => void;
   frequency: FrequencyFilter;
   priorityFilter: PriorityFilter;
   assigneeFilter: string;
@@ -582,18 +593,12 @@ function TaskFilterMenu({
   paused: boolean;
   onPausedChange: (paused: boolean) => void;
   activeCount: number;
-  onStatusChange: (value: StatusFilter) => void;
+  onStatusChange: (value: StatusFilter[]) => void;
   onFrequencyChange: (value: FrequencyFilter) => void;
   onPriorityChange: (value: PriorityFilter) => void;
   onAssigneeChange: (value: string) => void;
 }) {
-  const statusOptions: { value: StatusFilter; label: string }[] = [
-    { value: "all", label: "All statuses" },
-    { value: "due", label: "Pending" },
-    { value: "in_progress", label: "In progress" },
-    { value: "completed", label: "Completed" },
-    { value: "overdue", label: "Overdue" },
-  ];
+  const allStatusesSelected = statusFilter.length === allStatusFilters.length;
   const priorityOptions: { value: PriorityFilter; label: string }[] = [{ value: "all", label: "All priorities" }, ...priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))];
   const frequencyOptions: { value: FrequencyFilter; label: string }[] = [{ value: "all", label: "All frequencies" }, ...frequencies];
 
@@ -607,20 +612,57 @@ function TaskFilterMenu({
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content align="end" sideOffset={6} className="task-menu min-w-48" aria-label="Task filters">
-          {kind === "jd" && <DropdownMenu.CheckboxItem className="task-menu-item" checked={paused} onCheckedChange={onPausedChange}>Inactive tasks{paused && <Check className="ml-auto h-3.5 w-3.5" />}</DropdownMenu.CheckboxItem>}
-          {!paused && <TaskFilterSubmenu label="Status" value={statusFilter} options={statusOptions} onChange={onStatusChange} />}
-          {kind === "jd" ? (
-            <TaskFilterSubmenu label="Frequency" value={frequency} options={frequencyOptions} onChange={onFrequencyChange} />
+          {custom ? (
+            <DropdownMenu.CheckboxItem className="task-menu-item" checked={showOverdue} onCheckedChange={onShowOverdueChange}>
+              <span className="flex-1">Show overdue tasks</span>
+              {showOverdue && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
+            </DropdownMenu.CheckboxItem>
           ) : (
-            <TaskFilterSubmenu label="Priority" value={priorityFilter} options={priorityOptions} onChange={onPriorityChange} />
-          )}
-          {showAssigneeFilter && (
-            <TaskFilterSubmenu
-              label="Assigned To"
-              value={assigneeFilter}
-              options={[{ value: "all", label: "All assignees" }, ...assignees.map((assignee) => ({ value: assignee.membership._id as string, label: assigneeDisplayName(assignee), avatar: <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} /> }))]}
-              onChange={onAssigneeChange}
-            />
+            <>
+              {kind === "jd" && <DropdownMenu.CheckboxItem className="task-menu-item" checked={paused} onCheckedChange={onPausedChange}>Inactive tasks{paused && <Check className="ml-auto h-3.5 w-3.5" />}</DropdownMenu.CheckboxItem>}
+              {!paused && (kind === "jd" ? (
+                <TaskFilterSubmenu<"all" | StatusFilter>
+                  label="Status"
+                  value={allStatusesSelected ? "all" : statusFilter[0]}
+                  options={[{ value: "all", label: "All statuses" }, ...statusOptions]}
+                  onChange={(value) => onStatusChange(value === "all" ? allStatusFilters : [value])}
+                />
+              ) : (
+                <DropdownMenu.Sub>
+                  <DropdownMenu.SubTrigger className="task-menu-item">
+                    <span className="flex-1">Status</span>
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </DropdownMenu.SubTrigger>
+                  <DropdownMenu.Portal>
+                    <DropdownMenu.SubContent sideOffset={7} alignOffset={-5} className="task-menu min-w-52">
+                      <DropdownMenu.CheckboxItem className="task-menu-item" checked={allStatusesSelected} onCheckedChange={(checked) => onStatusChange(checked ? allStatusFilters : [])} onSelect={(event) => event.preventDefault()}>
+                        <span className="flex-1">All statuses</span>
+                        {allStatusesSelected && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
+                      </DropdownMenu.CheckboxItem>
+                      {statusOptions.map((option) => (
+                        <DropdownMenu.CheckboxItem key={option.value} className="task-menu-item" checked={statusFilter.includes(option.value)} onCheckedChange={(checked) => onStatusChange(checked ? [...statusFilter, option.value] : statusFilter.filter((value) => value !== option.value))} onSelect={(event) => event.preventDefault()}>
+                          <span className="flex-1">{option.label}</span>
+                          {statusFilter.includes(option.value) && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
+                        </DropdownMenu.CheckboxItem>
+                      ))}
+                    </DropdownMenu.SubContent>
+                  </DropdownMenu.Portal>
+                </DropdownMenu.Sub>
+              ))}
+              {kind === "jd" ? (
+                <TaskFilterSubmenu label="Frequency" value={frequency} options={frequencyOptions} onChange={onFrequencyChange} />
+              ) : (
+                <TaskFilterSubmenu label="Priority" value={priorityFilter} options={priorityOptions} onChange={onPriorityChange} />
+              )}
+              {showAssigneeFilter && (
+                <TaskFilterSubmenu
+                  label="Assigned To"
+                  value={assigneeFilter}
+                  options={[{ value: "all", label: "All assignees" }, ...assignees.map((assignee) => ({ value: assignee.membership._id as string, label: assigneeDisplayName(assignee), avatar: <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} /> }))]}
+                  onChange={onAssigneeChange}
+                />
+              )}
+            </>
           )}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
@@ -1551,7 +1593,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [taskView, setTaskView] = useState<TaskView>("all");
   const [frequency, setFrequency] = useState<FrequencyFilter>("all");
   const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>("all");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter[]>(() => kind === "one" ? manualStatuses.map((option) => option.value) : allStatusFilters);
+  const [customShowOverdue, setCustomShowOverdue] = useState(false);
   const [pausedFilter, setPausedFilter] = useState(false);
   const [changingPaused, setChangingPaused] = useState(false);
   const [assigneeFilter, setAssigneeFilter] = useState("all");
@@ -1697,7 +1740,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const filteredTasks = useMemo(() => (
     orderedTasks.filter((task) => {
       if (kind === "jd" && (task.pausedAt !== undefined) !== (!isCustomView && pausedFilter)) return false;
-      if (isCustomView) return true;
+      if (isCustomView) return kind !== "one" || customShowOverdue || !statusMatches(task, ["overdue"]);
       const needle = search.trim().toLowerCase();
       if (needle && !task.title.toLowerCase().includes(needle) && !task.reference.toLowerCase().includes(needle)) return false;
       if (effectiveTaskView === "my" && !taskHasAssignee(task, currentMembershipId)) return false;
@@ -1707,7 +1750,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
       if (assigneeFilter !== "all" && !taskHasAssignee(task, assigneeFilter)) return false;
       return true;
     })
-  ), [assigneeFilter, currentMembershipId, effectiveTaskView, frequency, isCustomView, kind, orderedTasks, pausedFilter, priorityFilter, search, statusFilter]);
+  ), [assigneeFilter, currentMembershipId, customShowOverdue, effectiveTaskView, frequency, isCustomView, kind, orderedTasks, pausedFilter, priorityFilter, search, statusFilter]);
   const displayedTasks = filteredTasks;
   const renderedTasks = useMemo(() => displayedTasks.slice(0, renderedCount), [displayedTasks, renderedCount]);
   const visibleIds = useMemo(() => renderedTasks.filter((task) => !isPendingTask(task)).map((task) => task._id), [renderedTasks]);
@@ -1749,7 +1792,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
       const nextVisible = insertListItem(visible, sourceId, insertion);
       if (sameListOrder(visible, nextVisible)) return;
       if (isCustomView) {
-        customViewController.saveOrder(nextVisible);
+        const baseline = orderedTasks.filter((task) => !isPendingTask(task)).map((task) => task._id);
+        customViewController.saveOrder(mergeFilteredListOrder(baseline, visible, nextVisible));
       } else {
         const baseline = restoreTaskListCustomOrder(allTasks.filter((task) => !isPendingTask(task)), taskType, activePreference?.customOrder, taskOrderKeys).map((task) => task._id);
         preferenceController.saveOrder(mergeFilteredListOrder(baseline, visible, nextVisible));
@@ -1990,8 +2034,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
 
   const jdColumns = 5 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional frequency + optional assignee + status + time + quantity
   const oneColumns = 5 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional priority + optional assignee + status + date assigned + due
-  const filterCount = [kind === "jd" && pausedFilter, !pausedFilter && statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
-  const hasActiveFilters = !isCustomView && (filterCount > 0 || search.trim() !== "");
+  const filterCount = isCustomView ? Number(kind === "one" && !customShowOverdue) : [kind === "jd" && pausedFilter, !pausedFilter && statusFilter.length !== allStatusFilters.length, kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
+  const hasActiveFilters = isCustomView ? filterCount > 0 && orderedTasks.length > 0 : allTasks.length > 0 && (filterCount > 0 || search.trim() !== "");
 
   return (
     <div>
@@ -2057,9 +2101,12 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
               {search ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
             </button>
           </div>}
-          {!isCustomView && <TaskFilterMenu
+          {(!isCustomView || kind === "one") && <TaskFilterMenu
             kind={kind}
             statusFilter={statusFilter}
+            custom={isCustomView}
+            showOverdue={customShowOverdue}
+            onShowOverdueChange={setCustomShowOverdue}
             frequency={frequency}
             priorityFilter={priorityFilter}
             assigneeFilter={assigneeFilter}
@@ -2218,14 +2265,14 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
                     <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{!hasActiveFilters && (isCustomView || allTasks.length === 0) ? "No tasks yet" : "No matching tasks"}</div>
-                    {!isCustomView && <p className="mt-1 max-w-[280px] text-[13px] text-[var(--ink-muted)]">{!hasActiveFilters && allTasks.length === 0 ? "Create your first task to get started." : "Try adjusting your search or filters."}</p>}
+                    {(!isCustomView || hasActiveFilters) && <p className="mt-1 max-w-[280px] text-[13px] text-[var(--ink-muted)]">{isCustomView ? "Try showing overdue tasks." : !hasActiveFilters && allTasks.length === 0 ? "Create your first task to get started." : "Try adjusting your search or filters."}</p>}
                     {canCreate && !hasActiveFilters && (isCustomView || allTasks.length === 0) && (
                       <Button className="mt-4" size="sm" variant="primary" onClick={() => setCreateOpen(true)}>
                         <Plus className="h-3.5 w-3.5" />New task
                       </Button>
                     )}
                     {hasActiveFilters && (
-                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); setStatusFilter("all"); setPausedFilter(false); setFrequency("all"); setPriorityFilter("all"); setAssigneeFilter("all"); }}>Clear filters</Button>
+                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { if (isCustomView) { setCustomShowOverdue(true); return; } setSearch(""); setSearchOpen(false); setStatusFilter(allStatusFilters); setPausedFilter(false); setFrequency("all"); setPriorityFilter("all"); setAssigneeFilter("all"); }}>{isCustomView ? "Show overdue tasks" : "Clear filters"}</Button>
                     )}
                   </div>
                   )}

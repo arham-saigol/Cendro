@@ -11,6 +11,9 @@ Object.assign(document, { createElementNS: (_namespace: string, tag: string) => 
 const state = vi.hoisted(() => ({
   view: { orderedIds: ["A", "B", "C"], revision: 0 },
   pending: false,
+  taskIds: ["A", "B", "C"],
+  taskStates: {} as Record<string, { status: string; rawStatus: string }>,
+  otherAssigneeIds: [] as string[],
   pausedIds: [] as string[],
   lifecycleAllowed: true,
   capabilities: [] as string[],
@@ -18,7 +21,9 @@ const state = vi.hoisted(() => ({
   lifecycleWrites: [] as { taskIds: string[]; paused: boolean }[],
   railRows: new Map<string, () => void>(),
   selectMy: null as null | (() => void),
+  selectAll: null as null | (() => void),
   selects: new Map<string, () => void>(),
+  checkboxes: new Map<string, { checked: boolean; onCheckedChange: (value: boolean) => void; onSelect?: (event: { preventDefault: () => void }) => void }>(),
   filterPaused: null as null | ((value: boolean) => void),
   drop: null as null | ((id: string, insertion: ListInsertion) => void),
   selectCustom: null as null | (() => void),
@@ -40,14 +45,16 @@ vi.mock("convex/react", () => ({
   },
   usePaginatedQuery: (_ref: unknown, args: { paused?: boolean }) => {
     state.railRows.clear();
+    state.selects.clear();
+    state.checkboxes.clear();
     return { status: "Exhausted", loadMore: vi.fn(), results:
-      [...(state.pending ? ["pending:new"] : []), "A", "B", "C"]
+      [...(state.pending ? ["pending:new"] : []), ...state.taskIds]
         .filter((_id) => state.ignorePausedQuery || state.pausedIds.includes(_id) === Boolean(args.paused))
         .map((_id) => ({
           _id, reference: _id, title: _id, recurrence: _id === "B" ? "weekly" : "daily", priority: "low", createdAt: 1,
           pausedAt: state.pausedIds.includes(_id) ? 1 : undefined,
           canPause: state.lifecycleAllowed, canResume: state.lifecycleAllowed,
-          assigneeMembershipIds: ["member"], assignees: [], state: { status: "Due" },
+          assigneeMembershipIds: [state.otherAssigneeIds.includes(_id) ? "other" : "member"], assignees: [], state: state.taskStates[_id] ?? { status: "Due" },
         })),
     };
   },
@@ -81,6 +88,7 @@ vi.mock("./task-rail-scroll", () => ({
         const label = React.Children.toArray(button.props.children);
         if (label.includes("Custom")) state.selectCustom = button.props.onClick ?? null;
         if (label.includes("My Tasks")) state.selectMy = button.props.onClick ?? null;
+        if (label.includes("All Tasks")) state.selectAll = button.props.onClick ?? null;
       });
     });
     return null;
@@ -108,8 +116,10 @@ vi.mock("@radix-ui/react-dropdown-menu", () => {
       if (label && onSelect) state.selects.set(label, onSelect);
       return children;
     },
-    CheckboxItem: ({ onCheckedChange, children }: { onCheckedChange: (value: boolean) => void; children: ReactNode }) => {
-      state.filterPaused = onCheckedChange;
+    CheckboxItem: ({ children, ...props }: { checked: boolean; onCheckedChange: (value: boolean) => void; onSelect?: (event: { preventDefault: () => void }) => void; children: ReactNode }) => {
+      const label = findLabel(children);
+      if (label) state.checkboxes.set(label, props);
+      if (label === "Inactive tasks") state.filterPaused = props.onCheckedChange;
       return children;
     },
   };
@@ -122,6 +132,9 @@ afterEach(async () => {
   root = undefined;
   state.view = { orderedIds: ["A", "B", "C"], revision: 0 };
   state.pending = false;
+  state.taskIds = ["A", "B", "C"];
+  state.taskStates = {};
+  state.otherAssigneeIds = [];
   state.pausedIds = [];
   state.lifecycleAllowed = true;
   state.capabilities = [];
@@ -129,6 +142,7 @@ afterEach(async () => {
   state.lifecycleWrites = [];
   state.filterPaused = null;
   state.selects.clear();
+  state.checkboxes.clear();
   state.writes = [];
 });
 
@@ -225,4 +239,98 @@ test("paused filtering works in All and My views and with a frequency filter, wh
   await act(async () => state.selectCustom!());
   expect(state.filterPaused).toBeNull();
   expect([...state.railRows.keys()]).toEqual(["A", "C"]);
+});
+
+function oneTimeStatuses() {
+  state.taskIds = ["A", "B", "C", "D"];
+  state.taskStates = {
+    A: { status: "Pending", rawStatus: "due" },
+    B: { status: "In Progress", rawStatus: "in_progress" },
+    C: { status: "Completed", rawStatus: "completed" },
+    D: { status: "Overdue", rawStatus: "overdue" },
+  };
+}
+
+async function checkFilter(label: string, checked: boolean) {
+  const option = state.checkboxes.get(label);
+  expect(option).toBeDefined();
+  await act(async () => option!.onCheckedChange(checked));
+}
+
+test("One-Time All and My default to non-overdue statuses and support independent status selections", async () => {
+  oneTimeStatuses();
+  state.taskIds.push("E");
+  state.taskStates.E = { status: "Overdue", rawStatus: "overdue" };
+  state.otherAssigneeIds = ["E"];
+  state.capabilities = ["tasks:one_time:view:any"];
+  await mount("one", false);
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
+  expect(["Pending", "In progress", "Completed"].map((label) => state.checkboxes.get(label)?.checked)).toEqual([true, true, true]);
+  expect(state.checkboxes.get("Overdue")?.checked).toBe(false);
+  expect(state.checkboxes.get("All statuses")?.checked).toBe(false);
+  await act(async () => state.selectMy!());
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
+
+  const preventDefault = vi.fn();
+  state.checkboxes.get("Overdue")!.onSelect!({ preventDefault });
+  expect(preventDefault).toHaveBeenCalledOnce(); // Multi-select does not dismiss the menu.
+  await checkFilter("Overdue", true);
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C", "D"]);
+  await checkFilter("Pending", false);
+  expect([...state.railRows.keys()]).toEqual(["B", "C", "D"]);
+  await act(async () => state.selectAll!());
+  expect([...state.railRows.keys()]).toEqual(["B", "C", "D", "E"]);
+  await checkFilter("All statuses", true);
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C", "D", "E"]);
+  await checkFilter("All statuses", false);
+  expect([...state.railRows.keys()]).toEqual([]);
+  await clickButton("Clear filters");
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C", "D", "E"]);
+});
+
+test("One-Time Custom has only an overdue toggle, independent of All/My filters, and preserves hidden order on drag", async () => {
+  oneTimeStatuses();
+  state.view = { orderedIds: ["A", "D", "B", "C"], revision: 0 };
+  await mount("one", false);
+  await checkFilter("Completed", false);
+  await act(async () => state.selectCustom!());
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
+  expect([...state.checkboxes.keys()]).toEqual(["Show overdue tasks"]);
+  expect(state.selects.size).toBe(0);
+  expect(state.checkboxes.get("Show overdue tasks")?.checked).toBe(false);
+  await act(async () => state.drop!("B", { anchorId: "A", edge: "before" }));
+  expect(state.writes[0].args).toMatchObject({ orderedIds: ["B", "D", "A", "C"], expectedRevision: 0 });
+  await act(async () => state.writes[0].resolve({ orderedIds: ["B", "D", "A", "C"], revision: 1 }));
+  await checkFilter("Show overdue tasks", true);
+  expect([...state.railRows.keys()]).toEqual(["B", "D", "A", "C"]);
+  await checkFilter("Show overdue tasks", false);
+  expect([...state.railRows.keys()]).toEqual(["B", "A", "C"]);
+  await act(async () => state.selectAll!());
+  expect([...state.railRows.keys()]).toEqual(["A", "B"]);
+});
+
+test("Custom explains an overdue-only empty view and offers to reveal the tasks", async () => {
+  state.taskStates = Object.fromEntries(["A", "B", "C"].map((id) => [id, { status: "Overdue", rawStatus: "overdue" }]));
+  await mount("one");
+  expect([...state.railRows.keys()]).toEqual([]);
+  expect(button("Show overdue tasks")).toBeDefined();
+  await clickButton("Show overdue tasks");
+  expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
+});
+
+test("the default overdue filter does not turn a genuinely empty list into a no-matches state", async () => {
+  state.taskIds = [];
+  await mount("one", false);
+  expect(descendants(container).some((node) => node.nodeValue === "No tasks yet" || node.textContent === "No tasks yet")).toBe(true);
+  expect(button("Clear filters")).toBeUndefined();
+});
+
+test("Job Description retains its all-status default and single-select status filter", async () => {
+  oneTimeStatuses();
+  await mount("jd", false);
+  expect(new Set(state.railRows.keys())).toEqual(new Set(["A", "B", "C", "D"]));
+  await act(async () => state.selects.get("Completed")!());
+  expect([...state.railRows.keys()]).toEqual(["C"]);
+  await act(async () => state.selects.get("All statuses")!());
+  expect(new Set(state.railRows.keys())).toEqual(new Set(["A", "B", "C", "D"]));
 });

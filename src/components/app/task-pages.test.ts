@@ -16,6 +16,7 @@ const state = vi.hoisted(() => ({
   dueDates: {} as Record<string, number>,
   serverTime: null as number | null,
   clockFails: false,
+  clockWait: null as Promise<void> | null,
   otherAssigneeIds: [] as string[],
   pausedIds: [] as string[],
   lifecycleAllowed: true,
@@ -40,7 +41,9 @@ vi.mock("./company-context", () => ({ useCompany: () => ({
 vi.mock("convex/react", () => {
   const getServerTime = async () => {
     if (state.clockFails) throw new Error("Clock unavailable");
-    return state.serverTime ?? Date.now();
+    const serverTime = state.serverTime ?? Date.now();
+    if (state.clockWait) await state.clockWait;
+    return serverTime;
   };
   return {
     useQuery: (ref: Parameters<typeof getFunctionName>[0]) => {
@@ -150,6 +153,7 @@ afterEach(async () => {
   state.dueDates = {};
   state.serverTime = null;
   state.clockFails = false;
+  state.clockWait = null;
   state.otherAssigneeIds = [];
   state.pausedIds = [];
   state.lifecycleAllowed = true;
@@ -400,6 +404,56 @@ test("failed server clock synchronization preserves server state and reports the
   await mount("one", false);
   expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
   expect(descendants(container).some((node) => node.textContent === "Could not refresh task deadlines. Try reloading.")).toBe(true);
+});
+
+test("a failed clock refresh retains overdue status and keeps future deadline timers running", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+  state.serverTime = Date.parse("2026-10-14T12:00:00Z");
+  state.dueDates = { A: state.serverTime + 1000, B: state.serverTime + 2000 };
+  let onVisible: (() => void) | undefined;
+  vi.spyOn(document, "addEventListener").mockImplementation((type, listener) => {
+    if (type === "visibilitychange") onVisible = listener as () => void;
+  });
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+  try {
+    await mount("one", false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1001); });
+    expect([...state.railRows.keys()]).toEqual(["B", "C"]);
+    state.clockFails = true;
+    await act(async () => onVisible!());
+    expect([...state.railRows.keys()]).toEqual(["B", "C"]);
+    expect(descendants(container).some((node) => node.textContent === "Could not refresh task deadlines. Try reloading.")).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect([...state.railRows.keys()]).toEqual(["C"]);
+  } finally {
+    Reflect.deleteProperty(document, "visibilityState");
+  }
+});
+
+test("a delayed successful clock refresh cannot rewind an already observed deadline", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+  const start = Date.parse("2026-10-14T12:00:00Z");
+  state.serverTime = start;
+  state.dueDates = { A: start + 1000 };
+  let onVisible: (() => void) | undefined;
+  vi.spyOn(document, "addEventListener").mockImplementation((type, listener) => {
+    if (type === "visibilitychange") onVisible = listener as () => void;
+  });
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+  try {
+    await mount("one", false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    state.serverTime = start + 200;
+    let release!: () => void;
+    state.clockWait = new Promise<void>((resolve) => { release = resolve; });
+    await act(async () => onVisible!());
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect([...state.railRows.keys()]).toEqual(["B", "C"]);
+    await act(async () => release()); // The timestamp was captured before A's deadline.
+    expect([...state.railRows.keys()]).toEqual(["B", "C"]);
+  } finally {
+    Reflect.deleteProperty(document, "visibilityState");
+  }
 });
 
 test("overdue-only All and My views explain the default filter and reuse Clear filters", async () => {

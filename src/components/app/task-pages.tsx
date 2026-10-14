@@ -1588,10 +1588,18 @@ function useTaskListRows(tasks: TaskRow[] | undefined, kind: Kind, companyId: Id
       const current = ++request;
       try {
         const serverTime = await getServerTime({ companyId });
-        if (!cancelled && current === request) setClock({ serverTime, receivedAt: performance.now(), elapsed: 0 });
+        if (!cancelled && current === request) {
+          const receivedAt = performance.now();
+          // A delayed reply must not undo a deadline already observed.
+          setClock((previous) => ({
+            serverTime: previous ? Math.max(serverTime, previous.serverTime + receivedAt - previous.receivedAt) : serverTime,
+            receivedAt,
+            elapsed: 0,
+          }));
+        }
       } catch {
         if (!cancelled && current === request) {
-          setClock(null);
+          setClock((previous) => previous && { ...previous, elapsed: performance.now() - previous.receivedAt });
           onError("Could not refresh task deadlines. Try reloading.");
         }
       }

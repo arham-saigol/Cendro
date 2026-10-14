@@ -5,8 +5,10 @@ import { getFunctionName } from "convex/server";
 import type { ListInsertion } from "@/lib/list-drag";
 import { createMockElement } from "./test-dom";
 import { TaskDetail, TaskList } from "./task-pages";
+import OneTimeTasksLayout from "@/app/(app)/one-time-tasks/layout";
 
 Object.assign(document, { createElementNS: (_namespace: string, tag: string) => createMockElement(tag) });
+Object.assign(window, { matchMedia: () => ({ matches: true, addEventListener: () => {}, removeEventListener: () => {} }) });
 
 const state = vi.hoisted(() => ({
   view: { orderedIds: ["A", "B", "C"], revision: 0 },
@@ -16,6 +18,8 @@ const state = vi.hoisted(() => ({
   dueDates: {} as Record<string, number>,
   serverTime: null as number | null,
   clockFails: false,
+  clockRequests: 0,
+  clockFailAfterFirst: false,
   clockWait: null as Promise<void> | null,
   detail: null as null | { task: { _id: string; title: string; createdAt: number; priority: string; dueDate: number; assigneeMembershipIds: string[]; state: { status: string; rawStatus: string } }; canUpdate: boolean },
   otherAssigneeIds: [] as string[],
@@ -35,13 +39,19 @@ const state = vi.hoisted(() => ({
   writes: [] as { args: { orderedIds: string[]; expectedRevision: number }; resolve: (value: { orderedIds: string[]; revision: number }) => void }[],
 }));
 
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }), useParams: () => ({ id: state.detail?.task._id }) }));
+vi.mock("motion/react", () => ({
+  AnimatePresence: ({ children }: { children: ReactNode }) => children,
+  useReducedMotion: () => true,
+  motion: { div: ({ children, className }: { children: ReactNode; className: string }) => React.createElement("div", { className }, children) },
+}));
 vi.mock("./company-context", () => ({ useCompany: () => ({
   activeCompanyId: "company", active: { membership: { _id: "member" }, capabilities: state.capabilities },
 }) }));
 vi.mock("convex/react", () => {
   const getServerTime = async () => {
-    if (state.clockFails) throw new Error("Clock unavailable");
+    state.clockRequests++;
+    if (state.clockFails || (state.clockFailAfterFirst && state.clockRequests > 1)) throw new Error("Clock unavailable");
     const serverTime = state.serverTime ?? Date.now();
     if (state.clockWait) await state.clockWait;
     return serverTime;
@@ -156,6 +166,8 @@ afterEach(async () => {
   state.dueDates = {};
   state.serverTime = null;
   state.clockFails = false;
+  state.clockRequests = 0;
+  state.clockFailAfterFirst = false;
   state.clockWait = null;
   state.detail = null;
   state.otherAssigneeIds = [];
@@ -173,7 +185,7 @@ afterEach(async () => {
 async function mount(kind: "jd" | "one", custom = true) {
   container = createMockElement();
   root = createRoot(container);
-  await act(async () => root!.render(React.createElement(TaskList, { kind })));
+  await act(async () => root!.render(kind === "one" ? React.createElement(OneTimeTasksLayout, null, null) : React.createElement(TaskList, { kind })));
   if (custom) await act(async () => state.selectCustom!());
 }
 
@@ -386,17 +398,18 @@ test.each([false, true])("One-Time tasks become overdue without a subscription u
   expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
 });
 
-test("an open One-Time detail locks its cached status when the list hides it at the deadline", async () => {
+test.each([false, true])("list and open detail share clock success, failure and recovery (initial failure: %s)", async (initialFailure) => {
   vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
   state.serverTime = Date.parse("2026-10-14T12:00:00Z");
   vi.setSystemTime(state.serverTime + 600_000);
   const dueDate = state.serverTime + 1000;
   state.dueDates = { A: dueDate };
+  state.clockFails = initialFailure;
+  state.clockFailAfterFirst = !initialFailure; // A separate drawer request would fail.
   state.detail = { task: { _id: "A", title: "A", createdAt: 1, priority: "low", dueDate, assigneeMembershipIds: ["member"], state: { status: "Pending", rawStatus: "due" } }, canUpdate: false };
   container = createMockElement();
   root = createRoot(container);
-  await act(async () => root!.render(React.createElement(React.Fragment, null,
-    React.createElement(TaskList, { kind: "one" }),
+  await act(async () => root!.render(React.createElement(OneTimeTasksLayout, null,
     React.createElement("section", { "aria-label": "Task detail" }, React.createElement(TaskDetail, { kind: "one", id: "A" })),
   )));
   const detail = descendants(container).find((node) => node.getAttribute?.("aria-label") === "Task detail");
@@ -404,11 +417,19 @@ test("an open One-Time detail locks its cached status when the list hides it at 
   expect([...state.railRows.keys()]).toContain("A");
   expect(statusControls()).toHaveLength(1);
   expect(descendants(detail).some((node) => node.textContent === "Pending" || node.nodeValue === "Pending")).toBe(true);
+  expect(state.clockRequests).toBe(1);
+  if (initialFailure) {
+    expect(descendants(container).filter((node) => node.textContent === "Could not refresh task deadlines. Retrying automatically.")).toHaveLength(2);
+    state.clockFails = false;
+    state.serverTime += 1001;
+  }
   await act(async () => { await vi.advanceTimersByTimeAsync(1001); });
   expect([...state.railRows.keys()]).not.toContain("A");
   expect(descendants(detail).some((node) => node.getAttribute?.("aria-label") === "Overdue (locked)")).toBe(true);
   expect(statusControls()).toHaveLength(0);
   expect(state.detail.task.state.rawStatus).toBe("due"); // The subscription has not changed.
+  expect(state.clockRequests).toBe(initialFailure ? 2 : 1);
+  expect(descendants(container).some((node) => node.getAttribute?.("role") === "alert")).toBe(false);
 });
 
 test.each([-600_000, 600_000])("deadline updates ignore device clock skew (%s ms)", async (skew) => {
@@ -421,7 +442,7 @@ test.each([-600_000, 600_000])("deadline updates ignore device clock skew (%s ms
   await act(async () => { await vi.advanceTimersByTimeAsync(1001); });
   expect([...state.railRows.keys()]).toEqual(["B", "C"]);
   vi.setSystemTime(Date.now() + 3_600_000); // Changing the wall clock must not advance server time.
-  await act(async () => root!.render(React.createElement(TaskList, { kind: "one" })));
+  await act(async () => root!.render(React.createElement(OneTimeTasksLayout, null, null)));
   expect([...state.railRows.keys()]).toEqual(["B", "C"]);
   await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
   expect([...state.railRows.keys()]).toEqual(["C"]);
@@ -446,7 +467,7 @@ test("clock failure and recovery preserve an actionable task-order conflict", as
     await mount("one");
     await act(async () => state.drop!("B", { anchorId: "A", edge: "before" }));
     state.view = { orderedIds: ["C", "B", "A"], revision: 1 };
-    await act(async () => root!.render(React.createElement(TaskList, { kind: "one" })));
+    await act(async () => root!.render(React.createElement(OneTimeTasksLayout, null, null)));
     const hasConflict = () => descendants(container).some((node) => node.textContent === "Task order changed in another session. Please repeat the move.");
     expect(hasConflict()).toBe(true);
     state.clockFails = true;
@@ -610,7 +631,7 @@ test("deadline updates cancel the old timer and handle deadlines beyond the brow
   state.dueDates = { A: start + 1000 };
   await mount("one", false);
   state.dueDates.A = start + month;
-  await act(async () => root!.render(React.createElement(TaskList, { kind: "one" })));
+  await act(async () => root!.render(React.createElement(OneTimeTasksLayout, null, null)));
   await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
   expect([...state.railRows.keys()]).toEqual(["A", "B", "C"]);
   await act(async () => { await vi.advanceTimersByTimeAsync(2_147_483_647 - 2000); });

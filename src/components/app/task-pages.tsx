@@ -34,7 +34,7 @@ import {
 import { useRouter } from "next/navigation";
 import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { DragDropProvider } from "@dnd-kit/react";
-import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
@@ -1579,12 +1579,27 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
 
 const taskDeadlineSyncError = "Could not refresh task deadlines. Retrying automatically.";
 
-function useTaskDeadlineRows(tasks: TaskRow[] | undefined, kind: Kind, companyId: Id<"companies"> | null) {
+type TaskDeadlineClock = { serverTime: number; receivedAt: number; elapsed: number };
+const TaskDeadlineContext = createContext<{
+  clock: TaskDeadlineClock | null;
+  deadlineError: string | null;
+  advanceClock: () => void;
+} | null>(null);
+
+export function TaskDeadlineProvider({ children }: { children: ReactNode }) {
+  const { activeCompanyId, active } = useCompany();
+  return <TaskDeadlineProviderContent key={`${activeCompanyId}:${active?.membership._id}`} companyId={activeCompanyId}>{children}</TaskDeadlineProviderContent>;
+}
+
+function TaskDeadlineProviderContent({ companyId, children }: { companyId: Id<"companies"> | null; children: ReactNode }) {
   const getServerTime = useMutation(api.tasks.getServerTime);
-  const [clock, setClock] = useState<{ serverTime: number; receivedAt: number; elapsed: number } | null>(null);
+  const [clock, setClock] = useState<TaskDeadlineClock | null>(null);
   const [deadlineError, setDeadlineError] = useState<string | null>(null);
+  const advanceClock = useCallback(() => {
+    setClock((current) => current && { ...current, elapsed: performance.now() - current.receivedAt });
+  }, []);
   useEffect(() => {
-    if (kind !== "one" || !companyId) return;
+    if (!companyId) return;
     let cancelled = false;
     let request = 0;
     let retryTimer: number | undefined;
@@ -1633,7 +1648,16 @@ function useTaskDeadlineRows(tasks: TaskRow[] | undefined, kind: Kind, companyId
       window.clearTimeout(retryTimer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [companyId, getServerTime, kind]);
+  }, [companyId, getServerTime]);
+  const value = useMemo(() => ({ clock, deadlineError, advanceClock }), [clock, deadlineError, advanceClock]);
+  return <TaskDeadlineContext.Provider value={value}>{children}</TaskDeadlineContext.Provider>;
+}
+
+function useTaskDeadlineRows(tasks: TaskRow[] | undefined, kind: Kind) {
+  const deadlineClock = useContext(TaskDeadlineContext);
+  if (kind === "one" && !deadlineClock) throw new Error("One-Time tasks require TaskDeadlineProvider.");
+  const clock = deadlineClock?.clock;
+  const advanceClock = deadlineClock?.advanceClock;
   // Only monotonic elapsed time advances the server clock; device wall-clock
   // skew or adjustments must not hide upcoming tasks or lock their controls.
   const taskTime = clock ? clock.serverTime + clock.elapsed : null;
@@ -1645,9 +1669,9 @@ function useTaskDeadlineRows(tasks: TaskRow[] | undefined, kind: Kind, companyId
     });
   }, [kind, tasks, taskTime]);
   useEffect(() => {
-    if (kind !== "one" || !clock) return;
-    // Convex queries do not rerun just because time passes. Use one timer for
-    // the next deadline; visibility changes resync server time after sleep.
+    if (kind !== "one" || !clock || !advanceClock) return;
+    // Each projection wakes the shared clock at its next deadline, including
+    // an open detail whose task isn't in the list's loaded pages.
     let nextDeadline = Infinity;
     for (const task of allTasks) {
       if (task.dueDate != null && rawStatus(task) !== "completed" && rawStatus(task) !== "overdue") {
@@ -1657,12 +1681,10 @@ function useTaskDeadlineRows(tasks: TaskRow[] | undefined, kind: Kind, companyId
     // Browser timers overflow beyond the signed 32-bit millisecond limit.
     const serverNow = clock.serverTime + performance.now() - clock.receivedAt;
     const delay = Math.min(2_147_483_647, Math.max(0, Math.ceil(nextDeadline + 1 - serverNow)));
-    const timer = Number.isFinite(nextDeadline) ? window.setTimeout(() => {
-      setClock((current) => current && { ...current, elapsed: performance.now() - current.receivedAt });
-    }, delay) : undefined;
+    const timer = Number.isFinite(nextDeadline) ? window.setTimeout(advanceClock, delay) : undefined;
     return () => window.clearTimeout(timer);
-  }, [allTasks, clock, kind]);
-  return { allTasks, deadlineError };
+  }, [allTasks, clock, kind, advanceClock]);
+  return { allTasks, deadlineError: deadlineClock?.deadlineError ?? null };
 }
 
 export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string }) {
@@ -1718,7 +1740,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     { initialNumItems: TASK_PAGE_SIZE }
   );
   const tasks = taskPageStatus === "LoadingFirstPage" ? undefined : taskPageResults as TaskRow[];
-  const { allTasks, deadlineError } = useTaskDeadlineRows(tasks, kind, activeCompanyId);
+  const { allTasks, deadlineError } = useTaskDeadlineRows(tasks, kind);
   const preferenceResult = useQuery(
     api.tasks.getListPreference,
     activeCompanyId ? { companyId: activeCompanyId, taskType } : "skip",
@@ -2772,7 +2794,7 @@ function TaskDetailContent({ kind, id }: { kind: Kind; id: string }) {
     const task = data?.task ?? preview;
     return task ? [task] : [];
   }, [data?.task, preview]);
-  const { allTasks, deadlineError } = useTaskDeadlineRows(detailRows, kind, activeCompanyId);
+  const { allTasks, deadlineError } = useTaskDeadlineRows(detailRows, kind);
   if (!data && !preview) return <TaskDetailSkeleton />;
   const task = allTasks[0] as any;
 

@@ -3,7 +3,7 @@ import React, { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { getFunctionName } from "convex/server";
 import { createMockElement } from "./test-dom";
-import { TaskList } from "./task-pages";
+import { TaskDeadlineProvider, TaskList } from "./task-pages";
 import { SopList } from "./sop-pages";
 
 const active = vi.hoisted(() => ({
@@ -110,7 +110,8 @@ test("the shared DOM host stops bubbling cancelled dialog clicks", () => {
 });
 
 test.each(["jd", "one"] as const)("%s task creation marks only fields required by its mutation", async (kind) => {
-  await mount(React.createElement(TaskList, { kind }), "New task");
+  const list = React.createElement(TaskList, { kind });
+  await mount(kind === "one" ? React.createElement(TaskDeadlineProvider, null, list) : list, "New task");
   expect(requiredLabels()).toEqual(["Title", "Assigned To", kind === "jd" ? "Frequency" : "Priority"]);
   expectAccessibleIndicators("Task title");
   const labels = nodes(dialog()).map((node) => node.getAttribute?.("aria-label"));

@@ -34,7 +34,7 @@ import {
 import { useRouter } from "next/navigation";
 import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { DragDropProvider } from "@dnd-kit/react";
-import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useCompany } from "./company-context";
@@ -80,7 +80,7 @@ type Kind = "jd" | "one";
 type Priority = "low" | "medium" | "high" | "critical";
 type Frequency = "daily" | "every_other_day" | "weekly" | "semimonthly" | "monthly" | "quarterly" | "semiannually" | "annually";
 type ManualStatus = "due" | "in_progress" | "completed";
-type StatusFilter = "all" | ManualStatus | "overdue";
+type StatusFilter = ManualStatus | "overdue";
 type TaskView = "all" | "my" | "custom";
 type PriorityFilter = "all" | Priority;
 type FrequencyFilter = Frequency | "all";
@@ -158,6 +158,14 @@ const manualStatuses: { value: ManualStatus; label: string }[] = [
   { value: "in_progress", label: "In Progress" },
   { value: "completed", label: "Completed" },
 ];
+
+const statusOptions: { value: StatusFilter; label: string }[] = [
+  { value: "due", label: "Pending" },
+  { value: "in_progress", label: "In progress" },
+  { value: "completed", label: "Completed" },
+  { value: "overdue", label: "Overdue" },
+];
+const allStatusFilters = statusOptions.map((option) => option.value);
 
 const taskListPreferenceMessages: ListPreferenceControllerOptions = {
   conflict: "Task order changed in another session. Please repeat the move.",
@@ -286,11 +294,8 @@ function canDeleteTaskRow(active: { capabilities: string[]; membership: { _id: s
   if (active?.capabilities.includes(`${prefix}:delete:managed`)) return true;
   return Boolean(active?.capabilities.includes(`${prefix}:delete:self`) && taskHasAssignee(task, active?.membership?._id));
 }
-function statusMatches(task: any, filter: StatusFilter) {
-  if (filter === "all") return true;
-  const raw = rawStatus(task);
-  if (filter === "overdue") return raw === "overdue" || statusText(task) === "Overdue";
-  return raw === filter;
+function statusMatches(task: TaskRow, filters: StatusFilter[]) {
+  return filters.some((filter) => rawStatus(task) === filter);
 }
 function taskHasAssignee(task: any, membershipId?: string) { return Boolean(membershipId && Array.isArray(task.assigneeMembershipIds) && task.assigneeMembershipIds.includes(membershipId)); }
 function assigneeDisplayName(assignee: any) { return assignee?.user?.name || assignee?.user?.email || "Unknown user"; }
@@ -343,13 +348,13 @@ function dueLabel(task: any) {
   if (Number.isNaN(date.getTime())) return "—";
   return dateHasExplicitTime(ms) ? `${formatDateOnly(date)} ${formatTimeOnly(date)}` : formatDateOnly(date);
 }
-function dueTone(task: any) {
+function dueTone(task: any, now: number | null) {
   const ms = task.dueDate;
   if (!ms) return "muted";
   if (rawStatus(task) === "completed") return "muted";
-  if (rawStatus(task) === "overdue" || ms < Date.now()) return "danger";
+  if (rawStatus(task) === "overdue") return "danger";
   const day = 86_400_000;
-  if (ms - Date.now() <= 2 * day) return "warn";
+  if (now !== null && ms - now <= 2 * day) return "warn";
   return "ink";
 }
 
@@ -430,17 +435,11 @@ function taskStateLabel(status: ManualStatus | "overdue") {
   return status === "due" ? "Pending" : status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Overdue";
 }
 
-// Mirrors the server-side state computation so a status change can be patched
-// into loaded list/detail query results before the mutation round-trips.
-function optimisticTaskState(task: any, kind: Kind, status: ManualStatus) {
+// Patch manual status only; the shared deadline projection owns overdue state,
+// including optimistic updates. Device wall time must not hide or lock a task.
+function optimisticTaskState(task: any, status: ManualStatus) {
   const state = typeof task.state === "object" && task.state ? task.state : {};
-  const now = Date.now();
-  if (kind === "jd") {
-    return { ...state, status: taskStateLabel(status), rawStatus: status, isOverdue: false };
-  }
-  const isOverdue = status !== "completed" && (Boolean(task.overdueAt) || Boolean(task.dueDate && task.dueDate < now));
-  const raw = isOverdue ? "overdue" : status;
-  return { ...state, status: taskStateLabel(raw), rawStatus: raw, isOverdue };
+  return { ...state, status: taskStateLabel(status), rawStatus: status, isOverdue: false };
 }
 
 function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger = false }: { kind: Kind; task: any; size?: "sm" | "md"; canUpdateOverride?: boolean; cellTrigger?: boolean }) {
@@ -448,12 +447,12 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   // Patch the loaded list/detail queries so every view of this task — the row,
   // the open detail pane, and status filters — reflects the change immediately.
   const updateJdStatus = useMutation(api.tasks.updateJdStatus).withOptimisticUpdate((localStore, args) => {
-    const patch = (row: any) => ({ ...row, state: optimisticTaskState(row, "jd", args.status), ...(args.status === "completed" ? { completedAt: Date.now() } : {}) });
+    const patch = (row: any) => ({ ...row, state: optimisticTaskState(row, args.status), ...(args.status === "completed" ? { completedAt: Date.now() } : {}) });
     updateInListPages(localStore, api.tasks.listJdRows, args.taskId, patch);
     updateInDetailQueries(localStore, api.tasks.getJd, args.taskId, patch);
   });
   const updateOneStatus = useMutation(api.tasks.updateOneTimeStatus).withOptimisticUpdate((localStore, args) => {
-    const patch = (row: any) => ({ ...row, state: optimisticTaskState(row, "one", args.status), ...(args.status === "completed" ? { completedAt: Date.now() } : {}) });
+    const patch = (row: any) => ({ ...row, state: optimisticTaskState(row, args.status), ...(args.status === "completed" ? { completedAt: Date.now() } : {}) });
     updateInListPages(localStore, api.tasks.listOneTimeRows, args.taskId, patch);
     updateInDetailQueries(localStore, api.tasks.getOneTime, args.taskId, patch);
   });
@@ -462,6 +461,8 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   const [open, setOpen] = useState(false);
   const status = statusText(task);
   const raw = rawStatus(task);
+  const deadlineClock = useContext(TaskDeadlineContext);
+  const awaitingClock = kind === "one" && task.dueDate != null && !deadlineClock?.synchronized;
   const locked = status === "Overdue" || raw === "overdue";
   const isAssignee = taskHasAssignee(task, active?.membership?._id);
   // Pending rows carry a synthetic id — a status mutation against it would reject.
@@ -469,7 +470,7 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   const pad = size === "md" ? "h-7 px-2.5" : "h-[22px] px-2";
 
   async function change(nextStatus: ManualStatus) {
-    if (!activeCompanyId || locked || pending) return;
+    if (!activeCompanyId || locked || pending || awaitingClock) return;
     setPending(true);
     setFailed(false);
     try {
@@ -487,7 +488,7 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   if (!canUpdate) return <span className={cn("task-pill", toneClasses[statusTone(status)], pad)}><span className={cn("task-pill-dot", statusDotClass(raw))} />{status}</span>;
 
   const pill = (
-    <span className={cn("task-pill", toneClasses[statusTone(status)], pad, failed && "ring-1 ring-[var(--danger)]")} title={failed ? "Could not update status — try again." : undefined}>
+    <span className={cn("task-pill", toneClasses[statusTone(status)], pad, failed && "ring-1 ring-[var(--danger)]")} title={awaitingClock ? "Synchronizing task deadline…" : failed ? "Could not update status — try again." : undefined}>
       <span className={cn("task-pill-dot", statusDotClass(raw))} />
       {manualStatuses.find((option) => option.value === raw)?.label ?? status}
       {failed && <CircleAlert className="h-3 w-3 text-[var(--danger)]" />}
@@ -496,9 +497,9 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
 
   if (cellTrigger || isAssignee) {
     return (
-      <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending} pending={pending} ariaLabel="Change status" header={pill}>
+      <TaskCellPopover open={open} onOpenChange={setOpen} disabled={pending || awaitingClock} pending={pending} ariaLabel="Change status" header={pill}>
         {manualStatuses.map((option) => (
-          <button key={option.value} type="button" onClick={() => { setOpen(false); void change(option.value); }} className="task-cell-popover-item">
+          <button key={option.value} type="button" disabled={pending || awaitingClock} onClick={() => { setOpen(false); void change(option.value); }} className="task-cell-popover-item">
             <span className={cn("task-pill h-[22px] px-2", toneClasses[statusTone(option.label)])}>
               <span className={cn("task-pill-dot", statusDotClass(option.value))} />
               {option.label}
@@ -514,7 +515,7 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
   return (
     <DropdownMenu.Root open={open} onOpenChange={setOpen}>
       <DropdownMenu.Trigger asChild>
-        <button type="button" disabled={pending} onClick={(event) => event.stopPropagation()} data-interactive="true" className={cn("task-pill", toneClasses[statusTone(status)], pad)} aria-label="Change status">
+        <button type="button" disabled={pending || awaitingClock} onClick={(event) => event.stopPropagation()} data-interactive="true" className={cn("task-pill", toneClasses[statusTone(status)], pad)} aria-label="Change status">
           <span className={cn("task-pill-dot", statusDotClass(raw))} />
           {manualStatuses.find((option) => option.value === raw)?.label ?? status}
         </button>
@@ -522,7 +523,7 @@ function StatusBadge({ kind, task, size = "sm", canUpdateOverride, cellTrigger =
       <DropdownMenu.Portal>
         <DropdownMenu.Content align="start" sideOffset={4} className="task-menu" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
           {manualStatuses.map((option) => (
-            <DropdownMenu.Item key={option.value} onSelect={() => change(option.value)} className="task-menu-item">
+            <DropdownMenu.Item key={option.value} disabled={pending || awaitingClock} onSelect={() => change(option.value)} className="task-menu-item">
               <span className={cn("task-pill-dot", statusDotClass(option.value))} />
               <span className="flex-1">{option.label}</span>
               {raw === option.value && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
@@ -559,6 +560,9 @@ function TaskFilterSubmenu<T extends string>({ label, value, options, onChange }
 function TaskFilterMenu({
   kind,
   statusFilter,
+  custom,
+  showOverdue,
+  onShowOverdueChange,
   frequency,
   priorityFilter,
   assigneeFilter,
@@ -573,7 +577,10 @@ function TaskFilterMenu({
   onAssigneeChange,
 }: {
   kind: Kind;
-  statusFilter: StatusFilter;
+  statusFilter: StatusFilter[];
+  custom: boolean;
+  showOverdue: boolean;
+  onShowOverdueChange: (value: boolean) => void;
   frequency: FrequencyFilter;
   priorityFilter: PriorityFilter;
   assigneeFilter: string;
@@ -582,18 +589,12 @@ function TaskFilterMenu({
   paused: boolean;
   onPausedChange: (paused: boolean) => void;
   activeCount: number;
-  onStatusChange: (value: StatusFilter) => void;
+  onStatusChange: (value: StatusFilter[]) => void;
   onFrequencyChange: (value: FrequencyFilter) => void;
   onPriorityChange: (value: PriorityFilter) => void;
   onAssigneeChange: (value: string) => void;
 }) {
-  const statusOptions: { value: StatusFilter; label: string }[] = [
-    { value: "all", label: "All statuses" },
-    { value: "due", label: "Pending" },
-    { value: "in_progress", label: "In progress" },
-    { value: "completed", label: "Completed" },
-    { value: "overdue", label: "Overdue" },
-  ];
+  const allStatusesSelected = statusFilter.length === allStatusFilters.length;
   const priorityOptions: { value: PriorityFilter; label: string }[] = [{ value: "all", label: "All priorities" }, ...priorities.map((priority) => ({ value: priority, label: priorityLabel(priority) }))];
   const frequencyOptions: { value: FrequencyFilter; label: string }[] = [{ value: "all", label: "All frequencies" }, ...frequencies];
 
@@ -607,20 +608,57 @@ function TaskFilterMenu({
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content align="end" sideOffset={6} className="task-menu min-w-48" aria-label="Task filters">
-          {kind === "jd" && <DropdownMenu.CheckboxItem className="task-menu-item" checked={paused} onCheckedChange={onPausedChange}>Inactive tasks{paused && <Check className="ml-auto h-3.5 w-3.5" />}</DropdownMenu.CheckboxItem>}
-          {!paused && <TaskFilterSubmenu label="Status" value={statusFilter} options={statusOptions} onChange={onStatusChange} />}
-          {kind === "jd" ? (
-            <TaskFilterSubmenu label="Frequency" value={frequency} options={frequencyOptions} onChange={onFrequencyChange} />
+          {custom ? (
+            <DropdownMenu.CheckboxItem className="task-menu-item" checked={showOverdue} onCheckedChange={onShowOverdueChange}>
+              <span className="flex-1">Show overdue tasks</span>
+              {showOverdue && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
+            </DropdownMenu.CheckboxItem>
           ) : (
-            <TaskFilterSubmenu label="Priority" value={priorityFilter} options={priorityOptions} onChange={onPriorityChange} />
-          )}
-          {showAssigneeFilter && (
-            <TaskFilterSubmenu
-              label="Assigned To"
-              value={assigneeFilter}
-              options={[{ value: "all", label: "All assignees" }, ...assignees.map((assignee) => ({ value: assignee.membership._id as string, label: assigneeDisplayName(assignee), avatar: <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} /> }))]}
-              onChange={onAssigneeChange}
-            />
+            <>
+              {kind === "jd" && <DropdownMenu.CheckboxItem className="task-menu-item" checked={paused} onCheckedChange={onPausedChange}>Inactive tasks{paused && <Check className="ml-auto h-3.5 w-3.5" />}</DropdownMenu.CheckboxItem>}
+              {!paused && (kind === "jd" ? (
+                <TaskFilterSubmenu<"all" | StatusFilter>
+                  label="Status"
+                  value={allStatusesSelected ? "all" : statusFilter[0]}
+                  options={[{ value: "all", label: "All statuses" }, ...statusOptions]}
+                  onChange={(value) => onStatusChange(value === "all" ? allStatusFilters : [value])}
+                />
+              ) : (
+                <DropdownMenu.Sub>
+                  <DropdownMenu.SubTrigger className="task-menu-item">
+                    <span className="flex-1">Status</span>
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </DropdownMenu.SubTrigger>
+                  <DropdownMenu.Portal>
+                    <DropdownMenu.SubContent sideOffset={7} alignOffset={-5} className="task-menu min-w-52">
+                      <DropdownMenu.CheckboxItem className="task-menu-item" checked={allStatusesSelected} onCheckedChange={(checked) => onStatusChange(checked ? allStatusFilters : [])} onSelect={(event) => event.preventDefault()}>
+                        <span className="flex-1">All statuses</span>
+                        {allStatusesSelected && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
+                      </DropdownMenu.CheckboxItem>
+                      {statusOptions.map((option) => (
+                        <DropdownMenu.CheckboxItem key={option.value} className="task-menu-item" checked={statusFilter.includes(option.value)} onCheckedChange={(checked) => onStatusChange(checked ? [...statusFilter, option.value] : statusFilter.filter((value) => value !== option.value))} onSelect={(event) => event.preventDefault()}>
+                          <span className="flex-1">{option.label}</span>
+                          {statusFilter.includes(option.value) && <Check className="h-3.5 w-3.5 text-[var(--primary)]" />}
+                        </DropdownMenu.CheckboxItem>
+                      ))}
+                    </DropdownMenu.SubContent>
+                  </DropdownMenu.Portal>
+                </DropdownMenu.Sub>
+              ))}
+              {kind === "jd" ? (
+                <TaskFilterSubmenu label="Frequency" value={frequency} options={frequencyOptions} onChange={onFrequencyChange} />
+              ) : (
+                <TaskFilterSubmenu label="Priority" value={priorityFilter} options={priorityOptions} onChange={onPriorityChange} />
+              )}
+              {showAssigneeFilter && (
+                <TaskFilterSubmenu
+                  label="Assigned To"
+                  value={assigneeFilter}
+                  options={[{ value: "all", label: "All assignees" }, ...assignees.map((assignee) => ({ value: assignee.membership._id as string, label: assigneeDisplayName(assignee), avatar: <Avatar name={assignee.user.name} email={assignee.user.email} imageUrl={assignee.user.imageUrl} /> }))]}
+                  onChange={onAssigneeChange}
+                />
+              )}
+            </>
           )}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
@@ -747,6 +785,8 @@ const TaskTableRow = memo(function TaskTableRow({
   onOpenDetails: (task: TaskRow) => void;
   onSaveInline: (task: any, patch: Partial<TaskFormValues>, label: string) => Promise<boolean>;
 }) {
+  const clock = useContext(TaskDeadlineContext)?.clock;
+  const dueDateTone = dueTone(task, clock ? clock.serverTime + clock.elapsed : null);
   const pending = (field: string) => pendingCell === `${task._id}:${field}`;
   const isPending = isPendingTask(task);
   const openDetails = () => {
@@ -830,7 +870,7 @@ const TaskTableRow = memo(function TaskTableRow({
           {rowCanEdit ? (
             <DatePicker value={task.dueDate ? toDateField(task.dueDate, dateHasExplicitTime(task.dueDate)) : ""} displayValue={dueLabel(task)} compact onChange={(dueDate) => { void onSaveInline(task, { dueDate }, "due"); }} />
           ) : (
-            <span className={cn(dueTone(task) === "danger" && "font-medium text-[var(--danger)]", dueTone(task) === "warn" && "font-medium text-[var(--badge-yellow-fg)]", dueTone(task) === "muted" && "text-[var(--ink-faint)]")}>{dueLabel(task)}</span>
+            <span className={cn(dueDateTone === "danger" && "font-medium text-[var(--danger)]", dueDateTone === "warn" && "font-medium text-[var(--badge-yellow-fg)]", dueDateTone === "muted" && "text-[var(--ink-faint)]")}>{dueLabel(task)}</span>
           )}
         </td>
       )}
@@ -1535,6 +1575,143 @@ function TaskDialog({ kind, mode, open, onOpenChange, task, assignable, assignab
   );
 }
 
+const taskDeadlineSyncError = "Could not refresh task deadlines. Retrying automatically.";
+// Bound accepted round trips to one second and compensate at their midpoint.
+// Never let network queues, suspended tabs or sleep create an unbounded offset.
+const TASK_CLOCK_MAX_ROUND_TRIP_MS = 1000;
+
+type TaskDeadlineClock = { serverTime: number; receivedAt: number; elapsed: number };
+const TaskDeadlineContext = createContext<{
+  clock: TaskDeadlineClock | null;
+  synchronized: boolean;
+  deadlineError: string | null;
+  advanceClock: () => void;
+} | null>(null);
+
+export function TaskDeadlineProvider({ children }: { children: ReactNode }) {
+  const { activeCompanyId, active } = useCompany();
+  return <TaskDeadlineProviderContent key={`${activeCompanyId}:${active?.membership._id}`} companyId={activeCompanyId}>{children}</TaskDeadlineProviderContent>;
+}
+
+function TaskDeadlineProviderContent({ companyId, children }: { companyId: Id<"companies"> | null; children: ReactNode }) {
+  const getServerTime = useMutation(api.tasks.getServerTime);
+  const [clock, setClock] = useState<TaskDeadlineClock | null>(null);
+  const [synchronized, setSynchronized] = useState(false);
+  const [deadlineError, setDeadlineError] = useState<string | null>(null);
+  const advanceClock = useCallback(() => {
+    setClock((current) => current && { ...current, elapsed: performance.now() - current.receivedAt });
+  }, []);
+  useEffect(() => {
+    if (!companyId) return;
+    let cancelled = false;
+    let request = 0;
+    let inFlight = false;
+    let retryTimer: number | undefined;
+    let retryDelay = 1000;
+    const isPageVisible = () => document.visibilityState !== "hidden";
+    const syncClock = async () => {
+      window.clearTimeout(retryTimer);
+      retryTimer = undefined;
+      if (cancelled || !isPageVisible() || inFlight) return;
+      inFlight = true;
+      setSynchronized(false);
+      const current = ++request;
+      const startedAt = performance.now();
+      const wallStartedAt = Date.now();
+      try {
+        const serverTime = await getServerTime({ companyId });
+        if (!cancelled && current === request) {
+          const receivedAt = performance.now();
+          const roundTrip = receivedAt - startedAt;
+          // Some browsers stop the monotonic clock during OS sleep. Wall time
+          // can reject a suspect sample, but never advances task deadlines.
+          const wallRoundTrip = Date.now() - wallStartedAt;
+          if (Math.max(roundTrip, wallRoundTrip) > TASK_CLOCK_MAX_ROUND_TRIP_MS || Math.abs(wallRoundTrip - roundTrip) > TASK_CLOCK_MAX_ROUND_TRIP_MS) {
+            throw new Error("Stale task clock sample.");
+          }
+          const sampledTime = serverTime + roundTrip / 2;
+          // A delayed reply must not undo a deadline already observed.
+          setClock((previous) => ({
+            serverTime: previous ? Math.max(sampledTime, previous.serverTime + receivedAt - previous.receivedAt) : sampledTime,
+            receivedAt,
+            elapsed: 0,
+          }));
+          retryDelay = 1000;
+          setSynchronized(true);
+          setDeadlineError(null);
+        }
+      } catch {
+        if (!cancelled && current === request) {
+          advanceClock();
+          setDeadlineError(taskDeadlineSyncError);
+          if (isPageVisible()) {
+            retryTimer = window.setTimeout(() => { void syncClock(); }, retryDelay);
+            retryDelay = Math.min(retryDelay * 2, 30_000);
+          }
+        }
+      } finally {
+        inFlight = false;
+        // A visibility transition invalidates the pending sample. Wait for it
+        // to settle before resyncing; Convex mutations cannot be aborted.
+        if (!cancelled && current !== request && isPageVisible()) void syncClock();
+      }
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        advanceClock();
+        void syncClock();
+      } else {
+        request++;
+        window.clearTimeout(retryTimer);
+        retryTimer = undefined;
+      }
+    };
+    void syncClock();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(retryTimer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [companyId, getServerTime, advanceClock]);
+  const value = useMemo(() => ({ clock, synchronized, deadlineError, advanceClock }), [clock, synchronized, deadlineError, advanceClock]);
+  return <TaskDeadlineContext.Provider value={value}>{children}</TaskDeadlineContext.Provider>;
+}
+
+function useTaskDeadlineRows(tasks: TaskRow[] | undefined, kind: Kind) {
+  const deadlineClock = useContext(TaskDeadlineContext);
+  if (kind === "one" && !deadlineClock) throw new Error("One-Time tasks require TaskDeadlineProvider.");
+  const clock = deadlineClock?.clock;
+  const advanceClock = deadlineClock?.advanceClock;
+  // Only monotonic elapsed time advances the server clock; device wall-clock
+  // skew or adjustments must not hide upcoming tasks or lock their controls.
+  const taskTime = clock ? clock.serverTime + clock.elapsed : null;
+  const allTasks = useMemo<TaskRow[]>(() => {
+    if (kind !== "one" || taskTime === null) return tasks ?? [];
+    return (tasks ?? []).map((task) => {
+      if (rawStatus(task) === "completed" || rawStatus(task) === "overdue" || task.dueDate == null || task.dueDate >= taskTime) return task;
+      return { ...task, state: { ...(typeof task.state === "object" ? task.state : {}), status: "Overdue", rawStatus: "overdue" as const, isOverdue: true } };
+    });
+  }, [kind, tasks, taskTime]);
+  useEffect(() => {
+    if (kind !== "one" || !clock || !advanceClock) return;
+    // Each projection wakes the shared clock at its next deadline, including
+    // an open detail whose task isn't in the list's loaded pages.
+    let nextDeadline = Infinity;
+    for (const task of allTasks) {
+      if (task.dueDate != null && rawStatus(task) !== "completed" && rawStatus(task) !== "overdue") {
+        nextDeadline = Math.min(nextDeadline, task.dueDate);
+      }
+    }
+    // Browser timers overflow beyond the signed 32-bit millisecond limit.
+    const serverNow = clock.serverTime + performance.now() - clock.receivedAt;
+    const delay = Math.min(2_147_483_647, Math.max(0, Math.ceil(nextDeadline + 1 - serverNow)));
+    const timer = Number.isFinite(nextDeadline) ? window.setTimeout(advanceClock, delay) : undefined;
+    return () => window.clearTimeout(timer);
+  }, [allTasks, clock, kind, advanceClock]);
+  return { allTasks, deadlineError: deadlineClock?.deadlineError ?? null };
+}
+
 export function TaskList({ kind, selectedId }: { kind: Kind; selectedId?: string }) {
   const { activeCompanyId, active } = useCompany();
   return <TaskListContent key={`${activeCompanyId}:${active?.membership._id}:${kind}`} kind={kind} selectedId={selectedId} />;
@@ -1551,7 +1728,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const [taskView, setTaskView] = useState<TaskView>("all");
   const [frequency, setFrequency] = useState<FrequencyFilter>("all");
   const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>("all");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter[]>(() => kind === "one" ? manualStatuses.map((option) => option.value) : allStatusFilters);
+  const [customShowOverdue, setCustomShowOverdue] = useState(false);
   const [pausedFilter, setPausedFilter] = useState(false);
   const [changingPaused, setChangingPaused] = useState(false);
   const [assigneeFilter, setAssigneeFilter] = useState("all");
@@ -1587,7 +1765,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
     { initialNumItems: TASK_PAGE_SIZE }
   );
   const tasks = taskPageStatus === "LoadingFirstPage" ? undefined : taskPageResults as TaskRow[];
-  const allTasks = useMemo<TaskRow[]>(() => tasks ?? [], [tasks]);
+  const { allTasks, deadlineError } = useTaskDeadlineRows(tasks, kind);
   const preferenceResult = useQuery(
     api.tasks.getListPreference,
     activeCompanyId ? { companyId: activeCompanyId, taskType } : "skip",
@@ -1697,7 +1875,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
   const filteredTasks = useMemo(() => (
     orderedTasks.filter((task) => {
       if (kind === "jd" && (task.pausedAt !== undefined) !== (!isCustomView && pausedFilter)) return false;
-      if (isCustomView) return true;
+      if (isCustomView) return kind !== "one" || customShowOverdue || !statusMatches(task, ["overdue"]);
       const needle = search.trim().toLowerCase();
       if (needle && !task.title.toLowerCase().includes(needle) && !task.reference.toLowerCase().includes(needle)) return false;
       if (effectiveTaskView === "my" && !taskHasAssignee(task, currentMembershipId)) return false;
@@ -1707,7 +1885,7 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
       if (assigneeFilter !== "all" && !taskHasAssignee(task, assigneeFilter)) return false;
       return true;
     })
-  ), [assigneeFilter, currentMembershipId, effectiveTaskView, frequency, isCustomView, kind, orderedTasks, pausedFilter, priorityFilter, search, statusFilter]);
+  ), [assigneeFilter, currentMembershipId, customShowOverdue, effectiveTaskView, frequency, isCustomView, kind, orderedTasks, pausedFilter, priorityFilter, search, statusFilter]);
   const displayedTasks = filteredTasks;
   const renderedTasks = useMemo(() => displayedTasks.slice(0, renderedCount), [displayedTasks, renderedCount]);
   const visibleIds = useMemo(() => renderedTasks.filter((task) => !isPendingTask(task)).map((task) => task._id), [renderedTasks]);
@@ -1749,7 +1927,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
       const nextVisible = insertListItem(visible, sourceId, insertion);
       if (sameListOrder(visible, nextVisible)) return;
       if (isCustomView) {
-        customViewController.saveOrder(nextVisible);
+        const baseline = orderedTasks.filter((task) => !isPendingTask(task)).map((task) => task._id);
+        customViewController.saveOrder(mergeFilteredListOrder(baseline, visible, nextVisible));
       } else {
         const baseline = restoreTaskListCustomOrder(allTasks.filter((task) => !isPendingTask(task)), taskType, activePreference?.customOrder, taskOrderKeys).map((task) => task._id);
         preferenceController.saveOrder(mergeFilteredListOrder(baseline, visible, nextVisible));
@@ -1990,8 +2169,10 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
 
   const jdColumns = 5 + (showFrequencyColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional frequency + optional assignee + status + time + quantity
   const oneColumns = 5 + (showPriorityColumn ? 1 : 0) + (showAssigneeColumn ? 1 : 0); // reference + title + optional priority + optional assignee + status + date assigned + due
-  const filterCount = [kind === "jd" && pausedFilter, !pausedFilter && statusFilter !== "all", kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
-  const hasActiveFilters = !isCustomView && (filterCount > 0 || search.trim() !== "");
+  const filterCount = isCustomView ? Number(kind === "one" && !customShowOverdue) : [kind === "jd" && pausedFilter, !pausedFilter && statusFilter.length !== allStatusFilters.length, kind === "jd" ? frequency !== "all" : priorityFilter !== "all", assigneeFilter !== "all"].filter(Boolean).length;
+  const hasOnlyDefaultStatusFilter = kind === "one" && filterCount === 1 && search.trim() === "" && statusFilter.length === manualStatuses.length && manualStatuses.every((option) => statusFilter.includes(option.value));
+  const hasActiveFilters = isCustomView ? filterCount > 0 && orderedTasks.length > 0 : (filterCount > 0 || search.trim() !== "") && (allTasks.length > 0 || !hasOnlyDefaultStatusFilter);
+  const hasHiddenOverdueTasks = !isCustomView && hasOnlyDefaultStatusFilter && orderedTasks.some((task) => rawStatus(task) === "overdue" && (effectiveTaskView !== "my" || taskHasAssignee(task, currentMembershipId)));
 
   return (
     <div>
@@ -2057,9 +2238,12 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
               {search ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
             </button>
           </div>}
-          {!isCustomView && <TaskFilterMenu
+          {(!isCustomView || kind === "one") && <TaskFilterMenu
             kind={kind}
             statusFilter={statusFilter}
+            custom={isCustomView}
+            showOverdue={customShowOverdue}
+            onShowOverdueChange={setCustomShowOverdue}
             frequency={frequency}
             priorityFilter={priorityFilter}
             assigneeFilter={assigneeFilter}
@@ -2101,6 +2285,8 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
           </button>
         </div>
       )}
+
+      {deadlineError && <p className="alert-error mb-3 rounded-lg px-3 py-2 text-[13px]" role="alert">{deadlineError}</p>}
 
       {inlineError && (
         <div className="alert-error mb-3 flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-[13px]" role="alert">
@@ -2218,14 +2404,14 @@ function TaskListContent({ kind, selectedId }: { kind: Kind; selectedId?: string
                   <div className="task-empty">
                     <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--surface-muted)] text-[var(--ink-faint)]"><Inbox className="h-5 w-5" /></span>
                     <div className="mt-3 text-[14px] font-semibold text-[var(--ink)]">{!hasActiveFilters && (isCustomView || allTasks.length === 0) ? "No tasks yet" : "No matching tasks"}</div>
-                    {!isCustomView && <p className="mt-1 max-w-[280px] text-[13px] text-[var(--ink-muted)]">{!hasActiveFilters && allTasks.length === 0 ? "Create your first task to get started." : "Try adjusting your search or filters."}</p>}
+                    {(!isCustomView || hasActiveFilters) && <p className="mt-1 max-w-[280px] text-[13px] text-[var(--ink-muted)]">{isCustomView ? "Try showing overdue tasks." : hasHiddenOverdueTasks ? "Overdue tasks are hidden by default. Select Overdue in the status filter or clear filters to show them." : !hasActiveFilters && allTasks.length === 0 ? "Create your first task to get started." : "Try adjusting your search or filters."}</p>}
                     {canCreate && !hasActiveFilters && (isCustomView || allTasks.length === 0) && (
                       <Button className="mt-4" size="sm" variant="primary" onClick={() => setCreateOpen(true)}>
                         <Plus className="h-3.5 w-3.5" />New task
                       </Button>
                     )}
                     {hasActiveFilters && (
-                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { setSearch(""); setSearchOpen(false); setStatusFilter("all"); setPausedFilter(false); setFrequency("all"); setPriorityFilter("all"); setAssigneeFilter("all"); }}>Clear filters</Button>
+                      <Button className="mt-4" size="sm" variant="ghost" onClick={() => { if (isCustomView) { setCustomShowOverdue(true); return; } setSearch(""); setSearchOpen(false); setStatusFilter(allStatusFilters); setPausedFilter(false); setFrequency("all"); setPriorityFilter("all"); setAssigneeFilter("all"); }}>{isCustomView ? "Show overdue tasks" : "Clear filters"}</Button>
                     )}
                   </div>
                   )}
@@ -2548,6 +2734,11 @@ function PeekBar({ kind, canEdit, onEdit }: { kind: Kind; canEdit: boolean; onEd
 }
 
 export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
+  const { activeCompanyId, active } = useCompany();
+  return <TaskDetailContent key={`${activeCompanyId}:${active?.membership._id}:${kind}`} kind={kind} id={id} />;
+}
+
+function TaskDetailContent({ kind, id }: { kind: Kind; id: string }) {
   const { activeCompanyId, active, email } = useCompany();
   const taskType = taskTypeFor(kind);
   const data = useQuery(kind === "jd" ? api.tasks.getJd : api.tasks.getOneTime, activeCompanyId ? { companyId: activeCompanyId, taskId: id as any } : "skip") as any;
@@ -2624,8 +2815,13 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
   // While the detail query resolves, paint from the seeded list-row preview.
   // Editing stays disabled until the authoritative record arrives.
   const preview = data === undefined ? getDetailPreview<TaskRow>(`task:${activeCompanyId}:${kind}:${active?.membership._id}`, id) : undefined;
+  const detailRows = useMemo<TaskRow[]>(() => {
+    const task = data?.task ?? preview;
+    return task ? [task] : [];
+  }, [data?.task, preview]);
+  const { allTasks, deadlineError } = useTaskDeadlineRows(detailRows, kind);
   if (!data && !preview) return <TaskDetailSkeleton />;
-  const task = (data?.task ?? preview) as any;
+  const task = allTasks[0] as any;
 
   async function saveTaskText(patch: { title?: string; description?: string; notes?: string }) {
     if (!activeCompanyId) return false;
@@ -2773,6 +2969,7 @@ export function TaskDetail({ kind, id }: { kind: Kind; id: string }) {
       <PeekBar kind={kind} canEdit={canEdit} onEdit={() => setEditOpen(true)} />
       <TaskDialog kind={kind} mode="edit" open={editOpen} onOpenChange={setEditOpen} task={task} assignable={assignable ?? []} assignableIsTruncated={assignableResult?.isTruncated ?? false} onUploadError={setUploadError} />
 
+      {deadlineError && <p className="alert-error mt-4 rounded-md p-2 text-[13px]" role="alert">{deadlineError}</p>}
       {textError && <p className="alert-error mt-4 rounded-md p-2 text-[13px]" role="alert">{textError}</p>}
 
       <div className="pt-6">

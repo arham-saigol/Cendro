@@ -1,12 +1,26 @@
 /// <reference types="vite/client" />
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { createAuthzFixture } from "./authz.fixture";
 import { defaultRoleCapabilities } from "../src/lib/permissions";
 
 describe("task list preferences", () => {
+  test("deadline clock uses fresh server time and requires company membership", async () => {
+    const f = await createAuthzFixture();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+    try {
+      const admin = f.asUser("adminA");
+      expect(await admin.mutation(api.tasks.getServerTime, { companyId: f.companyA })).toBe(1_800_000_000_000);
+      clock.mockReturnValue(1_800_000_001_000);
+      expect(await admin.mutation(api.tasks.getServerTime, { companyId: f.companyA })).toBe(1_800_000_001_000);
+      await expect(f.t.mutation(api.tasks.getServerTime, { companyId: f.companyA })).rejects.toThrow();
+      await expect(f.asUser("adminB").mutation(api.tasks.getServerTime, { companyId: f.companyA })).rejects.toThrow("You do not have access to this company");
+    } finally {
+      clock.mockRestore();
+    }
+  });
   test("custom views persist only the owner's tasks, independently by user and task type", async () => {
     const f = await createAuthzFixture();
     const admin = f.asUser("adminA");

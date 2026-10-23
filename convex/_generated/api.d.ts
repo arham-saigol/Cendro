@@ -22,6 +22,7 @@ import type * as platform from "../platform.js";
 import type * as queryLimits from "../queryLimits.js";
 import type * as references from "../references.js";
 import type * as roles from "../roles.js";
+import type * as searchText from "../searchText.js";
 import type * as sopListPreferences from "../sopListPreferences.js";
 import type * as sops from "../sops.js";
 import type * as taskCycles from "../taskCycles.js";
@@ -53,6 +54,7 @@ declare const fullApi: ApiFromModules<{
   queryLimits: typeof queryLimits;
   references: typeof references;
   roles: typeof roles;
+  searchText: typeof searchText;
   sopListPreferences: typeof sopListPreferences;
   sops: typeof sops;
   taskCycles: typeof taskCycles;

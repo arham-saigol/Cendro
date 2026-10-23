@@ -13,6 +13,7 @@ import {
   FileText,
   LayoutDashboard,
   LogOut,
+  Menu,
   Moon,
   Repeat,
   Search,
@@ -55,6 +56,84 @@ function navForCapabilities(active: CompanyAccess | null | undefined) {
   const canManage = canAccessCompanyManagement(active?.capabilities);
   const canDash = canViewDashboard(active?.capabilities);
   return nav.filter((item) => (!item.requiresCompanyManagement || canManage) && (!item.requiresDashboard || canDash));
+}
+
+function NavLinks({
+  items,
+  path,
+  onNavigate,
+  className,
+}: {
+  items: typeof nav;
+  path: string;
+  onNavigate?: () => void;
+  className?: string;
+}) {
+  return (
+    <>
+      {items.map((item) => {
+        const Icon = item.icon;
+        const activeRow = path === item.href || path.startsWith(`${item.href}/`);
+        return (
+          <Link
+            key={item.href}
+            href={item.href}
+            onClick={onNavigate}
+            aria-current={activeRow ? "page" : undefined}
+            className={cn(
+              "flex items-center gap-2 rounded-md text-sm uppercase text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)]",
+              activeRow && "bg-[var(--surface-pressed)] text-[var(--ink)]",
+              className,
+            )}
+          >
+            <Icon className="h-4 w-4 shrink-0 text-[var(--ink-muted)]" />
+            <span className="truncate">{item.label}</span>
+          </Link>
+        );
+      })}
+    </>
+  );
+}
+
+function MobileNavDrawer({
+  open,
+  onOpenChange,
+  items,
+  path,
+  isPlatformAdmin,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  items: typeof nav;
+  path: string;
+  isPlatformAdmin: boolean;
+}) {
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/25 md:hidden" />
+        <Dialog.Content className="fixed inset-y-0 left-0 z-50 flex w-[min(300px,calc(100vw-64px))] flex-col border-r border-[var(--hairline)] bg-[var(--chrome)] pb-[calc(0.75rem+env(safe-area-inset-bottom))] pl-[max(0.5rem,env(safe-area-inset-left))] pr-2 pt-[calc(0.75rem+env(safe-area-inset-top))] text-[var(--ink)] shadow-[var(--shadow-popover)] md:hidden">
+          <Dialog.Description className="sr-only">Primary navigation</Dialog.Description>
+          <div className="flex shrink-0 items-center justify-between gap-2 pl-2">
+            <Dialog.Title className="text-sm font-semibold uppercase tracking-[0.02em]">Cendro</Dialog.Title>
+            <Dialog.Close asChild>
+              <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0" aria-label="Close navigation">
+                <X className="h-4 w-4" />
+              </Button>
+            </Dialog.Close>
+          </div>
+          <nav className="mt-5 min-h-0 flex-1 space-y-0.5 overflow-y-auto">
+            <NavLinks items={items} path={path} onNavigate={() => onOpenChange(false)} className="h-11 px-2.5" />
+          </nav>
+          {isPlatformAdmin && (
+            <Button asChild variant="ghost" className="mt-2 h-10 shrink-0 justify-start px-2.5 uppercase">
+              <Link href="/admin" onClick={() => onOpenChange(false)}>Platform admin</Link>
+            </Button>
+          )}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
 }
 
 /** Lets any part of the shell open the single palette instance mounted by ShellSearch. */
@@ -415,7 +494,7 @@ function AccountCompanyMenu() {
 
   return (
     <>
-      <div className="flex h-8 items-center gap-1">
+      <div className="flex h-9 items-center gap-1 md:h-8">
         <DropdownMenu.Root>
           <DropdownMenu.Trigger asChild>
             <button className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[var(--ink)] hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]">
@@ -466,7 +545,7 @@ function AccountCompanyMenu() {
           </DropdownMenu.Content>
         </DropdownMenu.Portal>
         </DropdownMenu.Root>
-        <button className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]" aria-label="Open search" aria-keyshortcuts="Control+K Meta+K" title="Search (Ctrl+K)" onClick={() => setSearchOpen(true)}>
+        <button className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] md:h-7 md:w-7" aria-label="Open search" aria-keyshortcuts="Control+K Meta+K" title="Search (Ctrl+K)" onClick={() => setSearchOpen(true)}>
           <Search className="h-3.5 w-3.5" />
         </button>
       </div>
@@ -586,11 +665,29 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
   const router = useRouter();
   const { accessStatus, email, activeCompanyId, active, loadingStage, connection } = useCompany();
   const [aiOpen, setAiOpen] = useState(false);
+  const [navOpen, setNavOpen] = useState(false);
   const { stalled, elapsedMs, reloads, diagnostic, retry } = useShellStall(accessStatus, loadingStage, connection);
 
   useEffect(() => {
     if (accessStatus === "signedOut") router.replace(`/sign-in?redirect_url=${encodeURIComponent(path)}`);
   }, [accessStatus, path, router]);
+
+  // A navigation can complete before the drawer's close handler runs (e.g. a
+  // route push from another control); never leave the drawer over a new page.
+  useEffect(() => {
+    setNavOpen(false);
+  }, [path]);
+
+  // The drawer is hidden by layout at md; close it so a rotation or resize does
+  // not leave an invisible dialog holding focus and the scroll lock.
+  useEffect(() => {
+    const wide = window.matchMedia("(min-width: 768px)");
+    const onChange = () => {
+      if (wide.matches) setNavOpen(false);
+    };
+    wide.addEventListener("change", onChange);
+    return () => wide.removeEventListener("change", onChange);
+  }, []);
 
   const visibleNav = useMemo(() => navForCapabilities(active), [active]);
 
@@ -686,27 +783,11 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
   }
 
   return (
-    <div className={cn("flex h-dvh overflow-hidden bg-[var(--chrome)] pb-[max(0.5rem,env(safe-area-inset-bottom))] pl-[max(0.375rem,env(safe-area-inset-left))] pt-[max(0.5rem,env(safe-area-inset-top))] text-[var(--ink)]", aiOpen ? "pr-[max(0.375rem,env(safe-area-inset-right))]" : "pr-[max(0.625rem,env(safe-area-inset-right))]")}>
+    <div className={cn("flex h-dvh overflow-hidden bg-[var(--canvas)] text-[var(--ink)] md:bg-[var(--chrome)] md:pb-[max(0.5rem,env(safe-area-inset-bottom))] md:pl-[max(0.375rem,env(safe-area-inset-left))] md:pt-[max(0.5rem,env(safe-area-inset-top))]", aiOpen ? "md:pr-[max(0.375rem,env(safe-area-inset-right))]" : "md:pr-[max(0.625rem,env(safe-area-inset-right))]")}>
       <aside className="hidden w-[246px] shrink-0 flex-col bg-[var(--chrome-translucent)] px-2 pb-2 pt-1 backdrop-blur-sm md:flex">
         <AccountCompanyMenu />
         <nav className="mt-4 space-y-0.5">
-          {visibleNav.map((item) => {
-            const Icon = item.icon;
-            const activeRow = path === item.href || path.startsWith(`${item.href}/`);
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={cn(
-                  "flex h-8 items-center gap-2 rounded-md px-2 text-sm uppercase text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)]",
-                  activeRow && "bg-[var(--surface-pressed)] text-[var(--ink)]",
-                )}
-              >
-                <Icon className="h-4 w-4 text-[var(--ink-muted)]" />
-                <span className="truncate">{item.label}</span>
-              </Link>
-            );
-          })}
+          <NavLinks items={visibleNav} path={path} className="h-8 px-2" />
         </nav>
         {isPlatformAdmin && (
           <Button asChild variant="ghost" className="mt-auto justify-start px-2 uppercase">
@@ -716,38 +797,34 @@ function ShellInner({ children, isPlatformAdmin }: { children: React.ReactNode; 
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="shrink-0 bg-[var(--chrome-translucent)] px-2 pb-2 pt-1 backdrop-blur-sm md:hidden">
-          <AccountCompanyMenu />
-          <nav className="scrollbar-hidden mt-2 flex gap-1 overflow-x-auto pb-1">
-            {visibleNav.map((item) => {
-              const Icon = item.icon;
-              const activeRow = path === item.href || path.startsWith(`${item.href}/`);
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={cn(
-                    "flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm uppercase text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)]",
-                    activeRow && "bg-[var(--surface-pressed)] text-[var(--ink)]",
-                  )}
-                >
-                  <Icon className="h-4 w-4 text-[var(--ink-muted)]" />
-                  <span>{item.label}</span>
-                </Link>
-              );
-            })}
-            {isPlatformAdmin && (
-              <Button asChild variant="ghost" size="sm" className="h-8 shrink-0 px-2 uppercase">
-                <Link href="/admin">Platform admin</Link>
-              </Button>
-            )}
-          </nav>
+        <header className="shrink-0 border-b border-[var(--hairline)] bg-[var(--canvas)] pl-[max(0.25rem,env(safe-area-inset-left))] pr-[max(0.25rem,env(safe-area-inset-right))] pt-[env(safe-area-inset-top)] md:hidden">
+          <div className="flex h-11 items-center gap-0.5">
+            <button
+              type="button"
+              onClick={() => setNavOpen(true)}
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-md text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+              aria-label="Open navigation"
+              aria-haspopup="dialog"
+              aria-expanded={navOpen}
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+            <div className="min-w-0 flex-1">
+              <AccountCompanyMenu />
+            </div>
+          </div>
         </header>
-        <header className="hidden h-0 shrink-0 bg-[var(--chrome-translucent)] backdrop-blur-sm md:block" />
+        <MobileNavDrawer
+          open={navOpen}
+          onOpenChange={setNavOpen}
+          items={visibleNav}
+          path={path}
+          isPlatformAdmin={isPlatformAdmin}
+        />
 
         <div className="flex min-h-0 flex-1 gap-1 overflow-hidden">
-          <section className="relative min-w-0 flex-1 overflow-hidden rounded-xl border border-[var(--page-outline)] bg-[var(--canvas)]">
-            <div className="h-full overflow-auto">
+          <section className="relative min-w-0 flex-1 overflow-hidden bg-[var(--canvas)] md:rounded-xl md:border md:border-[var(--page-outline)]">
+            <div className="h-full overflow-auto pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] md:pb-0 md:pl-0 md:pr-0">
               {children}
             </div>
           </section>
